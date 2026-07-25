@@ -4,7 +4,7 @@
 # 基于 https://github.com/enfein/mieru
 set -euo pipefail
 
-SCRIPT_VERSION="1.2.27"
+SCRIPT_VERSION="1.9.1"
 SCRIPT_AUTHOR="ike"
 SCRIPT_REPO="ike-sh/mieru-OneClick"
 UPSTREAM_REPO="enfein/mieru"
@@ -14,12 +14,27 @@ MITA_BIN="/usr/local/bin/mita"
 MITA_REAL_BIN="/usr/local/bin/mita-real"
 MITA_MARKER="/etc/mita/.mieru-oneclick"
 MITA_STATE="/etc/mita/install-state.env"
+MITA_USERS_STATE="${MITA_USERS_STATE:-/etc/mita/users.json}"
+MITA_USERS_LOCK="${MITA_USERS_LOCK:-/etc/mita/users.lock}"
+MITA_USERS_CRON="${MITA_USERS_CRON:-/etc/cron.d/mita-users}"
+MITA_USERS_TIMER="/etc/systemd/system/mita-users-scan.timer"
+MITA_USERS_SERVICE="/etc/systemd/system/mita-users-scan.service"
+MITA_USERS_LOG="${MITA_USERS_LOG:-/var/log/mita-users.log}"
+MITA_USERS_BACKUP_DIR="${MITA_USERS_BACKUP_DIR:-/etc/mita/backups}"
+MITA_ADMIN_LOCK="${MITA_ADMIN_LOCK:-/etc/mita/admin.lock}"
+MITA_CLIENT_EXPORT_DIR="${MITA_CLIENT_EXPORT_DIR:-/root/mieru-clients}"
+MITA_LOGROTATE_CONF="${MITA_LOGROTATE_CONF:-/etc/logrotate.d/mita-oneclick}"
+# calendar 重置：days=只改窗口天数；password=微扰密码(默认，更可能清零)；metrics=清 metrics.pb(影响全部用户)
+QUOTA_RESET_METHOD="${QUOTA_RESET_METHOD:-password}"
 INSTALL_SCRIPT_PATH="/usr/local/bin/install-mita"
 MITA_MENU_PATH="/usr/local/bin/mita-menu"
 MITA_PROFILE_D="/etc/profile.d/mita-oneclick.sh"
 SCRIPT_REPO_RAW="https://raw.githubusercontent.com/ike-sh/mieru-OneClick/v${SCRIPT_VERSION}/install-mita.sh"
 OPENRC_SVC="/etc/init.d/mita"
 SYSTEMD_SVC="/etc/systemd/system/mita.service"
+# 多用户端口池：相对主端口偏移，或 IP 尾号段内扫描
+USER_PORT_POOL_START="${USER_PORT_POOL_START:-}"
+USER_PORT_POOL_END="${USER_PORT_POOL_END:-}"
 
 ACTION=""
 MENU_MODE=0
@@ -43,9 +58,27 @@ MULTIPLEXING="MULTIPLEXING_LOW"
 TRAFFIC_PATTERN="conservative"
 TRAFFIC_SEED=""
 TRAFFIC_CLI=0
+PORT_CLI=0
 CLIENT_RPC_PORT=8964
 CLIENT_SOCKS5_PORT=1080
 CLIENT_HTTP_PORT=8080
+USER_DEL_NAME=""
+USER_SHOW_NAME=""
+USER_QUOTA_MB=""
+USER_QUOTA_DAYS=""
+USER_QUOTA_MODE=""
+USER_EXPIRE=""
+USER_PACKAGE=""
+USER_BANDWIDTH_MBPS=""
+USER_RESTORE_FILE=""
+USER_EXPORT_FILE=""
+# tc 限速：出口网卡（空=自动默认路由）；总带宽 ceil 默认 10gbit
+TC_IFACE="${TC_IFACE:-}"
+TC_ROOT_RATE="${TC_ROOT_RATE:-10gbit}"
+TC_HANDLE="${TC_HANDLE:-1}"
+TC_INGRESS_HANDLE="${TC_INGRESS_HANDLE:-ffff:}"
+# 0=单用户兼容路径；1=使用 users.json 多用户（一用户一口）
+MULTI_USER_MODE=0
 
 if [ -z "${BASH_VERSION:-}" ]; then
   echo "[错误] 请使用 bash 运行此脚本" >&2
@@ -83,15 +116,40 @@ mieru mita 服务端一键安装 ${SCRIPT_VERSION}
   --start             启动服务（守护进程 + 代理）
   --stop              停止服务
   --restart           重启服务（守护进程异常时一键恢复）
+  --users / user-list 列出代理用户（端口独占）
+  --user-add          添加用户（可配合 --user/--password/--port/--package 等）
+  --user-del NAME     删除用户并释放端口
+  --user-show NAME    查看指定用户节点配置
+  --user-set-quota    设置套餐：--user NAME --quota-mb N --quota-days D
+  --user-set-expire   设置到期：--user NAME --expire YYYY-MM-DD|+Nd|0
+  --user-enable NAME  启用用户
+  --user-disable NAME 停用用户（从 mita 配置移除，端口保留）
+  --user-scan         扫描到期/日历月配额重置（供 cron/timer）
+  --user-quota-reset  手动触发日历月配额重置（可加 -y 强制）
+  --user-set-rate     设置带宽：--user NAME --bandwidth Mbps（0=不限，双向）
+  --rate-status       查看 tc 限速状态
+  --user-usage        查看 mita 用户流量/配额用量（mita get users/quotas）
+  --user-export-clients [DIR]  批量导出各用户客户端 JSON/链接
+  --user-backup       备份 users.json
+  --user-restore FILE 从备份恢复用户状态并 apply + tc
+  --user-export [FILE] 导出用户状态 JSON（默认 stdout）
+  --user-import FILE  导入用户状态（覆盖前自动备份）
+  --doctor / verify   一键验收：服务/用户/配额/tc/定时任务
 
 安装选项：
   --yes, -y           跳过确认
-  --port PORT         监听端口（1025-65535）
-  --port-range RANGE  监听端口段，如 9000-9010
+  --port PORT         监听端口（1025-65535）；多用户时作为主用户端口
+  --port-range RANGE  监听端口段，如 9000-9010（单用户模式）
   --protocol TCP|UDP|BOTH  传输协议（默认 TCP；BOTH 时 UDP 使用 PORT+1）
   --traffic-pattern LV  流量伪装/抗 DPI：off|conservative|aggressive（默认 conservative）
-  --user NAME         代理用户名
+  --user NAME         代理用户名（安装主用户 / user-add）
   --password PASS     代理密码
+  --package NAME      套餐：unlimited|trial|standard|custom（user-add）
+  --quota-mb N        流量配额 MB（0=不限；写入 mita quotas）
+  --quota-days D      配额滚动窗口天数（默认 30；rolling 模式）
+  --quota-mode MODE   rolling|calendar（calendar=每月1日重置计数）
+  --expire WHEN       到期：YYYY-MM-DD 或 +30d 或 0/never
+  --bandwidth Mbps    带宽限制 Mbps（0=不限；出口+入口按端口 tc）
   --op-user USER      加入 mita 用户组的 Linux 用户
   --enable-bbr        安装后启用 TCP BBR
   --lang en           使用英文提示
@@ -106,6 +164,9 @@ mieru mita 服务端一键安装 ${SCRIPT_VERSION}
   install-mita status             查看状态
   install-mita reconfigure        重新配置
   install-mita show               查看节点链接
+  install-mita users              用户管理列表
+  install-mita user-add --user a --password p
+  install-mita user-del a
   install-mita restart            重启服务（start/stop 同理）
   mita-menu                       同上（安装后可用）
   登录 shell 下输入 mita          管理子命令不区分大小写；mita start/stop/restart 已走干净启停（含 systemd/openrc）
@@ -171,17 +232,116 @@ while [ $# -gt 0 ]; do
     --start) ACTION=start ;;
     --stop) ACTION=stop ;;
     --restart) ACTION=restart ;;
-    install|upgrade|uninstall|status|reconfigure|client-config|show|menu|start|stop|restart|配置|节点)
+    --users|--user-list) ACTION=user-list ;;
+    --user-add) ACTION=user-add ;;
+    --user-del|--user-delete)
+      ACTION=user-del
+      USER_DEL_NAME="${2:-}"
+      [ -n "$USER_DEL_NAME" ] || die "--user-del 需要用户名"
+      shift
+      ;;
+    --user-show)
+      ACTION=user-show
+      USER_SHOW_NAME="${2:-}"
+      [ -n "$USER_SHOW_NAME" ] || die "--user-show 需要用户名"
+      shift
+      ;;
+    --user-set-quota) ACTION=user-set-quota ;;
+    --user-set-expire) ACTION=user-set-expire ;;
+    --user-enable)
+      ACTION=user-enable
+      USER_SHOW_NAME="${2:-}"
+      [ -n "$USER_SHOW_NAME" ] || die "--user-enable 需要用户名"
+      shift
+      ;;
+    --user-disable)
+      ACTION=user-disable
+      USER_SHOW_NAME="${2:-}"
+      [ -n "$USER_SHOW_NAME" ] || die "--user-disable 需要用户名"
+      shift
+      ;;
+    --user-scan) ACTION=user-scan ;;
+    --user-quota-reset) ACTION=user-quota-reset ;;
+    --user-set-rate|--user-set-bandwidth) ACTION=user-set-rate ;;
+    --rate-status|--tc-status) ACTION=rate-status ;;
+    --rate-restore|--tc-restore) ACTION=rate-restore ;;
+    --user-usage|--usage) ACTION=user-usage ;;
+    --user-export-clients)
+      ACTION=user-export-clients
+      if [ -n "${2:-}" ] && [[ "${2}" != --* ]]; then
+        MITA_CLIENT_EXPORT_DIR="${2}"
+        shift
+      fi
+      ;;
+    --doctor|--verify|doctor|verify) ACTION=doctor ;;
+    --user-backup) ACTION=user-backup ;;
+    --user-restore)
+      ACTION=user-restore
+      USER_RESTORE_FILE="${2:-}"
+      [ -n "$USER_RESTORE_FILE" ] || die "--user-restore 需要备份文件路径"
+      shift
+      ;;
+    --user-export)
+      ACTION=user-export
+      if [ -n "${2:-}" ] && [[ "${2}" != --* ]]; then
+        USER_EXPORT_FILE="${2}"
+        shift
+      else
+        USER_EXPORT_FILE=""
+      fi
+      ;;
+    --user-import)
+      ACTION=user-import
+      USER_RESTORE_FILE="${2:-}"
+      [ -n "$USER_RESTORE_FILE" ] || die "--user-import 需要文件路径"
+      shift
+      ;;
+    install|upgrade|uninstall|status|reconfigure|client-config|show|menu|start|stop|restart|配置|节点|users|user-list|user-add|user-del|user-delete|user-show|user-manage|user-set-quota|user-set-expire|user-enable|user-disable|user-scan|user-quota-reset|user-set-rate|user-set-bandwidth|rate-status|rate-restore|tc-status|tc-restore|user-backup|user-restore|user-export|user-import|user-usage|usage|user-export-clients|doctor|verify|help)
       [ -z "$ACTION" ] && ACTION="$_arg_lc"
       [ "$_arg_lc" = show ] && ACTION=client-config
       [ "$_arg_lc" = menu ] && ACTION=""
       [ "$_arg_lc" = 配置 ] && ACTION=client-config
       [ "$_arg_lc" = 节点 ] && ACTION=client-config
+      [ "$_arg_lc" = users ] && ACTION=user-list
+      [ "$_arg_lc" = user-delete ] && ACTION=user-del
+      [ "$_arg_lc" = user-manage ] && ACTION=user-manage
+      [ "$_arg_lc" = user-set-bandwidth ] && ACTION=user-set-rate
+      [ "$_arg_lc" = tc-status ] && ACTION=rate-status
+      [ "$_arg_lc" = tc-restore ] && ACTION=rate-restore
+      [ "$_arg_lc" = usage ] && ACTION=user-usage
+      [ "$_arg_lc" = verify ] && ACTION=doctor
+      [ "$_arg_lc" = help ] && ACTION=help
+      # 裸子命令后的位置参数：user-del bob / user-restore /path.json
+      if [ -n "${2:-}" ] && [[ "${2}" != --* ]]; then
+        case "$ACTION" in
+          user-del)
+            USER_DEL_NAME="${2}"
+            shift
+            ;;
+          user-show|user-enable|user-disable)
+            USER_SHOW_NAME="${2}"
+            shift
+            ;;
+          user-restore|user-import)
+            USER_RESTORE_FILE="${2}"
+            shift
+            ;;
+          user-export)
+            USER_EXPORT_FILE="${2}"
+            shift
+            ;;
+          user-export-clients)
+            MITA_CLIENT_EXPORT_DIR="${2}"
+            shift
+            ;;
+        esac
+      fi
       ;;
     --yes|-y) YES=1 ;;
     --dry-run) DRY_RUN=1 ;;
     --port)
       PORT="${2:-}"
+      PORT_CLI=1
       [ -n "$PORT" ] || die "--port 需要端口号"
       shift
       ;;
@@ -206,6 +366,30 @@ while [ $# -gt 0 ]; do
       ;;
     --password)
       PASSWORD="${2:-}"
+      shift
+      ;;
+    --package|--plan)
+      USER_PACKAGE="${2:-}"
+      shift
+      ;;
+    --quota-mb|--quota)
+      USER_QUOTA_MB="${2:-}"
+      shift
+      ;;
+    --quota-days)
+      USER_QUOTA_DAYS="${2:-}"
+      shift
+      ;;
+    --quota-mode)
+      USER_QUOTA_MODE="${2:-}"
+      shift
+      ;;
+    --expire|--expires)
+      USER_EXPIRE="${2:-}"
+      shift
+      ;;
+    --bandwidth|--rate|--mbps)
+      USER_BANDWIDTH_MBPS="${2:-}"
       shift
       ;;
     --op-user)
@@ -429,6 +613,77 @@ _state_kv() {
   printf '%s=%s\n' "$1" "$(printf '%q' "${2-}")"
 }
 
+# 收紧敏感文件权限；/etc/mita 必须对 mita 守护进程可写（server.conf.pb）
+# 优先 mita:mita 0750；无 mita 用户时 root:mita 0770
+harden_mita_permissions() {
+  run mkdir -p /etc/mita "$MITA_USERS_BACKUP_DIR" 2>/dev/null || true
+  if _has_user mita 2>/dev/null || id mita >/dev/null 2>&1; then
+    run chown mita:mita /etc/mita 2>/dev/null || true
+    run chmod 0750 /etc/mita 2>/dev/null || true
+  elif _has_group mita 2>/dev/null || getent group mita >/dev/null 2>&1; then
+    run chown root:mita /etc/mita 2>/dev/null || true
+    run chmod 0770 /etc/mita 2>/dev/null || true
+  else
+    run chmod 0750 /etc/mita 2>/dev/null || true
+  fi
+  # 敏感状态文件：root 读写即可（管理脚本以 root 运行）
+  if [ -f "$MITA_STATE" ]; then
+    run chown root:root "$MITA_STATE" 2>/dev/null || true
+    run chmod 0600 "$MITA_STATE" 2>/dev/null || true
+  fi
+  if [ -f "$MITA_USERS_STATE" ]; then
+    run chown root:root "$MITA_USERS_STATE" 2>/dev/null || true
+    run chmod 0600 "$MITA_USERS_STATE" 2>/dev/null || true
+  fi
+  [ -d "$MITA_USERS_BACKUP_DIR" ] && run chmod 0700 "$MITA_USERS_BACKUP_DIR" 2>/dev/null || true
+  if [ -d "$MITA_USERS_BACKUP_DIR" ]; then
+    find "$MITA_USERS_BACKUP_DIR" -type f -name 'users_*.json' -exec chmod 0600 {} \; 2>/dev/null || true
+  fi
+}
+
+install_logrotate_config() {
+  [ "${DRY_RUN:-0}" -eq 1 ] && return 0
+  [ -d /etc/logrotate.d ] || return 0
+  cat >"$MITA_LOGROTATE_CONF" <<EOF
+${MITA_USERS_LOG} {
+    weekly
+    rotate 8
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 root root
+}
+EOF
+  chmod 0644 "$MITA_LOGROTATE_CONF" 2>/dev/null || true
+}
+
+# 管理写操作互斥锁（fd 8，引用计数可重入）
+admin_lock_acquire() {
+  command -v flock >/dev/null 2>&1 || return 0
+  run mkdir -p "$(dirname "$MITA_ADMIN_LOCK")"
+  if [ "${_ADMIN_LOCK_HELD:-0}" -gt 0 ]; then
+    _ADMIN_LOCK_HELD=$((_ADMIN_LOCK_HELD + 1))
+    return 0
+  fi
+  exec 8>"$MITA_ADMIN_LOCK"
+  if flock -w 120 8; then
+    _ADMIN_LOCK_HELD=1
+    return 0
+  fi
+  warn "$(t '获取管理锁超时，继续执行（可能并发）' 'Admin lock timeout; continuing (may race)')"
+  return 0
+}
+
+admin_lock_release() {
+  [ "${_ADMIN_LOCK_HELD:-0}" -gt 0 ] || return 0
+  _ADMIN_LOCK_HELD=$((_ADMIN_LOCK_HELD - 1))
+  if [ "$_ADMIN_LOCK_HELD" -le 0 ]; then
+    _ADMIN_LOCK_HELD=0
+    flock -u 8 2>/dev/null || true
+  fi
+}
+
 save_install_state() {
   STAGE="保存安装状态"
   run mkdir -p /etc/mita
@@ -443,7 +698,7 @@ save_install_state() {
     _state_kv INSTALL_SCRIPT "$INSTALL_SCRIPT_PATH"
     printf 'INSTALL_METHOD=oneclick\n'
   } >"$MITA_STATE"
-  run chmod 0600 "$MITA_STATE" 2>/dev/null || true
+  harden_mita_permissions
   run touch "$MITA_MARKER"
 }
 
@@ -533,15 +788,20 @@ if [ $# -eq 0 ]; then
   exit 1
 fi
 
-if [ $# -gt 0 ] && [ -x "$INSTALL_MITA" ]; then
-  cmd="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
-  case "$cmd" in
-    menu|install|upgrade|uninstall|status|reconfigure|client-config|show|start|stop|restart|配置|节点|help)
-      shift
-      exec "$INSTALL_MITA" "$cmd" "$@"
-      ;;
-  esac
-fi
+  if [ $# -gt 0 ] && [ -x "$INSTALL_MITA" ]; then
+    cmd="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+    case "$cmd" in
+      menu|install|upgrade|uninstall|status|reconfigure|client-config|show|start|stop|restart|配置|节点|help|\
+      users|user-list|user-add|user-del|user-delete|user-show|user-manage|\
+      user-set-quota|user-set-expire|user-enable|user-disable|user-scan|user-quota-reset|\
+      user-set-rate|user-set-bandwidth|rate-status|rate-restore|tc-status|tc-restore|\
+      user-usage|usage|user-export-clients|user-backup|user-restore|user-export|user-import|\
+      doctor|verify)
+        shift
+        exec "$INSTALL_MITA" "$cmd" "$@"
+        ;;
+    esac
+  fi
 
 if [ -z "$MITA_REAL" ]; then
   echo "[错误] 未找到 mita 二进制；请重新运行安装脚本并选 3) 升级 自动重装：" >&2
@@ -663,7 +923,12 @@ if [ $# -eq 0 ]; then
 fi
 cmd="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
 case "$cmd" in
-  install|upgrade|uninstall|status|reconfigure|client-config|show|menu|start|stop|restart|配置|节点)
+  install|upgrade|uninstall|status|reconfigure|client-config|show|menu|start|stop|restart|配置|节点|\
+  users|user-list|user-add|user-del|user-delete|user-show|user-manage|\
+  user-set-quota|user-set-expire|user-enable|user-disable|user-scan|user-quota-reset|\
+  user-set-rate|user-set-bandwidth|rate-status|rate-restore|tc-status|tc-restore|\
+  user-usage|usage|user-export-clients|user-backup|user-restore|user-export|user-import|\
+  doctor|verify|help)
     set -- "$cmd" "${@:2}"
     ;;
 esac
@@ -692,7 +957,12 @@ mita() {
   local cmd
   cmd="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
   case "$cmd" in
-    menu|install|upgrade|uninstall|status|reconfigure|client-config|show|start|stop|restart|配置|节点|help)
+    menu|install|upgrade|uninstall|status|reconfigure|client-config|show|start|stop|restart|配置|节点|help|\
+    users|user-list|user-add|user-del|user-delete|user-show|user-manage|\
+    user-set-quota|user-set-expire|user-enable|user-disable|user-scan|user-quota-reset|\
+    user-set-rate|user-set-bandwidth|rate-status|rate-restore|tc-status|tc-restore|\
+    user-usage|usage|user-export-clients|user-backup|user-restore|user-export|user-import|\
+    doctor|verify)
       shift
       "$im" "$cmd" "$@"
       ;;
@@ -1115,6 +1385,2204 @@ valid_port_range() {
   valid_port "$start" && valid_port "$end" && [ "$start" -le "$end" ]
 }
 
+# ---------- 多用户（阶段1 端口；阶段2 套餐 quotas + 到期停用） ----------
+
+users_require_python() {
+  command -v python3 >/dev/null 2>&1 || die "$(t '多用户管理需要 python3' 'python3 required for multi-user management')"
+}
+
+users_log() {
+  local line quiet="${USERS_LOG_QUIET:-0}"
+  line="$(date '+%Y-%m-%d %H:%M:%S') $*"
+  printf '%s\n' "$line" >>"${MITA_USERS_LOG}" 2>/dev/null || true
+  [ "$quiet" = "1" ] || msg "$line" >&2
+}
+
+# 套餐模板 → 设置 USER_QUOTA_MB / USER_QUOTA_DAYS / 可选默认到期
+# unlimited: 0/0；trial: 10GB/7天；standard: 100GB/30天；custom: 用 CLI 值
+apply_user_package_defaults() {
+  local pkg
+  pkg="$(printf '%s' "${USER_PACKAGE:-}" | tr '[:upper:]' '[:lower:]')"
+  case "$pkg" in
+    ""|none)
+      ;;
+    unlimited|unlimit|none|0|无限)
+      USER_QUOTA_MB=0
+      USER_QUOTA_DAYS=0
+      USER_PACKAGE="unlimited"
+      ;;
+    trial|体验|test)
+      [ -n "${USER_QUOTA_MB}" ] || USER_QUOTA_MB=10240
+      [ -n "${USER_QUOTA_DAYS}" ] || USER_QUOTA_DAYS=7
+      [ -n "${USER_EXPIRE}" ] || USER_EXPIRE="+7d"
+      USER_PACKAGE="trial"
+      ;;
+    standard|std|标准|月包)
+      [ -n "${USER_QUOTA_MB}" ] || USER_QUOTA_MB=102400
+      [ -n "${USER_QUOTA_DAYS}" ] || USER_QUOTA_DAYS=30
+      [ -n "${USER_EXPIRE}" ] || USER_EXPIRE="+30d"
+      USER_PACKAGE="standard"
+      ;;
+    custom|自定义)
+      USER_PACKAGE="custom"
+      ;;
+    *)
+      warn "$(t "未知套餐 ${USER_PACKAGE}，忽略（可用 unlimited|trial|standard|custom）" \
+        "Unknown package ${USER_PACKAGE}; use unlimited|trial|standard|custom")"
+      USER_PACKAGE=""
+      ;;
+  esac
+  [ -n "${USER_QUOTA_DAYS}" ] || USER_QUOTA_DAYS=30
+  [ -n "${USER_QUOTA_MB}" ] || USER_QUOTA_MB=0
+}
+
+# 解析到期：空/0/never → 空；+Nd → 今天+N天 YYYY-MM-DD；YYYY-MM-DD 原样
+parse_expire_date() {
+  local raw="$1" days
+  raw="$(printf '%s' "$raw" | tr -d '[:space:]')"
+  if [ -z "$raw" ] || [ "$raw" = "0" ] || [ "$raw" = "never" ] || [ "$raw" = "none" ] || [ "$raw" = "-" ]; then
+    printf ''
+    return 0
+  fi
+  if [[ "$raw" =~ ^\+([0-9]+)[dD]?$ ]]; then
+    days="${BASH_REMATCH[1]}"
+    if date -u -d "+${days} days" +%Y-%m-%d >/dev/null 2>&1; then
+      date -u -d "+${days} days" +%Y-%m-%d
+      return 0
+    fi
+    if date -u -v+"${days}"d +%Y-%m-%d >/dev/null 2>&1; then
+      date -u -v+"${days}"d +%Y-%m-%d
+      return 0
+    fi
+    # busybox / python fallback
+    python3 -c "import datetime;print((datetime.date.today()+datetime.timedelta(days=int('${days}'))).isoformat())" 2>/dev/null
+    return 0
+  fi
+  if [[ "$raw" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+    printf '%s' "$raw"
+    return 0
+  fi
+  warn "$(t "无法解析到期日: $raw（用 YYYY-MM-DD 或 +30d）" "Bad expire: $raw (use YYYY-MM-DD or +30d)")"
+  return 1
+}
+
+# 与 calendar 重置统一用本地日历日（与 mita 服务器本地时间一致）
+today_ymd() {
+  date +%Y-%m-%d 2>/dev/null || python3 -c 'import datetime;print(datetime.date.today().isoformat())'
+}
+
+quota_label() {
+  local mb="${1:-0}" days="${2:-0}"
+  if [ -z "$mb" ] || [ "$mb" = "0" ] || [ "$mb" = "null" ]; then
+    t '不限量' 'unlimited'
+    return
+  fi
+  if [ "$mb" -ge 1024 ] 2>/dev/null; then
+    printf '%sGB/%sd' "$((mb / 1024))" "${days:-30}"
+  else
+    printf '%sMB/%sd' "$mb" "${days:-30}"
+  fi
+}
+
+users_state_init_empty() {
+  run mkdir -p "$(dirname "$MITA_USERS_STATE")"
+  printf '%s\n' '{"version":1,"users":[]}' >"$MITA_USERS_STATE"
+  run chmod 0600 "$MITA_USERS_STATE" 2>/dev/null || true
+}
+
+users_state_exists() {
+  [ -f "$MITA_USERS_STATE" ] && [ -s "$MITA_USERS_STATE" ]
+}
+
+users_count() {
+  users_state_exists || { printf '0'; return 0; }
+  command -v python3 >/dev/null 2>&1 || { printf '0'; return 0; }
+  python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(len(d.get("users") or []))' \
+    "$MITA_USERS_STATE" 2>/dev/null || printf '0'
+}
+
+# 在 flock 下执行 python -c（$1=代码）；环境变量传参
+users_py_locked() {
+  users_require_python
+  run mkdir -p "$(dirname "$MITA_USERS_STATE")" "$(dirname "$MITA_USERS_LOCK")"
+  local code="$1"
+  if command -v flock >/dev/null 2>&1; then
+    flock -w 30 "$MITA_USERS_LOCK" env MITA_USERS_STATE="$MITA_USERS_STATE" \
+      _U_NAME="${_U_NAME-}" _U_PASS="${_U_PASS-}" _U_PORT="${_U_PORT-}" _U_PROTO="${_U_PROTO-}" \
+      _U_QUOTA_MB="${_U_QUOTA_MB-}" _U_QUOTA_DAYS="${_U_QUOTA_DAYS-}" \
+      _U_QUOTA_MODE="${_U_QUOTA_MODE-}" \
+      _U_EXPIRE="${_U_EXPIRE-}" _U_PACKAGE="${_U_PACKAGE-}" _U_ENABLED="${_U_ENABLED-}" \
+      _U_BW="${_U_BW-}" _U_PRIMARY="${_U_PRIMARY-}" \
+      python3 -c "$code"
+  else
+    MITA_USERS_STATE="$MITA_USERS_STATE" \
+      _U_NAME="${_U_NAME-}" _U_PASS="${_U_PASS-}" _U_PORT="${_U_PORT-}" _U_PROTO="${_U_PROTO-}" \
+      _U_QUOTA_MB="${_U_QUOTA_MB-}" _U_QUOTA_DAYS="${_U_QUOTA_DAYS-}" \
+      _U_QUOTA_MODE="${_U_QUOTA_MODE-}" \
+      _U_EXPIRE="${_U_EXPIRE-}" _U_PACKAGE="${_U_PACKAGE-}" _U_ENABLED="${_U_ENABLED-}" \
+      _U_BW="${_U_BW-}" _U_PRIMARY="${_U_PRIMARY-}" \
+      python3 -c "$code"
+  fi
+}
+
+normalize_quota_mode() {
+  case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
+    calendar|cal|month|monthly|日历|月|自然月) printf 'calendar' ;;
+    *) printf 'rolling' ;;
+  esac
+}
+
+current_year_month() {
+  date +%Y-%m 2>/dev/null || python3 -c 'import datetime;print(datetime.date.today().strftime("%Y-%m"))'
+}
+
+users_get_field() {
+  # users_get_field <name> <field>
+  local name="$1" field="$2"
+  users_state_exists || return 1
+  python3 -c '
+import json, sys
+name, field, path = sys.argv[1], sys.argv[2], sys.argv[3]
+d = json.load(open(path))
+for u in d.get("users") or []:
+    if u.get("name") == name:
+        v = u.get(field, "")
+        if field == "enabled":
+            print("1" if v is not False else "0")
+        else:
+            print(v if v is not None else "")
+        sys.exit(0)
+sys.exit(1)
+' "$name" "$field" "$MITA_USERS_STATE" 2>/dev/null
+}
+
+users_name_exists() {
+  local name="$1"
+  [ -n "$(users_get_field "$name" name 2>/dev/null || true)" ]
+}
+
+users_all_ports() {
+  users_state_exists || return 0
+  # 协议经 argv 传入（shell PROTOCOL 未 export 时 os.environ 读不到）
+  PROTOCOL="${PROTOCOL:-TCP}" python3 -c '
+import json, sys, os
+d = json.load(open(sys.argv[1]))
+proto = (sys.argv[2] if len(sys.argv) > 2 else "") or os.environ.get("PROTOCOL", "TCP")
+for u in d.get("users") or []:
+    p = u.get("port")
+    if p is None:
+        continue
+    try:
+        p = int(p)
+    except Exception:
+        continue
+    print(p)
+    if proto == "BOTH":
+        print(p + 1)
+' "$MITA_USERS_STATE" "${PROTOCOL:-TCP}" 2>/dev/null
+}
+
+port_is_listening() {
+  local p="$1"
+  if command -v ss >/dev/null 2>&1; then
+    ss -lntu 2>/dev/null | grep -Eq "[:.]${p}\\s" && return 0
+  fi
+  if command -v netstat >/dev/null 2>&1; then
+    netstat -lntu 2>/dev/null | grep -Eq "[:.]${p}\\s" && return 0
+  fi
+  return 1
+}
+
+port_is_allocated() {
+  local p="$1" used
+  while IFS= read -r used; do
+    [ -n "$used" ] || continue
+    [ "$used" = "$p" ] && return 0
+  done < <(users_all_ports)
+  return 1
+}
+
+# 计算端口池起止（写入全局 _pool_lo _pool_hi）
+users_port_pool_bounds() {
+  if [ -n "${USER_PORT_POOL_START:-}" ] && [ -n "${USER_PORT_POOL_END:-}" ]; then
+    _pool_lo="$USER_PORT_POOL_START"
+    _pool_hi="$USER_PORT_POOL_END"
+    return 0
+  fi
+  local base
+  if base="$(derive_port_base 2>/dev/null)"; then
+    _pool_lo=$((base + 1))
+    _pool_hi=$((base + 99))
+    [ "${PROTOCOL:-TCP}" = "BOTH" ] && _pool_hi=$((base + 98))
+    return 0
+  fi
+  # 无 IP 尾号时：主端口附近 或 默认 20000-29999
+  if [ -n "${PORT:-}" ] && valid_port "$PORT"; then
+    _pool_lo=$((PORT + 2))
+    _pool_hi=$((PORT + 200))
+    [ "$_pool_hi" -gt 65535 ] && _pool_hi=65535
+    [ "$_pool_lo" -lt 1025 ] && _pool_lo=1025
+    return 0
+  fi
+  _pool_lo=20000
+  _pool_hi=29999
+}
+
+allocate_user_port() {
+  # 可选参数: 首选端口；成功打印端口
+  local prefer="${1:-}" p step=1
+  [ "${PROTOCOL:-TCP}" = "BOTH" ] && step=2
+  if [ -n "$prefer" ]; then
+    valid_port "$prefer" || { die "$(t "非法端口: $prefer" "Invalid port: $prefer")" || return 1; }
+    if [ "$PROTOCOL" = "BOTH" ]; then
+      valid_port "$((prefer + 1))" || { die "$(t '双协议需要主端口 ≤65534' 'Dual protocol needs main port ≤65534')" || return 1; }
+    fi
+    if port_is_allocated "$prefer"; then
+      warn "$(t "端口 ${prefer} 已被其它用户占用" "Port ${prefer} already allocated")"
+      return 1
+    fi
+    if port_is_listening "$prefer"; then
+      warn "$(t "端口 ${prefer} 已被系统占用" "Port ${prefer} is in use")"
+      return 1
+    fi
+    if [ "$PROTOCOL" = "BOTH" ] && { port_is_allocated "$((prefer + 1))" || port_is_listening "$((prefer + 1))"; }; then
+      warn "$(t "UDP 端口 $((prefer + 1)) 不可用" "UDP port $((prefer + 1)) unavailable")"
+      return 1
+    fi
+    printf '%s' "$prefer"
+    return 0
+  fi
+  users_port_pool_bounds
+  p="$_pool_lo"
+  while [ "$p" -le "$_pool_hi" ]; do
+    if ! port_is_allocated "$p" && ! port_is_listening "$p"; then
+      if [ "$PROTOCOL" != "BOTH" ] || { ! port_is_allocated "$((p + 1))" && ! port_is_listening "$((p + 1))"; }; then
+        printf '%s' "$p"
+        return 0
+      fi
+    fi
+    p=$((p + step))
+  done
+  die "$(t "端口池 ${_pool_lo}-${_pool_hi} 已满，请指定 --port 或扩大池" \
+    "Port pool ${_pool_lo}-${_pool_hi} exhausted; pass --port or enlarge pool")" || return 1
+}
+
+users_migrate_from_primary() {
+  # 将当前 USERNAME/PASSWORD/PORT 写入 users.json（若空）
+  users_require_python
+  [ -n "${USERNAME:-}" ] || return 0
+  [ -n "${PORT:-}" ] || return 0
+  if users_state_exists; then
+    local n
+    n="$(users_count)"
+    [ "${n:-0}" -gt 0 ] && return 0
+  fi
+  run mkdir -p "$(dirname "$MITA_USERS_STATE")"
+  python3 -c '
+import json, sys, time
+path, name, pwd, port, proto = sys.argv[1:6]
+port = int(port)
+d = {"version": 1, "protocol": proto, "users": [{
+    "name": name,
+    "password": pwd,
+    "port": port,
+    "enabled": True,
+    "quota_mb": 0,
+    "quota_days": 0,
+    "quota_mode": "rolling",
+    "last_quota_reset": "",
+    "expire_at": "",
+    "package": "unlimited",
+    "bandwidth_mbps": 0,
+    "created_at": int(time.time()),
+    "updated_at": int(time.time()),
+}]}
+json.dump(d, open(path, "w"), indent=2)
+' "$MITA_USERS_STATE" "$USERNAME" "$PASSWORD" "$PORT" "${PROTOCOL:-TCP}"
+  run chmod 0600 "$MITA_USERS_STATE" 2>/dev/null || true
+  MULTI_USER_MODE=1
+  install_users_scheduler 2>/dev/null || true
+}
+
+users_sync_primary_globals() {
+  # 用状态库第一个启用用户填充 USERNAME/PASSWORD/PORT（兼容旧摘要）
+  users_state_exists || return 0
+  local line rest
+  line="$(python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+for u in d.get("users") or []:
+    if u.get("enabled", True):
+        print("%s\t%s\t%s" % (u.get("name") or "", u.get("password") or "", u.get("port") or ""))
+        break
+' "$MITA_USERS_STATE" 2>/dev/null)" || return 0
+  [ -n "$line" ] || return 0
+  USERNAME="${line%%$'\t'*}"
+  rest="${line#*$'\t'}"
+  PASSWORD="${rest%%$'\t'*}"
+  PORT="${rest#*$'\t'}"
+  MULTI_USER_MODE=1
+}
+
+users_ensure_loaded() {
+  load_install_state
+  if users_state_exists && [ "$(users_count)" -gt 0 ]; then
+    MULTI_USER_MODE=1
+    users_sync_primary_globals
+    return 0
+  fi
+  # 尝试从 mita / 安装状态迁移
+  if [ -n "${USERNAME:-}" ] && [ -n "${PORT:-}" ]; then
+    users_migrate_from_primary
+  fi
+}
+
+users_add() {
+  local name="$1" password="$2" port_pref="${3:-}" port rc expire_at
+  users_require_python || return 1
+  [ -n "$name" ] || { die "$(t '用户名不能为空' 'Username required')" || return 1; }
+  [ -n "$password" ] || password="$(random_token)"
+  apply_user_package_defaults
+  expire_at=""
+  if [ -n "${USER_EXPIRE:-}" ]; then
+    expire_at="$(parse_expire_date "$USER_EXPIRE")" || return 1
+  fi
+  load_install_state
+  if ! users_state_exists || [ "$(users_count)" -eq 0 ]; then
+    if [ -n "${USERNAME:-}" ] && [ -n "${PORT:-}" ] && [ -n "${PASSWORD:-}" ]; then
+      users_migrate_from_primary
+    else
+      users_state_init_empty
+    fi
+  fi
+  if users_name_exists "$name"; then
+    warn "$(t "用户已存在: $name" "User already exists: $name")"
+    return 1
+  fi
+  if ! port="$(allocate_user_port "$port_pref")"; then
+    return 1
+  fi
+  users_backup_now pre-add >/dev/null 2>&1 || true
+  local bw="${USER_BANDWIDTH_MBPS:-0}" qmode
+  [[ "$bw" =~ ^[0-9]+$ ]] || bw=0
+  qmode="$(normalize_quota_mode "${USER_QUOTA_MODE:-rolling}")"
+  # 套餐默认 rolling；显式 calendar 保留
+  [ -n "${USER_QUOTA_MODE:-}" ] || qmode="rolling"
+  _U_NAME="$name" _U_PASS="$password" _U_PORT="$port" _U_PROTO="${PROTOCOL:-TCP}"
+  _U_QUOTA_MB="${USER_QUOTA_MB:-0}" _U_QUOTA_DAYS="${USER_QUOTA_DAYS:-0}"
+  _U_QUOTA_MODE="$qmode"
+  _U_EXPIRE="${expire_at}" _U_PACKAGE="${USER_PACKAGE:-}" _U_BW="$bw"
+  set +e
+  users_py_locked '
+import json, os, time, sys, datetime
+path = os.environ["MITA_USERS_STATE"]
+name = os.environ["_U_NAME"]
+password = os.environ["_U_PASS"]
+port = int(os.environ["_U_PORT"])
+proto = os.environ.get("_U_PROTO", "TCP")
+try:
+    qmb = int(os.environ.get("_U_QUOTA_MB") or "0")
+except Exception:
+    qmb = 0
+try:
+    qdays = int(os.environ.get("_U_QUOTA_DAYS") or "0")
+except Exception:
+    qdays = 0
+try:
+    bw = int(os.environ.get("_U_BW") or "0")
+except Exception:
+    bw = 0
+qmode = (os.environ.get("_U_QUOTA_MODE") or "rolling").strip().lower()
+if qmode not in ("rolling", "calendar"):
+    qmode = "rolling"
+expire = (os.environ.get("_U_EXPIRE") or "").strip()
+package = (os.environ.get("_U_PACKAGE") or "").strip() or ("custom" if qmb > 0 else "unlimited")
+try:
+    d = json.load(open(path))
+except Exception:
+    d = {"version": 1, "users": []}
+users = d.setdefault("users", [])
+for u in users:
+    if u.get("name") == name:
+        sys.exit(2)
+    if int(u.get("port") or 0) == port:
+        sys.exit(3)
+ym = datetime.date.today().strftime("%Y-%m")
+users.append({
+    "name": name,
+    "password": password,
+    "port": port,
+    "enabled": True,
+    "quota_mb": qmb,
+    "quota_days": qdays if qmb > 0 else 0,
+    "quota_mode": qmode,
+    "last_quota_reset": ym if (qmb > 0 and qmode == "calendar") else "",
+    "expire_at": expire,
+    "package": package,
+    "bandwidth_mbps": bw,
+    "created_at": int(time.time()),
+    "updated_at": int(time.time()),
+})
+d["protocol"] = proto
+json.dump(d, open(path, "w"), indent=2)
+'
+  rc=$?
+  set -e
+  if [ "$rc" -eq 2 ]; then
+    warn "$(t "用户已存在: $name" "User already exists: $name")"
+    return 1
+  fi
+  if [ "$rc" -eq 3 ]; then
+    warn "$(t "端口已被占用: $port" "Port already allocated: $port")"
+    return 1
+  fi
+  if [ "$rc" -ne 0 ]; then
+    warn "$(t "写入用户状态失败 ($rc)" "Failed to write user state ($rc)")"
+    return 1
+  fi
+  MULTI_USER_MODE=1
+  install_users_scheduler 2>/dev/null || true
+  t "已添加用户 ${name} 端口 ${port} 套餐=${USER_PACKAGE:-unlimited} 配额=$(quota_label "${USER_QUOTA_MB:-0}" "${USER_QUOTA_DAYS:-0}") 带宽=${bw}Mbps 到期=${expire_at:-永不过期}" \
+    "Added ${name} port ${port} package=${USER_PACKAGE:-unlimited} quota=$(quota_label "${USER_QUOTA_MB:-0}" "${USER_QUOTA_DAYS:-0}") bw=${bw}Mbps expire=${expire_at:-never}" >&2
+  printf '%s' "$port"
+}
+
+users_del() {
+  local name="$1" freed rc
+  users_require_python || return 1
+  [ -n "$name" ] || { die "$(t '用户名不能为空' 'Username required')" || return 1; }
+  users_state_exists || { die "$(t '无用户状态文件' 'No users state file')" || return 1; }
+  users_name_exists "$name" || { die "$(t "用户不存在: $name" "User not found: $name")" || return 1; }
+  freed="$(users_get_field "$name" port)"
+  users_backup_now pre-del >/dev/null 2>&1 || true
+  _U_NAME="$name"
+  set +e
+  users_py_locked '
+import json, os, sys
+path = os.environ["MITA_USERS_STATE"]
+name = os.environ["_U_NAME"]
+d = json.load(open(path))
+before = len(d.get("users") or [])
+d["users"] = [u for u in (d.get("users") or []) if u.get("name") != name]
+if len(d["users"]) == before:
+    sys.exit(2)
+json.dump(d, open(path, "w"), indent=2)
+'
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || { die "$(t "删除失败: $name" "Delete failed: $name")" || return 1; }
+  t "已删除用户 ${name}，释放端口 ${freed}" "Deleted user ${name}, freed port ${freed}" >&2
+  printf '%s' "$freed"
+}
+
+# 从 users.json 生成 portBindings + users 片段路径（完整 server json 由 write_server_config_multi 写）
+write_server_config_multi() {
+  local cfg tp tp_section=""
+  users_require_python
+  users_state_exists || die "$(t '无多用户状态' 'No multi-user state')"
+  ensure_traffic_seed
+  tp="$(traffic_pattern_json '  ')"
+  [ -n "$tp" ] && tp_section=",
+${tp}"
+  cfg="$(mktemp_file .json)"
+  if ! MITA_USERS_STATE="$MITA_USERS_STATE" \
+    _PROTO="${PROTOCOL:-TCP}" _MTU="${MTU:-1400}" \
+    _CFG="$cfg" python3 - <<'PY'
+import json, os, sys
+path = os.environ["MITA_USERS_STATE"]
+proto = os.environ.get("_PROTO", "TCP")
+mtu = int(os.environ.get("_MTU", "1400"))
+cfg_path = os.environ["_CFG"]
+d = json.load(open(path))
+users_out = []
+bindings = []
+seen = set()
+for u in d.get("users") or []:
+    if not u.get("enabled", True):
+        continue
+    name = u.get("name") or ""
+    password = u.get("password") or ""
+    try:
+        port = int(u.get("port"))
+    except Exception:
+        continue
+    if not name or not password:
+        continue
+    entry = {"name": name, "password": password}
+    try:
+        qmb = int(u.get("quota_mb") or 0)
+    except Exception:
+        qmb = 0
+    try:
+        qdays = int(u.get("quota_days") or 0)
+    except Exception:
+        qdays = 0
+    qmode = (u.get("quota_mode") or "rolling").strip().lower()
+    if qmb > 0:
+        if qmode == "calendar":
+            # 自然月：窗口取当月天数（28-31），月初由 user-scan 强制轮换
+            import calendar, datetime
+            t = datetime.date.today()
+            qdays = calendar.monthrange(t.year, t.month)[1]
+        elif qdays <= 0:
+            qdays = 30
+        entry["quotas"] = [{"days": qdays, "megabytes": qmb}]
+    users_out.append(entry)
+    if proto == "BOTH":
+        pairs = [("TCP", port), ("UDP", port + 1)]
+    else:
+        pairs = [(proto, port)]
+    for pr, p in pairs:
+        key = (p, pr)
+        if key in seen:
+            continue
+        seen.add(key)
+        bindings.append({"port": p, "protocol": pr})
+if not users_out:
+    sys.stderr.write("no enabled users\n")
+    sys.exit(1)
+doc = {
+    "portBindings": bindings,
+    "users": users_out,
+    "loggingLevel": "INFO",
+    "mtu": mtu,
+}
+json.dump(doc, open(cfg_path, "w"), indent=2)
+PY
+  then
+    die "$(t '生成多用户配置失败' 'Failed to build multi-user config')"
+  fi
+  # 追加 trafficPattern（若有）：与单用户路径一致的 JSON 片段
+  if [ -n "$tp_section" ] && command -v python3 >/dev/null 2>&1; then
+    _CFG="$cfg" _TP="$tp_section" python3 - <<'PY' 2>/dev/null || true
+import json, os, re
+cfg = os.environ["_CFG"]
+tp = os.environ.get("_TP", "").strip()
+if not tp:
+    raise SystemExit(0)
+if tp.startswith(","):
+    tp = tp[1:].strip()
+# tp like: "trafficPattern": { ... }
+m = re.match(r'"trafficPattern"\s*:\s*(\{.*\})\s*$', tp, re.S)
+if not m:
+    raise SystemExit(0)
+doc = json.load(open(cfg))
+doc["trafficPattern"] = json.loads(m.group(1))
+json.dump(doc, open(cfg, "w"), indent=2)
+PY
+  fi
+  printf '%s' "$cfg"
+}
+
+multi_user_port_protocol_pairs() {
+  # 输出 proto|port 每行（用于防火墙）
+  users_state_exists || return 0
+  python3 -c '
+import json, sys
+path, proto = sys.argv[1], sys.argv[2]
+d = json.load(open(path))
+for u in d.get("users") or []:
+    if not u.get("enabled", True):
+        continue
+    port = int(u.get("port"))
+    if proto == "BOTH":
+        print(f"TCP|{port}")
+        print(f"UDP|{port+1}")
+    else:
+        print(f"{proto}|{port}")
+' "$MITA_USERS_STATE" "${PROTOCOL:-TCP}" 2>/dev/null
+}
+
+apply_users_config() {
+  # 将 users.json 应用到 mita + 重建 tc（持管理锁；显式释放，避免嵌套 trap 覆盖）
+  local cfg enabled_n bin rc=0
+  STAGE="应用多用户配置"
+  admin_lock_acquire
+  if [ "$(users_count)" -eq 0 ]; then
+    admin_lock_release
+    die "$(t '至少保留一个用户' 'Keep at least one user')" || return 1
+  fi
+  enabled_n="$(python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+print(sum(1 for u in (d.get("users") or []) if u.get("enabled", True)))
+' "$MITA_USERS_STATE" 2>/dev/null || echo 0)"
+  if [ "${enabled_n:-0}" -eq 0 ]; then
+    admin_lock_release
+    die "$(t '至少保留一个启用中的用户' 'Keep at least one enabled user')" || return 1
+  fi
+  if ! cfg="$(write_server_config_multi)"; then
+    admin_lock_release
+    return 1
+  fi
+  if ! apply_config "$cfg"; then
+    admin_lock_release
+    return 1
+  fi
+  bin="$(mita_bin)"
+  if "$bin" reload 2>/dev/null; then
+    :
+  else
+    start_mita || rc=1
+  fi
+  apply_tc_limits 2>/dev/null || true
+  harden_mita_permissions 2>/dev/null || true
+  admin_lock_release
+  return "$rc"
+}
+
+# 更新用户字段（不改 name/port/password 除非传入）
+users_update_fields() {
+  local name="$1"
+  users_require_python || return 1
+  users_name_exists "$name" || { warn "$(t "用户不存在: $name" "User not found: $name")"; return 1; }
+  users_backup_now pre-update >/dev/null 2>&1 || true
+  _U_NAME="$name"
+  _U_QUOTA_MB="${USER_QUOTA_MB-}"
+  _U_QUOTA_DAYS="${USER_QUOTA_DAYS-}"
+  _U_QUOTA_MODE="${USER_QUOTA_MODE-}"
+  _U_EXPIRE="${USER_EXPIRE-}"
+  _U_PACKAGE="${USER_PACKAGE-}"
+  _U_ENABLED="${_U_ENABLED-}"
+  _U_PASS="${_U_PASS-}"
+  _U_BW="${USER_BANDWIDTH_MBPS-}"
+  set +e
+  users_py_locked '
+import json, os, time, sys, datetime
+path = os.environ["MITA_USERS_STATE"]
+name = os.environ["_U_NAME"]
+d = json.load(open(path))
+found = None
+for u in d.get("users") or []:
+    if u.get("name") == name:
+        found = u
+        break
+if found is None:
+    sys.exit(2)
+# optional fields: empty string means skip; special __CLEAR__ for expire
+qm = os.environ.get("_U_QUOTA_MB")
+if qm is not None and qm != "":
+    try:
+        found["quota_mb"] = int(qm)
+    except Exception:
+        pass
+qd = os.environ.get("_U_QUOTA_DAYS")
+if qd is not None and qd != "":
+    try:
+        found["quota_days"] = int(qd)
+    except Exception:
+        pass
+if found.get("quota_mb", 0) <= 0:
+    found["quota_mb"] = 0
+    found["quota_days"] = 0
+qmode = os.environ.get("_U_QUOTA_MODE")
+if qmode is not None and qmode != "":
+    qmode = qmode.strip().lower()
+    if qmode in ("calendar", "cal", "month", "monthly"):
+        found["quota_mode"] = "calendar"
+        if not found.get("last_quota_reset"):
+            found["last_quota_reset"] = datetime.date.today().strftime("%Y-%m")
+    else:
+        found["quota_mode"] = "rolling"
+ex = os.environ.get("_U_EXPIRE")
+if ex is not None and ex != "":
+    if ex in ("0", "never", "none", "-", "__CLEAR__"):
+        found["expire_at"] = ""
+    else:
+        found["expire_at"] = ex
+pkg = os.environ.get("_U_PACKAGE")
+if pkg is not None and pkg != "":
+    found["package"] = pkg
+en = os.environ.get("_U_ENABLED")
+if en is not None and en != "":
+    found["enabled"] = en in ("1", "true", "True", "yes")
+pw = os.environ.get("_U_PASS")
+if pw is not None and pw != "":
+    found["password"] = pw
+bw = os.environ.get("_U_BW")
+if bw is not None and bw != "":
+    try:
+        found["bandwidth_mbps"] = max(0, int(bw))
+    except Exception:
+        pass
+found["updated_at"] = int(time.time())
+json.dump(d, open(path, "w"), indent=2)
+'
+  local rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || return 1
+  return 0
+}
+
+# ---------- 阶段3/5：按独占端口 tc 双向限速（出口 HTB sport + 入口 police dport） ----------
+
+tc_available() {
+  command -v tc >/dev/null 2>&1 || return 1
+  tc qdisc show >/dev/null 2>&1 || return 1
+  return 0
+}
+
+tc_default_iface() {
+  local dev=""
+  if [ -n "${TC_IFACE:-}" ]; then
+    printf '%s' "$TC_IFACE"
+    return 0
+  fi
+  if command -v ip >/dev/null 2>&1; then
+    dev="$(ip route 2>/dev/null | awk '/^default/{print $5; exit}')"
+    [ -n "$dev" ] || dev="$(ip -br link 2>/dev/null | awk '$1!="lo"{print $1; exit}' | cut -d@ -f1)"
+  fi
+  printf '%s' "$dev"
+}
+
+# 清除本脚本在网卡上创建的 HTB 根 + ingress
+tc_clear_root() {
+  local dev="$1"
+  [ -n "$dev" ] || return 0
+  tc qdisc del dev "$dev" root 2>/dev/null || true
+  tc qdisc del dev "$dev" ingress 2>/dev/null || true
+  tc qdisc del dev "$dev" handle "${TC_INGRESS_HANDLE:-ffff:}" ingress 2>/dev/null || true
+}
+
+# Mbps → police rate 字符串；burst ≈ rate/8（最小 10k）
+tc_police_burst() {
+  local mbps="$1" burst
+  burst=$((mbps * 1000 / 8))
+  [ "$burst" -lt 10 ] && burst=10
+  printf '%sk' "$burst"
+}
+
+# 从 users.json 全量重建双向限速（幂等）
+# 出口(下载): HTB + u32 match sport=用户端口
+# 入口(上传): ingress + u32 match dport=用户端口 + police
+apply_tc_limits() {
+  local dev handle root_rate has_limit=0 name port bw classid idx=10 burst
+  [ "${DRY_RUN:-0}" -eq 1 ] && return 0
+  users_state_exists || return 0
+  if ! tc_available; then
+    if python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+sys.exit(0 if any(int(u.get("bandwidth_mbps") or 0)>0 for u in (d.get("users") or [])) else 1)
+' "$MITA_USERS_STATE" 2>/dev/null; then
+      warn "$(t 'tc 不可用，无法应用带宽限速（需 iproute2 + NET_ADMIN/root）' \
+        'tc unavailable; cannot apply bandwidth limits (need iproute2 + root/NET_ADMIN)')"
+    fi
+    return 0
+  fi
+  dev="$(tc_default_iface)"
+  if [ -z "$dev" ]; then
+    warn "$(t '无法检测网卡，跳过 tc 限速（可设 TC_IFACE=eth0）' \
+      'Cannot detect NIC; skip tc (set TC_IFACE=eth0)')"
+    return 0
+  fi
+  handle="${TC_HANDLE:-1}"
+  root_rate="${TC_ROOT_RATE:-10gbit}"
+
+  has_limit="$(python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+print(1 if any(u.get("enabled",True) and int(u.get("bandwidth_mbps") or 0)>0 for u in (d.get("users") or [])) else 0)
+' "$MITA_USERS_STATE" 2>/dev/null || echo 0)"
+
+  tc_clear_root "$dev"
+  if [ "$has_limit" != "1" ]; then
+    users_log "tc: no rate limits on $dev (cleared egress+ingress)"
+    return 0
+  fi
+
+  # ---- 出口 HTB ----
+  if ! tc qdisc add dev "$dev" root handle "${handle}:" htb default 9999 2>/tmp/mita-tc.err; then
+    warn "$(t "tc 创建根 qdisc 失败 ($dev): $(cat /tmp/mita-tc.err 2>/dev/null)" \
+      "tc root qdisc failed on $dev")"
+    return 1
+  fi
+  tc class add dev "$dev" parent "${handle}:" classid "${handle}:1" htb rate "$root_rate" ceil "$root_rate" 2>/dev/null || true
+  tc class add dev "$dev" parent "${handle}:1" classid "${handle}:9999" htb rate "$root_rate" ceil "$root_rate" 2>/dev/null || true
+
+  # ---- 入口 ingress（失败则仅出口）----
+  local ingress_ok=0
+  if tc qdisc add dev "$dev" handle "${TC_INGRESS_HANDLE:-ffff:}" ingress 2>/tmp/mita-tc-ing.err; then
+    ingress_ok=1
+  else
+    warn "$(t "tc ingress 创建失败 ($dev)，仅出口限速: $(head -c 200 /tmp/mita-tc-ing.err 2>/dev/null)" \
+      "tc ingress failed on $dev; egress only")"
+    users_log "tc: ingress unavailable on $dev"
+  fi
+
+  idx=10
+  while IFS=$'\t' read -r name port bw; do
+    [ -n "$port" ] || continue
+    [ -n "$bw" ] && [ "$bw" -gt 0 ] 2>/dev/null || continue
+    classid="$(printf '%x' "$idx")"
+    idx=$((idx + 1))
+    burst="$(tc_police_burst "$bw")"
+
+    # 出口 class + sport filter
+    if ! tc class add dev "$dev" parent "${handle}:1" classid "${handle}:${classid}" \
+        htb rate "${bw}mbit" ceil "${bw}mbit" 2>/tmp/mita-tc.err; then
+      warn "$(t "tc class 失败 ${name} ${bw}mbit: $(cat /tmp/mita-tc.err 2>/dev/null)" \
+        "tc class failed ${name}")"
+      continue
+    fi
+    tc filter add dev "$dev" protocol ip parent "${handle}:" prio 1 u32 \
+      match ip sport "$port" 0xffff flowid "${handle}:${classid}" 2>/dev/null || true
+    tc filter add dev "$dev" protocol ipv6 parent "${handle}:" prio 2 u32 \
+      match ip6 sport "$port" 0xffff flowid "${handle}:${classid}" 2>/dev/null || true
+
+    # 入口 police + dport filter（上传）
+    if [ "$ingress_ok" -eq 1 ]; then
+      if ! tc filter add dev "$dev" parent "${TC_INGRESS_HANDLE:-ffff:}" protocol ip prio 1 u32 \
+          match ip dport "$port" 0xffff \
+          police rate "${bw}mbit" burst "$burst" drop flowid :1 2>/tmp/mita-tc-ingf.err; then
+        warn "$(t "入口限速失败 ${name} port=${port}（保留出口）" \
+          "ingress police failed ${name} port=${port} (egress kept)")"
+      fi
+      tc filter add dev "$dev" parent "${TC_INGRESS_HANDLE:-ffff:}" protocol ipv6 prio 2 u32 \
+        match ip6 dport "$port" 0xffff \
+        police rate "${bw}mbit" burst "$burst" drop flowid :1 2>/dev/null || true
+    fi
+
+    if [ "${PROTOCOL:-TCP}" = "BOTH" ]; then
+      local up=$((port + 1))
+      # 出口 UDP+1（IPv4/IPv6）
+      tc filter add dev "$dev" protocol ip parent "${handle}:" prio 1 u32 \
+        match ip sport "$up" 0xffff flowid "${handle}:${classid}" 2>/dev/null || true
+      tc filter add dev "$dev" protocol ipv6 parent "${handle}:" prio 2 u32 \
+        match ip6 sport "$up" 0xffff flowid "${handle}:${classid}" 2>/dev/null || true
+      if [ "$ingress_ok" -eq 1 ]; then
+        # 入口 UDP+1（IPv4/IPv6）
+        tc filter add dev "$dev" parent "${TC_INGRESS_HANDLE:-ffff:}" protocol ip prio 1 u32 \
+          match ip dport "$up" 0xffff \
+          police rate "${bw}mbit" burst "$burst" drop flowid :1 2>/dev/null || true
+        tc filter add dev "$dev" parent "${TC_INGRESS_HANDLE:-ffff:}" protocol ipv6 prio 2 u32 \
+          match ip6 dport "$up" 0xffff \
+          police rate "${bw}mbit" burst "$burst" drop flowid :1 2>/dev/null || true
+      fi
+    fi
+    if [ "$ingress_ok" -eq 1 ]; then
+      users_log "tc: ${name} port=${port} ${bw}mbit egress+ingress class=${handle}:${classid} dev=${dev}"
+    else
+      users_log "tc: ${name} port=${port} ${bw}mbit egress-only class=${handle}:${classid} dev=${dev}"
+    fi
+  done < <(python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+for u in d.get("users") or []:
+    if not u.get("enabled", True):
+        continue
+    bw=int(u.get("bandwidth_mbps") or 0)
+    if bw<=0:
+        continue
+    print("%s\t%s\t%s" % (u.get("name") or "", u.get("port") or "", bw))
+' "$MITA_USERS_STATE" 2>/dev/null)
+
+  return 0
+}
+
+tc_rate_status() {
+  local dev
+  dev="$(tc_default_iface)"
+  msg ""
+  t "【tc 限速状态】网卡: ${dev:-?}（出口 HTB + 入口 police）" \
+    "[tc rate status] iface: ${dev:-?} (egress HTB + ingress police)"
+  if ! tc_available; then
+    warn "$(t 'tc 不可用' 'tc unavailable')"
+    return 1
+  fi
+  if [ -z "$dev" ]; then
+    warn "$(t '未检测到网卡' 'No NIC detected')"
+    return 1
+  fi
+  msg "--- qdisc ---"
+  tc qdisc show dev "$dev" 2>/dev/null || true
+  msg "--- egress class ---"
+  tc class show dev "$dev" 2>/dev/null || true
+  msg "--- egress filter ---"
+  tc filter show dev "$dev" 2>/dev/null | head -n 30 || true
+  msg "--- ingress filter ---"
+  tc filter show dev "$dev" parent "${TC_INGRESS_HANDLE:-ffff:}" 2>/dev/null | head -n 30 || true
+  msg ""
+  t '【用户带宽配置】双向 Mbps' '[User bandwidth] bidirectional Mbps'
+  if users_state_exists; then
+    python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+print("%-16s %-8s %-8s %s" % ("USER","PORT","MBPS","STATUS"))
+for u in d.get("users") or []:
+    bw=int(u.get("bandwidth_mbps") or 0)
+    st="on" if u.get("enabled",True) else "off"
+    print("%-16s %-8s %-8s %s" % (u.get("name") or "", u.get("port") or "", bw if bw>0 else "unlim", st))
+' "$MITA_USERS_STATE"
+  fi
+}
+
+users_set_enabled() {
+  local name="$1" en="$2"
+  _U_ENABLED="$en"
+  USER_QUOTA_MB="" USER_QUOTA_DAYS="" USER_EXPIRE="" USER_PACKAGE="" USER_BANDWIDTH_MBPS=""
+  users_update_fields "$name" || return 1
+  unset _U_ENABLED
+}
+
+# 扫描到期：expire_at <= today 且 enabled → 停用；stdout 仅输出被停用的用户名
+users_scan_expired() {
+  users_require_python || return 1
+  users_state_exists || return 0
+  local today changed
+  today="$(today_ymd)"
+  changed="$(USERS_LOG_QUIET=1 python3 -c '
+import json, sys, time
+path, today = sys.argv[1], sys.argv[2]
+d = json.load(open(path))
+changed = []
+for u in d.get("users") or []:
+    exp = (u.get("expire_at") or "").strip()
+    if not exp:
+        continue
+    if not u.get("enabled", True):
+        continue
+    if exp <= today:
+        u["enabled"] = False
+        u["updated_at"] = int(time.time())
+        changed.append(u.get("name") or "")
+if changed:
+    json.dump(d, open(path, "w"), indent=2)
+print("\n".join(changed))
+' "$MITA_USERS_STATE" "$today" 2>/dev/null || true)"
+  if [ -z "$changed" ]; then
+    return 0
+  fi
+  local n
+  while IFS= read -r n; do
+    [ -n "$n" ] || continue
+    USERS_LOG_QUIET=1 users_log "expired disable: $n (expire_at<=$today)"
+  done <<< "$changed"
+  if mita_installed 2>/dev/null; then
+    load_install_state
+    MULTI_USER_MODE=1
+    apply_users_config >/dev/null 2>&1 || USERS_LOG_QUIET=1 users_log "apply after expire scan failed"
+  fi
+  printf '%s\n' "$changed"
+}
+
+# 日历月配额重置：quota_mode=calendar 且 last_quota_reset != 当月
+# 方法（QUOTA_RESET_METHOD）：
+#   days     — 仅更新当月天数 + reload（不断线；mita 未必清零累计）
+#   password — 微扰密码两次 apply（默认；更可能开启新用户计数，可能短暂断线）
+#   metrics  — 删除 /var/lib/mita/metrics.pb 并重启（清全部用户 metrics，最重）
+# 仅成功 apply 后才写入 last_quota_reset，避免失败后本月跳过
+_calendar_mark_pending() {
+  # stdout: 待重置用户名列表；不写 last_quota_reset
+  python3 -c '
+import json, sys, time, datetime, calendar
+path, ym = sys.argv[1], sys.argv[2]
+d = json.load(open(path))
+reset = []
+today = datetime.date.today()
+mdays = calendar.monthrange(today.year, today.month)[1]
+for u in d.get("users") or []:
+    if not u.get("enabled", True):
+        continue
+    try:
+        qmb = int(u.get("quota_mb") or 0)
+    except Exception:
+        qmb = 0
+    if qmb <= 0:
+        continue
+    if (u.get("quota_mode") or "rolling").strip().lower() != "calendar":
+        continue
+    if (u.get("last_quota_reset") or "").strip() == ym:
+        continue
+    u["quota_days"] = mdays
+    u["updated_at"] = int(time.time())
+    u["_reset_pending"] = True
+    reset.append(u.get("name") or "")
+if reset:
+    json.dump(d, open(path, "w"), indent=2)
+print("\n".join(reset))
+' "$MITA_USERS_STATE" "$1" 2>/dev/null || true
+}
+
+_calendar_commit_reset() {
+  # 成功后：仅对 _reset_pending 用户写 last_quota_reset，并清 ZWSP
+  local ym="$1"
+  python3 -c '
+import json, sys, time
+path, ym = sys.argv[1], sys.argv[2]
+d = json.load(open(path))
+for u in d.get("users") or []:
+    pending = u.pop("_reset_pending", False)
+    pw = u.get("password") or ""
+    if pw.endswith("\u200b"):
+        u["password"] = pw[:-1]
+    if pending:
+        u["last_quota_reset"] = ym
+    u["updated_at"] = int(time.time())
+json.dump(d, open(path, "w"), indent=2)
+' "$MITA_USERS_STATE" "$ym" 2>/dev/null || true
+}
+
+_calendar_abort_reset() {
+  # 失败：去掉 pending 与 ZWSP，不写 last_quota_reset
+  # 若已向 mita 推送过 ZWSP 密码，调用方应 re-apply
+  python3 -c '
+import json, sys, time
+path = sys.argv[1]
+d = json.load(open(path))
+for u in d.get("users") or []:
+    u.pop("_reset_pending", None)
+    pw = u.get("password") or ""
+    if pw.endswith("\u200b"):
+        u["password"] = pw[:-1]
+    u["updated_at"] = int(time.time())
+json.dump(d, open(path, "w"), indent=2)
+' "$MITA_USERS_STATE" 2>/dev/null || true
+}
+
+users_scan_calendar_quota_reset() {
+  users_require_python || return 1
+  users_state_exists || return 0
+  local ym reset_list method ok=0
+  ym="$(current_year_month)"
+  method="$(printf '%s' "${QUOTA_RESET_METHOD:-password}" | tr '[:upper:]' '[:lower:]')"
+  reset_list="$(_calendar_mark_pending "$ym")"
+  [ -n "$reset_list" ] || return 0
+  local n
+  while IFS= read -r n; do
+    [ -n "$n" ] || continue
+    USERS_LOG_QUIET=1 users_log "calendar quota reset: $n month=$ym method=$method"
+  done <<< "$reset_list"
+
+  if ! mita_installed 2>/dev/null; then
+    _calendar_commit_reset "$ym"
+    printf '%s\n' "$reset_list"
+    return 0
+  fi
+
+  load_install_state
+  MULTI_USER_MODE=1
+
+  case "$method" in
+    days)
+      if apply_users_config >/dev/null 2>&1; then
+        ok=1
+      else
+        USERS_LOG_QUIET=1 users_log "calendar days-only apply failed"
+      fi
+      ;;
+    metrics)
+      if apply_users_config >/dev/null 2>&1; then
+        local sm
+        sm="$(service_manager 2>/dev/null || echo systemd)"
+        case "$sm" in
+          systemd) run systemctl stop mita 2>/dev/null || true ;;
+          openrc) run rc-service mita stop 2>/dev/null || true ;;
+        esac
+        run rm -f /var/lib/mita/metrics.pb 2>/dev/null || true
+        if start_mita 2>/dev/null; then
+          ok=1
+          USERS_LOG_QUIET=1 users_log "calendar reset cleared metrics.pb"
+        else
+          USERS_LOG_QUIET=1 users_log "calendar metrics reset: start_mita failed"
+        fi
+      fi
+      ;;
+    password|*)
+      # 微扰密码 → apply → 恢复密码 → apply
+      local first_applied=0
+      python3 -c '
+import json,sys
+path=sys.argv[1]
+d=json.load(open(path))
+for u in d.get("users") or []:
+    if not u.get("_reset_pending"):
+        continue
+    pw=u.get("password") or ""
+    if not pw.endswith("\u200b"):
+        u["password"]=pw+"\u200b"
+json.dump(d, open(path,"w"), indent=2)
+' "$MITA_USERS_STATE" 2>/dev/null || true
+      if apply_users_config >/dev/null 2>&1; then
+        first_applied=1
+        python3 -c '
+import json,sys
+path=sys.argv[1]
+d=json.load(open(path))
+for u in d.get("users") or []:
+    if not u.get("_reset_pending"):
+        continue
+    pw=u.get("password") or ""
+    if pw.endswith("\u200b"):
+        u["password"]=pw[:-1]
+json.dump(d, open(path,"w"), indent=2)
+' "$MITA_USERS_STATE" 2>/dev/null || true
+        if apply_users_config >/dev/null 2>&1; then
+          ok=1
+        else
+          USERS_LOG_QUIET=1 users_log "calendar password-reset second apply failed"
+        fi
+      else
+        USERS_LOG_QUIET=1 users_log "calendar password-reset first apply failed"
+      fi
+      # 若第一次已 apply 而整体失败：abort JSON 后必须 re-apply 干净密码
+      if [ "$ok" -ne 1 ] && [ "$first_applied" -eq 1 ]; then
+        _calendar_abort_reset
+        apply_users_config >/dev/null 2>&1 || USERS_LOG_QUIET=1 users_log "calendar password abort re-apply failed"
+        USERS_LOG_QUIET=1 users_log "calendar reset aborted after partial apply; will retry next scan"
+        return 1
+      fi
+      ;;
+  esac
+
+  if [ "$ok" -eq 1 ]; then
+    _calendar_commit_reset "$ym"
+    printf '%s\n' "$reset_list"
+  else
+    _calendar_abort_reset
+    USERS_LOG_QUIET=1 users_log "calendar reset aborted; will retry next scan"
+    return 1
+  fi
+}
+
+install_users_scheduler() {
+  # systemd timer 优先，否则 cron.d
+  [ "${DRY_RUN:-0}" -eq 1 ] && return 0
+  local script_path
+  script_path="${INSTALL_SCRIPT_PATH}"
+  [ -x "$script_path" ] || script_path="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
+  [ -n "$script_path" ] || return 0
+
+  if command -v systemctl >/dev/null 2>&1 && [ -d /etc/systemd/system ]; then
+    cat >"$MITA_USERS_SERVICE" <<EOF
+[Unit]
+Description=mita users expire scan and tc rate restore
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=${script_path} user-scan
+# 开机恢复按端口 tc 限速
+ExecStartPost=${script_path} rate-restore
+Nice=10
+EOF
+    cat >"$MITA_USERS_TIMER" <<EOF
+[Unit]
+Description=Run mita users scan every 15 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=15min
+AccuracySec=1min
+Unit=mita-users-scan.service
+
+[Install]
+WantedBy=timers.target
+EOF
+    # 开机 oneshot 恢复 tc
+    cat >"/etc/systemd/system/mita-tc-restore.service" <<EOF
+[Unit]
+Description=Restore mita per-port tc rate limits
+After=network-online.target mita.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=${script_path} rate-restore
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable --now mita-users-scan.timer 2>/dev/null || true
+    systemctl enable mita-tc-restore.service 2>/dev/null || true
+    systemctl start mita-tc-restore.service 2>/dev/null || true
+    install_logrotate_config 2>/dev/null || true
+    harden_mita_permissions 2>/dev/null || true
+    users_log "scheduler: systemd timer + mita-tc-restore.service"
+    return 0
+  fi
+
+  if [ -d /etc/cron.d ]; then
+    cat >"$MITA_USERS_CRON" <<EOF
+# mita multi-user expire scan (every 15 min) + daily tc restore
+*/15 * * * * root ${script_path} user-scan >>${MITA_USERS_LOG} 2>&1
+@reboot root sleep 30; ${script_path} rate-restore >>${MITA_USERS_LOG} 2>&1
+EOF
+    chmod 0644 "$MITA_USERS_CRON" 2>/dev/null || true
+    install_logrotate_config 2>/dev/null || true
+    harden_mita_permissions 2>/dev/null || true
+    users_log "scheduler: cron ${MITA_USERS_CRON}"
+    return 0
+  fi
+  # OpenRC / 无 cron：写入 hint
+  install_logrotate_config 2>/dev/null || true
+  warn "$(t '未找到 systemd timer 或 /etc/cron.d，请手动定期执行: install-mita user-scan / rate-restore' \
+    'No systemd timer or /etc/cron.d; run: install-mita user-scan / rate-restore')"
+}
+
+remove_users_scheduler() {
+  if [ -f "$MITA_USERS_TIMER" ] || [ -f "$MITA_USERS_SERVICE" ]; then
+    systemctl disable --now mita-users-scan.timer 2>/dev/null || true
+    systemctl disable --now mita-tc-restore.service 2>/dev/null || true
+    rm -f "$MITA_USERS_TIMER" "$MITA_USERS_SERVICE" /etc/systemd/system/mita-tc-restore.service 2>/dev/null || true
+    systemctl daemon-reload 2>/dev/null || true
+  fi
+  rm -f "$MITA_USERS_CRON" 2>/dev/null || true
+  # 清除 tc 规则
+  local dev
+  dev="$(tc_default_iface 2>/dev/null || true)"
+  [ -n "$dev" ] && tc_clear_root "$dev" 2>/dev/null || true
+}
+
+# ---------- 阶段4：备份 / 恢复 / 导出导入 / 管理锁 ----------
+
+# 破坏性变更前备份 users.json；成功打印备份路径
+users_backup_now() {
+  local tag="${1:-auto}" dest ts
+  users_state_exists || return 1
+  run mkdir -p "$MITA_USERS_BACKUP_DIR"
+  ts="$(date +%Y%m%d_%H%M%S 2>/dev/null || echo unknown)"
+  dest="${MITA_USERS_BACKUP_DIR}/users_${tag}_${ts}.json"
+  if command -v install >/dev/null 2>&1; then
+    run install -m 0600 "$MITA_USERS_STATE" "$dest"
+  else
+    run cp -f "$MITA_USERS_STATE" "$dest"
+    run chmod 0600 "$dest" 2>/dev/null || true
+  fi
+  # 只保留最近 20 份
+  if command -v python3 >/dev/null 2>&1; then
+    MITA_USERS_BACKUP_DIR="$MITA_USERS_BACKUP_DIR" python3 -c '
+import os, glob
+d=os.environ.get("MITA_USERS_BACKUP_DIR", "/etc/mita/backups")
+files=sorted(glob.glob(os.path.join(d, "users_*.json")), key=os.path.getmtime, reverse=True)
+for f in files[20:]:
+    try: os.remove(f)
+    except Exception: pass
+' 2>/dev/null || true
+  fi
+  printf '%s' "$dest"
+}
+
+users_validate_state_file() {
+  local f="$1"
+  [ -f "$f" ] || return 1
+  python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+users=d.get("users")
+if not isinstance(users, list):
+    sys.exit(2)
+names=set(); ports=set()
+for u in users:
+    if not isinstance(u, dict):
+        sys.exit(3)
+    n=u.get("name") or ""
+    if not n:
+        sys.exit(4)
+    if n in names:
+        sys.exit(5)
+    names.add(n)
+    try:
+        p=int(u.get("port"))
+    except Exception:
+        sys.exit(6)
+    if p in ports:
+        sys.exit(7)
+    ports.add(p)
+    # normalize optional fields
+    u.setdefault("enabled", True)
+    u.setdefault("quota_mb", 0)
+    u.setdefault("quota_days", 0)
+    u.setdefault("quota_mode", "rolling")
+    u.setdefault("last_quota_reset", "")
+    u.setdefault("expire_at", "")
+    u.setdefault("package", "unlimited")
+    u.setdefault("bandwidth_mbps", 0)
+d["version"]=int(d.get("version") or 1)
+json.dump(d, open(sys.argv[1]+".norm","w"), indent=2)
+' "$f" 2>/dev/null || return 1
+  if [ -f "${f}.norm" ]; then
+    mv -f "${f}.norm" "$f" 2>/dev/null || true
+  fi
+  return 0
+}
+
+users_restore_from_file() {
+  local src="$1" bak
+  [ -f "$src" ] || { warn "$(t "备份不存在: $src" "Backup not found: $src")"; return 1; }
+  local tmp
+  tmp="$(mktemp_file .json)"
+  cp -f "$src" "$tmp"
+  users_validate_state_file "$tmp" || { rm -f "$tmp"; warn "$(t '备份文件格式无效' 'Invalid backup format')"; return 1; }
+  admin_lock_acquire
+  if users_state_exists; then
+    bak="$(users_backup_now pre-restore 2>/dev/null || true)"
+    [ -n "$bak" ] && t "恢复前已备份: $bak" "Pre-restore backup: $bak" >&2
+  fi
+  run mkdir -p "$(dirname "$MITA_USERS_STATE")"
+  if command -v install >/dev/null 2>&1; then
+    run install -m 0600 "$tmp" "$MITA_USERS_STATE"
+  else
+    run cp -f "$tmp" "$MITA_USERS_STATE"
+    run chmod 0600 "$MITA_USERS_STATE" 2>/dev/null || true
+  fi
+  rm -f "$tmp"
+  MULTI_USER_MODE=1
+  users_sync_primary_globals
+  if mita_installed 2>/dev/null; then
+    if ! apply_users_config; then
+      admin_lock_release
+      return 1
+    fi
+    open_firewall_for_pairs "$(multi_user_port_protocol_pairs)" 2>/dev/null || true
+  else
+    apply_tc_limits 2>/dev/null || true
+  fi
+  admin_lock_release
+  t "已从备份恢复用户状态" "Users restored from backup"
+}
+
+do_user_backup() {
+  require_root
+  users_state_exists || die "$(t '无用户状态可备份' 'No users state to backup')"
+  local dest
+  dest="$(users_backup_now manual)"
+  t "已备份: $dest" "Backed up: $dest"
+  # 同时备份 install-state 若存在
+  if [ -f "$MITA_STATE" ]; then
+    local sdest
+    sdest="${dest%.json}_install-state.env"
+    cp -f "$MITA_STATE" "$sdest" 2>/dev/null || true
+    chmod 0600 "$sdest" 2>/dev/null || true
+    t "  安装状态: $sdest" "  Install state: $sdest"
+  fi
+  msg ""
+  t '最近备份:' 'Recent backups:'
+  ls -1t "$MITA_USERS_BACKUP_DIR"/users_*.json 2>/dev/null | head -n 10 || true
+}
+
+do_user_restore() {
+  require_root
+  local f="${USER_RESTORE_FILE:-}"
+  if [ -z "$f" ]; then
+    if [ "$YES" -eq 1 ]; then
+      die "$(t '需要备份文件路径' 'Backup file path required')"
+    fi
+    msg ""
+    t '可用备份:' 'Available backups:'
+    ls -1t "$MITA_USERS_BACKUP_DIR"/users_*.json 2>/dev/null | head -n 15 || true
+    read_tty f "$(t '备份文件路径: ' 'Backup file: ')" || true
+  fi
+  [ -n "$f" ] || die "$(t '需要备份文件路径' 'Backup file path required')"
+  if [ "$YES" -ne 1 ]; then
+    confirm '确认用该备份覆盖当前用户配置？[y/N]: ' 'Overwrite current users with this backup? [y/N]: ' n || return 0
+  fi
+  users_restore_from_file "$f"
+}
+
+do_user_export() {
+  require_root
+  users_state_exists || die "$(t '无用户状态' 'No users state')"
+  local out="${USER_EXPORT_FILE:-}"
+  if [ -n "$out" ]; then
+    run mkdir -p "$(dirname "$out")" 2>/dev/null || true
+    cp -f "$MITA_USERS_STATE" "$out"
+    chmod 0600 "$out" 2>/dev/null || true
+    t "已导出: $out" "Exported: $out"
+  else
+    cat "$MITA_USERS_STATE"
+  fi
+}
+
+do_user_import() {
+  require_root
+  local f="${USER_RESTORE_FILE:-}"
+  [ -n "$f" ] || die "$(t '需要 --user-import FILE' 'Need --user-import FILE')"
+  if [ "$YES" -ne 1 ]; then
+    confirm '导入将覆盖当前用户配置，是否继续？[y/N]: ' 'Import overwrites current users. Continue? [y/N]: ' n || return 0
+  fi
+  users_restore_from_file "$f"
+}
+
+print_user_outputs() {
+  local name="$1"
+  local ip password port saved_user saved_pass saved_port
+  password="$(users_get_field "$name" password)" || return 1
+  port="$(users_get_field "$name" port)" || return 1
+  ip="$(public_ip || echo 'YOUR_SERVER_IP')"
+  saved_user="$USERNAME"
+  saved_pass="$PASSWORD"
+  saved_port="$PORT"
+  USERNAME="$name"
+  PASSWORD="$password"
+  PORT="$port"
+  msg ""
+  t "========== 用户 ${name} ==========" "========== User ${name} =========="
+  t "  端口: ${port}" "  Port: ${port}"
+  local qmb qdays exp en pkg bw
+  qmb="$(users_get_field "$name" quota_mb 2>/dev/null || echo 0)"
+  qdays="$(users_get_field "$name" quota_days 2>/dev/null || echo 0)"
+  exp="$(users_get_field "$name" expire_at 2>/dev/null || true)"
+  en="$(users_get_field "$name" enabled 2>/dev/null || echo 1)"
+  pkg="$(users_get_field "$name" package 2>/dev/null || true)"
+  bw="$(users_get_field "$name" bandwidth_mbps 2>/dev/null || echo 0)"
+  t "  套餐: ${pkg:--}  配额: $(quota_label "$qmb" "$qdays")  带宽: ${bw:-0}Mbps  到期: ${exp:-永不过期}  状态: $([ "$en" = 1 ] && echo on || echo off)" \
+    "  Package: ${pkg:--}  Quota: $(quota_label "$qmb" "$qdays")  BW: ${bw:-0}Mbps  Expire: ${exp:-never}  Status: $([ "$en" = 1 ] && echo on || echo off)"
+  print_protocol_outputs "$ip"
+  msg ""
+  t '【连接信息】' '[Connection info]'
+  t "  服务器: ${ip}" "  Server:   ${ip}"
+  t "  用户名: ${name}" "  Username: ${name}"
+  t "  密码:   ${password}" "  Password: ${password}"
+  t "  协议:   $(protocol_label)" "  Protocol: $(protocol_label)"
+  if [ "$PROTOCOL" = "BOTH" ]; then
+    t "  端口:   TCP ${port} / UDP $((port + 1))" "  Ports:    TCP ${port} / UDP $((port + 1))"
+  else
+    t "  端口:   ${port}" "  Port:     ${port}"
+  fi
+  if [ -n "$ip" ] && [ "$ip" != "YOUR_SERVER_IP" ]; then
+    msg ""
+    t '【Clash / mihomo 配置片段】' '[Clash / mihomo snippet]'
+    build_clash_yaml_full "$ip"
+  fi
+  USERNAME="$saved_user"
+  PASSWORD="$saved_pass"
+  PORT="$saved_port"
+}
+
+open_firewall_for_pairs() {
+  local pairs="$1"
+  local fw="" pp proto p proto_lc
+  [ -n "$pairs" ] || return 0
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: active'; then
+    fw=ufw
+  elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+    fw=firewalld
+  elif command -v iptables >/dev/null 2>&1; then
+    fw=iptables
+  else
+    return 0
+  fi
+  while IFS= read -r pp; do
+    [ -n "$pp" ] || continue
+    proto="${pp%%|*}"
+    p="${pp#*|}"
+    proto_lc="$(proto_lower "$proto")"
+    case "$fw" in
+      ufw) run ufw allow "$(ufw_rule_spec "$p" "$proto_lc")" || true ;;
+      firewalld) run firewall-cmd --permanent --add-port="${p}/${proto_lc}" || true ;;
+      iptables) iptables_accept_port "$p" "$proto_lc" add ;;
+    esac
+  done <<< "$pairs"
+  case "$fw" in
+    firewalld) run firewall-cmd --reload || true ;;
+    iptables) persist_iptables_rules ;;
+  esac
+}
+
+do_user_list() {
+  require_root
+  load_install_state
+  users_ensure_loaded
+  if ! users_state_exists || [ "$(users_count)" -eq 0 ]; then
+    t '（无多用户记录；当前为单用户安装，添加用户后将自动迁移）' \
+      '(No multi-user state; single-user install. Adding a user migrates automatically.)'
+    if [ -n "${USERNAME:-}" ]; then
+      t "  主用户: ${USERNAME}  端口: ${PORT:-?}" "  Primary: ${USERNAME}  port: ${PORT:-?}"
+    fi
+    return 0
+  fi
+  msg ""
+  t '用户名      端口 状态 套餐     配额        模式  带宽  到期' \
+    'USER        PORT ST   PACKAGE  QUOTA       MODE  Mbps  EXPIRE'
+  t '----------- ---- ---- -------- ----------- ----- ----- ----------' \
+    '----------- ---- ---- -------- ----------- ----- ----- ----------'
+  python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+for u in d.get("users") or []:
+    name = (u.get("name") or "")[:11]
+    port = str(u.get("port") or "")
+    st = "on" if u.get("enabled", True) else "off"
+    pkg = (u.get("package") or "-")[:8]
+    qmb = int(u.get("quota_mb") or 0)
+    qdays = int(u.get("quota_days") or 0)
+    mode = (u.get("quota_mode") or "rolling")[:5]
+    if qmb <= 0:
+        quota = "unlim"
+        mode = "-"
+    elif qmb >= 1024:
+        quota = "%dG/%dd" % (qmb // 1024, qdays or 30)
+    else:
+        quota = "%dM/%dd" % (qmb, qdays or 30)
+    bw = int(u.get("bandwidth_mbps") or 0)
+    bws = str(bw) if bw > 0 else "-"
+    exp = (u.get("expire_at") or "never")[:10]
+    print(f"{name:<11} {port:<4} {st:<4} {pkg:<8} {quota:<11} {mode:<5} {bws:<5} {exp}")
+' "$MITA_USERS_STATE"
+  t "共 $(users_count) 个用户（rolling=滚动窗；calendar=每月1日重置）" \
+    "Total $(users_count) (rolling window; calendar=reset on 1st)"
+}
+
+do_user_add() {
+  require_root
+  require_linux
+  mita_installed || die "$(t 'mita 未安装，请先执行安装' 'mita is not installed; run install first')"
+  # CLI 参数先保存，避免被 load_install_state 覆盖
+  local name="${USERNAME:-}" password="${PASSWORD:-}" prefer="" new_port
+  local saved_pkg="${USER_PACKAGE:-}" saved_qmb="${USER_QUOTA_MB:-}" saved_qd="${USER_QUOTA_DAYS:-}" saved_exp="${USER_EXPIRE:-}" saved_bw="${USER_BANDWIDTH_MBPS:-}"
+  if [ "${PORT_CLI:-0}" -eq 1 ] && [ -n "${PORT:-}" ]; then
+    prefer="$PORT"
+  fi
+  load_install_state
+  USER_PACKAGE="$saved_pkg"
+  USER_QUOTA_MB="$saved_qmb"
+  USER_QUOTA_DAYS="$saved_qd"
+  USER_EXPIRE="$saved_exp"
+  USER_BANDWIDTH_MBPS="$saved_bw"
+  if ! users_state_exists || [ "$(users_count)" -eq 0 ]; then
+    load_config_from_mita 2>/dev/null || true
+    load_credentials_fallback 2>/dev/null || true
+    users_migrate_from_primary 2>/dev/null || true
+  fi
+  if [ -z "$name" ]; then
+    if [ "$YES" -eq 1 ]; then
+      name="$(random_token)"
+    else
+      read_tty name "$(t '新用户名: ' 'New username: ')" || true
+    fi
+  fi
+  if [ -z "$password" ]; then
+    if [ "$YES" -eq 1 ]; then
+      password="$(random_token)"
+    else
+      read_tty password "$(t '密码（回车随机）: ' 'Password (Enter=random): ')" || true
+      [ -n "$password" ] || password="$(random_token)"
+    fi
+  fi
+  if [ "$YES" -ne 1 ] && [ -z "${USER_PACKAGE}" ] && [ -z "${USER_QUOTA_MB}" ]; then
+    local pk=""
+    t '套餐: 1)不限量 2)体验10GB/7天 3)标准100GB/30天 4)自定义 5)跳过' \
+      'Package: 1)unlimited 2)trial 10GB/7d 3)standard 100GB/30d 4)custom 5)skip'
+    read_tty pk "$(t '选择 [1-5，默认1]: ' 'Choose [1-5, default 1]: ')" || pk=1
+    case "${pk:-1}" in
+      2) USER_PACKAGE=trial ;;
+      3) USER_PACKAGE=standard ;;
+      4)
+        USER_PACKAGE=custom
+        read_tty USER_QUOTA_MB "$(t '配额 MB（0=不限）: ' 'Quota MB (0=unlimited): ')" || true
+        read_tty USER_QUOTA_DAYS "$(t '滚动天数 [30]: ' 'Rolling days [30]: ')" || true
+        read_tty USER_EXPIRE "$(t '到期 YYYY-MM-DD 或 +30d（空=永不过期）: ' 'Expire YYYY-MM-DD or +30d (empty=never): ')" || true
+        ;;
+      5) ;;
+      *) USER_PACKAGE=unlimited ;;
+    esac
+  fi
+  admin_lock_acquire
+  if ! new_port="$(users_add "$name" "$password" "$prefer")"; then
+    admin_lock_release
+    return 1
+  fi
+  if ! apply_users_config; then
+    admin_lock_release
+    return 1
+  fi
+  open_firewall_for_pairs "$(multi_user_port_protocol_pairs)"
+  save_install_state
+  admin_lock_release
+  print_user_outputs "$name"
+}
+
+do_user_set_quota() {
+  require_root
+  mita_installed || die "$(t 'mita 未安装' 'mita is not installed')"
+  load_install_state
+  users_ensure_loaded
+  local name="${USERNAME:-}"
+  [ -n "$name" ] || die "$(t '需要 --user NAME' 'Need --user NAME')"
+  users_name_exists "$name" || die "$(t "用户不存在: $name" "User not found: $name")"
+  apply_user_package_defaults
+  if [ -z "${USER_QUOTA_MB}" ] && [ -z "${USER_PACKAGE}" ] && [ -z "${USER_QUOTA_MODE}" ]; then
+    die "$(t '需要 --package / --quota-mb / --quota-mode' 'Need --package / --quota-mb / --quota-mode')"
+  fi
+  local exp_parsed=""
+  if [ -n "${USER_EXPIRE:-}" ]; then
+    exp_parsed="$(parse_expire_date "$USER_EXPIRE")" || return 1
+    USER_EXPIRE="$exp_parsed"
+    [ -z "$USER_EXPIRE" ] && USER_EXPIRE="__CLEAR__"
+  fi
+  if [ -n "${USER_QUOTA_MODE:-}" ]; then
+    USER_QUOTA_MODE="$(normalize_quota_mode "$USER_QUOTA_MODE")"
+  fi
+  USER_BANDWIDTH_MBPS=""
+  admin_lock_acquire
+  if ! users_update_fields "$name"; then
+    admin_lock_release
+    return 1
+  fi
+  if ! apply_users_config; then
+    admin_lock_release
+    return 1
+  fi
+  admin_lock_release
+  t "已更新 ${name} 配额=$(quota_label "${USER_QUOTA_MB:-0}" "${USER_QUOTA_DAYS:-0}") 模式=${USER_QUOTA_MODE:-keep} 套餐=${USER_PACKAGE:-} 到期=${exp_parsed:-保持}" \
+    "Updated ${name} quota=$(quota_label "${USER_QUOTA_MB:-0}" "${USER_QUOTA_DAYS:-0}") mode=${USER_QUOTA_MODE:-keep} package=${USER_PACKAGE:-} expire=${exp_parsed:-keep}"
+}
+
+do_user_set_expire() {
+  require_root
+  mita_installed || die "$(t 'mita 未安装' 'mita is not installed')"
+  load_install_state
+  users_ensure_loaded
+  local name="${USERNAME:-}" exp
+  [ -n "$name" ] || die "$(t '需要 --user NAME' 'Need --user NAME')"
+  users_name_exists "$name" || die "$(t "用户不存在: $name" "User not found: $name")"
+  [ -n "${USER_EXPIRE}" ] || die "$(t '需要 --expire YYYY-MM-DD|+Nd|0' 'Need --expire YYYY-MM-DD|+Nd|0')"
+  exp="$(parse_expire_date "$USER_EXPIRE")" || return 1
+  USER_EXPIRE="${exp:-__CLEAR__}"
+  USER_QUOTA_MB="" USER_QUOTA_DAYS="" USER_PACKAGE="" USER_BANDWIDTH_MBPS=""
+  admin_lock_acquire
+  if ! users_update_fields "$name"; then
+    admin_lock_release
+    return 1
+  fi
+  if [ -n "$exp" ]; then
+    local today
+    today="$(today_ymd)"
+    if [[ "$exp" < "$today" || "$exp" == "$today" ]]; then
+      users_set_enabled "$name" 0 || true
+    fi
+  fi
+  if ! apply_users_config; then
+    admin_lock_release
+    return 1
+  fi
+  admin_lock_release
+  t "已设置 ${name} 到期=${exp:-永不过期}" "Set ${name} expire=${exp:-never}"
+}
+
+do_user_enable() {
+  require_root
+  mita_installed || die "$(t 'mita 未安装' 'mita is not installed')"
+  load_install_state
+  users_ensure_loaded
+  local name="${USER_SHOW_NAME:-${USERNAME:-}}"
+  [ -n "$name" ] || die "$(t '需要用户名' 'Username required')"
+  local exp today
+  exp="$(users_get_field "$name" expire_at 2>/dev/null || true)"
+  today="$(today_ymd)"
+  if [ -n "$exp" ] && { [[ "$exp" < "$today" ]] || [[ "$exp" == "$today" ]]; }; then
+    warn "$(t "用户 $name 已到期 ($exp)，请先 --user-set-expire 续期" \
+      "User $name expired ($exp); renew with --user-set-expire first")"
+    return 1
+  fi
+  admin_lock_acquire
+  if ! users_set_enabled "$name" 1; then
+    admin_lock_release
+    return 1
+  fi
+  if ! apply_users_config; then
+    admin_lock_release
+    return 1
+  fi
+  open_firewall_for_pairs "$(multi_user_port_protocol_pairs)"
+  admin_lock_release
+  t "已启用用户 $name" "Enabled user $name"
+}
+
+do_user_disable() {
+  require_root
+  mita_installed || die "$(t 'mita 未安装' 'mita is not installed')"
+  load_install_state
+  users_ensure_loaded
+  local name="${USER_SHOW_NAME:-${USERNAME:-}}"
+  [ -n "$name" ] || die "$(t '需要用户名' 'Username required')"
+  local en_n
+  en_n="$(python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+print(sum(1 for u in (d.get("users") or []) if u.get("enabled", True) and u.get("name")!=sys.argv[2]))
+' "$MITA_USERS_STATE" "$name" 2>/dev/null || echo 0)"
+  if [ "${en_n:-0}" -lt 1 ]; then
+    die "$(t '不能停用最后一个启用中的用户' 'Cannot disable the last enabled user')"
+  fi
+  admin_lock_acquire
+  if ! users_set_enabled "$name" 0; then
+    admin_lock_release
+    return 1
+  fi
+  if ! apply_users_config; then
+    admin_lock_release
+    return 1
+  fi
+  admin_lock_release
+  t "已停用用户 $name（端口仍保留，可再 enable）" "Disabled $name (port kept; can re-enable)"
+}
+
+do_user_scan() {
+  # cron/timer 入口：到期停用 + 日历月配额重置
+  require_root 2>/dev/null || true
+  load_install_state 2>/dev/null || true
+  users_state_exists || return 0
+  local out="" cal=""
+  admin_lock_acquire
+  out="$(users_scan_expired || true)"
+  cal="$(users_scan_calendar_quota_reset || true)"
+  admin_lock_release
+  if [ -n "$out" ]; then
+    msg "disabled: $(printf '%s' "$out" | tr '\n' ' ')"
+  fi
+  if [ -n "$cal" ]; then
+    msg "quota-reset: $(printf '%s' "$cal" | tr '\n' ' ')"
+  fi
+}
+
+do_user_usage() {
+  require_root 2>/dev/null || true
+  mita_installed || die "$(t 'mita 未安装' 'mita is not installed')"
+  local bin
+  bin="$(mita_bin)"
+  ensure_mita_daemon 2>/dev/null || true
+  wait_mita_socket 10 2>/dev/null || true
+  msg ""
+  t '【用户流量】mita get users' '[User traffic] mita get users'
+  if ! "$bin" get users 2>/dev/null; then
+    warn "$(t 'mita get users 不可用（需较新 mita）' 'mita get users unavailable (need newer mita)')"
+  fi
+  msg ""
+  t '【配额用量】mita get quotas' '[Quota usage] mita get quotas'
+  if ! "$bin" get quotas 2>/dev/null; then
+    warn "$(t 'mita get quotas 不可用' 'mita get quotas unavailable')"
+  fi
+  msg ""
+  t '【本地套餐配置】' '[Local package config]'
+  if users_state_exists; then
+    python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+print("%-14s %-6s %-8s %-10s %-8s" % ("USER","PORT","MODE","QUOTA_MB","BW_Mbps"))
+for u in d.get("users") or []:
+    print("%-14s %-6s %-8s %-10s %-8s" % (
+      (u.get("name") or "")[:14],
+      u.get("port") or "",
+      (u.get("quota_mode") or "rolling")[:8],
+      u.get("quota_mb") or 0,
+      u.get("bandwidth_mbps") or 0,
+    ))
+' "$MITA_USERS_STATE"
+  fi
+}
+
+do_user_export_clients() {
+  require_root
+  load_install_state
+  users_ensure_loaded
+  users_state_exists || die "$(t '无用户状态' 'No users state')"
+  local dir="${MITA_CLIENT_EXPORT_DIR:-/root/mieru-clients}"
+  local ts ip name
+  ts="$(date +%Y%m%d_%H%M%S)"
+  dir="${dir%/}/${ts}"
+  run mkdir -p "$dir"
+  run chmod 0700 "$dir" 2>/dev/null || true
+  ip="$(public_ip || echo 'YOUR_SERVER_IP')"
+  load_install_state
+  t "导出目录: $dir" "Export dir: $dir" >&2
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    local password port saved_u saved_p saved_port proto f
+    password="$(users_get_field "$name" password)" || continue
+    port="$(users_get_field "$name" port)" || continue
+    saved_u="$USERNAME"; saved_p="$PASSWORD"; saved_port="$PORT"
+    USERNAME="$name"; PASSWORD="$password"; PORT="$port"
+    while IFS= read -r proto; do
+      [ -n "$proto" ] || continue
+      f="${dir}/${name}_$(proto_lower "$proto").json"
+      build_client_json_for "$ip" "$proto" >"$f"
+      chmod 0600 "$f" 2>/dev/null || true
+      generate_share_link_for "$ip" "$proto" >>"${dir}/${name}_links.txt"
+      printf '\n' >>"${dir}/${name}_links.txt"
+    done < <(protocols_for_mode)
+    chmod 0600 "${dir}/${name}_links.txt" 2>/dev/null || true
+    USERNAME="$saved_u"; PASSWORD="$saved_p"; PORT="$saved_port"
+    t "  已导出: $name" "  Exported: $name" >&2
+  done < <(python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+for u in d.get("users") or []:
+    if u.get("enabled", True):
+        print(u.get("name") or "")
+' "$MITA_USERS_STATE")
+  t "完成: $dir" "Done: $dir" >&2
+  printf '%s\n' "$dir"
+}
+
+do_doctor() {
+  require_root 2>/dev/null || true
+  local pass=0 fail=0 warn_n=0
+  local check
+  check() {
+    local name="$1" ok="$2" detail="${3:-}"
+    if [ "$ok" = "1" ]; then
+      msg "  [PASS] $name${detail:+ — $detail}"
+      pass=$((pass + 1))
+    elif [ "$ok" = "2" ]; then
+      msg "  [WARN] $name${detail:+ — $detail}"
+      warn_n=$((warn_n + 1))
+    else
+      msg "  [FAIL] $name${detail:+ — $detail}"
+      fail=$((fail + 1))
+    fi
+  }
+  print_banner
+  t '========== 一键验收 doctor ==========' '========== doctor / verify =========='
+  msg ""
+
+  t '【环境】' '[Environment]'
+  check "root" "$([ "$(id -u 2>/dev/null || echo 1)" -eq 0 ] && echo 1 || echo 0)"
+  check "python3" "$(command -v python3 >/dev/null 2>&1 && echo 1 || echo 0)"
+  check "tc (iproute2)" "$(command -v tc >/dev/null 2>&1 && echo 1 || echo 2)" "限速需要"
+  check "flock" "$(command -v flock >/dev/null 2>&1 && echo 1 || echo 2)" "并发锁"
+
+  t '【mita】' '[mita]'
+  if mita_installed; then
+    check "mita installed" 1 "$(installed_version 2>/dev/null || echo ok)"
+    local bin st
+    bin="$(mita_bin)"
+    ensure_mita_daemon 2>/dev/null || true
+    if wait_mita_socket 8 2>/dev/null; then
+      check "daemon socket" 1
+    else
+      check "daemon socket" 0 "未就绪"
+    fi
+    st="$("$bin" status 2>/dev/null || true)"
+    if printf '%s' "$st" | grep -qi RUNNING; then
+      check "proxy RUNNING" 1
+    elif printf '%s' "$st" | grep -qi IDLE; then
+      check "proxy status" 2 "IDLE（可能未 start）"
+    else
+      check "proxy status" 2 "${st:-unknown}"
+    fi
+    if "$bin" get users >/dev/null 2>&1; then
+      check "mita get users" 1
+    else
+      check "mita get users" 2 "旧版可能无此命令"
+    fi
+    if "$bin" get quotas >/dev/null 2>&1; then
+      check "mita get quotas" 1
+    else
+      check "mita get quotas" 2
+    fi
+  else
+    check "mita installed" 0
+  fi
+
+  t '【用户状态】' '[Users state]'
+  load_install_state 2>/dev/null || true
+  if users_state_exists; then
+    check "users.json" 1 "$(users_count) users"
+    local en
+    en="$(python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+print(sum(1 for u in (d.get("users") or []) if u.get("enabled",True)))
+' "$MITA_USERS_STATE" 2>/dev/null || echo 0)"
+    check "enabled users" "$([ "${en:-0}" -ge 1 ] && echo 1 || echo 0)" "$en"
+    # 目录权限
+    local mode
+    mode="$(stat -c '%a' /etc/mita 2>/dev/null || stat -f '%OLp' /etc/mita 2>/dev/null || echo '?')"
+    if [ "$mode" = "750" ] || [ "$mode" = "0750" ] || [ "$mode" = "770" ] || [ "$mode" = "0770" ] || [ "$mode" = "700" ] || [ "$mode" = "0700" ]; then
+      check "/etc/mita mode" 1 "$mode"
+    else
+      check "/etc/mita mode" 2 "$mode (建议 mita:mita 750)"
+    fi
+  else
+    check "users.json" 2 "单用户或未迁移"
+  fi
+
+  t '【限速 tc】' '[tc rate]'
+  local dev
+  dev="$(tc_default_iface 2>/dev/null || true)"
+  if ! command -v tc >/dev/null 2>&1; then
+    check "tc binary" 2 "未安装"
+  elif [ -z "$dev" ]; then
+    check "nic detect" 2 "设 TC_IFACE="
+  else
+    check "nic" 1 "$dev"
+    if tc qdisc show dev "$dev" 2>/dev/null | grep -q htb; then
+      check "egress HTB" 1
+    else
+      check "egress HTB" 2 "无规则或未配置带宽"
+    fi
+    if tc qdisc show dev "$dev" 2>/dev/null | grep -qi ingress; then
+      check "ingress qdisc" 1
+    else
+      check "ingress qdisc" 2 "入口限速未启用"
+    fi
+  fi
+
+  t '【定时任务】' '[Scheduler]'
+  if [ -f "$MITA_USERS_TIMER" ] || systemctl is-enabled mita-users-scan.timer >/dev/null 2>&1; then
+    check "systemd timer" 1
+  elif [ -f "$MITA_USERS_CRON" ]; then
+    check "cron.d" 1 "$MITA_USERS_CRON"
+  else
+    check "scheduler" 2 "未安装 timer/cron"
+  fi
+  if [ -f "$MITA_LOGROTATE_CONF" ]; then
+    check "logrotate" 1
+  else
+    check "logrotate" 2 "可选"
+  fi
+
+  msg ""
+  t "结果: PASS=$pass WARN=$warn_n FAIL=$fail" "Result: PASS=$pass WARN=$warn_n FAIL=$fail"
+  if [ "$fail" -gt 0 ]; then
+    t '存在失败项，请根据上方提示排查' 'Failures above need attention'
+    return 1
+  fi
+  t '验收通过（警告可忽略或稍后处理）' 'Verify OK (warnings optional)'
+  return 0
+}
+
+do_user_quota_reset() {
+  # 手动触发日历月重置（或强制所有 calendar 用户）
+  require_root
+  load_install_state
+  users_ensure_loaded
+  local force="${1:-}"
+  admin_lock_acquire
+  if [ "$force" = "force" ] || [ "${YES:-0}" -eq 1 ]; then
+    # 清除 last_quota_reset 使本月全部 calendar 用户重跑
+    python3 -c '
+import json,sys
+path=sys.argv[1]
+d=json.load(open(path))
+for u in d.get("users") or []:
+    if (u.get("quota_mode") or "")=="calendar" and int(u.get("quota_mb") or 0)>0:
+        u["last_quota_reset"]=""
+json.dump(d, open(path,"w"), indent=2)
+' "$MITA_USERS_STATE" 2>/dev/null || true
+  fi
+  local cal
+  cal="$(users_scan_calendar_quota_reset || true)"
+  admin_lock_release
+  if [ -n "$cal" ]; then
+    t "已重置日历月配额: $(printf '%s' "$cal" | tr '\n' ' ')" \
+      "Calendar quota reset: $(printf '%s' "$cal" | tr '\n' ' ')"
+  else
+    t '无需重置（无 calendar 用户或本月已重置）' \
+      'Nothing to reset (no calendar users or already done this month)'
+  fi
+}
+
+do_user_set_rate() {
+  require_root
+  mita_installed || die "$(t 'mita 未安装' 'mita is not installed')"
+  load_install_state
+  users_ensure_loaded
+  local name="${USERNAME:-}" bw="${USER_BANDWIDTH_MBPS:-}"
+  [ -n "$name" ] || die "$(t '需要 --user NAME' 'Need --user NAME')"
+  [ -n "$bw" ] || die "$(t '需要 --bandwidth Mbps（0=不限）' 'Need --bandwidth Mbps (0=unlimited)')"
+  [[ "$bw" =~ ^[0-9]+$ ]] || die "$(t '带宽须为非负整数 Mbps' 'Bandwidth must be non-negative integer Mbps')"
+  users_name_exists "$name" || die "$(t "用户不存在: $name" "User not found: $name")"
+  USER_QUOTA_MB="" USER_QUOTA_DAYS="" USER_EXPIRE="" USER_PACKAGE=""
+  USER_BANDWIDTH_MBPS="$bw"
+  admin_lock_acquire
+  if ! users_update_fields "$name"; then
+    admin_lock_release
+    return 1
+  fi
+  apply_tc_limits || true
+  admin_lock_release
+  t "已设置 ${name} 带宽=${bw}Mbps（0=不限；按端口 tc 出口+入口）" \
+    "Set ${name} bandwidth=${bw}Mbps (0=unlimited; egress+ingress tc by port)"
+}
+
+do_rate_status() {
+  require_root 2>/dev/null || true
+  load_install_state 2>/dev/null || true
+  tc_rate_status
+}
+
+do_rate_restore() {
+  require_root 2>/dev/null || true
+  load_install_state 2>/dev/null || true
+  users_state_exists || return 0
+  admin_lock_acquire
+  apply_tc_limits || true
+  admin_lock_release
+}
+
+do_user_del() {
+  require_root
+  require_linux
+  mita_installed || die "$(t 'mita 未安装' 'mita is not installed')"
+  load_install_state
+  users_ensure_loaded
+  local name="${USER_DEL_NAME:-}"
+  if [ -z "$name" ]; then
+    if [ "$YES" -eq 1 ]; then
+      die "$(t '--user-del 需要用户名' '--user-del requires username')"
+    fi
+    do_user_list
+    read_tty name "$(t '要删除的用户名: ' 'Username to delete: ')" || true
+  fi
+  [ -n "$name" ] || die "$(t '用户名不能为空' 'Username required')"
+  local n
+  n="$(users_count)"
+  if [ "${n:-0}" -le 1 ] && users_name_exists "$name"; then
+    die "$(t '不能删除最后一个用户' 'Cannot delete the last user')"
+  fi
+  local freed
+  admin_lock_acquire
+  if ! freed="$(users_del "$name")"; then
+    admin_lock_release
+    return 1
+  fi
+  if ! apply_users_config; then
+    admin_lock_release
+    return 1
+  fi
+  if [ -n "$freed" ]; then
+    local close_pairs="TCP|${freed}"
+    [ "$PROTOCOL" = "BOTH" ] && close_pairs="${close_pairs}"$'\n'"UDP|$((freed + 1))"
+    close_firewall_for_bindings "$close_pairs"
+  fi
+  open_firewall_for_pairs "$(multi_user_port_protocol_pairs)"
+  users_sync_primary_globals
+  save_install_state
+  admin_lock_release
+  t "完成。已释放端口: ${freed:-?}" "Done. Freed port: ${freed:-?}"
+}
+
+do_user_show() {
+  require_root
+  load_install_state
+  users_ensure_loaded
+  local name="${USER_SHOW_NAME:-}"
+  if [ -z "$name" ]; then
+    read_tty name "$(t '用户名: ' 'Username: ')" || true
+  fi
+  users_name_exists "$name" || die "$(t "用户不存在: $name" "User not found: $name")"
+  print_user_outputs "$name"
+}
+
+do_user_manage() {
+  require_root
+  MENU_MODE=1
+  while true; do
+    msg ""
+    t '【用户管理】一用户一口；套餐=滚动配额；到期停用；带宽=tc按端口' \
+      '[Users] port/user; quota rolling; expire; bandwidth=tc by port'
+    msg "  1) 列出用户"
+    msg "  2) 添加用户"
+    msg "  3) 删除用户"
+    msg "  4) 查看用户节点配置"
+    msg "  5) 设置套餐/配额"
+    msg "  6) 设置到期日"
+    msg "  7) 启用用户"
+    msg "  8) 停用用户"
+    msg "  9) 立即扫描到期+月配额"
+    msg "  10) 设置带宽限速 (Mbps 双向)"
+    msg "  11) 查看 tc 限速状态"
+    msg "  12) 备份用户配置"
+    msg "  13) 从备份恢复"
+    msg "  14) 强制日历月配额重置"
+    msg "  15) 查看流量/配额用量"
+    msg "  16) 批量导出客户端配置"
+    msg "  17) 返回主菜单"
+    local c=""
+    read_tty c "$(t '请选择 [1-17]: ' 'Choose [1-17]: ')" || c=""
+    c="$(printf '%s' "$c" | tr -d '[:space:]')"
+    case "$c" in
+      1) do_user_list ;;
+      2)
+        USERNAME=""; PASSWORD=""; PORT=""; PORT_CLI=0
+        USER_PACKAGE=""; USER_QUOTA_MB=""; USER_QUOTA_DAYS=""; USER_QUOTA_MODE=""; USER_EXPIRE=""; USER_BANDWIDTH_MBPS=""
+        YES=0
+        local bw_in="" qm_in=""
+        read_tty USERNAME "$(t '新用户名: ' 'New username: ')" || true
+        read_tty PASSWORD "$(t '密码（回车随机）: ' 'Password (Enter=random): ')" || true
+        read_tty bw_in "$(t '带宽 Mbps（回车=不限，双向）: ' 'Bandwidth Mbps (Enter=unlim, both dirs): ')" || true
+        USER_BANDWIDTH_MBPS="${bw_in:-0}"
+        do_user_add
+        ;;
+      3)
+        USER_DEL_NAME=""
+        do_user_del
+        ;;
+      4)
+        USER_SHOW_NAME=""
+        do_user_show
+        ;;
+      5)
+        USERNAME=""; USER_PACKAGE=""; USER_QUOTA_MB=""; USER_QUOTA_DAYS=""; USER_QUOTA_MODE=""; USER_EXPIRE=""; USER_BANDWIDTH_MBPS=""
+        read_tty USERNAME "$(t '用户名: ' 'Username: ')" || true
+        t '1)不限量 2)体验 3)标准 4)自定义' '1)unlimited 2)trial 3)standard 4)custom'
+        local pk="" qm_in=""
+        read_tty pk "$(t '套餐 [1-4]: ' 'Package [1-4]: ')" || true
+        case "$pk" in
+          1) USER_PACKAGE=unlimited ;;
+          2) USER_PACKAGE=trial ;;
+          3) USER_PACKAGE=standard ;;
+          4)
+            USER_PACKAGE=custom
+            read_tty USER_QUOTA_MB "$(t '配额 MB: ' 'Quota MB: ')" || true
+            read_tty USER_QUOTA_DAYS "$(t '滚动天数 [30]: ' 'Days [30]: ')" || true
+            ;;
+        esac
+        read_tty qm_in "$(t '配额模式 1)滚动 2)日历月 [1]: ' 'Quota mode 1)rolling 2)calendar [1]: ')" || true
+        case "${qm_in:-1}" in
+          2) USER_QUOTA_MODE=calendar ;;
+          *) USER_QUOTA_MODE=rolling ;;
+        esac
+        do_user_set_quota
+        ;;
+      6)
+        USERNAME=""; USER_EXPIRE=""; USER_BANDWIDTH_MBPS=""
+        read_tty USERNAME "$(t '用户名: ' 'Username: ')" || true
+        read_tty USER_EXPIRE "$(t '到期 YYYY-MM-DD / +30d / 0: ' 'Expire YYYY-MM-DD / +30d / 0: ')" || true
+        do_user_set_expire
+        ;;
+      7)
+        USER_SHOW_NAME=""
+        read_tty USER_SHOW_NAME "$(t '用户名: ' 'Username: ')" || true
+        do_user_enable
+        ;;
+      8)
+        USER_SHOW_NAME=""
+        read_tty USER_SHOW_NAME "$(t '用户名: ' 'Username: ')" || true
+        do_user_disable
+        ;;
+      9) do_user_scan ;;
+      10)
+        USERNAME=""; USER_BANDWIDTH_MBPS=""
+        read_tty USERNAME "$(t '用户名: ' 'Username: ')" || true
+        read_tty USER_BANDWIDTH_MBPS "$(t '带宽 Mbps 双向（0=不限）: ' 'Bandwidth Mbps both dirs (0=unlim): ')" || true
+        do_user_set_rate
+        ;;
+      11) do_rate_status ;;
+      12) do_user_backup ;;
+      13)
+        USER_RESTORE_FILE=""
+        do_user_restore
+        ;;
+      14)
+        YES=1
+        do_user_quota_reset force
+        ;;
+      15) do_user_usage ;;
+      16) do_user_export_clients ;;
+      17) return 0 ;;
+      *) warn "$(t '无效选择' 'Invalid choice')" ;;
+    esac
+    menu_pause
+  done
+}
+
 choose_protocol_interactive() {
   msg ""
   t '传输协议:' 'Transport protocol:'
@@ -1533,6 +4001,11 @@ PY
 }
 
 write_server_config() {
+  # 多用户：从 users.json 生成（一用户一口）
+  if [ "${MULTI_USER_MODE:-0}" -eq 1 ] && users_state_exists && [ "$(users_count)" -gt 0 ]; then
+    write_server_config_multi
+    return
+  fi
   local cfg bindings="" proto pp tp tp_section=""
   cfg="$(mktemp_file .json)"
   while IFS= read -r pp; do
@@ -1825,6 +4298,11 @@ persist_iptables_rules() {
 open_firewall() {
   STAGE="配置防火墙"
   local pp proto p proto_lc fw=""
+  # 多用户：放行所有用户端口
+  if [ "${MULTI_USER_MODE:-0}" -eq 1 ] && users_state_exists && [ "$(users_count)" -gt 0 ]; then
+    open_firewall_for_pairs "$(multi_user_port_protocol_pairs)"
+    return 0
+  fi
   if ! pp="$(port_protocol_pairs | head -n1)" || [ -z "$pp" ]; then
     return 0
   fi
@@ -2313,6 +4791,8 @@ do_install() {
   verify_mita_running
   install_self_script
   save_install_state
+  # 阶段1：安装后写入 users.json，便于后续加用户
+  users_migrate_from_primary 2>/dev/null || true
 
   if [ "$ENABLE_BBR" -eq 1 ]; then
     enable_tcp_bbr
@@ -2344,14 +4824,83 @@ do_reconfigure() {
   wait_mita_socket 30 || true
   close_firewall_for_bindings "$old_bindings"
   warn_traffic_unsupported
-  cfg="$(write_server_config)"
-  apply_config "$cfg"
-  open_firewall
-  start_mita
-  verify_mita_running
-  save_install_state
+  # 多用户：协议全局更新；仅当用户显式改了主用户名/密码/端口时同步「主用户」
+  # 主用户 = install-state 中的 USERNAME，找不到则 users[0]
+  if users_state_exists && [ "$(users_count)" -gt 0 ]; then
+    MULTI_USER_MODE=1
+    admin_lock_acquire
+    _U_NAME="$USERNAME" _U_PASS="$PASSWORD" _U_PORT="$PORT" _U_PROTO="$PROTOCOL"
+    _U_PRIMARY="${USERNAME}"
+    users_py_locked '
+import json, os, time
+path = os.environ["MITA_USERS_STATE"]
+d = json.load(open(path))
+name = os.environ.get("_U_NAME") or ""
+password = os.environ.get("_U_PASS") or ""
+port = os.environ.get("_U_PORT") or ""
+proto = os.environ.get("_U_PROTO") or "TCP"
+primary = os.environ.get("_U_PRIMARY") or ""
+users = d.get("users") or []
+# 定位主用户：优先同名，否则第一个
+idx = 0
+for i, u in enumerate(users):
+    if primary and u.get("name") == primary:
+        idx = i
+        break
+if users:
+    u = users[idx]
+    old_port = int(u.get("port") or 0)
+    if name and name != u.get("name"):
+        # 避免与其它用户重名
+        if any(x.get("name") == name for j, x in enumerate(users) if j != idx):
+            raise SystemExit(2)
+        u["name"] = name
+    if password and not password.startswith("*"):
+        u["password"] = password
+    if port and str(port).isdigit():
+        new_port = int(port)
+        # 端口冲突则拒绝改端口（保留其它用户端口）
+        if any(int(x.get("port") or 0) == new_port for j, x in enumerate(users) if j != idx):
+            raise SystemExit(3)
+        u["port"] = new_port
+    u["updated_at"] = int(time.time())
+d["protocol"] = proto
+json.dump(d, open(path, "w"), indent=2)
+' || {
+      local prc=$?
+      admin_lock_release
+      if [ "$prc" -eq 2 ]; then
+        die "$(t '新用户名与其它用户冲突' 'New username conflicts with another user')"
+      elif [ "$prc" -eq 3 ]; then
+        die "$(t '新端口已被其它用户占用' 'New port already used by another user')"
+      fi
+      die "$(t '更新多用户状态失败' 'Failed to update multi-user state')"
+    }
+    # 协议变更时所有用户 portBindings 随 PROTOCOL 重建；端口仅主用户可能变
+    if ! apply_users_config; then
+      admin_lock_release
+      return 1
+    fi
+    open_firewall
+    start_mita
+    verify_mita_running
+    save_install_state
+    admin_lock_release
+  else
+    users_migrate_from_primary 2>/dev/null || true
+    cfg="$(write_server_config)"
+    apply_config "$cfg"
+    open_firewall
+    start_mita
+    verify_mita_running
+    save_install_state
+  fi
   msg ""
   t '========== 重新配置完成 ==========' '========== Reconfigure complete =========='
+  if users_state_exists && [ "$(users_count)" -gt 1 ]; then
+    t '提示: 多用户模式下「重新配置」只改主用户凭据/端口与全局协议；其它用户端口不变' \
+      'Note: multi-user reconfigure updates primary user + global protocol only; other ports unchanged'
+  fi
   print_summary
 }
 
@@ -2399,8 +4948,11 @@ remove_mita_common() {
   esac
   run rm -f /var/log/mita.log /var/log/mita.err
   run rm -f /root/mieru_client_*.json /root/mieru_client_tcp_*.json /root/mieru_client_udp_*.json 2>/dev/null || true
+  remove_users_scheduler 2>/dev/null || true
+  run rm -f "$MITA_LOGROTATE_CONF" 2>/dev/null || true
   run rm -rf /etc/mita /var/lib/mita /var/run/mita /var/run/mita.sock
   run rm -f "$MITA_BIN" "$MITA_REAL_BIN" /usr/bin/mita-real "$MITA_MARKER" "$OPENRC_SVC"
+  run rm -f "$MITA_USERS_LOG" 2>/dev/null || true
   if ! command -v dpkg >/dev/null 2>&1 || ! dpkg -l mita 2>/dev/null | grep -q '^ii'; then
     run rm -f /usr/bin/mita
   fi
@@ -2578,6 +5130,34 @@ menu_run_action() {
     start) do_start || rc=1 ;;
     stop) do_stop || rc=1 ;;
     restart) do_restart || rc=1 ;;
+    user-list) do_user_list || rc=1 ;;
+    user-add) do_user_add || rc=1 ;;
+    user-del) do_user_del || rc=1 ;;
+    user-show) do_user_show || rc=1 ;;
+    user-manage) do_user_manage || rc=1 ;;
+    user-set-quota) do_user_set_quota || rc=1 ;;
+    user-set-expire) do_user_set_expire || rc=1 ;;
+    user-enable) do_user_enable || rc=1 ;;
+    user-disable) do_user_disable || rc=1 ;;
+    user-scan) do_user_scan || rc=1 ;;
+    user-quota-reset)
+      if [ "${YES:-0}" -eq 1 ]; then
+        do_user_quota_reset force || rc=1
+      else
+        do_user_quota_reset || rc=1
+      fi
+      ;;
+    user-set-rate) do_user_set_rate || rc=1 ;;
+    rate-status) do_rate_status || rc=1 ;;
+    rate-restore) do_rate_restore || rc=1 ;;
+    user-usage) do_user_usage || rc=1 ;;
+    user-export-clients) do_user_export_clients || rc=1 ;;
+    user-backup) do_user_backup || rc=1 ;;
+    user-restore) do_user_restore || rc=1 ;;
+    user-export) do_user_export || rc=1 ;;
+    user-import) do_user_import || rc=1 ;;
+    doctor) do_doctor || rc=1 ;;
+    help) usage; rc=0 ;;
     *) warn "$(t '未知操作' 'Unknown action')"; return 1 ;;
   esac
   return "$rc"
@@ -2624,7 +5204,7 @@ show_menu() {
     MENU_SCRIPTS_READY=1
   fi
   print_banner
-  msg "  1) 新装安装"
+  msg "  1) 新装 / 安装"
   msg "  2) 重新配置（端口 / 密码 / 协议）"
   msg "  3) 升级"
   msg "  4) 卸载"
@@ -2633,16 +5213,18 @@ show_menu() {
   msg "  7) 启动服务"
   msg "  8) 停止服务"
   msg "  9) 重启服务"
-  msg "  10) 退出"
+  msg "  10) 用户管理（增删 / 套餐 / 限速）"
+  msg "  11) 一键验收 doctor"
+  msg "  12) 退出"
   msg ""
   t '快捷命令: 直接输入 mita 打开菜单（不区分大小写）' \
     'Quick command: type mita to open menu (case-insensitive)'
   msg ""
   local choice=""
-  read_tty choice "$(t '请选择 [1-10]: ' 'Choose [1-10]: ')" || choice=""
+  read_tty choice "$(t '请选择 [1-12]: ' 'Choose [1-12]: ')" || choice=""
   choice="$(printf '%s' "$choice" | tr -d '[:space:]')"
   if [ -z "$choice" ]; then
-    warn "$(t '请输入 1-10' 'Enter 1-10')"
+    warn "$(t '请输入 1-12' 'Enter 1-12')"
     return 1
   fi
   case "$choice" in
@@ -2655,9 +5237,11 @@ show_menu() {
     7) ACTION=start ;;
     8) ACTION=stop ;;
     9) ACTION=restart ;;
-    10) return 2 ;;
+    10) ACTION=user-manage ;;
+    11) ACTION=doctor ;;
+    12) return 2 ;;
     *)
-      warn "$(t '无效选择，请输入 1-10' 'Invalid choice, enter 1-10')"
+      warn "$(t '无效选择，请输入 1-12' 'Invalid choice, enter 1-12')"
       return 1
       ;;
   esac
@@ -2685,6 +5269,34 @@ main() {
     start) do_start ;;
     stop) do_stop ;;
     restart) do_restart ;;
+    user-list) do_user_list ;;
+    user-add) do_user_add ;;
+    user-del) do_user_del ;;
+    user-show) do_user_show ;;
+    user-manage) do_user_manage ;;
+    user-set-quota) do_user_set_quota ;;
+    user-set-expire) do_user_set_expire ;;
+    user-enable) do_user_enable ;;
+    user-disable) do_user_disable ;;
+    user-scan) do_user_scan ;;
+    user-quota-reset)
+      if [ "${YES:-0}" -eq 1 ]; then
+        do_user_quota_reset force
+      else
+        do_user_quota_reset
+      fi
+      ;;
+    user-set-rate) do_user_set_rate ;;
+    rate-status) do_rate_status ;;
+    rate-restore) do_rate_restore ;;
+    user-usage) do_user_usage ;;
+    user-export-clients) do_user_export_clients ;;
+    user-backup) do_user_backup ;;
+    user-restore) do_user_restore ;;
+    user-export) do_user_export ;;
+    user-import) do_user_import ;;
+    doctor) do_doctor ;;
+    help) usage; exit 0 ;;
     menu)
       menu_loop
       ;;
@@ -2692,4 +5304,7 @@ main() {
   esac
 }
 
-main
+# 允许被 source 做单测（设置 MITA_SOURCE_ONLY=1）
+if [ "${MITA_SOURCE_ONLY:-0}" != "1" ]; then
+  main
+fi

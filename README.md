@@ -32,6 +32,68 @@ apk add --no-cache bash curl && \
 5. 安装完成**同时输出** `mierus://` 节点链接、客户端 JSON、**Clash/mihomo 片段**及连接信息摘要
 6. 下载包 **SHA256 校验**；提示云安全组放行端口
 
+### v1.9.1 二次审计修复
+
+- reconfigure 主用户：`_U_PRIMARY` 正确传入（按 install-state 用户名定位）
+- `/etc/mita` 恢复为 **mita:mita 750**（守护进程可写）；敏感 JSON 仍 600
+- calendar password 半失败时 re-apply 干净密码；commit 仅 stamp pending 用户
+- 裸参数：`user-restore|import|export|export-clients PATH`；`help` 退出码 0
+- 年月/日期与 calendar 统一本地时区；`users_all_ports` 正确识别 BOTH
+
+### v1.9.0 中优先级补齐
+
+- **写路径 admin 锁**：user-add/del/set-*/enable/disable/restore 与 apply/scan 互斥
+- **`mita` / `mita-menu` / profile** 转发用户管理与 doctor 子命令
+- **reconfigure 多用户**：主用户 + 全局协议；端口/用户名冲突检测
+- **BOTH + IPv6**：UDP+1 出口/入口 filter 补齐
+
+### v1.8.1 审计修复
+
+- 修复菜单下 `user-scan` / `rate-restore` 无用户时 `exit` 整进程退出
+- 修复 `apply_users_config` 失败时管理锁泄漏
+- 裸子命令支持 `user-del bob` 等
+- calendar 仅在 apply **成功后**写入 `last_quota_reset`
+- `user-quota-reset` 仅 `-y` 时强制
+
+### v1.8.0 运维优化
+
+- **`doctor` / `verify`**：一键检查 root、mita、用户状态、tc、timer/cron、权限
+- **用量**：`user-usage` 调用 `mita get users` / `mita get quotas`
+- **批量导出客户端**：`user-export-clients [DIR]`
+- **管理锁**可重入；敏感文件 600；logrotate
+- **calendar 重置方法**可选：`QUOTA_RESET_METHOD=password|days|metrics`
+- **ingress 失败**时明确降级为仅出口限速
+
+### v1.7.0 日历月配额 + 双向限速
+
+- **配额模式** `--quota-mode rolling|calendar`：`calendar` 每月 1 日通过 `user-scan` 强制轮换 mita 配额窗口
+- **双向带宽**：`tc` 出口 HTB（sport）+ 入口 ingress police（dport），上下行同 Mbps
+- `user-quota-reset` 可手动/强制触发日历月重置
+
+### v1.6.0 运维加固
+
+- **用户配置备份 / 恢复 / 导出导入**：`user-backup`、`user-restore`、`user-export`、`user-import`；变更前自动备份到 `/etc/mita/backups/`（保留最近 20 份）
+- 增删改用户、恢复导入与 `user-scan` 使用管理锁，降低并发写冲突
+- 卸载时清理 timer/cron、tc 限速规则与用户日志
+
+### v1.5.0 按端口带宽限速
+
+- 一用户一口 + **`tc` HTB 出口限速**（`--bandwidth` Mbps，0=不限）
+- `user-set-rate` / `rate-status` / `rate-restore`；开机 `mita-tc-restore` 恢复规则
+- 菜单用户管理可设置带宽并查看 tc 状态
+
+### v1.4.0 流量套餐与到期
+
+- 套餐：`unlimited` / `trial`(10GB/7d) / `standard`(100GB/30d) / `custom`
+- 写入 mita `quotas`（默认**滚动 N 天**）；`expire_at` 到期自动停用（端口保留）
+- `user-scan` 每 15 分钟（systemd timer 或 cron）
+
+### v1.3.0 多用户与独占端口
+
+- `/etc/mita/users.json` 管理多用户；**一用户一监听端口**，删除后释放端口
+- 菜单「用户管理」与 CLI：`users` / `user-add` / `user-del` / `user-show`
+- 安装后自动迁移主用户；按用户导出节点链接
+
 ### v1.2.27 增强
 
 - **端口自动分配（按 IP 尾号）**：安装 / 非交互时默认端口改为**按本机内网 IP 末位八位组推导**——端口基数 = 末位 × 100，段内随机取 `xx01-xx99`，`xx00` 保留给 SSH。例：`172.16.1.36` → `3601-3699`
@@ -227,11 +289,74 @@ curl -fsSL https://raw.githubusercontent.com/ike-sh/mieru-OneClick/main/install-
 install-mita                  # 打开菜单
 install-mita reconfigure      # 重新配置
 install-mita show             # 查看节点链接
+install-mita users            # 用户列表
 mita-menu status              # 同上
-mita status                   # 登录 shell 下（需已安装 profile.d）
+mita status                   # 服务状态（走 install-mita）
+mita users / mita doctor      # 用户管理 / 验收（走 install-mita）
+mita get users                # 官方二进制（流量统计等）
 ```
 
 卸载后再次管理请重新执行一键安装，或运行 `install-mita --help`（安装后位于 `/usr/local/bin/install-mita`）。
+
+## 多用户 / 套餐 / 限速（v1.3+）
+
+安装完成后可用菜单 **10) 用户管理**，或 CLI：
+
+```sh
+# 列表
+install-mita users
+
+# 添加用户（独占端口；可选套餐 / 带宽）
+install-mita user-add --user bob --password 'secret' --package trial --bandwidth 50
+install-mita user-add --user carol --password 'x' --package standard --port 21005
+
+# 套餐与到期
+install-mita user-set-quota --user bob --package custom --quota-mb 51200 --quota-days 30
+# 日历月配额（每月 1 日重置计数窗口）
+install-mita user-set-quota --user bob --quota-mb 102400 --quota-mode calendar
+install-mita user-set-expire --user bob --expire +30d
+install-mita user-set-expire --user bob --expire 0          # 永不过期
+install-mita user-quota-reset -y                           # 强制本月重置 calendar 用户
+
+# 启用 / 停用（停用保留端口，可再 enable）
+install-mita user-disable bob
+install-mita user-enable bob
+
+# 带宽限速（Mbps，出口+入口；需 root + iproute2）
+install-mita user-set-rate --user bob --bandwidth 20
+install-mita rate-status
+install-mita rate-restore                                  # 重启后恢复 tc
+
+# 删除并释放端口
+install-mita user-del bob
+
+# 备份 / 恢复 / 导出
+install-mita user-backup
+install-mita user-export /root/users-export.json
+install-mita user-restore /etc/mita/backups/users_manual_*.json
+
+# 用量与验收
+install-mita user-usage
+install-mita user-export-clients /root/mieru-clients
+install-mita doctor
+```
+
+**说明与限制：**
+
+| 项 | 说明 |
+|----|------|
+| 端口 | 一用户一口；删除后归还端口池 |
+| 流量套餐 rolling | mita `quotas` 滚动 N 天 / MB |
+| 流量套餐 calendar | 当月天数窗口；跨月重置方法见 `QUOTA_RESET_METHOD`（password/days/metrics） |
+| 到期 | 本地 `expire_at`，`user-scan` 定时停用；**不是**删除用户 |
+| 带宽 | `tc` 出口 HTB（sport）+ 入口 police（dport）；入口失败则仅出口 |
+| 用量 | `mita get users` / `mita get quotas`（需较新 mita） |
+| 状态文件 | `/etc/mita` 为 **mita:mita 750**（守护进程可写），`users.json` 600；备份在 `/etc/mita/backups/` |
+| 删除用户 | `install-mita user-del NAME` 或 `--user-del NAME` |
+| 月配额重置 | `user-quota-reset`（仅过月用户）；`user-quota-reset -y` 强制本月全部 calendar |
+| 依赖 | 多用户管理需 `python3`；限速需 `tc`（iproute2） |
+
+套餐模板：`unlimited` · `trial`（10GB/7 天）· `standard`（100GB/30 天）· `custom`。
 
 ## 与官方脚本的关系
 
@@ -248,10 +373,11 @@ sudo python3 setup.py
 - 非交互参数（`--port` / `--user` / `--password` / `-y`）
 - 防火墙自动放行
 - 安装摘要与客户端配置一键导出
+- 多用户、流量套餐、到期停用、按端口带宽限速与备份恢复
 
 ## 客户端
 
-安装完成后，将服务器 IP、端口、用户名、密码填入 [mieru 客户端](https://github.com/enfein/mieru/blob/main/docs/client-install.md) 或 Clash Verge Rev 等兼容客户端。
+安装完成后，将服务器 IP、端口、用户名、密码填入 [mieru 客户端](https://github.com/enfein/mieru/blob/main/docs/client-install.md) 或 Clash Verge Rev 等兼容客户端。多用户时每个用户使用**各自端口**与凭据。
 
 ## 许可
 
