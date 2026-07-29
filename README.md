@@ -32,6 +32,16 @@ apk add --no-cache bash curl && \
 5. 安装完成**同时输出** `mierus://` 节点链接、客户端 JSON、**Clash/mihomo 片段**及连接信息摘要
 6. 下载包 **SHA256 校验**；提示云安全组放行端口
 
+### v1.9.5 低熵模式与可靠性修复
+
+- 对 mita v3.35.0+ 增加显式低熵模式选择，默认关闭，推荐按需使用 `LOW_ENTROPY_MODE_56`
+- 支持 `off / 56 / 48 / 40 / 32`，并显示对应流量开销；可用 `--low-entropy` 非交互配置
+- 即使流量伪装选择“激进”，也会显式写入低熵模式，避免 `unlockAll` 随机启用高开销模式
+- 启用低熵时明确提示客户端兼容风险；mihomo 尚未适配的版本请保持关闭
+- 修正 `mierus://` simple URL：服务器地址不再重复端口，`port` / `protocol` 仅在 query 中成对输出；兼容 IPv6
+- 客户端 JSON、Clash/mihomo YAML 对账号、密码和地址做安全转义，并保留所选 `traffic-pattern`
+- 用户写操作、恢复、到期扫描和日历配额重置增加事务回滚；服务或 `tc` 应用失败不再留下半更新状态
+
 ### v1.9.4 客户端模式与分享配置
 
 - 安装和重新配置时可选择 multiplexing 与 handshake mode；推荐默认值为 `MULTIPLEXING_OFF` / `HANDSHAKE_NO_WAIT`
@@ -213,7 +223,7 @@ apk add --no-cache bash curl && \
 ### v1.2.3 增强
 
 - **默认双协议**：同端口同时监听 TCP + UDP（`--protocol BOTH`，可改为 `TCP` / `UDP`）
-- **节点链接**：对齐官方 `mierus://` 格式（`port`/`protocol` 成对出现；单端口时地址含 `:port`）
+- **节点链接**：对齐官方 `mierus://` 格式（当前实现中服务器地址不含端口，`port`/`protocol` 在 query 中成对出现）
 - **Clash**：双协议时输出 TCP/UDP 两条代理配置
 - 防火墙 / 云安全组提示同步覆盖 TCP 与 UDP
 
@@ -277,6 +287,10 @@ curl -fsSL https://raw.githubusercontent.com/ike-sh/mieru-OneClick/main/install-
     --protocol TCP \
     --user myuser \
     --password 'my-secret' \
+    --multiplexing off \
+    --handshake-mode no-wait \
+    --traffic-pattern conservative \
+    --low-entropy off \
     --enable-bbr
 ```
 

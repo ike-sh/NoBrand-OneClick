@@ -3,8 +3,9 @@
 # 作者: ike · https://github.com/ike-sh/mieru-OneClick
 # 基于 https://github.com/enfein/mieru
 set -euo pipefail
+umask 077
 
-SCRIPT_VERSION="1.9.4"
+SCRIPT_VERSION="1.9.5"
 SCRIPT_AUTHOR="ike"
 SCRIPT_REPO="ike-sh/mieru-OneClick"
 UPSTREAM_REPO="enfein/mieru"
@@ -52,6 +53,8 @@ PROTOCOL="TCP"
 PROTOCOL_CLI=0
 USERNAME=""
 PASSWORD=""
+USERNAME_CLI=0
+PASSWORD_CLI=0
 OP_USER=""
 MTU=1400
 MULTIPLEXING="MULTIPLEXING_OFF"
@@ -61,7 +64,10 @@ HANDSHAKE_CLI=0
 TRAFFIC_PATTERN="conservative"
 TRAFFIC_SEED=""
 TRAFFIC_CLI=0
+LOW_ENTROPY_MODE="LOW_ENTROPY_MODE_OFF"
+LOW_ENTROPY_CLI=0
 PORT_CLI=0
+PORT_RANGE_CLI=0
 CLIENT_RPC_PORT=8964
 CLIENT_SOCKS5_PORT=1080
 CLIENT_HTTP_PORT=8080
@@ -145,6 +151,7 @@ mieru mita 服务端一键安装 ${SCRIPT_VERSION}
   --port-range RANGE  监听端口段，如 9000-9010（单用户模式）
   --protocol TCP|UDP|BOTH  传输协议（默认 TCP；BOTH 时 UDP 使用 PORT+1）
   --traffic-pattern LV  流量伪装/抗 DPI：off|conservative|aggressive（默认 conservative）
+  --low-entropy MODE  低熵模式：off|56|48|40|32（默认 off，推荐 56）
   --multiplexing MODE  多路复用：off|low|middle|high（默认 off）
   --handshake-mode MODE 握手：no-wait|standard（默认 no-wait）
   --user NAME         代理用户名（安装主用户 / user-add）
@@ -278,7 +285,7 @@ while [ $# -gt 0 ]; do
         shift
       fi
       ;;
-    --doctor|--verify|doctor|verify) ACTION=doctor ;;
+    --doctor|--verify) ACTION=doctor ;;
     --user-backup) ACTION=user-backup ;;
     --user-restore)
       ACTION=user-restore
@@ -352,6 +359,7 @@ while [ $# -gt 0 ]; do
       ;;
     --port-range)
       PORT_RANGE="${2:-}"
+      PORT_RANGE_CLI=1
       [ -n "$PORT_RANGE" ] || die "--port-range 需要端口段"
       shift
       ;;
@@ -363,6 +371,11 @@ while [ $# -gt 0 ]; do
     --traffic-pattern|--traffic)
       TRAFFIC_PATTERN="${2:-}"
       TRAFFIC_CLI=1
+      shift
+      ;;
+    --low-entropy)
+      LOW_ENTROPY_MODE="${2:-}"
+      LOW_ENTROPY_CLI=1
       shift
       ;;
     --multiplexing)
@@ -377,10 +390,12 @@ while [ $# -gt 0 ]; do
       ;;
     --user)
       USERNAME="${2:-}"
+      USERNAME_CLI=1
       shift
       ;;
     --password)
       PASSWORD="${2:-}"
+      PASSWORD_CLI=1
       shift
       ;;
     --package|--plan)
@@ -442,12 +457,29 @@ run() {
 # BusyBox mktemp（Alpine）要求 XXXXXX 在模板末尾；GNU 允许中间占位
 mktemp_file() {
   local suffix="${1:-}"
-  local f
-  f="$(mktemp /tmp/mita.XXXXXX 2>/dev/null)" || f="/tmp/mita_$$_${RANDOM}"
+  local f="" candidate i
+  f="$(mktemp /tmp/mita.XXXXXX 2>/dev/null)" || true
+  if [ -z "$f" ]; then
+    for i in 1 2 3 4 5; do
+      candidate="/tmp/mita.$$.${RANDOM}.${i}"
+      if (set -o noclobber; : >"$candidate") 2>/dev/null; then
+        f="$candidate"
+        break
+      fi
+    done
+  fi
+  if [ -z "$f" ]; then
+    die "$(t '无法创建安全临时文件' 'Failed to create secure temporary file')" || true
+    return 1
+  fi
   [ -n "$suffix" ] || { printf '%s' "$f"; return; }
   local out="${f}${suffix}"
   if [ "$f" != "$out" ]; then
-    mv "$f" "$out" 2>/dev/null || { : >"$out"; rm -f "$f"; }
+    if ! mv "$f" "$out" 2>/dev/null; then
+      rm -f "$f"
+      die "$(t '无法创建带后缀的安全临时文件' 'Failed to create secure suffixed temporary file')"
+      return 1
+    fi
   fi
   printf '%s' "$out"
 }
@@ -628,6 +660,55 @@ _state_kv() {
   printf '%s=%s\n' "$1" "$(printf '%q' "${2-}")"
 }
 
+has_control_chars() {
+  printf '%s' "${1-}" | LC_ALL=C grep -q '[[:cntrl:]]'
+}
+
+valid_proxy_identity_part() {
+  local value="${1-}"
+  [ -n "$value" ] || return 1
+  [ "$(printf '%s' "$value" | wc -c | tr -d '[:space:]')" -le 64 ] || return 1
+  ! has_control_chars "$value"
+}
+
+validate_proxy_credentials() {
+  local username="${1-${USERNAME:-}}"
+  local password="${2-${PASSWORD:-}}"
+  valid_proxy_identity_part "$username" || {
+    die "$(t '用户名必须为 1-64 字节且不能包含控制字符' \
+      'Username must be 1-64 bytes and contain no control characters')" || return 1
+  }
+  valid_proxy_identity_part "$password" || {
+    die "$(t '密码必须为 1-64 字节且不能包含控制字符' \
+      'Password must be 1-64 bytes and contain no control characters')" || return 1
+  }
+}
+
+json_escape() {
+  local value="${1-}"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//$'\b'/\\b}"
+  value="${value//$'\f'/\\f}"
+  value="${value//$'\n'/\\n}"
+  value="${value//$'\r'/\\r}"
+  value="${value//$'\t'/\\t}"
+  printf '%s' "$value"
+}
+
+json_string() {
+  printf '"%s"' "$(json_escape "${1-}")"
+}
+
+safe_filename_component() {
+  local value="${1-}"
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe="._-"))' "$value"
+  else
+    printf '%s' "$value" | sed 's/[^A-Za-z0-9._-]/_/g'
+  fi
+}
+
 # 收紧敏感文件权限；/etc/mita 必须对 mita 守护进程可写（server.conf.pb）
 # 优先 mita:mita 0750；无 mita 用户时 root:mita 0770
 harden_mita_permissions() {
@@ -686,8 +767,9 @@ admin_lock_acquire() {
     _ADMIN_LOCK_HELD=1
     return 0
   fi
-  warn "$(t '获取管理锁超时，继续执行（可能并发）' 'Admin lock timeout; continuing (may race)')"
-  return 0
+  exec 8>&-
+  die "$(t '获取管理锁超时，操作已取消以避免并发写入' \
+    'Admin lock timeout; operation cancelled to prevent concurrent writes')" || return 1
 }
 
 admin_lock_release() {
@@ -696,6 +778,7 @@ admin_lock_release() {
   if [ "$_ADMIN_LOCK_HELD" -le 0 ]; then
     _ADMIN_LOCK_HELD=0
     flock -u 8 2>/dev/null || true
+    exec 8>&-
   fi
 }
 
@@ -710,6 +793,7 @@ save_install_state() {
     _state_kv PASSWORD "$PASSWORD"
     _state_kv TRAFFIC_PATTERN "$TRAFFIC_PATTERN"
     _state_kv TRAFFIC_SEED "$TRAFFIC_SEED"
+    _state_kv LOW_ENTROPY_MODE "$LOW_ENTROPY_MODE"
     _state_kv MULTIPLEXING "$MULTIPLEXING"
     _state_kv HANDSHAKE_MODE "$HANDSHAKE_MODE"
     _state_kv INSTALL_SCRIPT "$INSTALL_SCRIPT_PATH"
@@ -729,25 +813,41 @@ installed_by_oneclick() {
 }
 
 load_install_state() {
+  local _cli_port="$PORT"
+  local _cli_port_range="$PORT_RANGE"
+  local _cli_protocol="$PROTOCOL"
+  local _cli_user="$USERNAME"
+  local _cli_password="$PASSWORD"
   PORT=""
   PORT_RANGE=""
   PROTOCOL="TCP"
   [ -f "$MITA_STATE" ] || return 0
   local _cli_tp="$TRAFFIC_PATTERN"
+  local _cli_le="$LOW_ENTROPY_MODE"
   local _cli_mux="$MULTIPLEXING"
   local _cli_hs="$HANDSHAKE_MODE"
   # shellcheck disable=SC1090
   source "$MITA_STATE" 2>/dev/null || true
   # 命令行显式指定 --traffic-pattern 时优先，不被已保存状态覆盖
   [ "${TRAFFIC_CLI:-0}" -eq 1 ] && TRAFFIC_PATTERN="$_cli_tp"
+  [ "${LOW_ENTROPY_CLI:-0}" -eq 1 ] && LOW_ENTROPY_MODE="$_cli_le"
   [ "${MULTIPLEXING_CLI:-0}" -eq 1 ] && MULTIPLEXING="$_cli_mux"
   [ "${HANDSHAKE_CLI:-0}" -eq 1 ] && HANDSHAKE_MODE="$_cli_hs"
+  [ "${PORT_CLI:-0}" -eq 1 ] && { PORT="$_cli_port"; PORT_RANGE=""; }
+  [ "${PORT_RANGE_CLI:-0}" -eq 1 ] && { PORT=""; PORT_RANGE="$_cli_port_range"; }
+  [ "${PROTOCOL_CLI:-0}" -eq 1 ] && PROTOCOL="$_cli_protocol"
+  [ "${USERNAME_CLI:-0}" -eq 1 ] && USERNAME="$_cli_user"
+  [ "${PASSWORD_CLI:-0}" -eq 1 ] && PASSWORD="$_cli_password"
+  return 0
 }
 
 install_self_script() {
   STAGE="安装管理脚本"
   local main_url="https://raw.githubusercontent.com/ike-sh/mieru-OneClick/main/install-mita.sh"
-  if curl -fsSL --connect-timeout 15 --max-time 60 "$main_url" -o "$INSTALL_SCRIPT_PATH" 2>/dev/null; then
+  # 已发布版本优先安装同版本脚本，避免运行 tag 时被可变 main 静默替换。
+  if curl -fsSL --connect-timeout 15 --max-time 60 "$SCRIPT_REPO_RAW" -o "$INSTALL_SCRIPT_PATH" 2>/dev/null; then
+    run chmod 0755 "$INSTALL_SCRIPT_PATH"
+  elif curl -fsSL --connect-timeout 15 --max-time 60 "$main_url" -o "$INSTALL_SCRIPT_PATH" 2>/dev/null; then
     run chmod 0755 "$INSTALL_SCRIPT_PATH"
   elif [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
     local src_real dest_real
@@ -1422,10 +1522,10 @@ users_log() {
 # 套餐模板 → 设置 USER_QUOTA_MB / USER_QUOTA_DAYS / 可选默认到期
 # unlimited: 0/0；trial: 10GB/7天；standard: 100GB/30天；custom: 用 CLI 值
 apply_user_package_defaults() {
-  local pkg
+  local fill_missing="${1:-1}" pkg
   pkg="$(printf '%s' "${USER_PACKAGE:-}" | tr '[:upper:]' '[:lower:]')"
   case "$pkg" in
-    ""|none)
+    "")
       ;;
     unlimited|unlimit|none|0|无限)
       USER_QUOTA_MB=0
@@ -1451,10 +1551,20 @@ apply_user_package_defaults() {
       warn "$(t "未知套餐 ${USER_PACKAGE}，忽略（可用 unlimited|trial|standard|custom）" \
         "Unknown package ${USER_PACKAGE}; use unlimited|trial|standard|custom")"
       USER_PACKAGE=""
+      return 1
       ;;
   esac
-  [ -n "${USER_QUOTA_DAYS}" ] || USER_QUOTA_DAYS=30
-  [ -n "${USER_QUOTA_MB}" ] || USER_QUOTA_MB=0
+  if [ "$fill_missing" = "1" ]; then
+    [ -n "${USER_QUOTA_DAYS}" ] || USER_QUOTA_DAYS=30
+    [ -n "${USER_QUOTA_MB}" ] || USER_QUOTA_MB=0
+  elif [ -n "${USER_QUOTA_MB}" ]; then
+    [[ "$USER_QUOTA_MB" =~ ^[0-9]+$ ]] || return 1
+    if [ "$USER_QUOTA_MB" -eq 0 ]; then
+      USER_QUOTA_DAYS=0
+    else
+      [ -n "${USER_QUOTA_DAYS}" ] || USER_QUOTA_DAYS=30
+    fi
+  fi
 }
 
 # 解析到期：空/0/never → 空；+Nd → 今天+N天 YYYY-MM-DD；YYYY-MM-DD 原样
@@ -1476,12 +1586,25 @@ parse_expire_date() {
       return 0
     fi
     # busybox / python fallback
-    python3 -c "import datetime;print((datetime.date.today()+datetime.timedelta(days=int('${days}'))).isoformat())" 2>/dev/null
-    return 0
+    if command -v python3 >/dev/null 2>&1; then
+      python3 -c "import datetime;print((datetime.date.today()+datetime.timedelta(days=int('${days}'))).isoformat())" 2>/dev/null
+      return $?
+    fi
+    warn "$(t "当前系统无法计算相对日期: $raw" "Cannot calculate relative date on this system: $raw")"
+    return 1
   fi
   if [[ "$raw" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
-    printf '%s' "$raw"
-    return 0
+    if [ "$(date -d "$raw" +%Y-%m-%d 2>/dev/null || true)" = "$raw" ]; then
+      printf '%s' "$raw"
+      return 0
+    fi
+    if command -v python3 >/dev/null 2>&1 \
+       && python3 -c 'import datetime,sys; datetime.date.fromisoformat(sys.argv[1])' "$raw" 2>/dev/null; then
+      printf '%s' "$raw"
+      return 0
+    fi
+    warn "$(t "无效日历日期: $raw" "Invalid calendar date: $raw")"
+    return 1
   fi
   warn "$(t "无法解析到期日: $raw（用 YYYY-MM-DD 或 +30d）" "Bad expire: $raw (use YYYY-MM-DD or +30d)")"
   return 1
@@ -1513,6 +1636,59 @@ users_state_init_empty() {
 
 users_state_exists() {
   [ -f "$MITA_USERS_STATE" ] && [ -s "$MITA_USERS_STATE" ]
+}
+
+users_tx_snapshot() {
+  local snapshot
+  snapshot="$(mktemp_file .users.json)" || return 1
+  if users_state_exists; then
+    cp -f "$MITA_USERS_STATE" "$snapshot" || { rm -f "$snapshot"; return 1; }
+  else
+    printf '%s\n' '__MITA_USERS_STATE_ABSENT__' >"$snapshot"
+  fi
+  chmod 0600 "$snapshot" 2>/dev/null || true
+  printf '%s' "$snapshot"
+}
+
+users_tx_commit() {
+  local snapshot="${1:-}"
+  [ -n "$snapshot" ] && rm -f "$snapshot" 2>/dev/null || true
+}
+
+users_tx_restore() {
+  local snapshot="${1:-}"
+  [ -f "$snapshot" ] || return 1
+  if grep -qx '__MITA_USERS_STATE_ABSENT__' "$snapshot" 2>/dev/null; then
+    rm -f "$MITA_USERS_STATE" 2>/dev/null || true
+    return 2
+  fi
+  run mkdir -p "$(dirname "$MITA_USERS_STATE")"
+  cp -f "$snapshot" "$MITA_USERS_STATE" || return 1
+  chmod 0600 "$MITA_USERS_STATE" 2>/dev/null || true
+  return 0
+}
+
+users_tx_rollback() {
+  local snapshot="${1:-}" reapply="${2:-0}" restored=0 restore_rc=0 cfg bin
+  [ -n "$snapshot" ] || return 0
+  if users_tx_restore "$snapshot"; then
+    restored=1
+  else
+    restore_rc=$?
+    [ "$restore_rc" -eq 2 ] || warn "$(t '用户状态回滚失败，请从最近备份恢复' \
+      'Failed to roll back users state; restore the latest backup')"
+  fi
+  if [ "$restored" -eq 1 ] && [ "$reapply" -eq 1 ] && mita_installed 2>/dev/null; then
+    MULTI_USER_MODE=1
+    if cfg="$(write_server_config_multi 2>/dev/null)" && apply_config "$cfg"; then
+      bin="$(mita_bin)"
+      "$bin" reload 2>/dev/null || start_mita 2>/dev/null || true
+    else
+      warn "$(t '用户状态已回滚，但旧服务端配置重新应用失败，请立即运行 doctor' \
+        'Users state was rolled back, but reapplying the old server config failed; run doctor now')"
+    fi
+  fi
+  users_tx_commit "$snapshot"
 }
 
 users_count() {
@@ -1584,8 +1760,8 @@ users_name_exists() {
 
 users_all_ports() {
   users_state_exists || return 0
-  # 协议经 argv 传入（shell PROTOCOL 未 export 时 os.environ 读不到）
-  PROTOCOL="${PROTOCOL:-TCP}" python3 -c '
+  # 协议经 argv 传入
+  python3 -c '
 import json, sys, os
 d = json.load(open(sys.argv[1]))
 proto = (sys.argv[2] if len(sys.argv) > 2 else "") or os.environ.get("PROTOCOL", "TCP")
@@ -1763,6 +1939,7 @@ users_add() {
   users_require_python || return 1
   [ -n "$name" ] || { die "$(t '用户名不能为空' 'Username required')" || return 1; }
   [ -n "$password" ] || password="$(random_token)"
+  validate_proxy_credentials "$name" "$password" || return 1
   apply_user_package_defaults
   expire_at=""
   if [ -n "${USER_EXPIRE:-}" ]; then
@@ -2016,12 +2193,14 @@ for u in d.get("users") or []:
 
 apply_users_config() {
   # 将 users.json 应用到 mita + 重建 tc（持管理锁；显式释放，避免嵌套 trap 覆盖）
-  local cfg enabled_n bin rc=0
+  local snapshot="${1:-}" prior_applied="${2:-0}" cfg enabled_n bin
   STAGE="应用多用户配置"
-  admin_lock_acquire
+  admin_lock_acquire || return 1
   if [ "$(users_count)" -eq 0 ]; then
+    users_tx_rollback "$snapshot" 0
     admin_lock_release
-    die "$(t '至少保留一个用户' 'Keep at least one user')" || return 1
+    warn "$(t '至少保留一个用户' 'Keep at least one user')"
+    return 1
   fi
   enabled_n="$(python3 -c '
 import json,sys
@@ -2029,27 +2208,38 @@ d=json.load(open(sys.argv[1]))
 print(sum(1 for u in (d.get("users") or []) if u.get("enabled", True)))
 ' "$MITA_USERS_STATE" 2>/dev/null || echo 0)"
   if [ "${enabled_n:-0}" -eq 0 ]; then
+    users_tx_rollback "$snapshot" 0
     admin_lock_release
-    die "$(t '至少保留一个启用中的用户' 'Keep at least one enabled user')" || return 1
+    warn "$(t '至少保留一个启用中的用户' 'Keep at least one enabled user')"
+    return 1
   fi
   if ! cfg="$(write_server_config_multi)"; then
+    users_tx_rollback "$snapshot" 0
     admin_lock_release
     return 1
   fi
   if ! apply_config "$cfg"; then
+    users_tx_rollback "$snapshot" "$prior_applied"
     admin_lock_release
     return 1
   fi
   bin="$(mita_bin)"
   if "$bin" reload 2>/dev/null; then
     :
-  else
-    start_mita || rc=1
+  elif ! start_mita; then
+    users_tx_rollback "$snapshot" 1
+    admin_lock_release
+    return 1
   fi
-  apply_tc_limits 2>/dev/null || true
+  if ! apply_tc_limits; then
+    users_tx_rollback "$snapshot" 1
+    apply_tc_limits 2>/dev/null || true
+    admin_lock_release
+    return 1
+  fi
   harden_mita_permissions 2>/dev/null || true
   admin_lock_release
-  return "$rc"
+  return 0
 }
 
 # 更新用户字段（不改 name/port/password 除非传入）
@@ -2177,34 +2367,33 @@ tc_police_burst() {
 # 出口(下载): HTB + u32 match sport=用户端口
 # 入口(上传): ingress + u32 match dport=用户端口 + police
 apply_tc_limits() {
-  local dev handle root_rate has_limit=0 name port bw classid idx=10 burst
+  local dev handle root_rate has_limit=0 failed=0 name port bw classid idx=10 burst
   [ "${DRY_RUN:-0}" -eq 1 ] && return 0
   users_state_exists || return 0
-  if ! tc_available; then
-    if python3 -c '
-import json,sys
-d=json.load(open(sys.argv[1]))
-sys.exit(0 if any(int(u.get("bandwidth_mbps") or 0)>0 for u in (d.get("users") or [])) else 1)
-' "$MITA_USERS_STATE" 2>/dev/null; then
-      warn "$(t 'tc 不可用，无法应用带宽限速（需 iproute2 + NET_ADMIN/root）' \
-        'tc unavailable; cannot apply bandwidth limits (need iproute2 + root/NET_ADMIN)')"
-    fi
-    return 0
-  fi
-  dev="$(tc_default_iface)"
-  if [ -z "$dev" ]; then
-    warn "$(t '无法检测网卡，跳过 tc 限速（可设 TC_IFACE=eth0）' \
-      'Cannot detect NIC; skip tc (set TC_IFACE=eth0)')"
-    return 0
-  fi
-  handle="${TC_HANDLE:-1}"
-  root_rate="${TC_ROOT_RATE:-10gbit}"
-
   has_limit="$(python3 -c '
 import json,sys
 d=json.load(open(sys.argv[1]))
 print(1 if any(u.get("enabled",True) and int(u.get("bandwidth_mbps") or 0)>0 for u in (d.get("users") or [])) else 0)
 ' "$MITA_USERS_STATE" 2>/dev/null || echo 0)"
+  if ! tc_available; then
+    if [ "$has_limit" = "1" ]; then
+      warn "$(t 'tc 不可用，无法应用带宽限速（需 iproute2 + NET_ADMIN/root）' \
+        'tc unavailable; cannot apply bandwidth limits (need iproute2 + root/NET_ADMIN)')"
+      return 1
+    fi
+    return 0
+  fi
+  dev="$(tc_default_iface)"
+  if [ -z "$dev" ]; then
+    if [ "$has_limit" = "1" ]; then
+      warn "$(t '无法检测网卡，不能应用 tc 限速（可设 TC_IFACE=eth0）' \
+        'Cannot detect NIC; cannot apply tc limits (set TC_IFACE=eth0)')"
+      return 1
+    fi
+    return 0
+  fi
+  handle="${TC_HANDLE:-1}"
+  root_rate="${TC_ROOT_RATE:-10gbit}"
 
   tc_clear_root "$dev"
   if [ "$has_limit" != "1" ]; then
@@ -2244,6 +2433,7 @@ print(1 if any(u.get("enabled",True) and int(u.get("bandwidth_mbps") or 0)>0 for
         htb rate "${bw}mbit" ceil "${bw}mbit" 2>/tmp/mita-tc.err; then
       warn "$(t "tc class 失败 ${name} ${bw}mbit: $(cat /tmp/mita-tc.err 2>/dev/null)" \
         "tc class failed ${name}")"
+      failed=1
       continue
     fi
     tc filter add dev "$dev" protocol ip parent "${handle}:" prio 1 u32 \
@@ -2298,7 +2488,7 @@ for u in d.get("users") or []:
     print("%s\t%s\t%s" % (u.get("name") or "", u.get("port") or "", bw))
 ' "$MITA_USERS_STATE" 2>/dev/null)
 
-  return 0
+  return "$failed"
 }
 
 tc_rate_status() {
@@ -2350,9 +2540,11 @@ users_set_enabled() {
 users_scan_expired() {
   users_require_python || return 1
   users_state_exists || return 0
-  local today changed
+  local today changed tx
+  admin_lock_acquire || return 1
+  tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
   today="$(today_ymd)"
-  changed="$(USERS_LOG_QUIET=1 python3 -c '
+  if ! changed="$(USERS_LOG_QUIET=1 python3 -c '
 import json, sys, time
 path, today = sys.argv[1], sys.argv[2]
 d = json.load(open(path))
@@ -2370,8 +2562,14 @@ for u in d.get("users") or []:
 if changed:
     json.dump(d, open(path, "w"), indent=2)
 print("\n".join(changed))
-' "$MITA_USERS_STATE" "$today" 2>/dev/null || true)"
+' "$MITA_USERS_STATE" "$today" 2>/dev/null)"; then
+    users_tx_rollback "$tx" 0
+    admin_lock_release
+    return 1
+  fi
   if [ -z "$changed" ]; then
+    users_tx_commit "$tx"
+    admin_lock_release
     return 0
   fi
   local n
@@ -2382,8 +2580,14 @@ print("\n".join(changed))
   if mita_installed 2>/dev/null; then
     load_install_state
     MULTI_USER_MODE=1
-    apply_users_config >/dev/null 2>&1 || USERS_LOG_QUIET=1 users_log "apply after expire scan failed"
+    if ! apply_users_config "$tx" >/dev/null 2>&1; then
+      USERS_LOG_QUIET=1 users_log "apply after expire scan failed; users state rolled back"
+      admin_lock_release
+      return 1
+    fi
   fi
+  users_tx_commit "$tx"
+  admin_lock_release
   printf '%s\n' "$changed"
 }
 
@@ -2422,7 +2626,7 @@ for u in d.get("users") or []:
 if reset:
     json.dump(d, open(path, "w"), indent=2)
 print("\n".join(reset))
-' "$MITA_USERS_STATE" "$1" 2>/dev/null || true
+' "$MITA_USERS_STATE" "$1" 2>/dev/null
 }
 
 _calendar_commit_reset() {
@@ -2441,34 +2645,27 @@ for u in d.get("users") or []:
         u["last_quota_reset"] = ym
     u["updated_at"] = int(time.time())
 json.dump(d, open(path, "w"), indent=2)
-' "$MITA_USERS_STATE" "$ym" 2>/dev/null || true
-}
-
-_calendar_abort_reset() {
-  # 失败：去掉 pending 与 ZWSP，不写 last_quota_reset
-  # 若已向 mita 推送过 ZWSP 密码，调用方应 re-apply
-  python3 -c '
-import json, sys, time
-path = sys.argv[1]
-d = json.load(open(path))
-for u in d.get("users") or []:
-    u.pop("_reset_pending", None)
-    pw = u.get("password") or ""
-    if pw.endswith("\u200b"):
-        u["password"] = pw[:-1]
-    u["updated_at"] = int(time.time())
-json.dump(d, open(path, "w"), indent=2)
-' "$MITA_USERS_STATE" 2>/dev/null || true
+' "$MITA_USERS_STATE" "$ym" 2>/dev/null
 }
 
 users_scan_calendar_quota_reset() {
   users_require_python || return 1
   users_state_exists || return 0
-  local ym reset_list method ok=0
+  local ym reset_list method tx metrics_backup=""
+  admin_lock_acquire || return 1
+  tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
   ym="$(current_year_month)"
   method="$(printf '%s' "${QUOTA_RESET_METHOD:-password}" | tr '[:upper:]' '[:lower:]')"
-  reset_list="$(_calendar_mark_pending "$ym")"
-  [ -n "$reset_list" ] || return 0
+  if ! reset_list="$(_calendar_mark_pending "$ym")"; then
+    users_tx_rollback "$tx" 0
+    admin_lock_release
+    return 1
+  fi
+  if [ -z "$reset_list" ]; then
+    users_tx_commit "$tx"
+    admin_lock_release
+    return 0
+  fi
   local n
   while IFS= read -r n; do
     [ -n "$n" ] || continue
@@ -2476,7 +2673,13 @@ users_scan_calendar_quota_reset() {
   done <<< "$reset_list"
 
   if ! mita_installed 2>/dev/null; then
-    _calendar_commit_reset "$ym"
+    if ! _calendar_commit_reset "$ym"; then
+      users_tx_rollback "$tx" 0
+      admin_lock_release
+      return 1
+    fi
+    users_tx_commit "$tx"
+    admin_lock_release
     printf '%s\n' "$reset_list"
     return 0
   fi
@@ -2486,32 +2689,42 @@ users_scan_calendar_quota_reset() {
 
   case "$method" in
     days)
-      if apply_users_config >/dev/null 2>&1; then
-        ok=1
-      else
+      if ! apply_users_config "$tx" >/dev/null 2>&1; then
         USERS_LOG_QUIET=1 users_log "calendar days-only apply failed"
+        admin_lock_release
+        return 1
       fi
       ;;
     metrics)
-      if apply_users_config >/dev/null 2>&1; then
-        local sm
-        sm="$(service_manager 2>/dev/null || echo systemd)"
-        case "$sm" in
-          systemd) run systemctl stop mita 2>/dev/null || true ;;
-          openrc) run rc-service mita stop 2>/dev/null || true ;;
-        esac
-        run rm -f /var/lib/mita/metrics.pb 2>/dev/null || true
-        if start_mita 2>/dev/null; then
-          ok=1
-          USERS_LOG_QUIET=1 users_log "calendar reset cleared metrics.pb"
-        else
-          USERS_LOG_QUIET=1 users_log "calendar metrics reset: start_mita failed"
-        fi
+      if ! apply_users_config "$tx" >/dev/null 2>&1; then
+        USERS_LOG_QUIET=1 users_log "calendar metrics apply failed"
+        admin_lock_release
+        return 1
+      fi
+      if [ -f /var/lib/mita/metrics.pb ]; then
+        metrics_backup="$(mktemp_file .metrics.pb)"
+        cp -f /var/lib/mita/metrics.pb "$metrics_backup" 2>/dev/null || metrics_backup=""
+      fi
+      local sm
+      sm="$(service_manager 2>/dev/null || echo systemd)"
+      case "$sm" in
+        systemd) run systemctl stop mita 2>/dev/null || true ;;
+        openrc) run rc-service mita stop 2>/dev/null || true ;;
+      esac
+      run rm -f /var/lib/mita/metrics.pb 2>/dev/null || true
+      if start_mita 2>/dev/null; then
+        USERS_LOG_QUIET=1 users_log "calendar reset cleared metrics.pb"
+      else
+        [ -n "$metrics_backup" ] && cp -f "$metrics_backup" /var/lib/mita/metrics.pb 2>/dev/null || true
+        [ -n "$metrics_backup" ] && rm -f "$metrics_backup" 2>/dev/null || true
+        users_tx_rollback "$tx" 1
+        USERS_LOG_QUIET=1 users_log "calendar metrics reset: start_mita failed; rolled back"
+        admin_lock_release
+        return 1
       fi
       ;;
     password|*)
       # 微扰密码 → apply → 恢复密码 → apply
-      local first_applied=0
       python3 -c '
 import json,sys
 path=sys.argv[1]
@@ -2523,10 +2736,17 @@ for u in d.get("users") or []:
     if not pw.endswith("\u200b"):
         u["password"]=pw+"\u200b"
 json.dump(d, open(path,"w"), indent=2)
-' "$MITA_USERS_STATE" 2>/dev/null || true
-      if apply_users_config >/dev/null 2>&1; then
-        first_applied=1
-        python3 -c '
+' "$MITA_USERS_STATE" 2>/dev/null || {
+        users_tx_rollback "$tx" 0
+        admin_lock_release
+        return 1
+      }
+      if ! apply_users_config "$tx" >/dev/null 2>&1; then
+        USERS_LOG_QUIET=1 users_log "calendar password-reset first apply failed; rolled back"
+        admin_lock_release
+        return 1
+      fi
+      python3 -c '
 import json,sys
 path=sys.argv[1]
 d=json.load(open(path))
@@ -2537,33 +2757,37 @@ for u in d.get("users") or []:
     if pw.endswith("\u200b"):
         u["password"]=pw[:-1]
 json.dump(d, open(path,"w"), indent=2)
-' "$MITA_USERS_STATE" 2>/dev/null || true
-        if apply_users_config >/dev/null 2>&1; then
-          ok=1
-        else
-          USERS_LOG_QUIET=1 users_log "calendar password-reset second apply failed"
-        fi
-      else
-        USERS_LOG_QUIET=1 users_log "calendar password-reset first apply failed"
-      fi
-      # 若第一次已 apply 而整体失败：abort JSON 后必须 re-apply 干净密码
-      if [ "$ok" -ne 1 ] && [ "$first_applied" -eq 1 ]; then
-        _calendar_abort_reset
-        apply_users_config >/dev/null 2>&1 || USERS_LOG_QUIET=1 users_log "calendar password abort re-apply failed"
-        USERS_LOG_QUIET=1 users_log "calendar reset aborted after partial apply; will retry next scan"
+' "$MITA_USERS_STATE" 2>/dev/null || {
+        users_tx_rollback "$tx" 1
+        admin_lock_release
+        return 1
+      }
+      if ! apply_users_config "$tx" 1 >/dev/null 2>&1; then
+        USERS_LOG_QUIET=1 users_log "calendar password-reset second apply failed; rolled back"
+        admin_lock_release
         return 1
       fi
       ;;
   esac
 
-  if [ "$ok" -eq 1 ]; then
-    _calendar_commit_reset "$ym"
-    printf '%s\n' "$reset_list"
-  else
-    _calendar_abort_reset
-    USERS_LOG_QUIET=1 users_log "calendar reset aborted; will retry next scan"
+  if ! _calendar_commit_reset "$ym"; then
+    if [ -n "$metrics_backup" ] && [ -f "$metrics_backup" ]; then
+      case "${sm:-$(service_manager 2>/dev/null || echo systemd)}" in
+        systemd) run systemctl stop mita 2>/dev/null || true ;;
+        openrc) run rc-service mita stop 2>/dev/null || true ;;
+      esac
+      cp -f "$metrics_backup" /var/lib/mita/metrics.pb 2>/dev/null || true
+      start_mita 2>/dev/null || true
+    fi
+    [ -n "$metrics_backup" ] && rm -f "$metrics_backup" 2>/dev/null || true
+    users_tx_rollback "$tx" 1
+    admin_lock_release
     return 1
   fi
+  [ -n "$metrics_backup" ] && rm -f "$metrics_backup" 2>/dev/null || true
+  users_tx_commit "$tx"
+  admin_lock_release
+  printf '%s\n' "$reset_list"
 }
 
 install_users_scheduler() {
@@ -2691,18 +2915,26 @@ users_validate_state_file() {
   local f="$1"
   [ -f "$f" ] || return 1
   python3 -c '
-import json,sys
+import datetime,json,sys
 d=json.load(open(sys.argv[1]))
+proto=(sys.argv[2] if len(sys.argv)>2 else "TCP").upper()
 users=d.get("users")
 if not isinstance(users, list):
     sys.exit(2)
-names=set(); ports=set()
+names=set(); occupied_ports=set()
 for u in users:
     if not isinstance(u, dict):
         sys.exit(3)
-    n=u.get("name") or ""
-    if not n:
+    n=u.get("name")
+    pw=u.get("password")
+    if not isinstance(n, str) or not n or len(n.encode()) > 64:
         sys.exit(4)
+    if any(ord(c) < 32 or ord(c) == 127 for c in n):
+        sys.exit(4)
+    if not isinstance(pw, str) or not pw or len(pw.encode()) > 64:
+        sys.exit(8)
+    if any(ord(c) < 32 or ord(c) == 127 for c in pw):
+        sys.exit(8)
     if n in names:
         sys.exit(5)
     names.add(n)
@@ -2710,51 +2942,89 @@ for u in users:
         p=int(u.get("port"))
     except Exception:
         sys.exit(6)
-    if p in ports:
+    if p < 1025 or p > 65535 or (proto == "BOTH" and p > 65534):
+        sys.exit(6)
+    user_ports=(p, p+1) if proto == "BOTH" else (p,)
+    if any(port in occupied_ports for port in user_ports):
         sys.exit(7)
-    ports.add(p)
-    # normalize optional fields
-    u.setdefault("enabled", True)
-    u.setdefault("quota_mb", 0)
-    u.setdefault("quota_days", 0)
-    u.setdefault("quota_mode", "rolling")
-    u.setdefault("last_quota_reset", "")
-    u.setdefault("expire_at", "")
-    u.setdefault("package", "unlimited")
-    u.setdefault("bandwidth_mbps", 0)
+    occupied_ports.update(user_ports)
+    try:
+        qmb=max(0, int(u.get("quota_mb") or 0))
+        qdays=max(0, int(u.get("quota_days") or 0))
+        bw=max(0, int(u.get("bandwidth_mbps") or 0))
+    except Exception:
+        sys.exit(9)
+    u["quota_mb"]=qmb
+    u["quota_days"]=qdays if qmb > 0 else 0
+    qmode=str(u.get("quota_mode") or "rolling").strip().lower()
+    if qmode not in ("rolling","calendar"):
+        sys.exit(10)
+    u["quota_mode"]=qmode
+    enabled=u.get("enabled", True)
+    if not isinstance(enabled, bool):
+        sys.exit(11)
+    u["enabled"]=enabled
+    expire=str(u.get("expire_at") or "").strip()
+    if expire:
+        try:
+            datetime.date.fromisoformat(expire)
+        except Exception:
+            sys.exit(12)
+    u["expire_at"]=expire
+    last_reset=str(u.get("last_quota_reset") or "").strip()
+    if last_reset and (len(last_reset) != 7 or last_reset[4] != "-" or not last_reset.replace("-","").isdigit()):
+        sys.exit(13)
+    u["last_quota_reset"]=last_reset
+    package=str(u.get("package") or ("custom" if qmb > 0 else "unlimited"))
+    if len(package.encode()) > 64 or any(ord(c) < 32 or ord(c) == 127 for c in package):
+        sys.exit(14)
+    u["package"]=package
+    u["bandwidth_mbps"]=bw
 d["version"]=int(d.get("version") or 1)
 json.dump(d, open(sys.argv[1]+".norm","w"), indent=2)
-' "$f" 2>/dev/null || return 1
+' "$f" "${PROTOCOL:-TCP}" 2>/dev/null || return 1
   if [ -f "${f}.norm" ]; then
-    mv -f "${f}.norm" "$f" 2>/dev/null || true
+    mv -f "${f}.norm" "$f" 2>/dev/null || return 1
   fi
   return 0
 }
 
 users_restore_from_file() {
-  local src="$1" bak
+  local src="$1" bak tx
   [ -f "$src" ] || { warn "$(t "备份不存在: $src" "Backup not found: $src")"; return 1; }
+  load_install_state
   local tmp
   tmp="$(mktemp_file .json)"
   cp -f "$src" "$tmp"
   users_validate_state_file "$tmp" || { rm -f "$tmp"; warn "$(t '备份文件格式无效' 'Invalid backup format')"; return 1; }
-  admin_lock_acquire
+  admin_lock_acquire || { rm -f "$tmp"; return 1; }
+  tx="$(users_tx_snapshot)" || { rm -f "$tmp"; admin_lock_release; return 1; }
   if users_state_exists; then
     bak="$(users_backup_now pre-restore 2>/dev/null || true)"
     [ -n "$bak" ] && t "恢复前已备份: $bak" "Pre-restore backup: $bak" >&2
   fi
   run mkdir -p "$(dirname "$MITA_USERS_STATE")"
   if command -v install >/dev/null 2>&1; then
-    run install -m 0600 "$tmp" "$MITA_USERS_STATE"
+    if ! run install -m 0600 "$tmp" "$MITA_USERS_STATE"; then
+      rm -f "$tmp"
+      users_tx_rollback "$tx" 0
+      admin_lock_release
+      return 1
+    fi
   else
-    run cp -f "$tmp" "$MITA_USERS_STATE"
+    if ! run cp -f "$tmp" "$MITA_USERS_STATE"; then
+      rm -f "$tmp"
+      users_tx_rollback "$tx" 0
+      admin_lock_release
+      return 1
+    fi
     run chmod 0600 "$MITA_USERS_STATE" 2>/dev/null || true
   fi
   rm -f "$tmp"
   MULTI_USER_MODE=1
   users_sync_primary_globals
   if mita_installed 2>/dev/null; then
-    if ! apply_users_config; then
+    if ! apply_users_config "$tx"; then
       admin_lock_release
       return 1
     fi
@@ -2762,6 +3032,7 @@ users_restore_from_file() {
   else
     apply_tc_limits 2>/dev/null || true
   fi
+  users_tx_commit "$tx"
   admin_lock_release
   t "已从备份恢复用户状态" "Users restored from backup"
 }
@@ -2953,11 +3224,17 @@ do_user_add() {
   require_linux
   mita_installed || die "$(t 'mita 未安装，请先执行安装' 'mita is not installed; run install first')"
   # CLI 参数先保存，避免被 load_install_state 覆盖
-  local name="${USERNAME:-}" password="${PASSWORD:-}" prefer="" new_port
+  local name="${USERNAME:-}" password="${PASSWORD:-}" prefer="" tx
   local saved_pkg="${USER_PACKAGE:-}" saved_qmb="${USER_QUOTA_MB:-}" saved_qd="${USER_QUOTA_DAYS:-}" saved_exp="${USER_EXPIRE:-}" saved_bw="${USER_BANDWIDTH_MBPS:-}"
   if [ "${PORT_CLI:-0}" -eq 1 ] && [ -n "${PORT:-}" ]; then
     prefer="$PORT"
   fi
+  # --user/--password/--port 描述的是新用户；读取现有主用户时不能让这些 CLI 值覆盖安装状态。
+  USERNAME_CLI=0
+  PASSWORD_CLI=0
+  PORT_CLI=0
+  PORT_RANGE_CLI=0
+  PROTOCOL_CLI=0
   load_install_state
   USER_PACKAGE="$saved_pkg"
   USER_QUOTA_MB="$saved_qmb"
@@ -2965,9 +3242,14 @@ do_user_add() {
   USER_EXPIRE="$saved_exp"
   USER_BANDWIDTH_MBPS="$saved_bw"
   if ! users_state_exists || [ "$(users_count)" -eq 0 ]; then
-    load_config_from_mita 2>/dev/null || true
+    load_config_from_mita || return 1
     load_credentials_fallback 2>/dev/null || true
-    users_migrate_from_primary 2>/dev/null || true
+    users_migrate_from_primary || return 1
+    users_state_exists || {
+      warn "$(t '无法迁移现有主用户，已取消新增以避免覆盖服务端账号' \
+        'Could not migrate the existing primary user; add cancelled to avoid overwriting server accounts')"
+      return 1
+    }
   fi
   if [ -z "$name" ]; then
     if [ "$YES" -eq 1 ]; then
@@ -3002,15 +3284,18 @@ do_user_add() {
       *) USER_PACKAGE=unlimited ;;
     esac
   fi
-  admin_lock_acquire
-  if ! new_port="$(users_add "$name" "$password" "$prefer")"; then
+  admin_lock_acquire || return 1
+  tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
+  if ! users_add "$name" "$password" "$prefer" >/dev/null; then
+    users_tx_rollback "$tx" 0
     admin_lock_release
     return 1
   fi
-  if ! apply_users_config; then
+  if ! apply_users_config "$tx"; then
     admin_lock_release
     return 1
   fi
+  users_tx_commit "$tx"
   open_firewall_for_pairs "$(multi_user_port_protocol_pairs)"
   save_install_state
   admin_lock_release
@@ -3025,9 +3310,23 @@ do_user_set_quota() {
   local name="${USERNAME:-}"
   [ -n "$name" ] || die "$(t '需要 --user NAME' 'Need --user NAME')"
   users_name_exists "$name" || die "$(t "用户不存在: $name" "User not found: $name")"
-  apply_user_package_defaults
-  if [ -z "${USER_QUOTA_MB}" ] && [ -z "${USER_PACKAGE}" ] && [ -z "${USER_QUOTA_MODE}" ]; then
-    die "$(t '需要 --package / --quota-mb / --quota-mode' 'Need --package / --quota-mb / --quota-mode')"
+  if [ -z "${USER_QUOTA_MB}" ] && [ -z "${USER_QUOTA_DAYS}" ] \
+     && [ -z "${USER_PACKAGE}" ] && [ -z "${USER_QUOTA_MODE}" ] \
+     && [ -z "${USER_EXPIRE}" ]; then
+    die "$(t '需要 --package / --quota-mb / --quota-mode' 'Need --package / --quota-mb / --quota-mode')" || return 1
+    return 1
+  fi
+  if ! apply_user_package_defaults 0; then
+    die "$(t '套餐或配额参数无效' 'Invalid package or quota value')" || return 1
+    return 1
+  fi
+  if [ -n "${USER_QUOTA_MB}" ] && ! [[ "$USER_QUOTA_MB" =~ ^[0-9]+$ ]]; then
+    die "$(t '--quota-mb 必须是非负整数' '--quota-mb must be a non-negative integer')" || return 1
+    return 1
+  fi
+  if [ -n "${USER_QUOTA_DAYS}" ] && ! [[ "$USER_QUOTA_DAYS" =~ ^[0-9]+$ ]]; then
+    die "$(t '--quota-days 必须是非负整数' '--quota-days must be a non-negative integer')" || return 1
+    return 1
   fi
   local exp_parsed=""
   if [ -n "${USER_EXPIRE:-}" ]; then
@@ -3039,15 +3338,19 @@ do_user_set_quota() {
     USER_QUOTA_MODE="$(normalize_quota_mode "$USER_QUOTA_MODE")"
   fi
   USER_BANDWIDTH_MBPS=""
-  admin_lock_acquire
+  local tx
+  admin_lock_acquire || return 1
+  tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
   if ! users_update_fields "$name"; then
+    users_tx_rollback "$tx" 0
     admin_lock_release
     return 1
   fi
-  if ! apply_users_config; then
+  if ! apply_users_config "$tx"; then
     admin_lock_release
     return 1
   fi
+  users_tx_commit "$tx"
   admin_lock_release
   t "已更新 ${name} 配额=$(quota_label "${USER_QUOTA_MB:-0}" "${USER_QUOTA_DAYS:-0}") 模式=${USER_QUOTA_MODE:-keep} 套餐=${USER_PACKAGE:-} 到期=${exp_parsed:-保持}" \
     "Updated ${name} quota=$(quota_label "${USER_QUOTA_MB:-0}" "${USER_QUOTA_DAYS:-0}") mode=${USER_QUOTA_MODE:-keep} package=${USER_PACKAGE:-} expire=${exp_parsed:-keep}"
@@ -3065,8 +3368,11 @@ do_user_set_expire() {
   exp="$(parse_expire_date "$USER_EXPIRE")" || return 1
   USER_EXPIRE="${exp:-__CLEAR__}"
   USER_QUOTA_MB="" USER_QUOTA_DAYS="" USER_PACKAGE="" USER_BANDWIDTH_MBPS=""
-  admin_lock_acquire
+  local tx
+  admin_lock_acquire || return 1
+  tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
   if ! users_update_fields "$name"; then
+    users_tx_rollback "$tx" 0
     admin_lock_release
     return 1
   fi
@@ -3077,10 +3383,11 @@ do_user_set_expire() {
       users_set_enabled "$name" 0 || true
     fi
   fi
-  if ! apply_users_config; then
+  if ! apply_users_config "$tx"; then
     admin_lock_release
     return 1
   fi
+  users_tx_commit "$tx"
   admin_lock_release
   t "已设置 ${name} 到期=${exp:-永不过期}" "Set ${name} expire=${exp:-never}"
 }
@@ -3100,15 +3407,19 @@ do_user_enable() {
       "User $name expired ($exp); renew with --user-set-expire first")"
     return 1
   fi
-  admin_lock_acquire
+  local tx
+  admin_lock_acquire || return 1
+  tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
   if ! users_set_enabled "$name" 1; then
+    users_tx_rollback "$tx" 0
     admin_lock_release
     return 1
   fi
-  if ! apply_users_config; then
+  if ! apply_users_config "$tx"; then
     admin_lock_release
     return 1
   fi
+  users_tx_commit "$tx"
   open_firewall_for_pairs "$(multi_user_port_protocol_pairs)"
   admin_lock_release
   t "已启用用户 $name" "Enabled user $name"
@@ -3130,15 +3441,19 @@ print(sum(1 for u in (d.get("users") or []) if u.get("enabled", True) and u.get(
   if [ "${en_n:-0}" -lt 1 ]; then
     die "$(t '不能停用最后一个启用中的用户' 'Cannot disable the last enabled user')"
   fi
-  admin_lock_acquire
+  local tx
+  admin_lock_acquire || return 1
+  tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
   if ! users_set_enabled "$name" 0; then
+    users_tx_rollback "$tx" 0
     admin_lock_release
     return 1
   fi
-  if ! apply_users_config; then
+  if ! apply_users_config "$tx"; then
     admin_lock_release
     return 1
   fi
+  users_tx_commit "$tx"
   admin_lock_release
   t "已停用用户 $name（端口仍保留，可再 enable）" "Disabled $name (port kept; can re-enable)"
 }
@@ -3148,10 +3463,16 @@ do_user_scan() {
   require_root 2>/dev/null || true
   load_install_state 2>/dev/null || true
   users_state_exists || return 0
-  local out="" cal=""
-  admin_lock_acquire
-  out="$(users_scan_expired || true)"
-  cal="$(users_scan_calendar_quota_reset || true)"
+  local out="" cal="" rc=0
+  admin_lock_acquire || return 1
+  if ! out="$(users_scan_expired)"; then
+    warn "$(t '到期用户扫描失败，状态已回滚' 'Expired-user scan failed; state rolled back')"
+    rc=1
+  fi
+  if ! cal="$(users_scan_calendar_quota_reset)"; then
+    warn "$(t '日历月配额重置失败，状态已回滚' 'Calendar quota reset failed; state rolled back')"
+    rc=1
+  fi
   admin_lock_release
   if [ -n "$out" ]; then
     msg "disabled: $(printf '%s' "$out" | tr '\n' ' ')"
@@ -3159,6 +3480,7 @@ do_user_scan() {
   if [ -n "$cal" ]; then
     msg "quota-reset: $(printf '%s' "$cal" | tr '\n' ' ')"
   fi
+  return "$rc"
 }
 
 do_user_usage() {
@@ -3203,7 +3525,7 @@ do_user_export_clients() {
   users_ensure_loaded
   users_state_exists || die "$(t '无用户状态' 'No users state')"
   local dir="${MITA_CLIENT_EXPORT_DIR:-/root/mieru-clients}"
-  local ts ip name
+  local ts ip name safe_name
   ts="$(date +%Y%m%d_%H%M%S)"
   dir="${dir%/}/${ts}"
   run mkdir -p "$dir"
@@ -3213,20 +3535,24 @@ do_user_export_clients() {
   t "导出目录: $dir" "Export dir: $dir" >&2
   while IFS= read -r name; do
     [ -n "$name" ] || continue
-    local password port saved_u saved_p saved_port proto f
+    local password port saved_u saved_p saved_port proto f links_file
     password="$(users_get_field "$name" password)" || continue
     port="$(users_get_field "$name" port)" || continue
     saved_u="$USERNAME"; saved_p="$PASSWORD"; saved_port="$PORT"
     USERNAME="$name"; PASSWORD="$password"; PORT="$port"
+    safe_name="$(safe_filename_component "$name")"
+    [ -n "$safe_name" ] || safe_name="user"
+    links_file="${dir}/${safe_name}_links.txt"
+    : >"$links_file"
     while IFS= read -r proto; do
       [ -n "$proto" ] || continue
-      f="${dir}/${name}_$(proto_lower "$proto").json"
+      f="${dir}/${safe_name}_$(proto_lower "$proto").json"
       build_client_json_for "$ip" "$proto" >"$f"
       chmod 0600 "$f" 2>/dev/null || true
-      generate_share_link_for "$ip" "$proto" >>"${dir}/${name}_links.txt"
-      printf '\n' >>"${dir}/${name}_links.txt"
+      generate_share_link_for "$ip" "$proto" >>"$links_file"
+      printf '\n' >>"$links_file"
     done < <(protocols_for_mode)
-    chmod 0600 "${dir}/${name}_links.txt" 2>/dev/null || true
+    chmod 0600 "$links_file" 2>/dev/null || true
     USERNAME="$saved_u"; PASSWORD="$saved_p"; PORT="$saved_port"
     t "  已导出: $name" "  Exported: $name" >&2
   done < <(python3 -c '
@@ -3243,7 +3569,6 @@ for u in d.get("users") or []:
 do_doctor() {
   require_root 2>/dev/null || true
   local pass=0 fail=0 warn_n=0
-  local check
   check() {
     local name="$1" ok="$2" detail="${3:-}"
     if [ "$ok" = "1" ]; then
@@ -3373,8 +3698,9 @@ do_user_quota_reset() {
   require_root
   load_install_state
   users_ensure_loaded
-  local force="${1:-}"
-  admin_lock_acquire
+  local force="${1:-}" cal tx
+  admin_lock_acquire || return 1
+  tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
   if [ "$force" = "force" ] || [ "${YES:-0}" -eq 1 ]; then
     # 清除 last_quota_reset 使本月全部 calendar 用户重跑
     python3 -c '
@@ -3385,10 +3711,18 @@ for u in d.get("users") or []:
     if (u.get("quota_mode") or "")=="calendar" and int(u.get("quota_mb") or 0)>0:
         u["last_quota_reset"]=""
 json.dump(d, open(path,"w"), indent=2)
-' "$MITA_USERS_STATE" 2>/dev/null || true
+' "$MITA_USERS_STATE" 2>/dev/null || {
+      users_tx_rollback "$tx" 0
+      admin_lock_release
+      return 1
+    }
   fi
-  local cal
-  cal="$(users_scan_calendar_quota_reset || true)"
+  if ! cal="$(users_scan_calendar_quota_reset)"; then
+    users_tx_rollback "$tx" 0
+    admin_lock_release
+    return 1
+  fi
+  users_tx_commit "$tx"
   admin_lock_release
   if [ -n "$cal" ]; then
     t "已重置日历月配额: $(printf '%s' "$cal" | tr '\n' ' ')" \
@@ -3411,12 +3745,21 @@ do_user_set_rate() {
   users_name_exists "$name" || die "$(t "用户不存在: $name" "User not found: $name")"
   USER_QUOTA_MB="" USER_QUOTA_DAYS="" USER_EXPIRE="" USER_PACKAGE=""
   USER_BANDWIDTH_MBPS="$bw"
-  admin_lock_acquire
+  local tx
+  admin_lock_acquire || return 1
+  tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
   if ! users_update_fields "$name"; then
+    users_tx_rollback "$tx" 0
     admin_lock_release
     return 1
   fi
-  apply_tc_limits || true
+  if ! apply_tc_limits; then
+    users_tx_rollback "$tx" 0
+    apply_tc_limits 2>/dev/null || true
+    admin_lock_release
+    return 1
+  fi
+  users_tx_commit "$tx"
   admin_lock_release
   t "已设置 ${name} 带宽=${bw}Mbps（0=不限；按端口 tc 出口+入口）" \
     "Set ${name} bandwidth=${bw}Mbps (0=unlimited; egress+ingress tc by port)"
@@ -3432,8 +3775,11 @@ do_rate_restore() {
   require_root 2>/dev/null || true
   load_install_state 2>/dev/null || true
   users_state_exists || return 0
-  admin_lock_acquire
-  apply_tc_limits || true
+  admin_lock_acquire || return 1
+  if ! apply_tc_limits; then
+    admin_lock_release
+    return 1
+  fi
   admin_lock_release
 }
 
@@ -3457,16 +3803,19 @@ do_user_del() {
   if [ "${n:-0}" -le 1 ] && users_name_exists "$name"; then
     die "$(t '不能删除最后一个用户' 'Cannot delete the last user')"
   fi
-  local freed
-  admin_lock_acquire
+  local freed tx
+  admin_lock_acquire || return 1
+  tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
   if ! freed="$(users_del "$name")"; then
+    users_tx_rollback "$tx" 0
     admin_lock_release
     return 1
   fi
-  if ! apply_users_config; then
+  if ! apply_users_config "$tx"; then
     admin_lock_release
     return 1
   fi
+  users_tx_commit "$tx"
   if [ -n "$freed" ]; then
     local close_pairs="TCP|${freed}"
     [ "$PROTOCOL" = "BOTH" ] && close_pairs="${close_pairs}"$'\n'"UDP|$((freed + 1))"
@@ -3645,6 +3994,34 @@ normalize_handshake_mode() {
   esac
 }
 
+normalize_low_entropy_mode() {
+  case "$(printf '%s' "${1:-}" | tr '[:lower:]' '[:upper:]')" in
+    OFF|0|NO|DISABLED|LOW_ENTROPY_MODE_OFF) printf 'LOW_ENTROPY_MODE_OFF' ;;
+    56|MODE_56|LOW_ENTROPY_MODE_56) printf 'LOW_ENTROPY_MODE_56' ;;
+    48|MODE_48|LOW_ENTROPY_MODE_48) printf 'LOW_ENTROPY_MODE_48' ;;
+    40|MODE_40|LOW_ENTROPY_MODE_40) printf 'LOW_ENTROPY_MODE_40' ;;
+    32|MODE_32|LOW_ENTROPY_MODE_32) printf 'LOW_ENTROPY_MODE_32' ;;
+    *) return 1 ;;
+  esac
+}
+
+low_entropy_label() {
+  case "$(normalize_low_entropy_mode "${LOW_ENTROPY_MODE:-LOW_ENTROPY_MODE_OFF}" 2>/dev/null || true)" in
+    LOW_ENTROPY_MODE_56) t '56（约 1.15 倍流量）' '56 (~1.15x traffic)' ;;
+    LOW_ENTROPY_MODE_48) t '48（约 1.34 倍流量）' '48 (~1.34x traffic)' ;;
+    LOW_ENTROPY_MODE_40) t '40（约 1.6 倍流量）' '40 (~1.6x traffic)' ;;
+    LOW_ENTROPY_MODE_32) t '32（约 2 倍流量）' '32 (~2x traffic)' ;;
+    *) t '关闭' 'Off' ;;
+  esac
+}
+
+warn_low_entropy_client_compat() {
+  [ "$(normalize_low_entropy_mode "${LOW_ENTROPY_MODE:-LOW_ENTROPY_MODE_OFF}" 2>/dev/null || true)" != "LOW_ENTROPY_MODE_OFF" ] || return 0
+  warn "$(t \
+    '低熵模式是较新的实验性能力；请确认客户端确实支持 lowEntropy。尚未适配的 mihomo 等客户端可能无法正确使用，不确定时请保持关闭并优先使用官方 mieru 客户端。' \
+    'Low entropy is a newer experimental capability. Confirm that the client supports lowEntropy; clients such as mihomo builds without adaptation may not work correctly. Keep it off when unsure and prefer the official mieru client.')"
+}
+
 choose_client_modes_interactive() {
   local input="" def=1
   if [ "${MULTIPLEXING_CLI:-0}" -ne 1 ]; then
@@ -3689,6 +4066,64 @@ choose_client_modes_interactive() {
   msg ""
   t "客户端模式: ${MULTIPLEXING} / ${HANDSHAKE_MODE}" \
     "Client modes: ${MULTIPLEXING} / ${HANDSHAKE_MODE}"
+}
+
+choose_low_entropy_interactive() {
+  local current input="" def=1 enabled_default="n"
+  if [ "$(normalize_traffic_pattern "${TRAFFIC_PATTERN:-conservative}")" = "off" ]; then
+    LOW_ENTROPY_MODE="LOW_ENTROPY_MODE_OFF"
+    return 0
+  fi
+  if [ "${LOW_ENTROPY_CLI:-0}" -eq 1 ]; then
+    warn_low_entropy_client_compat
+    return 0
+  fi
+
+  current="$(normalize_low_entropy_mode "${LOW_ENTROPY_MODE:-LOW_ENTROPY_MODE_OFF}" 2>/dev/null || printf 'LOW_ENTROPY_MODE_OFF')"
+  [ "$current" != "LOW_ENTROPY_MODE_OFF" ] && enabled_default="y"
+  msg ""
+  if [ "$enabled_default" = "y" ]; then
+    read_tty input "$(t '是否启用低熵模式？会增加流量和 CPU 开销 [Y/n]: ' \
+      'Enable low entropy mode? This increases traffic and CPU load [Y/n]: ')" || input=""
+    input="${input:-y}"
+  else
+    read_tty input "$(t '是否启用低熵模式？会增加流量和 CPU 开销 [y/N]: ' \
+      'Enable low entropy mode? This increases traffic and CPU load [y/N]: ')" || input=""
+    input="${input:-n}"
+  fi
+  case "$(printf '%s' "$input" | tr '[:upper:]' '[:lower:]')" in
+    y|yes|1|是) ;;
+    *)
+      LOW_ENTROPY_MODE="LOW_ENTROPY_MODE_OFF"
+      t '低熵模式: 关闭（推荐默认）' 'Low entropy: Off (recommended default)'
+      return 0
+      ;;
+  esac
+
+  case "$current" in
+    LOW_ENTROPY_MODE_48) def=2 ;;
+    LOW_ENTROPY_MODE_40) def=3 ;;
+    LOW_ENTROPY_MODE_32) def=4 ;;
+    *) def=1 ;;
+  esac
+  msg ""
+  t '低熵强度（数字越小，伪装越强，但开销越大）:' \
+    'Low entropy strength (smaller means stronger disguise and more overhead):'
+  t '  1) 56 —— 约 1.15 倍流量（推荐）' '  1) 56 — ~1.15x traffic (recommended)'
+  t '  2) 48 —— 约 1.34 倍流量' '  2) 48 — ~1.34x traffic'
+  t '  3) 40 —— 约 1.6 倍流量' '  3) 40 — ~1.6x traffic'
+  t '  4) 32 —— 约 2 倍流量' '  4) 32 — ~2x traffic'
+  input=""
+  read_tty input "$(t "请选择 [1-4，默认 ${def}]: " "Choose [1-4, default ${def}]: ")" || input=""
+  input="${input:-$def}"
+  case "$input" in
+    2) LOW_ENTROPY_MODE="LOW_ENTROPY_MODE_48" ;;
+    3) LOW_ENTROPY_MODE="LOW_ENTROPY_MODE_40" ;;
+    4) LOW_ENTROPY_MODE="LOW_ENTROPY_MODE_32" ;;
+    *) LOW_ENTROPY_MODE="LOW_ENTROPY_MODE_56" ;;
+  esac
+  t "低熵模式: $(low_entropy_label)" "Low entropy: $(low_entropy_label)"
+  warn_low_entropy_client_compat
 }
 
 choose_traffic_pattern_interactive() {
@@ -3785,11 +4220,18 @@ collect_config_interactive() {
   t "已选协议: $(protocol_label)" "Selected protocol: $(protocol_label)"
   choose_client_modes_interactive
   choose_traffic_pattern_interactive
+  choose_low_entropy_interactive
   ensure_traffic_seed
+  validate_proxy_credentials
 }
 
 load_config_from_mita() {
   local desc bin bindings
+  local cli_user="$USERNAME" cli_password="$PASSWORD"
+  local cli_port="$PORT" cli_port_range="$PORT_RANGE" cli_protocol="$PROTOCOL"
+  load_install_state
+  local state_user="$USERNAME" state_password="$PASSWORD"
+  local state_port="$PORT" state_port_range="$PORT_RANGE" state_protocol="$PROTOCOL"
   bin="$(mita_bin)"
   if ! [ -x "$bin" ]; then
     recover_deb_mita 2>/dev/null || true
@@ -3805,10 +4247,24 @@ load_config_from_mita() {
       'Cannot read server config. Use 5) Status; if daemon is down: systemctl restart mita')" || return 1
   fi
 
-  parse_user_from_describe "$desc" || true
-  if [ -z "$USERNAME" ] || [ -z "$PASSWORD" ]; then
-    load_credentials_fallback
+  USERNAME=""
+  PASSWORD=""
+  if ! command -v python3 >/dev/null 2>&1 \
+     && [ -n "$state_user" ] && [ -n "$state_password" ]; then
+    USERNAME="$state_user"
+    PASSWORD="$state_password"
+  else
+    parse_user_from_describe "$desc" || true
   fi
+  [ -n "$USERNAME" ] || USERNAME="$state_user"
+  if [ -z "$PASSWORD" ] || [[ "$PASSWORD" == \** ]]; then
+    PASSWORD="$state_password"
+  fi
+  if [ -z "$USERNAME" ] || [ -z "$PASSWORD" ] || [[ "$PASSWORD" == \** ]]; then
+    load_credentials_fallback || true
+  fi
+  [ "${USERNAME_CLI:-0}" -eq 1 ] && USERNAME="$cli_user"
+  [ "${PASSWORD_CLI:-0}" -eq 1 ] && PASSWORD="$cli_password"
   if [ -z "$USERNAME" ]; then
     bail "$(t '配置中缺少用户名' 'Missing username in config')" || return 1
   fi
@@ -3816,12 +4272,16 @@ load_config_from_mita() {
     bail "$(t '密码已哈希存储，无法生成节点链接。请选 2) 重新配置 设置新密码' \
       'Password is hashed; use 2) Reconfigure to set a new password')" || return 1
   fi
+  validate_proxy_credentials || return 1
 
   bindings="$(extract_bindings_from_describe "$desc")"
-  PORT=""
-  PORT_RANGE=""
+  PORT="$state_port"
+  PORT_RANGE="$state_port_range"
+  PROTOCOL="$state_protocol"
   if [ -n "$bindings" ]; then
-    local pp proto p has_tcp=0 has_udp=0 tcp_port=""
+    local pp proto p has_tcp=0 has_udp=0 tcp_port="" primary_port="" live_range=""
+    PORT=""
+    PORT_RANGE=""
     while IFS= read -r pp; do
       [ -n "$pp" ] || continue
       proto="${pp%%|*}"
@@ -3830,15 +4290,24 @@ load_config_from_mita() {
         TCP)
           has_tcp=1
           if [[ "$p" =~ ^[0-9]+$ ]]; then
-            tcp_port="$p"
-          elif [[ "$p" == *-* ]]; then
-            PORT_RANGE="$p"
+            [ -n "$tcp_port" ] || tcp_port="$p"
+            [ -n "$primary_port" ] || primary_port="$p"
+          elif [[ "$p" == *-* ]] && [ -z "$live_range" ]; then
+            live_range="$p"
           fi
           ;;
-        UDP) has_udp=1 ;;
+        UDP)
+          has_udp=1
+          if [[ "$p" =~ ^[0-9]+$ ]] && [ -z "$primary_port" ]; then
+            primary_port="$p"
+          elif [[ "$p" == *-* ]] && [ -z "$live_range" ]; then
+            live_range="$p"
+          fi
+          ;;
       esac
     done <<< "$bindings"
-    [ -n "$tcp_port" ] && PORT="$tcp_port"
+    PORT="${tcp_port:-$primary_port}"
+    PORT_RANGE="$live_range"
     if [ "$has_tcp" -gt 0 ] && [ "$has_udp" -gt 0 ]; then
       PROTOCOL="BOTH"
     elif [ "$has_udp" -gt 0 ]; then
@@ -3847,7 +4316,9 @@ load_config_from_mita() {
       PROTOCOL="TCP"
     fi
   fi
-  load_install_state
+  [ "${PORT_CLI:-0}" -eq 1 ] && { PORT="$cli_port"; PORT_RANGE=""; }
+  [ "${PORT_RANGE_CLI:-0}" -eq 1 ] && { PORT=""; PORT_RANGE="$cli_port_range"; }
+  [ "${PROTOCOL_CLI:-0}" -eq 1 ] && PROTOCOL="$cli_protocol"
   # 旧安装：状态无 TRAFFIC_PATTERN 记录、且服务端配置本身无 trafficPattern 时，
   # 不在客户端配置/重配里凭空注入（保持与服务端一致）；显式 --traffic-pattern 优先
   if [ "${TRAFFIC_CLI:-0}" -ne 1 ] \
@@ -3886,9 +4357,22 @@ print(f"{name}\t{pwd}")
 }
 
 load_credentials_fallback() {
-  load_install_state
-  [ -n "$USERNAME" ] && [ -n "$PASSWORD" ] && return 0
   local f line
+  if [ -f "$MITA_STATE" ]; then
+    line="$(
+      (
+        local USERNAME="" PASSWORD=""
+        # shellcheck disable=SC1090
+        source "$MITA_STATE" 2>/dev/null || true
+        printf '%s\t%s' "${USERNAME:-}" "${PASSWORD:-}"
+      )
+    )"
+    [ -z "$USERNAME" ] && USERNAME="${line%%$'\t'*}"
+    if [ -z "$PASSWORD" ] || [[ "$PASSWORD" == \** ]]; then
+      PASSWORD="${line#*$'\t'}"
+    fi
+  fi
+  [ -n "$USERNAME" ] && [ -n "$PASSWORD" ] && [[ "$PASSWORD" != \** ]] && return 0
   if ! command -v python3 >/dev/null 2>&1; then
     return 1
   fi
@@ -3911,8 +4395,10 @@ if users:
     print(f\"{u.get('name','')}\t{u.get('password','')}\")
 " "$f" 2>/dev/null)" || continue
     [ -z "$USERNAME" ] && USERNAME="${line%%$'\t'*}"
-    [ -z "$PASSWORD" ] && PASSWORD="${line#*$'\t'}"
-    [ -n "$USERNAME" ] && [ -n "$PASSWORD" ] && return 0
+    if [ -z "$PASSWORD" ] || [[ "$PASSWORD" == \** ]]; then
+      PASSWORD="${line#*$'\t'}"
+    fi
+    [ -n "$USERNAME" ] && [ -n "$PASSWORD" ] && [[ "$PASSWORD" != \** ]] && return 0
   done
   return 1
 }
@@ -3969,7 +4455,9 @@ collect_reconfigure_interactive() {
   fi
   choose_client_modes_interactive
   choose_traffic_pattern_interactive
+  choose_low_entropy_interactive
   ensure_traffic_seed
+  validate_proxy_credentials
   msg ""
   t "将应用协议: $(protocol_label)" "Will apply protocol: $(protocol_label)"
 }
@@ -3980,6 +4468,7 @@ ensure_config_noninteractive() {
     die "$(t '--port 与 --port-range 不能同时使用' 'Cannot use --port and --port-range together')"
   [ -n "$USERNAME" ] || USERNAME="$(random_token)"
   [ -n "$PASSWORD" ] || PASSWORD="$(random_token)"
+  validate_proxy_credentials
   if [ -z "$PORT" ] && [ -z "$PORT_RANGE" ]; then
     if PORT="$(derive_port_from_ip)"; then
       :
@@ -4008,6 +4497,10 @@ ensure_config_noninteractive() {
     die "$(t '双协议需要主端口 ≤65534' 'Dual protocol needs main port ≤65534')"
   fi
   TRAFFIC_PATTERN="$(normalize_traffic_pattern "$TRAFFIC_PATTERN")"
+  LOW_ENTROPY_MODE="$(normalize_low_entropy_mode "$LOW_ENTROPY_MODE")" || \
+    die "$(t '非法低熵模式' 'Invalid low entropy mode')"
+  [ "$TRAFFIC_PATTERN" != "off" ] || LOW_ENTROPY_MODE="LOW_ENTROPY_MODE_OFF"
+  warn_low_entropy_client_compat
   MULTIPLEXING="$(normalize_multiplexing "$MULTIPLEXING")" || \
     die "$(t '非法 multiplexing 模式' 'Invalid multiplexing mode')"
   HANDSHAKE_MODE="$(normalize_handshake_mode "$HANDSHAKE_MODE")" || \
@@ -4048,6 +4541,13 @@ mita_supports_traffic_pattern() {
   [ "$(printf '%s\n%s' "3.28.0" "$v" | sort -V 2>/dev/null | head -n1)" = "3.28.0" ]
 }
 
+mita_supports_low_entropy() {
+  local v
+  v="$(installed_version 2>/dev/null || true)"
+  [ -n "$v" ] || return 1
+  [ "$(printf '%s\n%s' "3.35.0" "$v" | sort -V 2>/dev/null | head -n1)" = "3.35.0" ]
+}
+
 ensure_traffic_seed() {
   [ "$(normalize_traffic_pattern "${TRAFFIC_PATTERN:-conservative}")" = "off" ] && return 0
   [ -n "$TRAFFIC_SEED" ] && return 0
@@ -4060,22 +4560,36 @@ warn_traffic_unsupported() {
   mita_supports_traffic_pattern && return 0
   warn "$(t '当前 mita 版本不支持流量伪装（需 ≥3.28.0），本次不会写入 trafficPattern；如需启用请先选 3) 升级' \
     'Current mita does not support traffic obfuscation (needs >=3.28.0); trafficPattern will be skipped. Use 3) Upgrade to enable.')"
+  TRAFFIC_PATTERN="off"
+  LOW_ENTROPY_MODE="LOW_ENTROPY_MODE_OFF"
+}
+
+warn_low_entropy_unsupported() {
+  [ "$(normalize_low_entropy_mode "${LOW_ENTROPY_MODE:-LOW_ENTROPY_MODE_OFF}" 2>/dev/null || true)" = "LOW_ENTROPY_MODE_OFF" ] && return 0
+  mita_supports_low_entropy && return 0
+  warn "$(t '当前 mita 版本不支持低熵模式（需要 ≥3.35.0），本次将关闭低熵；请先升级后再启用' \
+    'Current mita does not support low entropy mode (needs >=3.35.0); it will be disabled. Upgrade first to enable it.')"
+  LOW_ENTROPY_MODE="LOW_ENTROPY_MODE_OFF"
 }
 
 # 输出缩进后的 "trafficPattern": {...} 片段；off 或旧版 mita 时输出空
 traffic_pattern_json() {
   local ind="${1:-  }"
-  local level seed
+  local level seed low_entropy_section=""
   level="$(normalize_traffic_pattern "${TRAFFIC_PATTERN:-conservative}")"
   [ "$level" = "off" ] && return 0
   mita_supports_traffic_pattern || return 0
   seed="${TRAFFIC_SEED:-0}"
+  if mita_supports_low_entropy; then
+    low_entropy_section="${ind}  \"lowEntropy\": { \"mode\": \"$(normalize_low_entropy_mode "${LOW_ENTROPY_MODE:-LOW_ENTROPY_MODE_OFF}")\" },
+"
+  fi
   if [ "$level" = "aggressive" ]; then
     cat <<EOF
 ${ind}"trafficPattern": {
 ${ind}  "seed": ${seed},
 ${ind}  "unlockAll": true,
-${ind}  "tcpFragment": { "enable": true, "maxSleepMs": 8 },
+${low_entropy_section}${ind}  "tcpFragment": { "enable": true, "maxSleepMs": 8 },
 ${ind}  "nonce": { "type": "NONCE_TYPE_PRINTABLE", "applyToAllUDPPacket": true, "minLen": 6, "maxLen": 12 },
 ${ind}  "padding": { "maxMiddlePaddingLen": 64, "maxEndPaddingLen": 255 }
 ${ind}}
@@ -4085,30 +4599,11 @@ EOF
 ${ind}"trafficPattern": {
 ${ind}  "seed": ${seed},
 ${ind}  "unlockAll": false,
-${ind}  "nonce": { "type": "NONCE_TYPE_PRINTABLE", "applyToAllUDPPacket": true, "minLen": 4, "maxLen": 8 },
+${low_entropy_section}${ind}  "nonce": { "type": "NONCE_TYPE_PRINTABLE", "applyToAllUDPPacket": true, "minLen": 4, "maxLen": 8 },
 ${ind}  "padding": { "maxMiddlePaddingLen": 0, "maxEndPaddingLen": 128 }
 ${ind}}
 EOF
   fi
-}
-
-# 去掉 trafficPattern 字段后另存一份（mita 过旧时降级应用）；成功打印新路径
-strip_traffic_pattern() {
-  local src="$1" out
-  command -v python3 >/dev/null 2>&1 || return 1
-  out="$(mktemp_file .json)"
-  if python3 - "$src" "$out" <<'PY' 2>/dev/null
-import json, sys
-d = json.load(open(sys.argv[1]))
-d.pop("trafficPattern", None)
-json.dump(d, open(sys.argv[2], "w"), indent=2)
-PY
-  then
-    printf '%s' "$out"
-    return 0
-  fi
-  rm -f "$out" 2>/dev/null || true
-  return 1
 }
 
 write_server_config() {
@@ -4117,8 +4612,10 @@ write_server_config() {
     write_server_config_multi
     return
   fi
-  local cfg bindings="" proto pp tp tp_section=""
+  local cfg bindings="" proto pp tp tp_section="" user_json password_json
   cfg="$(mktemp_file .json)"
+  user_json="$(json_string "$USERNAME")"
+  password_json="$(json_string "$PASSWORD")"
   while IFS= read -r pp; do
     proto="${pp%%|*}"
     local p="${pp#*|}"
@@ -4158,8 +4655,8 @@ ${bindings}
   ],
   "users": [
     {
-      "name": "${USERNAME}",
-      "password": "${PASSWORD}"
+      "name": ${user_json},
+      "password": ${password_json}
     }
   ],
   "loggingLevel": "INFO",
@@ -4221,38 +4718,34 @@ ensure_mita_daemon() {
 apply_config() {
   local cfg="$1"
   STAGE="应用配置"
-  local bin attempt
+  local bin err_file i=0
   bin="$(mita_bin)"
+  err_file="$(mktemp_file .log)"
   ensure_mita_daemon
   if ! wait_mita_socket 45; then
     warn "$(t 'mita 管理进程未就绪，正在重试 apply config...' \
       'mita management daemon not ready, retrying apply config...')"
     mita_log_tail
   fi
-  for attempt in 1 2 3 4 5; do
-    if "$bin" apply config "$cfg" 2>/dev/null; then
-      rm -f "$cfg"
+  while [ "$i" -lt 5 ]; do
+    : >"$err_file"
+    if "$bin" apply config "$cfg" 2>"$err_file"; then
+      rm -f "$cfg" "$err_file"
       return 0
     fi
+    i=$((i + 1))
     ensure_mita_daemon
     wait_mita_socket 10 || true
     sleep 2
   done
-  # 兜底：若配置含 trafficPattern 且仍失败，可能是 mita 版本过旧不识别该字段，
-  # 自动去掉 trafficPattern 后降级应用其余配置，避免整装失败。
-  if grep -q '"trafficPattern"' "$cfg" 2>/dev/null; then
-    local stripped
-    stripped="$(strip_traffic_pattern "$cfg" || true)"
-    if [ -n "$stripped" ] && "$bin" apply config "$stripped" 2>/dev/null; then
-      warn "$(t '当前 mita 不支持流量伪装(trafficPattern)，已忽略该设置并应用其余配置；如需启用请升级 mita(选 3)。' \
-        'This mita build does not support trafficPattern; applied config without it. Upgrade mita (option 3) to enable.')"
-      rm -f "$cfg" "$stripped"
-      return 0
-    fi
-    rm -f "$stripped" 2>/dev/null || true
+  if [ -s "$err_file" ]; then
+    warn "$(t 'mita apply 最后一次错误:' 'Last mita apply error:')"
+    tail -n 8 "$err_file" >&2 || true
   fi
-  "$bin" apply config "$cfg" || die "$(t '应用配置失败' 'Failed to apply config')"
-  rm -f "$cfg"
+  rm -f "$cfg" "$err_file"
+  warn "$(t '应用配置失败；原配置未被脚本降级或删改' \
+    'Failed to apply config; the script did not downgrade or remove any fields')"
+  return 1
 }
 
 collect_ports_from_mita() {
@@ -4311,19 +4804,36 @@ except Exception:
 for binding in data.get("portBindings", []):
     proto = binding.get("protocol", "TCP")
     if "port" in binding:
-        print(f"{proto}|{binding['port']}")
+        print("{}|{}".format(proto, binding.get("port")))
     elif binding.get("portRange"):
-        print(f"{proto}|{binding['portRange']}")
+        print("{}|{}".format(proto, binding.get("portRange")))
 ' 2>/dev/null || true
     return 0
   fi
-  local line proto p
-  while IFS= read -r line; do
-    proto="$(printf '%s' "$line" | sed -n 's/.*"protocol"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
-    p="$(printf '%s' "$line" | sed -n 's/.*"port"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p')"
-    [ -z "$p" ] && p="$(printf '%s' "$line" | sed -n 's/.*"portRange"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
-    [ -n "$proto" ] && [ -n "$p" ] && printf '%s|%s\n' "$proto" "$p"
-  done < <(printf '%s' "$desc" | grep -E '"port"|"portRange"|"protocol"')
+  printf '%s\n' "$desc" | awk '
+    /"protocol"[[:space:]]*:/ {
+      value=$0
+      sub(/^.*"protocol"[[:space:]]*:[[:space:]]*"/, "", value)
+      sub(/".*$/, "", value)
+      proto=value
+    }
+    /"portRange"[[:space:]]*:/ {
+      value=$0
+      sub(/^.*"portRange"[[:space:]]*:[[:space:]]*"/, "", value)
+      sub(/".*$/, "", value)
+      port=value
+    }
+    /"port"[[:space:]]*:/ {
+      value=$0
+      sub(/^.*"port"[[:space:]]*:[[:space:]]*/, "", value)
+      sub(/[^0-9].*$/, "", value)
+      port=value
+    }
+    /}/ {
+      if (proto != "" && port != "") print proto "|" port
+      proto=""; port=""
+    }
+  '
 }
 
 close_firewall_for_bindings() {
@@ -4505,15 +5015,62 @@ cloud_firewall_hint() {
     "[Cloud SG] Allow in provider firewall: ${spec}"
 }
 
+valid_ip_literal() {
+  local value="${1:-}" a b c d extra colons segment remainder
+  local -a parts=()
+  [ -n "$value" ] || return 1
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import ipaddress,sys; ipaddress.ip_address(sys.argv[1])' "$value" 2>/dev/null
+    return $?
+  fi
+  if [[ "$value" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    IFS=. read -r a b c d extra <<< "$value"
+    [ -z "${extra:-}" ] || return 1
+    for segment in "$a" "$b" "$c" "$d"; do
+      [[ "$segment" =~ ^[0-9]{1,3}$ ]] && [ "$segment" -le 255 ] || return 1
+    done
+    return 0
+  fi
+  [[ "$value" == *:* ]] || return 1
+  [[ "$value" =~ ^[0-9A-Fa-f:]+$ ]] || return 1
+  [[ "$value" != *:::* ]] || return 1
+  colons="${value//[^:]/}"
+  [ "${#colons}" -ge 2 ] && [ "${#colons}" -le 7 ] || return 1
+  if [[ "$value" == *::* ]]; then
+    remainder="${value#*::}"
+    [[ "$remainder" != *::* ]] || return 1
+  else
+    [ "${#colons}" -eq 7 ] || return 1
+  fi
+  IFS=: read -r -a parts <<< "$value"
+  for segment in "${parts[@]}"; do
+    [ "${#segment}" -le 4 ] || return 1
+  done
+  return 0
+}
+
 public_ip() {
-  curl -fsSL --connect-timeout 5 --max-time 10 https://checkip.amazonaws.com 2>/dev/null \
-    || curl -fsSL --connect-timeout 5 --max-time 10 https://api.ip.sb/ip 2>/dev/null \
-    || hostname -I 2>/dev/null | awk '{print $1}'
+  local candidate=""
+  candidate="$(curl -fsSL --connect-timeout 5 --max-time 10 https://checkip.amazonaws.com 2>/dev/null \
+    | head -n1 | tr -d '[:space:]' || true)"
+  if valid_ip_literal "$candidate"; then
+    printf '%s' "$candidate"
+    return 0
+  fi
+  candidate="$(curl -fsSL --connect-timeout 5 --max-time 10 https://api.ip.sb/ip 2>/dev/null \
+    | head -n1 | tr -d '[:space:]' || true)"
+  if valid_ip_literal "$candidate"; then
+    printf '%s' "$candidate"
+    return 0
+  fi
+  candidate="$(hostname -I 2>/dev/null | awk '{print $1}' | tr -d '[:space:]' || true)"
+  valid_ip_literal "$candidate" || return 1
+  printf '%s' "$candidate"
 }
 
 start_mita() {
   STAGE="启动服务"
-  local sm bin attempt
+  local sm bin _attempt
   sm="$(service_manager)"
   bin="$(mita_bin)"
   if wait_mita_socket 1; then
@@ -4526,7 +5083,7 @@ start_mita() {
       'mita management socket not ready, retrying start...')"
     mita_log_tail
   fi
-  for attempt in 1 2 3 4 5; do
+  for _attempt in 1 2 3 4 5; do
     if "$bin" start 2>/dev/null; then
       sleep 1
       return 0
@@ -4537,13 +5094,14 @@ start_mita() {
   done
   warn "$(t "mita start 未成功，请手动执行: $(mita_restart_hint) && mita start" \
     "mita start failed; run: $(mita_restart_hint) && mita start")"
+  return 1
 }
 
 verify_mita_running() {
   STAGE="验证服务状态"
-  local bin status_out attempt
+  local bin status_out _attempt
   bin="$(mita_bin)"
-  for attempt in 1 2 3 4 5; do
+  for _attempt in 1 2 3 4 5; do
     sleep 2
     status_out="$("$bin" status 2>/dev/null || true)"
     if printf '%s' "$status_out" | grep -q 'status is "RUNNING"'; then
@@ -4557,7 +5115,7 @@ verify_mita_running() {
   warn "$(t "mita 未处于 RUNNING 状态，请执行: $(mita_restart_hint) && mita status && mita start" \
     "mita is not RUNNING; run: $(mita_restart_hint) && mita status && mita start")"
   [ -n "$status_out" ] && msg "$status_out"
-  return 0
+  return 1
 }
 
 add_op_user() {
@@ -4608,6 +5166,15 @@ urlencode() {
     'python3 required to encode special characters in share link')"
 }
 
+url_host() {
+  local host="$1"
+  if [[ "$host" == *:* ]] && [[ "$host" != \[*\] ]]; then
+    printf '[%s]' "$host"
+  else
+    printf '%s' "$host"
+  fi
+}
+
 export_traffic_pattern_value() {
   local bin value
   [ "$(normalize_traffic_pattern "${TRAFFIC_PATTERN:-conservative}")" != "off" ] || return 0
@@ -4624,30 +5191,26 @@ export_traffic_pattern_value() {
 generate_share_link_for() {
   local ip="$1"
   local proto="$2"
-  local enc_user enc_pass p host query port_q="" tp enc_tp=""
+  local enc_user enc_pass p host query tp enc_tp=""
   enc_user="$(urlencode "$USERNAME")"
   enc_pass="$(urlencode "$PASSWORD")"
   p="$(port_for_protocol "$proto")"
-  # 单端口：只写在 authority（@ip:port），query 不再重复 port=
-  # 端口段：authority 仅 IP，query 用 port=range（官方 simple 链接约定）
-  # BOTH 时 print_protocol_outputs 会为 TCP/UDP 各生成一条链接，每条仍只有一个端口
-  if [ -n "$PORT" ]; then
-    host="${ip}:${p}"
-  else
-    host="$ip"
-    port_q="&port=${p}"
-  fi
+  # 官方 simple URL 始终要求 port/protocol 在 query 中成对出现。
+  host="$(url_host "$ip")"
   tp="$(export_traffic_pattern_value)"
   [ -n "$tp" ] && enc_tp="&traffic-pattern=$(urlencode "$tp")"
-  query="handshake-mode=${HANDSHAKE_MODE}&mtu=${MTU}&multiplexing=${MULTIPLEXING}${port_q}&profile=default&protocol=${proto}${enc_tp}"
+  query="handshake-mode=${HANDSHAKE_MODE}&mtu=${MTU}&multiplexing=${MULTIPLEXING}&port=$(urlencode "$p")&profile=default&protocol=${proto}${enc_tp}"
   printf 'mierus://%s:%s@%s?%s' "$enc_user" "$enc_pass" "$host" "$query"
 }
 
 build_client_json_for() {
   local ip="$1"
   local proto="$2"
-  local p binding tp tp_section=""
+  local p binding tp tp_section="" user_json password_json ip_json
   p="$(port_for_protocol "$proto")"
+  user_json="$(json_string "$USERNAME")"
+  password_json="$(json_string "$PASSWORD")"
+  ip_json="$(json_string "$ip")"
   ensure_traffic_seed
   tp="$(traffic_pattern_json '      ')"
   [ -n "$tp" ] && tp_section=",
@@ -4675,12 +5238,12 @@ EOB
     {
       "profileName": "default",
       "user": {
-        "name": "${USERNAME}",
-        "password": "${PASSWORD}"
+        "name": ${user_json},
+        "password": ${password_json}
       },
       "servers": [
         {
-          "ipAddress": "${ip}",
+          "ipAddress": ${ip_json},
           "domainName": "",
           "portBindings": [
 ${binding}
@@ -4708,9 +5271,12 @@ EOF
 build_clash_yaml_entry() {
   local ip="$1"
   local proto="$2"
-  local p port_lines name_suffix tp tp_line=""
+  local p port_lines name_suffix tp tp_line="" server_yaml user_yaml password_yaml
   p="$(port_for_protocol "$proto")"
   name_suffix="$(proto_lower "$proto")"
+  server_yaml="$(json_string "$ip")"
+  user_yaml="$(json_string "$USERNAME")"
+  password_yaml="$(json_string "$PASSWORD")"
   tp="$(export_traffic_pattern_value)"
   [ -n "$tp" ] && tp_line="
     traffic-pattern: \"${tp}\""
@@ -4722,12 +5288,12 @@ build_clash_yaml_entry() {
   cat <<EOF
   - name: mieru-mita-${name_suffix}
     type: mieru
-    server: ${ip}
+    server: ${server_yaml}
 ${port_lines}
     transport: ${proto}
     udp: true
-    username: ${USERNAME}
-    password: ${PASSWORD}
+    username: ${user_yaml}
+    password: ${password_yaml}
     multiplexing: ${MULTIPLEXING}
     handshake-mode: ${HANDSHAKE_MODE}${tp_line}
 EOF
@@ -4819,6 +5385,7 @@ print_summary() {
   t "  密码:   ${PASSWORD}" "  Password: ${PASSWORD}"
   t "  协议:   $(protocol_label)" "  Protocol: $(protocol_label)"
   t "  流量伪装: $(traffic_label)" "  Obfuscation: $(traffic_label)"
+  t "  低熵模式: $(low_entropy_label)" "  Low entropy: $(low_entropy_label)"
   t "  多路复用: ${MULTIPLEXING}" "  Multiplexing: ${MULTIPLEXING}"
   t "  握手模式: ${HANDSHAKE_MODE}" "  Handshake: ${HANDSHAKE_MODE}"
   if [ -n "$PORT" ]; then
@@ -4920,6 +5487,7 @@ do_install() {
 
   add_op_user "$OP_USER"
   warn_traffic_unsupported
+  warn_low_entropy_unsupported
   cfg="$(write_server_config)"
   apply_config "$cfg"
   open_firewall
@@ -4944,7 +5512,7 @@ do_reconfigure() {
   require_linux
   mita_installed || die "$(t 'mita 未安装，请先执行安装' 'mita is not installed; run install first')"
 
-  local old_bindings desc bin cfg
+  local old_bindings desc bin cfg tx
   bin="$(mita_bin)"
   desc="$("$bin" describe config 2>/dev/null || true)"
   old_bindings="$(extract_bindings_from_describe "$desc")"
@@ -4960,11 +5528,13 @@ do_reconfigure() {
   wait_mita_socket 30 || true
   close_firewall_for_bindings "$old_bindings"
   warn_traffic_unsupported
+  warn_low_entropy_unsupported
   # 多用户：协议全局更新；仅当用户显式改了主用户名/密码/端口时同步「主用户」
   # 主用户 = install-state 中的 USERNAME，找不到则 users[0]
   if users_state_exists && [ "$(users_count)" -gt 0 ]; then
     MULTI_USER_MODE=1
-    admin_lock_acquire
+    admin_lock_acquire || return 1
+    tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
     _U_NAME="$USERNAME" _U_PASS="$PASSWORD" _U_PORT="$PORT" _U_PROTO="$PROTOCOL"
     _U_PRIMARY="${USERNAME}"
     users_py_locked '
@@ -5004,6 +5574,7 @@ d["protocol"] = proto
 json.dump(d, open(path, "w"), indent=2)
 ' || {
       local prc=$?
+      users_tx_rollback "$tx" 0
       admin_lock_release
       if [ "$prc" -eq 2 ]; then
         die "$(t '新用户名与其它用户冲突' 'New username conflicts with another user')"
@@ -5013,10 +5584,11 @@ json.dump(d, open(path, "w"), indent=2)
       die "$(t '更新多用户状态失败' 'Failed to update multi-user state')"
     }
     # 协议变更时所有用户 portBindings 随 PROTOCOL 重建；端口仅主用户可能变
-    if ! apply_users_config; then
+    if ! apply_users_config "$tx"; then
       admin_lock_release
       return 1
     fi
+    users_tx_commit "$tx"
     open_firewall
     start_mita
     verify_mita_running
