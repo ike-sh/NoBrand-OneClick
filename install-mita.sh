@@ -4,7 +4,7 @@
 # 基于 https://github.com/enfein/mieru
 set -euo pipefail
 
-SCRIPT_VERSION="1.9.1"
+SCRIPT_VERSION="1.9.2"
 SCRIPT_AUTHOR="ike"
 SCRIPT_REPO="ike-sh/mieru-OneClick"
 UPSTREAM_REPO="enfein/mieru"
@@ -4500,16 +4500,20 @@ urlencode() {
 generate_share_link_for() {
   local ip="$1"
   local proto="$2"
-  local enc_user enc_pass p host query
+  local enc_user enc_pass p host query port_q=""
   enc_user="$(urlencode "$USERNAME")"
   enc_pass="$(urlencode "$PASSWORD")"
   p="$(port_for_protocol "$proto")"
-  query="handshake-mode=HANDSHAKE_STANDARD&mtu=${MTU}&multiplexing=${MULTIPLEXING}&port=${p}&profile=default&protocol=${proto}"
+  # 单端口：只写在 authority（@ip:port），query 不再重复 port=
+  # 端口段：authority 仅 IP，query 用 port=range（官方 simple 链接约定）
+  # BOTH 时 print_protocol_outputs 会为 TCP/UDP 各生成一条链接，每条仍只有一个端口
   if [ -n "$PORT" ]; then
     host="${ip}:${p}"
   else
     host="$ip"
+    port_q="&port=${p}"
   fi
+  query="handshake-mode=HANDSHAKE_STANDARD&mtu=${MTU}&multiplexing=${MULTIPLEXING}${port_q}&profile=default&protocol=${proto}"
   printf 'mierus://%s:%s@%s?%s' "$enc_user" "$enc_pass" "$host" "$query"
 }
 
