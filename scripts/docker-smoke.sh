@@ -2,7 +2,7 @@
 # 本地/CI：Docker 冒烟（需本机已装 docker）
 # 用法: bash scripts/docker-smoke.sh
 set -euo pipefail
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/.." && { pwd -W 2>/dev/null || pwd; })"
 docker run --rm --cap-add=NET_ADMIN -v "$ROOT:/work:ro" debian:bookworm-slim bash -c '
 set -e
 apt-get update -qq >/dev/null
@@ -23,11 +23,24 @@ port_is_listening(){ return 1; }; mita_supports_traffic_pattern(){ return 1; }
 install_users_scheduler(){ install_logrotate_config; harden_mita_permissions; }
 service_manager(){ echo none; }; ensure_mita_daemon(){ :; }; wait_mita_socket(){ :; }
 print_protocol_outputs(){ :; }; build_clash_yaml_full(){ echo proxies:; }
-build_client_json_for(){ echo "{\"u\":\"$USERNAME\"}"; }
-generate_share_link_for(){ echo link; }; protocols_for_mode(){ echo TCP; }
+protocols_for_mode(){ echo TCP; }
 proto_lower(){ echo tcp; }
 USERNAME=alice PASSWORD=a PORT=26000 PROTOCOL=TCP TRAFFIC_PATTERN=off
 MULTI_USER_MODE=0 DRY_RUN=0 YES=1 LANG_ZH=1 MENU_MODE=1
+test "$(normalize_multiplexing off)" = "MULTIPLEXING_OFF"
+test "$(normalize_multiplexing high)" = "MULTIPLEXING_HIGH"
+test "$(normalize_handshake_mode no-wait)" = "HANDSHAKE_NO_WAIT"
+test "$(normalize_handshake_mode standard)" = "HANDSHAKE_STANDARD"
+MULTIPLEXING=MULTIPLEXING_OFF HANDSHAKE_MODE=HANDSHAKE_NO_WAIT
+link=$(generate_share_link_for 1.2.3.4 TCP)
+echo "$link" | grep -q "multiplexing=MULTIPLEXING_OFF"
+echo "$link" | grep -q "handshake-mode=HANDSHAKE_NO_WAIT"
+json=$(build_client_json_for 1.2.3.4 TCP)
+echo "$json" | grep -q "\"level\": \"MULTIPLEXING_OFF\""
+echo "$json" | grep -q "\"handshakeMode\": \"HANDSHAKE_NO_WAIT\""
+export_traffic_pattern_value(){ echo "CCoQARoECAEQCg=="; }
+link=$(generate_share_link_for 1.2.3.4 TCP)
+echo "$link" | grep -q "traffic-pattern=CCoQARoECAEQCg%3D%3D"
 users_migrate_from_primary
 USER_QUOTA_MODE=calendar USER_QUOTA_MB=1024 USER_BANDWIDTH_MBPS=10 USER_PACKAGE=custom
 users_add bob b 26005 >/dev/null

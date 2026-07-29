@@ -32,6 +32,13 @@ apk add --no-cache bash curl && \
 5. 安装完成**同时输出** `mierus://` 节点链接、客户端 JSON、**Clash/mihomo 片段**及连接信息摘要
 6. 下载包 **SHA256 校验**；提示云安全组放行端口
 
+### v1.9.4 客户端模式与分享配置
+
+- 安装和重新配置时可选择 multiplexing 与 handshake mode；推荐默认值为 `MULTIPLEXING_OFF` / `HANDSHAKE_NO_WAIT`
+- `traffic-pattern` 可明确选择加入或不加入；加入后可选择保守或激进模式
+- `mierus://` 分享链接、客户端 JSON 与 Clash/mihomo 片段同步输出所选客户端模式和 `traffic-pattern`
+- Docker 冒烟测试增加客户端模式、分享链接与 Windows Git Bash 挂载兼容性验证
+
 ### v1.9.1 二次审计修复
 
 - reconfigure 主用户：`_U_PRIMARY` 正确传入（按 install-state 用户名定位）

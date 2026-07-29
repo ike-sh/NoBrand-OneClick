@@ -4,7 +4,7 @@
 # 基于 https://github.com/enfein/mieru
 set -euo pipefail
 
-SCRIPT_VERSION="1.9.2"
+SCRIPT_VERSION="1.9.4"
 SCRIPT_AUTHOR="ike"
 SCRIPT_REPO="ike-sh/mieru-OneClick"
 UPSTREAM_REPO="enfein/mieru"
@@ -54,7 +54,10 @@ USERNAME=""
 PASSWORD=""
 OP_USER=""
 MTU=1400
-MULTIPLEXING="MULTIPLEXING_LOW"
+MULTIPLEXING="MULTIPLEXING_OFF"
+HANDSHAKE_MODE="HANDSHAKE_NO_WAIT"
+MULTIPLEXING_CLI=0
+HANDSHAKE_CLI=0
 TRAFFIC_PATTERN="conservative"
 TRAFFIC_SEED=""
 TRAFFIC_CLI=0
@@ -142,6 +145,8 @@ mieru mita 服务端一键安装 ${SCRIPT_VERSION}
   --port-range RANGE  监听端口段，如 9000-9010（单用户模式）
   --protocol TCP|UDP|BOTH  传输协议（默认 TCP；BOTH 时 UDP 使用 PORT+1）
   --traffic-pattern LV  流量伪装/抗 DPI：off|conservative|aggressive（默认 conservative）
+  --multiplexing MODE  多路复用：off|low|middle|high（默认 off）
+  --handshake-mode MODE 握手：no-wait|standard（默认 no-wait）
   --user NAME         代理用户名（安装主用户 / user-add）
   --password PASS     代理密码
   --package NAME      套餐：unlimited|trial|standard|custom（user-add）
@@ -358,6 +363,16 @@ while [ $# -gt 0 ]; do
     --traffic-pattern|--traffic)
       TRAFFIC_PATTERN="${2:-}"
       TRAFFIC_CLI=1
+      shift
+      ;;
+    --multiplexing)
+      MULTIPLEXING="${2:-}"
+      MULTIPLEXING_CLI=1
+      shift
+      ;;
+    --handshake-mode|--handshake)
+      HANDSHAKE_MODE="${2:-}"
+      HANDSHAKE_CLI=1
       shift
       ;;
     --user)
@@ -695,6 +710,8 @@ save_install_state() {
     _state_kv PASSWORD "$PASSWORD"
     _state_kv TRAFFIC_PATTERN "$TRAFFIC_PATTERN"
     _state_kv TRAFFIC_SEED "$TRAFFIC_SEED"
+    _state_kv MULTIPLEXING "$MULTIPLEXING"
+    _state_kv HANDSHAKE_MODE "$HANDSHAKE_MODE"
     _state_kv INSTALL_SCRIPT "$INSTALL_SCRIPT_PATH"
     printf 'INSTALL_METHOD=oneclick\n'
   } >"$MITA_STATE"
@@ -717,10 +734,14 @@ load_install_state() {
   PROTOCOL="TCP"
   [ -f "$MITA_STATE" ] || return 0
   local _cli_tp="$TRAFFIC_PATTERN"
+  local _cli_mux="$MULTIPLEXING"
+  local _cli_hs="$HANDSHAKE_MODE"
   # shellcheck disable=SC1090
   source "$MITA_STATE" 2>/dev/null || true
   # 命令行显式指定 --traffic-pattern 时优先，不被已保存状态覆盖
   [ "${TRAFFIC_CLI:-0}" -eq 1 ] && TRAFFIC_PATTERN="$_cli_tp"
+  [ "${MULTIPLEXING_CLI:-0}" -eq 1 ] && MULTIPLEXING="$_cli_mux"
+  [ "${HANDSHAKE_CLI:-0}" -eq 1 ] && HANDSHAKE_MODE="$_cli_hs"
 }
 
 install_self_script() {
@@ -3606,25 +3627,109 @@ choose_protocol_interactive() {
   esac
 }
 
+normalize_multiplexing() {
+  case "$(printf '%s' "${1:-}" | tr '[:lower:]' '[:upper:]')" in
+    OFF|0|NO|DISABLED|MULTIPLEXING_OFF) printf 'MULTIPLEXING_OFF' ;;
+    LOW|MULTIPLEXING_LOW) printf 'MULTIPLEXING_LOW' ;;
+    MIDDLE|MEDIUM|MULTIPLEXING_MIDDLE) printf 'MULTIPLEXING_MIDDLE' ;;
+    HIGH|MULTIPLEXING_HIGH) printf 'MULTIPLEXING_HIGH' ;;
+    *) return 1 ;;
+  esac
+}
+
+normalize_handshake_mode() {
+  case "$(printf '%s' "${1:-}" | tr '[:lower:]' '[:upper:]' | tr '-' '_')" in
+    NO_WAIT|NOWAIT|0RTT|HANDSHAKE_NO_WAIT) printf 'HANDSHAKE_NO_WAIT' ;;
+    STANDARD|WAIT|HANDSHAKE_STANDARD) printf 'HANDSHAKE_STANDARD' ;;
+    *) return 1 ;;
+  esac
+}
+
+choose_client_modes_interactive() {
+  local input="" def=1
+  if [ "${MULTIPLEXING_CLI:-0}" -ne 1 ]; then
+    case "$(normalize_multiplexing "${MULTIPLEXING:-MULTIPLEXING_OFF}" 2>/dev/null || true)" in
+      MULTIPLEXING_LOW) def=2 ;;
+      MULTIPLEXING_MIDDLE) def=3 ;;
+      MULTIPLEXING_HIGH) def=4 ;;
+      *) def=1 ;;
+    esac
+    msg ""
+    t '多路复用模式（默认推荐关闭）:' 'Multiplexing mode (OFF recommended by default):'
+    t '  1) MULTIPLEXING_OFF（推荐）' '  1) MULTIPLEXING_OFF (recommended)'
+    t '  2) MULTIPLEXING_LOW' '  2) MULTIPLEXING_LOW'
+    t '  3) MULTIPLEXING_MIDDLE' '  3) MULTIPLEXING_MIDDLE'
+    t '  4) MULTIPLEXING_HIGH' '  4) MULTIPLEXING_HIGH'
+    read_tty input "$(t "请选择 [1-4，默认 ${def}]: " "Choose [1-4, default ${def}]: ")" || input=""
+    input="${input:-$def}"
+    case "$input" in
+      2) MULTIPLEXING="MULTIPLEXING_LOW" ;;
+      3) MULTIPLEXING="MULTIPLEXING_MIDDLE" ;;
+      4) MULTIPLEXING="MULTIPLEXING_HIGH" ;;
+      *) MULTIPLEXING="MULTIPLEXING_OFF" ;;
+    esac
+  fi
+
+  input=""
+  def=1
+  if [ "${HANDSHAKE_CLI:-0}" -ne 1 ]; then
+    [ "$(normalize_handshake_mode "${HANDSHAKE_MODE:-HANDSHAKE_NO_WAIT}" 2>/dev/null || true)" = "HANDSHAKE_STANDARD" ] && def=2
+    msg ""
+    t '握手模式:' 'Handshake mode:'
+    t '  1) HANDSHAKE_NO_WAIT（推荐，0-RTT）' '  1) HANDSHAKE_NO_WAIT (recommended, 0-RTT)'
+    t '  2) HANDSHAKE_STANDARD' '  2) HANDSHAKE_STANDARD'
+    read_tty input "$(t "请选择 [1-2，默认 ${def}]: " "Choose [1-2, default ${def}]: ")" || input=""
+    input="${input:-$def}"
+    case "$input" in
+      2) HANDSHAKE_MODE="HANDSHAKE_STANDARD" ;;
+      *) HANDSHAKE_MODE="HANDSHAKE_NO_WAIT" ;;
+    esac
+  fi
+
+  msg ""
+  t "客户端模式: ${MULTIPLEXING} / ${HANDSHAKE_MODE}" \
+    "Client modes: ${MULTIPLEXING} / ${HANDSHAKE_MODE}"
+}
+
 choose_traffic_pattern_interactive() {
   [ "${TRAFFIC_CLI:-0}" -eq 1 ] && return 0
-  local cur def input=""
+  local cur def input="" enable_default="y"
   cur="$(normalize_traffic_pattern "${TRAFFIC_PATTERN:-conservative}")"
-  case "$cur" in off) def=1 ;; aggressive) def=3 ;; *) def=2 ;; esac
+  [ "$cur" = "off" ] && enable_default="n"
   msg ""
-  t '流量伪装 / 抗 DPI（客户端无需与服务端一致）:' \
-    'Traffic obfuscation / anti-DPI (client need not match server):'
-  t '  1) 关闭 —— 仅 mita 内置隐式默认' \
-    '  1) Off — mita built-in implicit only'
-  t '  2) 保守 —— 可打印 Nonce + 末尾填充，几乎不影响速度（推荐）' \
-    '  2) Conservative — printable nonce + end padding, near-zero overhead (recommended)'
-  t '  3) 激进 —— 再加 TCP 分片 + 全量填充，更隐蔽但增加延迟/降速' \
-    '  3) Aggressive — also TCP fragment + full padding, stealthier but slower'
-  read_tty input "$(t "请选择 [1-3，默认 ${def}]: " "Choose [1-3, default ${def}]: ")" || input=""
+  if [ "$enable_default" = "y" ]; then
+    read_tty input "$(t '是否加入 traffic-pattern 流量伪装？[Y/n]: ' \
+      'Include traffic-pattern obfuscation? [Y/n]: ')" || input=""
+    input="${input:-y}"
+  else
+    read_tty input "$(t '是否加入 traffic-pattern 流量伪装？[y/N]: ' \
+      'Include traffic-pattern obfuscation? [y/N]: ')" || input=""
+    input="${input:-n}"
+  fi
+  case "$(printf '%s' "$input" | tr '[:upper:]' '[:lower:]')" in
+    y|yes|1|是) ;;
+    *)
+      TRAFFIC_PATTERN="off"
+      msg ""
+      t '已选择不加入 traffic-pattern' 'traffic-pattern will not be included'
+      return 0
+      ;;
+  esac
+
+  def=1
+  [ "$cur" = "aggressive" ] && def=2
+  msg ""
+  t 'traffic-pattern 模式（客户端无需与服务端一致）:' \
+    'traffic-pattern mode (client need not match server):'
+  t '  1) 保守 —— 可打印 Nonce + 末尾填充，几乎不影响速度（推荐）' \
+    '  1) Conservative — printable nonce + end padding, near-zero overhead (recommended)'
+  t '  2) 激进 —— 再加 TCP 分片 + 全量填充，更隐蔽但增加延迟/降速' \
+    '  2) Aggressive — also TCP fragment + full padding, stealthier but slower'
+  input=""
+  read_tty input "$(t "请选择 [1-2，默认 ${def}]: " "Choose [1-2, default ${def}]: ")" || input=""
   input="${input:-$def}"
   case "$input" in
-    1) TRAFFIC_PATTERN="off" ;;
-    3) TRAFFIC_PATTERN="aggressive" ;;
+    2) TRAFFIC_PATTERN="aggressive" ;;
     *) TRAFFIC_PATTERN="conservative" ;;
   esac
   msg ""
@@ -3678,6 +3783,7 @@ collect_config_interactive() {
   fi
   msg ""
   t "已选协议: $(protocol_label)" "Selected protocol: $(protocol_label)"
+  choose_client_modes_interactive
   choose_traffic_pattern_interactive
   ensure_traffic_seed
 }
@@ -3861,6 +3967,7 @@ collect_reconfigure_interactive() {
   if [ "$PROTOCOL" = "BOTH" ] && [ -n "$PORT" ] && [ "$PORT" -ge 65535 ]; then
     die "$(t '双协议需要主端口 ≤65534' 'Dual protocol needs main port ≤65534')"
   fi
+  choose_client_modes_interactive
   choose_traffic_pattern_interactive
   ensure_traffic_seed
   msg ""
@@ -3901,6 +4008,10 @@ ensure_config_noninteractive() {
     die "$(t '双协议需要主端口 ≤65534' 'Dual protocol needs main port ≤65534')"
   fi
   TRAFFIC_PATTERN="$(normalize_traffic_pattern "$TRAFFIC_PATTERN")"
+  MULTIPLEXING="$(normalize_multiplexing "$MULTIPLEXING")" || \
+    die "$(t '非法 multiplexing 模式' 'Invalid multiplexing mode')"
+  HANDSHAKE_MODE="$(normalize_handshake_mode "$HANDSHAKE_MODE")" || \
+    die "$(t '非法 handshake mode' 'Invalid handshake mode')"
   ensure_traffic_seed
 }
 
@@ -4497,10 +4608,23 @@ urlencode() {
     'python3 required to encode special characters in share link')"
 }
 
+export_traffic_pattern_value() {
+  local bin value
+  [ "$(normalize_traffic_pattern "${TRAFFIC_PATTERN:-conservative}")" != "off" ] || return 0
+  mita_supports_traffic_pattern || return 0
+  bin="$(mita_bin)"
+  [ -x "$bin" ] || return 0
+  value="$("$bin" export traffic-pattern 2>/dev/null | tr -d '\r\n' || true)"
+  case "$value" in
+    ''|*[!A-Za-z0-9+/=]*) return 0 ;;
+  esac
+  printf '%s' "$value"
+}
+
 generate_share_link_for() {
   local ip="$1"
   local proto="$2"
-  local enc_user enc_pass p host query port_q=""
+  local enc_user enc_pass p host query port_q="" tp enc_tp=""
   enc_user="$(urlencode "$USERNAME")"
   enc_pass="$(urlencode "$PASSWORD")"
   p="$(port_for_protocol "$proto")"
@@ -4513,7 +4637,9 @@ generate_share_link_for() {
     host="$ip"
     port_q="&port=${p}"
   fi
-  query="handshake-mode=HANDSHAKE_STANDARD&mtu=${MTU}&multiplexing=${MULTIPLEXING}${port_q}&profile=default&protocol=${proto}"
+  tp="$(export_traffic_pattern_value)"
+  [ -n "$tp" ] && enc_tp="&traffic-pattern=$(urlencode "$tp")"
+  query="handshake-mode=${HANDSHAKE_MODE}&mtu=${MTU}&multiplexing=${MULTIPLEXING}${port_q}&profile=default&protocol=${proto}${enc_tp}"
   printf 'mierus://%s:%s@%s?%s' "$enc_user" "$enc_pass" "$host" "$query"
 }
 
@@ -4565,7 +4691,7 @@ ${binding}
       "multiplexing": {
         "level": "${MULTIPLEXING}"
       },
-      "handshakeMode": "HANDSHAKE_STANDARD"${tp_section}
+      "handshakeMode": "${HANDSHAKE_MODE}"${tp_section}
     }
   ],
   "activeProfile": "default",
@@ -4582,9 +4708,12 @@ EOF
 build_clash_yaml_entry() {
   local ip="$1"
   local proto="$2"
-  local p port_lines name_suffix
+  local p port_lines name_suffix tp tp_line=""
   p="$(port_for_protocol "$proto")"
   name_suffix="$(proto_lower "$proto")"
+  tp="$(export_traffic_pattern_value)"
+  [ -n "$tp" ] && tp_line="
+    traffic-pattern: \"${tp}\""
   if [ -n "$PORT" ]; then
     port_lines="    port: ${p}"
   else
@@ -4600,6 +4729,7 @@ ${port_lines}
     username: ${USERNAME}
     password: ${PASSWORD}
     multiplexing: ${MULTIPLEXING}
+    handshake-mode: ${HANDSHAKE_MODE}${tp_line}
 EOF
 }
 
@@ -4689,6 +4819,8 @@ print_summary() {
   t "  密码:   ${PASSWORD}" "  Password: ${PASSWORD}"
   t "  协议:   $(protocol_label)" "  Protocol: $(protocol_label)"
   t "  流量伪装: $(traffic_label)" "  Obfuscation: $(traffic_label)"
+  t "  多路复用: ${MULTIPLEXING}" "  Multiplexing: ${MULTIPLEXING}"
+  t "  握手模式: ${HANDSHAKE_MODE}" "  Handshake: ${HANDSHAKE_MODE}"
   if [ -n "$PORT" ]; then
     if [ "$PROTOCOL" = "BOTH" ]; then
       t "  端口:   TCP ${PORT} / UDP $((PORT + 1))" "  Ports:    TCP ${PORT} / UDP $((PORT + 1))"
