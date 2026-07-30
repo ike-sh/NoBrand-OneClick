@@ -5,7 +5,7 @@
 set -euo pipefail
 umask 077
 
-SCRIPT_VERSION="2.0.1"
+SCRIPT_VERSION="2.0.2"
 SCRIPT_AUTHOR="ike"
 SCRIPT_REPO="ike-sh/mieru-OneClick"
 UPSTREAM_REPO="enfein/mieru"
@@ -52,6 +52,7 @@ USER_PORT_POOL_END="${USER_PORT_POOL_END:-}"
 ACTION=""
 MENU_MODE=0
 MENU_SCRIPTS_READY=0
+UNINSTALL_CANCELLED=0
 MITA_REINSTALL_TRIED=0
 YES=0
 DRY_RUN=0
@@ -1192,44 +1193,9 @@ esac
 exec "$IM" "$@"
 EOF
   run chmod 0755 "$MITA_MENU_PATH"
-  cat >"$MITA_PROFILE_D" <<'EOF'
-# mieru-OneClick：登录 shell 下 mita 管理子命令不区分大小写
-mita() {
-  local im="/usr/local/bin/install-mita"
-  local real="" c
-  for c in /usr/local/bin/mita-real /usr/bin/mita; do
-    if [ -x "$c" ] && [ "$(head -c 4 "$c" 2>/dev/null || true)" = $'\x7fELF' ]; then
-      real="$c"
-      break
-    fi
-  done
-  if [ ! -x "$im" ]; then
-    [ -n "$real" ] && command "$real" "$@"
-    return $?
-  fi
-  if [ $# -eq 0 ]; then
-    "$im"
-    return $?
-  fi
-  local cmd
-  cmd="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
-  case "$cmd" in
-    menu|install|upgrade|uninstall|status|reconfigure|client-config|show|mtu|mtu-config|set-mtu|start|stop|restart|配置|节点|help|\
-    users|user-list|user-add|user-del|user-delete|user-show|user-manage|\
-    user-set-quota|user-set-expire|user-enable|user-disable|user-scan|user-quota-reset|\
-    user-set-rate|user-set-bandwidth|rate-status|rate-restore|tc-status|tc-restore|\
-    user-usage|usage|user-export-clients|user-backup|user-restore|user-export|user-import|\
-    doctor|verify)
-      shift
-      "$im" "$cmd" "$@"
-      ;;
-    *)
-      [ -n "$real" ] && command "$real" "$@"
-      ;;
-  esac
-}
-EOF
-  run chmod 0644 "$MITA_PROFILE_D"
+  # /usr/local/bin/mita 包装器已完整处理菜单及大小写；profile 函数既重复，
+  # 又会在卸载后残留于当前父 shell，故升级时一并移除旧实现。
+  run rm -f "$MITA_PROFILE_D"
 }
 
 remove_mita_shortcuts() {
@@ -2535,7 +2501,7 @@ isolated_stop_all() {
         [ -d "$id" ] || continue
         basename "$id"
       done
-    } | grep -E '^u[0-9a-f]{16}$' | LC_ALL=C sort -u
+    } | grep -E '^u[0-9a-f]{16}$' | LC_ALL=C sort -u || true
   )
 }
 
@@ -6239,6 +6205,23 @@ firewall_owned_remove() {
   fi
 }
 
+iptables_remove_owned_rule() {
+  local ipt="$1" proto="$2" p="$3" key
+  key="${ipt}|${proto}|${p}"
+  firewall_owned_has "$key" || return 0
+  command -v "$ipt" >/dev/null 2>&1 || return 1
+  if "$ipt" -C INPUT -p "$proto" --dport "$p" -m comment \
+      --comment "$MITA_FIREWALL_COMMENT" -j ACCEPT 2>/dev/null; then
+    run "$ipt" -D INPUT -p "$proto" --dport "$p" -m comment \
+      --comment "$MITA_FIREWALL_COMMENT" -j ACCEPT 2>/dev/null || return 1
+  fi
+  if "$ipt" -C INPUT -p "$proto" --dport "$p" -m comment \
+      --comment "$MITA_FIREWALL_COMMENT" -j ACCEPT 2>/dev/null; then
+    return 1
+  fi
+  firewall_owned_remove "$key"
+}
+
 ufw_binding_exists() {
   local spec="$1"
   ufw show added 2>/dev/null | grep -Eq \
@@ -6310,21 +6293,32 @@ close_firewall_for_bindings() {
 }
 
 firewall_clear_all_owned() {
-  local snapshot tool proto p
+  local snapshot tool proto p failed=0
   [ -f "$MITA_FIREWALL_OWNED_STATE" ] || return 0
   snapshot="$(mktemp_file .firewall-owned)" || return 1
-  cp -f "$MITA_FIREWALL_OWNED_STATE" "$snapshot"
+  cp -f "$MITA_FIREWALL_OWNED_STATE" "$snapshot" || {
+    rm -f "$snapshot"
+    return 1
+  }
   while IFS='|' read -r tool proto p; do
     [ -n "$tool" ] && [ -n "$proto" ] && [ -n "$p" ] || continue
     case "$tool" in
-      ufw|firewalld) firewall_apply_binding "$tool" del "$proto" "$p" ;;
-      iptables|ip6tables) firewall_apply_binding iptables del "$proto" "$p" ;;
+      ufw|firewalld)
+        firewall_apply_binding "$tool" del "$proto" "$p" || failed=1
+        ;;
+      iptables|ip6tables)
+        iptables_remove_owned_rule "$tool" "$proto" "$p" || failed=1
+        ;;
+      *) failed=1 ;;
     esac
   done <"$snapshot"
   rm -f "$snapshot"
   command -v firewall-cmd >/dev/null 2>&1 \
     && run firewall-cmd --reload 2>/dev/null || true
-  persist_iptables_rules
+  persist_iptables_rules || failed=1
+  # 只有确认规则已不存在才删除所有权记录；残留记录代表清理未完成。
+  [ ! -s "$MITA_FIREWALL_OWNED_STATE" ] || failed=1
+  [ "$failed" -eq 0 ]
 }
 
 ufw_rule_spec() {
@@ -6364,9 +6358,7 @@ iptables_accept_port() {
             firewall_owned_add "$key"
           fi
         elif firewall_owned_has "$key"; then
-          run "$ipt" -D INPUT -p "$proto" --dport "$port" -m comment \
-            --comment "$MITA_FIREWALL_COMMENT" -j ACCEPT 2>/dev/null || true
-          firewall_owned_remove "$key"
+          iptables_remove_owned_rule "$ipt" "$proto" "$port" || return 1
         fi
         port=$((port + 1))
       done
@@ -6383,9 +6375,7 @@ iptables_accept_port() {
           firewall_owned_add "$key"
         fi
       elif firewall_owned_has "$key"; then
-        run "$ipt" -D INPUT -p "$proto" --dport "$p" -m comment \
-          --comment "$MITA_FIREWALL_COMMENT" -j ACCEPT 2>/dev/null || true
-        firewall_owned_remove "$key"
+        iptables_remove_owned_rule "$ipt" "$proto" "$p" || return 1
       fi
     fi
   done
@@ -7401,27 +7391,51 @@ do_upgrade() {
   t "已升级至 ${ver}" "Upgraded to ${ver}"
 }
 
-remove_mita_common() {
-  local bin
+mita_uninstall_target_present() {
+  mita_installed \
+    || installed_by_oneclick \
+    || [ -x "$INSTALL_SCRIPT_PATH" ] \
+    || is_mita_wrapper "$MITA_BIN" \
+    || [ -d /etc/mita ] \
+    || [ -e "$MITA_INSTANCE_SYSTEMD_TEMPLATE" ] \
+    || [ -e "$MITA_USERS_TIMER" ] \
+    || [ -e "$MITA_USERS_SERVICE" ]
+}
+
+stop_mita_for_uninstall() {
+  local bin sm
+  STAGE="停止 mita 服务"
   bin="$(mita_bin)"
   isolated_stop_all
   tc_clear_owned_filters 2>/dev/null || true
-  run "$bin" stop 2>/dev/null || true
-  case "$(service_manager)" in
+  [ -x "$bin" ] && run "$bin" stop 2>/dev/null || true
+  sm="$(service_manager)"
+  case "$sm" in
     systemd)
-      run systemctl stop mita 2>/dev/null || true
-      run systemctl disable mita 2>/dev/null || true
+      run systemctl disable --now mita.service 2>/dev/null || true
+      run systemctl disable --now mita-users-scan.timer mita-users-scan.service \
+        mita-tc-restore.service 2>/dev/null || true
       ;;
     openrc)
       run rc-service mita stop 2>/dev/null || true
       run rc-update del mita default 2>/dev/null || true
       ;;
   esac
+  command -v pkill >/dev/null 2>&1 && run pkill -x mita 2>/dev/null || true
+}
+
+remove_mita_common() {
+  STAGE="删除 mita 文件与账号"
   run rm -f /var/log/mita.log /var/log/mita.err /var/log/mita-oneclick-*.log /var/log/mita-oneclick-*.err
   run rm -f /root/mieru_client_*.json /root/mieru_client_tcp_*.json /root/mieru_client_udp_*.json 2>/dev/null || true
+  run rm -rf "$MITA_CLIENT_EXPORT_DIR"
   remove_users_scheduler 2>/dev/null || true
   run rm -f "$MITA_LOGROTATE_CONF" 2>/dev/null || true
-  run rm -rf /etc/mita /var/lib/mita /var/run/mita /var/run/mita.sock "$MITA_INSTANCE_RUN_DIR"
+  run rm -rf /etc/mita /var/lib/mita /run/mita /var/run/mita \
+    /var/run/mita.sock "$MITA_INSTANCES_DIR" "$MITA_INSTANCE_RUN_DIR" \
+    "$MITA_INSTANCE_METRICS_DIR" "$MITA_USERS_BACKUP_DIR"
+  run rm -f "$MITA_USERS_STATE" "$MITA_USERS_LOCK" "$MITA_ADMIN_LOCK" \
+    "$MITA_FIREWALL_OWNED_STATE" "$TC_OWNED_STATE" "$MITA_STATE"
   run rm -f "$MITA_BIN" "$MITA_REAL_BIN" /usr/bin/mita-real "$MITA_MARKER" "$OPENRC_SVC"
   run rm -f "$MITA_INSTANCE_SYSTEMD_TEMPLATE" "$MITA_INSTANCE_TMPFILES" \
     "$MITA_INSTANCE_RUNNER" "${MITA_INSTANCE_OPENRC_PREFIX}"*
@@ -7431,7 +7445,14 @@ remove_mita_common() {
   fi
   run rm -f /lib/systemd/system/mita.service /usr/lib/systemd/system/mita.service "$SYSTEMD_SVC"
   run rm -f /etc/sysctl.d/mieru_tcp_bbr.conf
+  if [ -d /etc/systemd/system ]; then
+    find /etc/systemd/system -type l \
+      \( -name 'mita.service' -o -name 'mita-oneclick@*.service' \
+         -o -name 'mita-users-scan.timer' -o -name 'mita-tc-restore.service' \) \
+      -delete 2>/dev/null || true
+  fi
   run systemctl daemon-reload 2>/dev/null || true
+  run systemctl reset-failed 2>/dev/null || true
   remove_self_script
   if _has_user mita; then
     run deluser mita 2>/dev/null || run userdel mita 2>/dev/null || true
@@ -7441,33 +7462,131 @@ remove_mita_common() {
   fi
 }
 
+verify_mita_uninstalled() {
+  STAGE="验收卸载结果"
+  local failed=0 path pattern save_cmd
+  if command -v dpkg-query >/dev/null 2>&1 \
+     && dpkg-query -W -f='${db:Status-Abbrev}' mita 2>/dev/null | grep -q .; then
+    warn "$(t '卸载验收失败: Debian 软件包记录仍存在' \
+      'Uninstall verification failed: Debian package record remains')"
+    failed=1
+  fi
+  if command -v rpm >/dev/null 2>&1 && rpm -q mita >/dev/null 2>&1; then
+    warn "$(t '卸载验收失败: RPM 软件包仍存在' \
+      'Uninstall verification failed: RPM package remains')"
+    failed=1
+  fi
+  for path in \
+    /etc/mita /var/lib/mita /run/mita /var/run/mita \
+    "$MITA_INSTANCES_DIR" "$MITA_INSTANCE_RUN_DIR" "$MITA_INSTANCE_METRICS_DIR" \
+    "$MITA_USERS_STATE" "$MITA_USERS_LOCK" "$MITA_USERS_BACKUP_DIR" \
+    "$MITA_ADMIN_LOCK" "$MITA_FIREWALL_OWNED_STATE" "$TC_OWNED_STATE" \
+    "$MITA_BIN" "$MITA_REAL_BIN" /usr/bin/mita /usr/bin/mita-real \
+    "$INSTALL_SCRIPT_PATH" "$MITA_MENU_PATH" "$MITA_PROFILE_D" "$MITA_CLIENT_EXPORT_DIR" \
+    "$SYSTEMD_SVC" /lib/systemd/system/mita.service /usr/lib/systemd/system/mita.service \
+    "$MITA_INSTANCE_SYSTEMD_TEMPLATE" "$MITA_INSTANCE_TMPFILES" "$MITA_INSTANCE_RUNNER" \
+    "$MITA_USERS_TIMER" "$MITA_USERS_SERVICE" "$MITA_USERS_CRON" "$MITA_LOGROTATE_CONF" \
+    "$OPENRC_SVC" "$MITA_USERS_LOG" /var/log/mita.log /var/log/mita.err \
+    /etc/sysctl.d/mieru_tcp_bbr.conf; do
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      warn "$(t "卸载残留: ${path}" "Uninstall residue: ${path}")"
+      failed=1
+    fi
+  done
+  for pattern in \
+    "${MITA_INSTANCE_OPENRC_PREFIX}*" '/var/log/mita-oneclick-*.log' \
+    '/var/log/mita-oneclick-*.err' '/root/mieru_client_*.json' \
+    '/root/mieru_client_tcp_*.json' '/root/mieru_client_udp_*.json'; do
+    if compgen -G "$pattern" >/dev/null 2>&1; then
+      warn "$(t "卸载仍有匹配残留: ${pattern}" "Uninstall residue matches: ${pattern}")"
+      failed=1
+    fi
+  done
+  if [ -d /etc/systemd/system ] \
+     && find /etc/systemd/system -type l \
+       \( -name 'mita.service' -o -name 'mita-oneclick@*.service' \
+          -o -name 'mita-users-scan.timer' -o -name 'mita-tc-restore.service' \) \
+       -print -quit 2>/dev/null | grep -q .; then
+    warn "$(t '卸载残留: systemd wants 目录仍有 mita 符号链接' \
+      'Uninstall residue: systemd wants directories still contain mita symlinks')"
+    failed=1
+  fi
+  if command -v pgrep >/dev/null 2>&1 && pgrep -x mita >/dev/null 2>&1; then
+    warn "$(t '卸载残留: mita 进程仍在运行' 'Uninstall residue: mita process is still running')"
+    failed=1
+  fi
+  if _has_user mita || _has_group mita; then
+    warn "$(t '卸载残留: mita 系统用户或用户组仍存在' \
+      'Uninstall residue: mita system user or group remains')"
+    failed=1
+  fi
+  for save_cmd in iptables-save ip6tables-save; do
+    if command -v "$save_cmd" >/dev/null 2>&1 \
+       && "$save_cmd" 2>/dev/null | grep -q -- "$MITA_FIREWALL_COMMENT"; then
+      warn "$(t "卸载残留: ${save_cmd} 中仍有 ${MITA_FIREWALL_COMMENT} 规则" \
+        "Uninstall residue: ${save_cmd} still contains ${MITA_FIREWALL_COMMENT} rules")"
+      failed=1
+    fi
+  done
+  [ "$failed" -eq 0 ]
+}
+
 do_uninstall() {
   require_root
-  mita_installed || die "$(t 'mita 未安装' 'mita is not installed')"
+  UNINSTALL_CANCELLED=0
+  mita_uninstall_target_present \
+    || die "$(t '未检测到 mita 或 OneClick 残留，无需卸载' \
+      'No mita or OneClick residue detected; nothing to uninstall')"
   if ! installed_by_oneclick; then
-    warn "$(t '未检测到本脚本安装标记；若仅使用官方 deb/rpm，卸载范围可能不同' \
-      'OneClick install marker not found; official package uninstall may differ')"
+    warn "$(t '未检测到完整的 OneClick 安装标记；将按残留/官方包清理模式处理' \
+      'Complete OneClick marker not found; residual/official package cleanup mode will be used')"
     if ! confirm '仍要继续卸载？[y/N]: ' 'Continue uninstall anyway? [y/N]: ' n; then
-      [ "${MENU_MODE:-0}" -eq 1 ] && return 0
+      if [ "${MENU_MODE:-0}" -eq 1 ]; then
+        UNINSTALL_CANCELLED=1
+        return 0
+      fi
       exit 0
     fi
   fi
   if ! confirm '确认卸载 mita、管理脚本及全部配置？[y/N]: ' \
     'Uninstall mita, manager script, and all config? [y/N]: ' n; then
-    [ "${MENU_MODE:-0}" -eq 1 ] && return 0
+    if [ "${MENU_MODE:-0}" -eq 1 ]; then
+      UNINSTALL_CANCELLED=1
+      return 0
+    fi
     exit 0
   fi
   local pm
   pm="$(detect_pkg_manager)"
+  stop_mita_for_uninstall
+  STAGE="清理防火墙规则"
   close_firewall
   firewall_clear_all_owned
+  STAGE="卸载 mita 软件包"
   case "$pm" in
-    deb) run dpkg -P mita 2>/dev/null || true ;;
-    rpm) run rpm -e mita 2>/dev/null || true ;;
+    deb)
+      if dpkg-query -W mita >/dev/null 2>&1; then
+        run dpkg -P mita
+      fi
+      ;;
+    rpm)
+      if rpm -q mita >/dev/null 2>&1; then
+        run rpm -e mita
+      fi
+      ;;
     alpine) ;;
   esac
   remove_mita_common
+  if ! verify_mita_uninstalled; then
+    warn "$(t '卸载未完全通过验收；已保留上方残留信息，请修复后重试' \
+      'Uninstall did not pass verification; review the residue above and retry')"
+    return 1
+  fi
   t 'mita 及安装脚本已完全卸载' 'mita and install script fully removed'
+  t '若当前已打开的旧终端仍显示 mita 是函数，请运行:' \
+    'If an already-open shell still reports mita as a function, run:'
+  msg '  unset -f mita 2>/dev/null || true; hash -r'
+  t '新登录终端不会再加载该函数。' 'New login shells will no longer load that function.'
 }
 
 do_status() {
@@ -7720,9 +7839,9 @@ menu_run_action() {
     upgrade) do_upgrade ;;
     uninstall)
       do_uninstall
-      if ! mita_installed; then
-        return 2
-      fi
+      [ "${UNINSTALL_CANCELLED:-0}" -eq 1 ] && return 0
+      # do_uninstall 只有在最终残留验收通过后才返回成功。
+      return 2
       ;;
     status) do_status ;;
     client-config) do_client_config ;;

@@ -31,6 +31,19 @@ source /work/install-mita.sh
 trap - ERR
 MITA_STATE=/tmp/install-state.env
 
+# 空实例集合不能在 ERR trap 中产生伪失败输出。
+empty_stop_output="$(
+  (
+    set -Eeuo pipefail
+    trap on_error ERR
+    MITA_USERS_STATE=/tmp/no-users.json
+    MITA_INSTANCES_DIR=/tmp/no-instances
+    mkdir -p "$MITA_INSTANCES_DIR"
+    isolated_stop_all
+  ) 2>&1
+)"
+test -z "$empty_stop_output"
+
 # 状态、默认客户端模式与 MTU 策略。
 printf "%s\n" \
   "PORT=26000" "PORT_RANGE=" "PROTOCOL=TCP" "MTU=1452" "MTU_POLICY=custom" \
@@ -260,19 +273,33 @@ MITA_FIREWALL_OWNED_STATE=/tmp/firewall-owned.bindings
 FW_LOG=/tmp/firewall.log
 : >"$FW_LOG"
 IPT_PREEXIST=0
+IPT_OWNED_EXISTS=0
+IPT_DELETE_FAIL=0
 iptables(){
   printf 'v4 %s\n' "$*" >>"$FW_LOG"
   case "$*" in
-    "-C "*"--comment"*) return 1 ;;
+    "-C "*"--comment"*) [ "$IPT_OWNED_EXISTS" -eq 1 ] && return 0 || return 1 ;;
     "-C "*) [ "$IPT_PREEXIST" -eq 1 ] && return 0 || return 1 ;;
+    "-I "*"--comment"*) IPT_OWNED_EXISTS=1; return 0 ;;
+    "-D "*"--comment"*)
+      [ "$IPT_DELETE_FAIL" -eq 1 ] && return 1
+      IPT_OWNED_EXISTS=0
+      return 0
+      ;;
   esac
   return 0
 }
 ip6tables(){
   printf 'v6 %s\n' "$*" >>"$FW_LOG"
   case "$*" in
-    "-C "*"--comment"*) return 1 ;;
+    "-C "*"--comment"*) [ "$IPT_OWNED_EXISTS" -eq 1 ] && return 0 || return 1 ;;
     "-C "*) [ "$IPT_PREEXIST" -eq 1 ] && return 0 || return 1 ;;
+    "-I "*"--comment"*) IPT_OWNED_EXISTS=1; return 0 ;;
+    "-D "*"--comment"*)
+      [ "$IPT_DELETE_FAIL" -eq 1 ] && return 1
+      IPT_OWNED_EXISTS=0
+      return 0
+      ;;
   esac
   return 0
 }
@@ -288,6 +315,19 @@ test ! -e "$MITA_FIREWALL_OWNED_STATE"
 ! grep -q ' -I ' "$FW_LOG"
 iptables_accept_port 28001 tcp del
 ! grep -q ' -D ' "$FW_LOG"
+# 删除失败时必须保留所有权清单并让卸载失败；重试成功后才能清掉清单。
+IPT_PREEXIST=0
+IPT_OWNED_EXISTS=1
+IPT_DELETE_FAIL=1
+printf 'iptables|tcp|28002\nip6tables|tcp|28002\n' >"$MITA_FIREWALL_OWNED_STATE"
+if firewall_clear_all_owned >/dev/null 2>&1; then
+  echo "failed firewall cleanup unexpectedly succeeded" >&2
+  exit 1
+fi
+test "$(wc -l <"$MITA_FIREWALL_OWNED_STATE")" -eq 2
+IPT_DELETE_FAIL=0
+firewall_clear_all_owned
+test ! -e "$MITA_FIREWALL_OWNED_STATE"
 
 # 全部用户同时到期必须停掉全部实例，不能因“最后一个用户”保护而回滚为继续可用。
 today="$(date +%F)"
@@ -334,6 +374,21 @@ menu_rc=$?
 set -e
 test "$menu_rc" -ne 0
 ! grep -q MENU_SHOULD_NOT_CONTINUE <<<"$menu_probe"
+# 卸载成功通过特殊返回码退出菜单；用户取消则留在菜单且不报错。
+set +e
+(
+  do_uninstall(){ UNINSTALL_CANCELLED=0; }
+  ACTION=uninstall
+  menu_run_action
+)
+uninstall_menu_rc=$?
+set -e
+test "$uninstall_menu_rc" -eq 2
+(
+  do_uninstall(){ UNINSTALL_CANCELLED=1; }
+  ACTION=uninstall
+  menu_run_action
+)
 rm -f /tmp/dry-run-mutated
 do_install(){ touch /tmp/dry-run-mutated; }
 repair_mita_binary_paths(){ touch /tmp/dry-run-mutated; }
@@ -341,6 +396,23 @@ ACTION=install DRY_RUN=1
 main >/tmp/dry-run.out
 test ! -e /tmp/dry-run-mutated
 grep -q DRY-RUN /tmp/dry-run.out
+
+# 在无软件包、只有 OneClick 残留的半安装状态下也能完整卸载并给出父 shell 提示。
+mkdir -p /etc/mita /etc/profile.d
+touch "$MITA_MARKER" "$MITA_PROFILE_D"
+YES=1 DRY_RUN=0
+set +e
+uninstall_output="$(do_uninstall 2>&1)"
+uninstall_rc=$?
+set -e
+if [ "$uninstall_rc" -ne 0 ]; then
+  printf '%s\n' "$uninstall_output" >&2
+  exit "$uninstall_rc"
+fi
+grep -q '完全卸载' <<<"$uninstall_output"
+grep -q 'unset -f mita' <<<"$uninstall_output"
+! grep -q '\[错误\]' <<<"$uninstall_output"
+test ! -e "$MITA_PROFILE_D"
 
 echo SMOKE_OK
 DOCKER_TEST
