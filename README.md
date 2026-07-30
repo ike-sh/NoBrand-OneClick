@@ -26,11 +26,35 @@ apk add --no-cache bash curl && \
 运行后按菜单选择「安装 / 配置」，脚本将：
 
 1. 从 GitHub Releases 下载最新 `mita` 安装包
-2. 自动生成随机用户名、密码；**询问端口时默认按本机内网 IP 尾号推导**（回车即用，规则见下文「端口自动分配（按 IP 尾号）」）
+2. 自动生成随机用户名、密码；**询问端口时默认按本机内网 IP 尾号推导**，并询问 MTU 策略
 3. 应用配置并启动服务
 4. 尝试放行防火墙（ufw / firewalld / Alpine iptables）
 5. 安装完成**同时输出** `mierus://` 节点链接、客户端 JSON、**Clash/mihomo 片段**及连接信息摘要
 6. 下载包 **SHA256 校验**；提示云安全组放行端口
+
+### v2.0.0 用户专属实例模型
+
+- `users.json` 是管理面的权威状态；每个启用账号运行一个独立 mita 实例，并拥有稳定 `instance_id`、单用户配置、专属监听端口、UDS 和 `metrics.pb`
+- 端口、凭据和配额统计现在是真正的用户隔离边界；改端口或改用户名不会改变 `instance_id`，也不会丢失累计用量
+- 旧单实例安装在下一次安装、升级或用户变更时事务迁移；迁移失败会停止新实例并恢复旧服务
+- `calendar` 只清空到期用户自己的 metrics；不再清零其它 rolling/calendar 用户，失败会恢复 metrics 与 `users.json`
+- `--bandwidth` 重新支持正整数 Mbps；通过专属端口实施 IPv4/IPv6 双向 police。脚本只维护自己记录的 filter，不删除或替换现有 root/ingress qdisc
+- 全部账号可同时到期并进入“零运行实例”状态，不会为了保留最后一个实例而让过期账号继续可用；手工停用仍保护最后一个启用账号
+- 删除采用两阶段提交：实例先停、metrics 暂存，只有用户事务与安装状态均成功后才清理；失败会恢复账号和累计用量
+- 重新配置先验收新实例、再变更防火墙；菜单目标账号与 `YES` 状态不再被全局状态覆盖或泄漏
+- `doctor` 逐实例检查服务、UDS、单用户配置、专属 binding、metrics API/目录、tc 与防火墙所有权清单
+- 下载包 checksum 改为 fail-closed；iptables 同时维护 IPv4/IPv6；本地防火墙只撤销脚本实际新增的规则；公网 IP 探测不再回退为不可用的私网地址
+- 重装保留现有用户/节点配置；升级或重装会重启专属守护进程，确保实际运行新二进制和新 unit/runner
+- 菜单动作在严格子 shell 中执行；`--dry-run` 在任何服务修复和写操作之前返回
+
+### v1.9.6 MTU 策略与在线调整
+
+- 安装和重新配置时询问 MTU：安全默认 `1400`、自动优化或自定义 `1280-1500`
+- 自动模式下 TCP 保持 `1400`；UDP / BOTH 根据默认出口网卡链路 MTU 扣除 IPv4/IPv6 开销，结果限制在 `1280-1400`
+- MTU 不与 multiplexing、handshake mode 或 traffic-pattern 绑定；TCP 使用大于 `1400` 通常没有明显收益
+- 主菜单新增「调整 MTU」，也可运行 `mita mtu` 或 `install-mita --mtu-config --mtu auto`
+- 调整后重新应用服务端配置、重启并验收；失败自动尝试回滚，成功后立即输出带新 MTU 的节点链接与 mieru JSON
+- mihomo 当前节点字段没有独立 MTU 参数，因此自动策略封顶 `1400`；自定义 `1401-1500` 仅建议用于能同步相同 MTU 的官方 mieru 客户端
 
 ### v1.9.5 低熵模式与可靠性修复
 
@@ -40,7 +64,7 @@ apk add --no-cache bash curl && \
 - 启用低熵时明确提示客户端兼容风险；mihomo 尚未适配的版本请保持关闭
 - 修正 `mierus://` simple URL：服务器地址不再重复端口，`port` / `protocol` 仅在 query 中成对输出；兼容 IPv6
 - 客户端 JSON、Clash/mihomo YAML 对账号、密码和地址做安全转义，并保留所选 `traffic-pattern`
-- 用户写操作、恢复、到期扫描和日历配额重置增加事务回滚；服务或 `tc` 应用失败不再留下半更新状态
+- 用户写操作、恢复、到期扫描和日历配额重置增加事务回滚
 
 ### v1.9.4 客户端模式与分享配置
 
@@ -78,10 +102,10 @@ apk add --no-cache bash curl && \
 - **用量**：`user-usage` 调用 `mita get users` / `mita get quotas`
 - **批量导出客户端**：`user-export-clients [DIR]`
 - **管理锁**可重入；敏感文件 600；logrotate
-- **calendar 重置方法**可选：`QUOTA_RESET_METHOD=password|days|metrics`
-- **ingress 失败**时明确降级为仅出口限速
+- 历史版本曾提供 `QUOTA_RESET_METHOD=password|days|metrics`（`password/days` 已在 v1.9.7 禁用）
+- 历史版本的单实例按端口 tc 限速在 v1.9.7 禁用；v2.0.0 以专属实例模型安全恢复
 
-### v1.7.0 日历月配额 + 双向限速
+### v1.7.0 日历月配额 + 双向限速（旧单实例实现）
 
 - **配额模式** `--quota-mode rolling|calendar`：`calendar` 每月 1 日通过 `user-scan` 强制轮换 mita 配额窗口
 - **双向带宽**：`tc` 出口 HTB（sport）+ 入口 ingress police（dport），上下行同 Mbps
@@ -91,9 +115,9 @@ apk add --no-cache bash curl && \
 
 - **用户配置备份 / 恢复 / 导出导入**：`user-backup`、`user-restore`、`user-export`、`user-import`；变更前自动备份到 `/etc/mita/backups/`（保留最近 20 份）
 - 增删改用户、恢复导入与 `user-scan` 使用管理锁，降低并发写冲突
-- 卸载时清理 timer/cron、tc 限速规则与用户日志
+- 卸载时清理 timer/cron、用户日志和脚本拥有的 tc filter；不删除系统已有 qdisc
 
-### v1.5.0 按端口带宽限速
+### v1.5.0 按端口带宽限速（旧单实例实现）
 
 - 一用户一口 + **`tc` HTB 出口限速**（`--bandwidth` Mbps，0=不限）
 - `user-set-rate` / `rate-status` / `rate-restore`；开机 `mita-tc-restore` 恢复规则
@@ -105,9 +129,9 @@ apk add --no-cache bash curl && \
 - 写入 mita `quotas`（默认**滚动 N 天**）；`expire_at` 到期自动停用（端口保留）
 - `user-scan` 每 15 分钟（systemd timer 或 cron）
 
-### v1.3.0 多用户与独占端口
+### v1.3.0 多用户与入口端口（旧单实例模型）
 
-- `/etc/mita/users.json` 管理多用户；**一用户一监听端口**，删除后释放端口
+- `/etc/mita/users.json` 管理多用户；该历史版本仍是单实例，v2.0.0 已迁移为专属实例
 - 菜单「用户管理」与 CLI：`users` / `user-add` / `user-del` / `user-show`
 - 安装后自动迁移主用户；按用户导出节点链接
 
@@ -285,6 +309,7 @@ curl -fsSL https://raw.githubusercontent.com/ike-sh/mieru-OneClick/main/install-
   sudo bash -s -- --install -y \
     --port 2088 \
     --protocol TCP \
+    --mtu safe \
     --user myuser \
     --password 'my-secret' \
     --multiplexing off \
@@ -292,6 +317,20 @@ curl -fsSL https://raw.githubusercontent.com/ike-sh/mieru-OneClick/main/install-
     --traffic-pattern conservative \
     --low-entropy off \
     --enable-bbr
+```
+
+`--mtu` 支持：
+
+- `safe`：固定 `1400`，默认且推荐
+- `auto`：TCP 使用 `1400`；UDP / BOTH 按出口链路自动计算，为兼容 mihomo 最大 `1400`
+- `1280-1500`：直接指定自定义 MTU；`1401-1500` 仅建议用于可同步 MTU 的官方 mieru 客户端
+
+已安装后可随时调整并重新输出客户端参数：
+
+```sh
+mita mtu                         # 交互选择
+install-mita mtu 1452            # 直接设置
+install-mita --mtu-config --mtu auto
 ```
 
 ## 其它命令
@@ -303,6 +342,7 @@ curl -fsSL https://raw.githubusercontent.com/ike-sh/mieru-OneClick/main/install-
 | `--uninstall` | 卸载 mita、管理脚本、防火墙规则、客户端配置与日志 |
 | `--status` | 查看服务与配置 |
 | `--client-config` / `--show` | 查看节点链接并生成客户端 JSON |
+| `--mtu-config` / `mtu` | 调整 MTU、重启验收并重新输出节点配置 |
 
 快捷命令（子命令不区分大小写）：
 
@@ -310,6 +350,7 @@ curl -fsSL https://raw.githubusercontent.com/ike-sh/mieru-OneClick/main/install-
 install-mita                  # 打开菜单
 install-mita reconfigure      # 重新配置
 install-mita show             # 查看节点链接
+install-mita mtu              # 调整 MTU
 install-mita users            # 用户列表
 mita-menu status              # 同上
 mita status                   # 服务状态（走 install-mita）
@@ -319,7 +360,7 @@ mita get users                # 官方二进制（流量统计等）
 
 卸载后再次管理请重新执行一键安装，或运行 `install-mita --help`（安装后位于 `/usr/local/bin/install-mita`）。
 
-## 多用户 / 套餐 / 限速（v1.3+）
+## 多用户 / 套餐（v1.3+）
 
 安装完成后可用菜单 **10) 用户管理**，或 CLI：
 
@@ -327,9 +368,9 @@ mita get users                # 官方二进制（流量统计等）
 # 列表
 install-mita users
 
-# 添加用户（独占端口；可选套餐 / 带宽）
-install-mita user-add --user bob --password 'secret' --package trial --bandwidth 50
-install-mita user-add --user carol --password 'x' --package standard --port 21005
+# 添加用户（每个用户使用独立 mita 实例与专属端口）
+install-mita user-add --user bob --password 'secret' --package trial
+install-mita user-add --user carol --password 'x' --package standard --port 21005 --bandwidth 20
 
 # 套餐与到期
 install-mita user-set-quota --user bob --package custom --quota-mb 51200 --quota-days 30
@@ -343,10 +384,10 @@ install-mita user-quota-reset -y                           # 强制本月重置 
 install-mita user-disable bob
 install-mita user-enable bob
 
-# 带宽限速（Mbps，出口+入口；需 root + iproute2）
+# 专属实例双向限速（Mbps；0=不限）
 install-mita user-set-rate --user bob --bandwidth 20
+install-mita user-set-rate --user bob --bandwidth 0
 install-mita rate-status
-install-mita rate-restore                                  # 重启后恢复 tc
 
 # 删除并释放端口
 install-mita user-del bob
@@ -366,16 +407,19 @@ install-mita doctor
 
 | 项 | 说明 |
 |----|------|
-| 端口 | 一用户一口；删除后归还端口池 |
+| 部署模型 | `isolated-v2`：每个启用账号一个 mita 实例；稳定 `instance_id` 与端口/用户名解耦 |
+| 端口与凭据 | 每个实例仅配置一个账号和它的 TCP/UDP binding，构成真实隔离边界 |
 | 流量套餐 rolling | mita `quotas` 滚动 N 天 / MB |
-| 流量套餐 calendar | 当月天数窗口；跨月重置方法见 `QUOTA_RESET_METHOD`（password/days/metrics） |
-| 到期 | 本地 `expire_at`，`user-scan` 定时停用；**不是**删除用户 |
-| 带宽 | `tc` 出口 HTB（sport）+ 入口 police（dport）；入口失败则仅出口 |
-| 用量 | `mita get users` / `mita get quotas`（需较新 mita） |
-| 状态文件 | `/etc/mita` 为 **mita:mita 750**（守护进程可写），`users.json` 600；备份在 `/etc/mita/backups/` |
+| 流量套餐 calendar | 仅支持 `QUOTA_RESET_METHOD=metrics`；每月只停止并清空到期用户自己的 `metrics.pb` |
+| 到期 | 本地 `expire_at`；`user-scan` 停止/禁用该用户实例并关闭本地防火墙端口，保留状态和 metrics 以便再启用；允许全部账号同时到期 |
+| 带宽 | `0-1000000` Mbps；默认出口网卡上的专属端口 IPv4/IPv6 ingress/egress police；只增删 `/etc/mita/tc-owned.filters` 记录的 pref，不替换现有 qdisc；多出口可设置 `TC_IFACE` |
+| 本地防火墙 | 所有权记录在 `/etc/mita/firewall-owned.bindings`；预先存在的同端口规则不会被接管或删除 |
+| 用量 | 逐实例调用 `mita get users` / `mita get quotas` |
+| 状态与实例 | `users.json` 600；配置 `/etc/mita/instances/<instance_id>/server.json`；UDS `/run/mita-instances/<instance_id>.sock`；metrics `/var/lib/mita/instances/<instance_id>/metrics.pb` |
 | 删除用户 | `install-mita user-del NAME` 或 `--user-del NAME` |
-| 月配额重置 | `user-quota-reset`（仅过月用户）；`user-quota-reset -y` 强制本月全部 calendar |
-| 依赖 | 多用户管理需 `python3`；限速需 `tc`（iproute2） |
+| 月配额重置 | `user-quota-reset` 仅影响过月 calendar 用户；`-y` 强制这些用户本月重置 |
+| 数值范围 | quota MB / days 使用上游 `int32` 范围；有限配额未指定周期时按 30 天 |
+| 依赖 | `python3`、`iproute2`、`util-linux`；systemd 用 tmpfiles 管理 UDS 父目录，OpenRC 用 mount namespace 隔离固定 metrics 路径 |
 
 套餐模板：`unlimited` · `trial`（10GB/7 天）· `standard`（100GB/30 天）· `custom`。
 
@@ -394,11 +438,11 @@ sudo python3 setup.py
 - 非交互参数（`--port` / `--user` / `--password` / `-y`）
 - 防火墙自动放行
 - 安装摘要与客户端配置一键导出
-- 多用户、流量套餐、到期停用、按端口带宽限速与备份恢复
+- 多用户、流量套餐、可验证的到期撤权与备份恢复
 
 ## 客户端
 
-安装完成后，将服务器 IP、端口、用户名、密码填入 [mieru 客户端](https://github.com/enfein/mieru/blob/main/docs/client-install.md) 或 Clash Verge Rev 等兼容客户端。多用户时每个用户使用**各自端口**与凭据。
+安装完成后，将服务器 IP、端口、用户名、密码填入 [mieru 客户端](https://github.com/enfein/mieru/blob/main/docs/client-install.md) 或 Clash Verge Rev 等兼容客户端。v2.0.0 的每个账号链接指向自己的 mita 实例与专属端口；其它账号凭据无法在该实例认证。
 
 ## 许可
 
