@@ -5,7 +5,7 @@
 set -euo pipefail
 umask 077
 
-SCRIPT_VERSION="2.0.4"
+SCRIPT_VERSION="2.1.0"
 SCRIPT_AUTHOR="ike"
 SCRIPT_REPO="ike-sh/mieru-OneClick"
 UPSTREAM_REPO="enfein/mieru"
@@ -13,21 +13,32 @@ GITHUB_API="https://api.github.com/repos/${UPSTREAM_REPO}/releases/latest"
 GITHUB_DL="https://github.com/${UPSTREAM_REPO}/releases/download"
 MITA_BIN="/usr/local/bin/mita"
 MITA_REAL_BIN="/usr/local/bin/mita-real"
-MITA_MARKER="/etc/mita/.mieru-oneclick"
-MITA_STATE="/etc/mita/install-state.env"
-MITA_USERS_STATE="${MITA_USERS_STATE:-/etc/mita/users.json}"
-MITA_USERS_LOCK="${MITA_USERS_LOCK:-/etc/mita/users.lock}"
+MITA_MANAGER_STATE_DIR="${MITA_MANAGER_STATE_DIR:-/var/lib/mita-oneclick}"
+MITA_LEGACY_STATE_DIR="/etc/mita"
+MITA_LEGACY_MARKER="${MITA_LEGACY_STATE_DIR}/.mieru-oneclick"
+MITA_LEGACY_STATE="${MITA_LEGACY_STATE_DIR}/install-state.env"
+MITA_LEGACY_USERS_STATE="${MITA_LEGACY_STATE_DIR}/users.json"
+MITA_LEGACY_USERS_BACKUP_DIR="${MITA_LEGACY_STATE_DIR}/backups"
+MITA_LEGACY_FIREWALL_STATE="${MITA_LEGACY_STATE_DIR}/firewall-owned.bindings"
+MITA_LEGACY_TC_STATE="${MITA_LEGACY_STATE_DIR}/tc-owned.filters"
+MITA_MARKER="${MITA_MARKER:-${MITA_MANAGER_STATE_DIR}/.installed}"
+MITA_STATE="${MITA_STATE:-${MITA_MANAGER_STATE_DIR}/install-state.env}"
+MITA_USERS_STATE="${MITA_USERS_STATE:-${MITA_MANAGER_STATE_DIR}/users.json}"
+MITA_USERS_LOCK="${MITA_USERS_LOCK:-${MITA_MANAGER_STATE_DIR}/users.lock}"
 MITA_USERS_CRON="${MITA_USERS_CRON:-/etc/cron.d/mita-users}"
 MITA_USERS_TIMER="/etc/systemd/system/mita-users-scan.timer"
 MITA_USERS_SERVICE="/etc/systemd/system/mita-users-scan.service"
 MITA_USERS_LOG="${MITA_USERS_LOG:-/var/log/mita-users.log}"
-MITA_USERS_BACKUP_DIR="${MITA_USERS_BACKUP_DIR:-/etc/mita/backups}"
-MITA_ADMIN_LOCK="${MITA_ADMIN_LOCK:-/etc/mita/admin.lock}"
+MITA_USERS_BACKUP_DIR="${MITA_USERS_BACKUP_DIR:-${MITA_MANAGER_STATE_DIR}/backups}"
+MITA_ADMIN_LOCK="${MITA_ADMIN_LOCK:-${MITA_MANAGER_STATE_DIR}/admin.lock}"
 MITA_CLIENT_EXPORT_DIR="${MITA_CLIENT_EXPORT_DIR:-/root/mieru-clients}"
 MITA_LOGROTATE_CONF="${MITA_LOGROTATE_CONF:-/etc/logrotate.d/mita-oneclick}"
-MITA_FIREWALL_OWNED_STATE="${MITA_FIREWALL_OWNED_STATE:-/etc/mita/firewall-owned.bindings}"
+MITA_FIREWALL_OWNED_STATE="${MITA_FIREWALL_OWNED_STATE:-${MITA_MANAGER_STATE_DIR}/firewall-owned.bindings}"
 MITA_FIREWALL_COMMENT="mieru-oneclick"
 MITA_METRICS_FILE="${MITA_METRICS_FILE:-/var/lib/mita/metrics.pb}"
+BBR_SYSCTL_CONF="${BBR_SYSCTL_CONF:-/etc/sysctl.d/mieru_tcp_bbr.conf}"
+BBR_STATE_FILE="${BBR_STATE_FILE:-${MITA_MANAGER_STATE_DIR}/bbr-owned.state}"
+BBR_BACKUP_FILE="${BBR_BACKUP_FILE:-${MITA_MANAGER_STATE_DIR}/bbr-sysctl.backup}"
 MITA_DEPLOYMENT_MODEL="isolated-v2"
 MITA_INSTANCES_DIR="${MITA_INSTANCES_DIR:-/etc/mita/instances}"
 MITA_INSTANCE_RUN_DIR="${MITA_INSTANCE_RUN_DIR:-/run/mita-instances}"
@@ -65,6 +76,9 @@ PORT=""
 PORT_RANGE=""
 PROTOCOL="TCP"
 PROTOCOL_CLI=0
+ADVERTISE_HOST=""
+ADVERTISE_PORT=""
+ADVERTISE_CLI=0
 USERNAME=""
 PASSWORD=""
 USERNAME_CLI=0
@@ -105,7 +119,7 @@ USER_RESTORE_FILE=""
 USER_EXPORT_FILE=""
 # 脚本只创建 clsact（缺失时）并维护自己记录的 filter；不删除或替换现有 qdisc。
 TC_IFACE="${TC_IFACE:-}"
-TC_OWNED_STATE="${TC_OWNED_STATE:-/etc/mita/tc-owned.filters}"
+TC_OWNED_STATE="${TC_OWNED_STATE:-${MITA_MANAGER_STATE_DIR}/tc-owned.filters}"
 TC_PREF_MIN=42000
 TC_PREF_MAX=42999
 # 0=首次安装的短暂兼容路径；1=使用 users.json 管理用户专属实例。
@@ -152,6 +166,7 @@ mieru mita 服务端一键安装 ${SCRIPT_VERSION}
   --user-add          添加用户（可配合 --user/--password/--port/--package 等）
   --user-del NAME     删除用户并释放端口
   --user-show NAME    查看指定用户节点配置
+  --user-set-endpoint 设置展示入口：--user NAME --advertise-host IP --advertise-port PORT；或 --advertise-auto
   --user-set-quota    设置套餐：--user NAME --quota-mb N --quota-days D
   --user-set-expire   设置到期：--user NAME --expire YYYY-MM-DD|+Nd|0
   --user-enable NAME  启用用户
@@ -173,6 +188,9 @@ mieru mita 服务端一键安装 ${SCRIPT_VERSION}
   --port PORT         监听端口（1025-65535）；多用户时作为主用户端口
   --port-range RANGE  已弃用；v2 专属实例要求每用户使用单端口
   --protocol TCP|UDP|BOTH  传输协议（默认 TCP；BOTH 时 UDP 使用 PORT+1）
+  --advertise-host IP 客户端配置展示的入口 IP（仅展示，不修改服务端监听）
+  --advertise-port PORT 客户端配置展示的入口端口（仅展示，可使用 1-65535）
+  --advertise-auto    恢复自动探测公网 IP，并展示服务端监听端口
   --mtu VALUE         MTU 策略/值：safe|auto|1280-1500（默认 safe=1400）
   --traffic-pattern LV  流量伪装/抗 DPI：off|conservative|aggressive（默认 conservative）
   --low-entropy MODE  低熵模式：off|56|48|40|32（默认 off，推荐 56）
@@ -187,7 +205,7 @@ mieru mita 服务端一键安装 ${SCRIPT_VERSION}
   --expire WHEN       到期：YYYY-MM-DD 或 +30d 或 0/never
   --bandwidth Mbps    专属实例双向限速（0=不限）
   --op-user USER      加入 mita 用户组的 Linux 用户
-  --enable-bbr        安装后启用 TCP BBR
+  --enable-bbr        安装后启用 TCP BBR + FQ
   --lang en           使用英文提示
 
 其它：
@@ -286,6 +304,7 @@ while [ $# -gt 0 ]; do
       ;;
     --user-set-quota) ACTION=user-set-quota ;;
     --user-set-expire) ACTION=user-set-expire ;;
+    --user-set-endpoint) ACTION=user-set-endpoint ;;
     --user-enable)
       ACTION=user-enable
       USER_SHOW_NAME="${2:-}"
@@ -334,7 +353,7 @@ while [ $# -gt 0 ]; do
       [ -n "$USER_RESTORE_FILE" ] || die "--user-import 需要文件路径"
       shift
       ;;
-    install|upgrade|uninstall|status|reconfigure|client-config|show|mtu|mtu-config|set-mtu|menu|start|stop|restart|配置|节点|users|user-list|user-add|user-del|user-delete|user-show|user-manage|user-set-quota|user-set-expire|user-enable|user-disable|user-scan|user-quota-reset|user-set-rate|user-set-bandwidth|rate-status|rate-restore|tc-status|tc-restore|user-backup|user-restore|user-export|user-import|user-usage|usage|user-export-clients|doctor|verify|help)
+    install|upgrade|uninstall|status|reconfigure|client-config|show|mtu|mtu-config|set-mtu|menu|start|stop|restart|配置|节点|users|user-list|user-add|user-del|user-delete|user-show|user-manage|user-set-endpoint|user-set-quota|user-set-expire|user-enable|user-disable|user-scan|user-quota-reset|user-set-rate|user-set-bandwidth|rate-status|rate-restore|tc-status|tc-restore|user-backup|user-restore|user-export|user-import|user-usage|usage|user-export-clients|doctor|verify|help)
       [ -z "$ACTION" ] && ACTION="$_arg_lc"
       [ "$_arg_lc" = show ] && ACTION=client-config
       { [ "$_arg_lc" = mtu ] || [ "$_arg_lc" = set-mtu ]; } && ACTION=mtu-config
@@ -399,6 +418,23 @@ while [ $# -gt 0 ]; do
       PROTOCOL="${2:-}"
       PROTOCOL_CLI=1
       shift
+      ;;
+    --advertise-host|--entry-ip)
+      ADVERTISE_HOST="${2:-}"
+      ADVERTISE_CLI=1
+      [ -n "$ADVERTISE_HOST" ] || die "--advertise-host 需要入口 IP"
+      shift
+      ;;
+    --advertise-port|--entry-port)
+      ADVERTISE_PORT="${2:-}"
+      ADVERTISE_CLI=1
+      [ -n "$ADVERTISE_PORT" ] || die "--advertise-port 需要入口端口"
+      shift
+      ;;
+    --advertise-auto)
+      ADVERTISE_HOST=""
+      ADVERTISE_PORT=""
+      ADVERTISE_CLI=1
       ;;
     --mtu)
       MTU_REQUEST="${2:-}"
@@ -494,6 +530,110 @@ run() {
   fi
 }
 
+secure_stat_path() {
+  local path="$1" expected_type="$2" uid mode
+  [ "$expected_type" = dir ] && [ -d "$path" ] && [ ! -L "$path" ] || {
+    [ "$expected_type" = file ] && [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  }
+  uid="$(stat -c '%u' "$path" 2>/dev/null || true)"
+  mode="$(stat -c '%a' "$path" 2>/dev/null || true)"
+  [ "$uid" = 0 ] && [[ "$mode" =~ ^[0-7]{3,4}$ ]] || return 1
+  [ "$((8#$mode & 8#022))" -eq 0 ]
+}
+
+state_file_is_secure() {
+  local path="$1" parent
+  parent="$(dirname "$path")"
+  secure_stat_path "$parent" dir && secure_stat_path "$path" file
+}
+
+secure_migrate_root_file() {
+  local src="$1" dest="$2" mode="${3:-0600}"
+  [ -e "$dest" ] && return 0
+  [ -f "$src" ] && [ ! -L "$src" ] || return 0
+  command -v python3 >/dev/null 2>&1 || {
+    warn "$(t "无法安全迁移旧状态（缺少 python3）: ${src}" \
+      "Cannot securely migrate legacy state without python3: ${src}")"
+    return 1
+  }
+  python3 - "$src" "$dest" "$mode" <<'PY'
+import os, stat, sys, tempfile
+
+src, dest, mode_text = sys.argv[1:4]
+flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+fd = os.open(src, flags)
+try:
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+        raise PermissionError("legacy state is not a root-owned protected regular file")
+    chunks = []
+    while True:
+        chunk = os.read(fd, 1024 * 1024)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        if sum(map(len, chunks)) > 64 * 1024 * 1024:
+            raise ValueError("legacy state is unexpectedly large")
+finally:
+    os.close(fd)
+
+parent = os.path.dirname(dest)
+os.makedirs(parent, mode=0o700, exist_ok=True)
+os.chown(parent, 0, 0)
+os.chmod(parent, 0o700)
+tmp_fd, tmp_path = tempfile.mkstemp(prefix=".migrate-", dir=parent)
+try:
+    os.fchmod(tmp_fd, int(mode_text, 8))
+    os.write(tmp_fd, b"".join(chunks))
+    os.fsync(tmp_fd)
+    os.close(tmp_fd)
+    tmp_fd = -1
+    os.replace(tmp_path, dest)
+finally:
+    if tmp_fd >= 0:
+        os.close(tmp_fd)
+    try:
+        os.unlink(tmp_path)
+    except FileNotFoundError:
+        pass
+PY
+}
+
+ensure_manager_state_layout() {
+  local create="${1:-0}"
+  [ "${DRY_RUN:-0}" -eq 1 ] && return 0
+  if [ "$create" -ne 1 ] && [ ! -d "$MITA_MANAGER_STATE_DIR" ] \
+     && [ ! -e "$MITA_LEGACY_STATE" ] && [ ! -e "$MITA_LEGACY_USERS_STATE" ] \
+     && [ ! -e "$MITA_LEGACY_FIREWALL_STATE" ] && [ ! -e "$MITA_LEGACY_TC_STATE" ] \
+     && [ ! -d "$MITA_LEGACY_USERS_BACKUP_DIR" ] && [ ! -e "$MITA_LEGACY_MARKER" ]; then
+    return 0
+  fi
+  install -d -o root -g root -m 0700 "$MITA_MANAGER_STATE_DIR" "$MITA_USERS_BACKUP_DIR"
+
+  secure_migrate_root_file "$MITA_LEGACY_STATE" "$MITA_STATE" 0600
+  secure_migrate_root_file "$MITA_LEGACY_USERS_STATE" "$MITA_USERS_STATE" 0600
+  secure_migrate_root_file "$MITA_LEGACY_FIREWALL_STATE" "$MITA_FIREWALL_OWNED_STATE" 0600
+  secure_migrate_root_file "$MITA_LEGACY_TC_STATE" "$TC_OWNED_STATE" 0600
+
+  local legacy_backup dest
+  if [ -d "$MITA_LEGACY_USERS_BACKUP_DIR" ]; then
+    for legacy_backup in "$MITA_LEGACY_USERS_BACKUP_DIR"/users_*.json; do
+      [ -f "$legacy_backup" ] || continue
+      dest="${MITA_USERS_BACKUP_DIR}/$(basename "$legacy_backup")"
+      secure_migrate_root_file "$legacy_backup" "$dest" 0600
+    done
+  fi
+  if [ -e "$MITA_LEGACY_MARKER" ] && [ ! -e "$MITA_MARKER" ]; then
+    install -o root -g root -m 0600 /dev/null "$MITA_MARKER"
+  fi
+
+  [ ! -e "$MITA_STATE" ] || rm -f "$MITA_LEGACY_STATE"
+  [ ! -e "$MITA_USERS_STATE" ] || rm -f "$MITA_LEGACY_USERS_STATE"
+  [ ! -e "$MITA_FIREWALL_OWNED_STATE" ] || rm -f "$MITA_LEGACY_FIREWALL_STATE"
+  [ ! -e "$TC_OWNED_STATE" ] || rm -f "$MITA_LEGACY_TC_STATE"
+  rm -f "${MITA_LEGACY_STATE_DIR}/users.lock" "${MITA_LEGACY_STATE_DIR}/admin.lock" 2>/dev/null || true
+}
+
 dry_run_action_preview() {
   local action="${1:-unknown}"
   t '========== DRY-RUN：仅预览 ==========' '========== DRY-RUN: preview only =========='
@@ -503,6 +643,10 @@ dry_run_action_preview() {
   [ -n "${PROTOCOL:-}" ] && t "协议: ${PROTOCOL}" "Protocol: ${PROTOCOL}"
   [ -n "${MTU_REQUEST:-}" ] && t "MTU 请求: ${MTU_REQUEST}" "MTU request: ${MTU_REQUEST}"
   [ -n "${USERNAME:-}" ] && t "用户: ${USERNAME}" "User: ${USERNAME}"
+  if [ -n "${ADVERTISE_HOST:-}" ]; then
+    t "客户端展示入口: ${ADVERTISE_HOST}:${ADVERTISE_PORT}" \
+      "Client display entry: ${ADVERTISE_HOST}:${ADVERTISE_PORT}"
+  fi
   t '未执行命令；未修改配置、账号、服务、软件包、防火墙、tc、定时任务或持久化文件。' \
     'No command was executed; config, users, services, packages, firewall, tc, schedulers, and persistent files were not changed.'
 }
@@ -671,13 +815,15 @@ protocols_for_mode() {
 }
 
 protocol_label() {
+  local canonical_port=""
+  [ -z "${PORT:-}" ] || canonical_port="$(normalize_uint "$PORT" 2>/dev/null || printf '%s' "$PORT")"
   case "$PROTOCOL" in
     BOTH)
       if [ -n "$PORT" ]; then
         if [ "$LANG_ZH" -eq 1 ]; then
-          printf '%s' "TCP(${PORT}) + UDP($((PORT + 1)))"
+          printf '%s' "TCP(${canonical_port}) + UDP($((canonical_port + 1)))"
         else
-          printf '%s' "TCP(${PORT}) + UDP($((PORT + 1)))"
+          printf '%s' "TCP(${canonical_port}) + UDP($((canonical_port + 1)))"
         fi
       else
         if [ "$LANG_ZH" -eq 1 ]; then
@@ -692,12 +838,13 @@ protocol_label() {
 }
 
 port_for_protocol() {
-  local proto="$1"
+  local proto="$1" canonical_port
   if [ -n "$PORT" ]; then
+    canonical_port="$(normalize_uint "$PORT")" || return 1
     if [ "$PROTOCOL" = "BOTH" ] && [ "$proto" = "UDP" ]; then
-      printf '%s' "$((PORT + 1))"
+      printf '%s' "$((canonical_port + 1))"
     else
-      printf '%s' "$PORT"
+      printf '%s' "$canonical_port"
     fi
   else
     printf '%s' "$PORT_RANGE"
@@ -770,10 +917,10 @@ safe_filename_component() {
   fi
 }
 
-# 收紧敏感文件权限；/etc/mita 必须对 mita 守护进程可写（server.conf.pb）
-# 优先 mita:mita 0750；无 mita 用户时 root:mita 0770
+# /etc/mita 仅保存官方守护进程数据，必须允许 mita 写 server.conf.pb。
+# OneClick 的 root 管理状态全部位于独立的 root:root 0700 目录。
 harden_mita_permissions() {
-  run mkdir -p /etc/mita "$MITA_USERS_BACKUP_DIR" 2>/dev/null || true
+  run mkdir -p /etc/mita "$MITA_MANAGER_STATE_DIR" "$MITA_USERS_BACKUP_DIR" 2>/dev/null || true
   if _has_user mita 2>/dev/null || id mita >/dev/null 2>&1; then
     run chown mita:mita /etc/mita 2>/dev/null || true
     run chmod 0750 /etc/mita 2>/dev/null || true
@@ -783,7 +930,9 @@ harden_mita_permissions() {
   else
     run chmod 0750 /etc/mita 2>/dev/null || true
   fi
-  # 敏感状态文件：root 读写即可（管理脚本以 root 运行）
+  run chown root:root "$MITA_MANAGER_STATE_DIR" "$MITA_USERS_BACKUP_DIR" 2>/dev/null || true
+  run chmod 0700 "$MITA_MANAGER_STATE_DIR" "$MITA_USERS_BACKUP_DIR" 2>/dev/null || true
+  # 敏感状态文件：root 读写即可（管理脚本以 root 运行）。
   if [ -f "$MITA_STATE" ]; then
     run chown root:root "$MITA_STATE" 2>/dev/null || true
     run chmod 0600 "$MITA_STATE" 2>/dev/null || true
@@ -796,7 +945,6 @@ harden_mita_permissions() {
     run chown root:mita "$MITA_INSTANCES_DIR" 2>/dev/null || true
     run chmod 0750 "$MITA_INSTANCES_DIR" 2>/dev/null || true
   fi
-  [ -d "$MITA_USERS_BACKUP_DIR" ] && run chmod 0700 "$MITA_USERS_BACKUP_DIR" 2>/dev/null || true
   if [ -d "$MITA_USERS_BACKUP_DIR" ]; then
     find "$MITA_USERS_BACKUP_DIR" -type f -name 'users_*.json' -exec chmod 0600 {} \; 2>/dev/null || true
   fi
@@ -869,12 +1017,14 @@ save_install_state() {
     msg "[dry-run] save install state: $MITA_STATE"
     return 0
   fi
-  run mkdir -p /etc/mita
+  run mkdir -p "$(dirname "$MITA_STATE")"
   state_tmp="$(mktemp "${MITA_STATE}.XXXXXX" 2>/dev/null || mktemp_file .state)"
   if ! {
     _state_kv PORT "$PORT"
     _state_kv PORT_RANGE "$PORT_RANGE"
     _state_kv PROTOCOL "$PROTOCOL"
+    _state_kv ADVERTISE_HOST "$ADVERTISE_HOST"
+    _state_kv ADVERTISE_PORT "$ADVERTISE_PORT"
     _state_kv MTU "$MTU"
     _state_kv MTU_POLICY "$MTU_POLICY"
     _state_kv USERNAME "$USERNAME"
@@ -905,8 +1055,10 @@ save_install_state() {
 }
 
 mark_oneclick_install() {
-  run mkdir -p /etc/mita
+  run mkdir -p "$(dirname "$MITA_MARKER")"
   run touch "$MITA_MARKER"
+  run chown root:root "$MITA_MARKER" 2>/dev/null || true
+  run chmod 0600 "$MITA_MARKER" 2>/dev/null || true
 }
 
 installed_by_oneclick() {
@@ -918,6 +1070,8 @@ load_install_state() {
   local _cli_port="$PORT"
   local _cli_port_range="$PORT_RANGE"
   local _cli_protocol="$PROTOCOL"
+  local _cli_advertise_host="$ADVERTISE_HOST"
+  local _cli_advertise_port="$ADVERTISE_PORT"
   local _cli_mtu="$MTU"
   local _cli_mtu_policy="$MTU_POLICY"
   local _cli_mtu_request="$MTU_REQUEST"
@@ -926,7 +1080,14 @@ load_install_state() {
   PORT=""
   PORT_RANGE=""
   PROTOCOL="TCP"
+  ADVERTISE_HOST=""
+  ADVERTISE_PORT=""
   [ -f "$MITA_STATE" ] || return 0
+  state_file_is_secure "$MITA_STATE" || {
+    warn "$(t "拒绝读取权限不安全的安装状态: ${MITA_STATE}" \
+      "Refusing to read install state with unsafe ownership or permissions: ${MITA_STATE}")"
+    return 1
+  }
   local _cli_tp="$TRAFFIC_PATTERN"
   local _cli_le="$LOW_ENTROPY_MODE"
   local _cli_mux="$MULTIPLEXING"
@@ -959,6 +1120,10 @@ load_install_state() {
   [ "${PORT_CLI:-0}" -eq 1 ] && { PORT="$_cli_port"; PORT_RANGE=""; }
   [ "${PORT_RANGE_CLI:-0}" -eq 1 ] && { PORT=""; PORT_RANGE="$_cli_port_range"; }
   [ "${PROTOCOL_CLI:-0}" -eq 1 ] && PROTOCOL="$_cli_protocol"
+  if [ "${ADVERTISE_CLI:-0}" -eq 1 ]; then
+    ADVERTISE_HOST="$_cli_advertise_host"
+    ADVERTISE_PORT="$_cli_advertise_port"
+  fi
   if [ "${MTU_CLI:-0}" -eq 1 ]; then
     MTU="$_cli_mtu"
     MTU_POLICY="$_cli_mtu_policy"
@@ -966,6 +1131,10 @@ load_install_state() {
   fi
   [ "${USERNAME_CLI:-0}" -eq 1 ] && USERNAME="$_cli_user"
   [ "${PASSWORD_CLI:-0}" -eq 1 ] && PASSWORD="$_cli_password"
+  [ -z "${PORT:-}" ] || ! valid_port "$PORT" || PORT="$(normalize_uint "$PORT")"
+  [ -z "${ADVERTISE_PORT:-}" ] || ! valid_advertise_port "$ADVERTISE_PORT" \
+    || ADVERTISE_PORT="$(normalize_uint "$ADVERTISE_PORT")"
+  [ -z "${MTU:-}" ] || ! valid_mtu "$MTU" || MTU="$(normalize_uint "$MTU")"
   return 0
 }
 
@@ -1052,7 +1221,7 @@ fi
     cmd="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
     case "$cmd" in
       menu|install|upgrade|uninstall|status|reconfigure|client-config|show|mtu|mtu-config|set-mtu|start|stop|restart|配置|节点|help|\
-      users|user-list|user-add|user-del|user-delete|user-show|user-manage|\
+      users|user-list|user-add|user-del|user-delete|user-show|user-manage|user-set-endpoint|\
       user-set-quota|user-set-expire|user-enable|user-disable|user-scan|user-quota-reset|\
       user-set-rate|user-set-bandwidth|rate-status|rate-restore|tc-status|tc-restore|\
       user-usage|usage|user-export-clients|user-backup|user-restore|user-export|user-import|\
@@ -1184,7 +1353,7 @@ fi
 cmd="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
 case "$cmd" in
   install|upgrade|uninstall|status|reconfigure|client-config|show|mtu|mtu-config|set-mtu|menu|start|stop|restart|配置|节点|\
-  users|user-list|user-add|user-del|user-delete|user-show|user-manage|\
+  users|user-list|user-add|user-del|user-delete|user-show|user-manage|user-set-endpoint|\
   user-set-quota|user-set-expire|user-enable|user-disable|user-scan|user-quota-reset|\
   user-set-rate|user-set-bandwidth|rate-status|rate-restore|tc-status|tc-restore|\
   user-usage|usage|user-export-clients|user-backup|user-restore|user-export|user-import|\
@@ -1608,6 +1777,15 @@ random_available_port() {
   return 1
 }
 
+normalize_uint() {
+  local value="${1:-}"
+  [[ "$value" =~ ^[0-9]+$ ]] || return 1
+  while [ "${#value}" -gt 1 ] && [ "${value#0}" != "$value" ]; do
+    value="${value#0}"
+  done
+  printf '%s' "$value"
+}
+
 # 取本机主用 IPv4：优先默认路由出口地址（ip route get 不发包，仅查路由表，
 # 内网无外网也可用），回退首个非回环地址。
 detect_local_ip() {
@@ -1656,17 +1834,51 @@ derive_port_from_ip() {
 }
 
 valid_port() {
-  local p="${1:-}" digits
-  [[ "$p" =~ ^0*([0-9]{1,5})$ ]] || return 1
-  digits="${BASH_REMATCH[1]}"
-  [ "$((10#$digits))" -ge 1025 ] && [ "$((10#$digits))" -le 65535 ]
+  local p
+  p="$(normalize_uint "${1:-}")" || return 1
+  [ "${#p}" -le 5 ] && [ "$p" -ge 1025 ] && [ "$p" -le 65535 ]
+}
+
+valid_advertise_port() {
+  local p
+  p="$(normalize_uint "${1:-}")" || return 1
+  [ "${#p}" -le 5 ] && [ "$p" -ge 1 ] && [ "$p" -le 65535 ]
+}
+
+validate_advertise_endpoint_values() {
+  local host="${1:-}" port="${2:-}" protocol="${3:-${PROTOCOL:-TCP}}"
+  if [ -z "$host" ] && [ -z "$port" ]; then
+    return 0
+  fi
+  [ -n "$host" ] && [ -n "$port" ] || {
+    warn "$(t '自定义客户端入口必须同时提供 IP 和端口' \
+      'Custom client entry requires both an IP and a port')"
+    return 1
+  }
+  valid_ip_literal "$host" || {
+    warn "$(t '自定义客户端入口 IP 格式无效' 'Invalid custom client entry IP')"
+    return 1
+  }
+  valid_advertise_port "$port" || {
+    warn "$(t '自定义客户端入口端口必须是 1-65535' \
+      'Custom client entry port must be between 1 and 65535')"
+    return 1
+  }
+  if [ "$protocol" = "BOTH" ] && [ "$port" -ge 65535 ]; then
+    warn "$(t '双协议的客户端入口主端口必须 ≤65534（UDP 使用入口端口+1）' \
+      'Dual protocol requires client entry port <=65534 (UDP uses entry port + 1)')"
+    return 1
+  fi
+}
+
+validate_advertise_endpoint() {
+  validate_advertise_endpoint_values "$ADVERTISE_HOST" "$ADVERTISE_PORT" "${PROTOCOL:-TCP}"
 }
 
 valid_mtu() {
-  local value="${1:-}" digits
-  [[ "$value" =~ ^0*([0-9]{1,4})$ ]] || return 1
-  digits="${BASH_REMATCH[1]}"
-  [ "$((10#$digits))" -ge 1280 ] && [ "$((10#$digits))" -le 1500 ]
+  local value
+  value="$(normalize_uint "${1:-}")" || return 1
+  [ "${#value}" -le 4 ] && [ "$value" -ge 1280 ] && [ "$value" -le 1500 ]
 }
 
 valid_nonnegative_int32() {
@@ -1791,7 +2003,7 @@ resolve_mtu_request() {
     valid_mtu "$raw" || {
       die "$(t '非法 MTU：必须为 1280-1500' 'Invalid MTU: expected 1280-1500')" || return 1
     }
-    MTU="$raw"
+    MTU="$(normalize_uint "$raw")"
     MTU_POLICY="custom"
     return 0
   fi
@@ -2649,11 +2861,12 @@ users_py_locked() {
     flock -w 30 "$MITA_USERS_LOCK" env MITA_USERS_STATE="$MITA_USERS_STATE" \
       _U_NAME="${_U_NAME-}" _U_PASS="${_U_PASS-}" _U_PORT="${_U_PORT-}" _U_PROTO="${_U_PROTO-}" \
       _U_QUOTA_MB="${_U_QUOTA_MB-}" _U_QUOTA_DAYS="${_U_QUOTA_DAYS-}" \
-       _U_QUOTA_MODE="${_U_QUOTA_MODE-}" \
-       _U_EXPIRE="${_U_EXPIRE-}" _U_PACKAGE="${_U_PACKAGE-}" _U_ENABLED="${_U_ENABLED-}" \
-       _U_BW="${_U_BW-}" _U_PRIMARY="${_U_PRIMARY-}" \
-       _U_DEPLOYMENT_MODEL="${_U_DEPLOYMENT_MODEL-}" \
-       python3 -c "$code"
+      _U_QUOTA_MODE="${_U_QUOTA_MODE-}" \
+      _U_EXPIRE="${_U_EXPIRE-}" _U_PACKAGE="${_U_PACKAGE-}" _U_ENABLED="${_U_ENABLED-}" \
+      _U_BW="${_U_BW-}" _U_PRIMARY="${_U_PRIMARY-}" \
+      _U_ADVERTISE_HOST="${_U_ADVERTISE_HOST-}" _U_ADVERTISE_PORT="${_U_ADVERTISE_PORT-}" \
+      _U_DEPLOYMENT_MODEL="${_U_DEPLOYMENT_MODEL-}" \
+      python3 -c "$code"
   else
     MITA_USERS_STATE="$MITA_USERS_STATE" \
       _U_NAME="${_U_NAME-}" _U_PASS="${_U_PASS-}" _U_PORT="${_U_PORT-}" _U_PROTO="${_U_PROTO-}" \
@@ -2661,6 +2874,7 @@ users_py_locked() {
       _U_QUOTA_MODE="${_U_QUOTA_MODE-}" \
       _U_EXPIRE="${_U_EXPIRE-}" _U_PACKAGE="${_U_PACKAGE-}" _U_ENABLED="${_U_ENABLED-}" \
       _U_BW="${_U_BW-}" _U_PRIMARY="${_U_PRIMARY-}" \
+      _U_ADVERTISE_HOST="${_U_ADVERTISE_HOST-}" _U_ADVERTISE_PORT="${_U_ADVERTISE_PORT-}" \
       _U_DEPLOYMENT_MODEL="${_U_DEPLOYMENT_MODEL-}" \
       python3 -c "$code"
   fi
@@ -2807,7 +3021,8 @@ PY
 }
 
 port_required_bindings() {
-  local p="$1"
+  local p
+  p="$(normalize_uint "$1")" || return 1
   case "${PROTOCOL:-TCP}" in
     UDP) printf 'UDP|%s\n' "$p" ;;
     BOTH)
@@ -2932,6 +3147,7 @@ allocate_user_port() {
   [ "${PROTOCOL:-TCP}" = "BOTH" ] && step=2
   if [ -n "$prefer" ]; then
     valid_port "$prefer" || { die "$(t "非法端口: $prefer" "Invalid port: $prefer")" || return 1; }
+    prefer="$(normalize_uint "$prefer")"
     if [ "$PROTOCOL" = "BOTH" ]; then
       valid_port "$((prefer + 1))" || { die "$(t '双协议需要主端口 ≤65534' 'Dual protocol needs main port ≤65534')" || return 1; }
     fi
@@ -2984,14 +3200,17 @@ users_migrate_from_primary() {
   run mkdir -p "$(dirname "$MITA_USERS_STATE")"
   if ! python3 -c '
 import hashlib, json, sys, time
-path, name, pwd, port, proto = sys.argv[1:6]
+path, name, pwd, port, proto, advertise_host, advertise_port = sys.argv[1:8]
 port = int(port)
+advertise_port = int(advertise_port) if advertise_port else ""
 instance_id = "u" + hashlib.sha256(("%s\0%s" % (name, port)).encode()).hexdigest()[:16]
 d = {"version": 2, "protocol": proto, "users": [{
     "instance_id": instance_id,
     "name": name,
     "password": pwd,
     "port": port,
+    "advertise_host": advertise_host,
+    "advertise_port": advertise_port,
     "enabled": True,
     "quota_mb": 0,
     "quota_days": 0,
@@ -3004,7 +3223,8 @@ d = {"version": 2, "protocol": proto, "users": [{
     "updated_at": int(time.time()),
 }]}
 json.dump(d, open(path, "w"), indent=2)
-' "$MITA_USERS_STATE" "$USERNAME" "$PASSWORD" "$PORT" "${PROTOCOL:-TCP}"
+' "$MITA_USERS_STATE" "$USERNAME" "$PASSWORD" "$PORT" "${PROTOCOL:-TCP}" \
+    "${ADVERTISE_HOST:-}" "${ADVERTISE_PORT:-}"
   then
     admin_lock_release
     return 1
@@ -3032,6 +3252,8 @@ for u in d.get("users") or []:
   rest="${line#*$'\t'}"
   PASSWORD="${rest%%$'\t'*}"
   PORT="${rest#*$'\t'}"
+  ADVERTISE_HOST="$(users_get_field "$USERNAME" advertise_host 2>/dev/null || true)"
+  ADVERTISE_PORT="$(users_get_field "$USERNAME" advertise_port 2>/dev/null || true)"
   MULTI_USER_MODE=1
 }
 
@@ -3050,11 +3272,14 @@ users_ensure_loaded() {
 
 users_add() {
   local name="$1" password="$2" port_pref="${3:-}" port rc expire_at
+  local advertise_host="${4:-}" advertise_port="${5:-}"
   local bw="${USER_BANDWIDTH_MBPS:-0}" qmode
   users_require_python || return 1
   [ -n "$name" ] || { die "$(t '用户名不能为空' 'Username required')" || return 1; }
   [ -n "$password" ] || password="$(random_token)"
   validate_proxy_credentials "$name" "$password" || return 1
+  validate_advertise_endpoint_values "$advertise_host" "$advertise_port" "${PROTOCOL:-TCP}" || return 1
+  [ -z "$advertise_port" ] || advertise_port="$(normalize_uint "$advertise_port")"
   valid_bandwidth_mbps "$bw" || {
     warn "$(t '带宽必须是 0-1000000 Mbps 的整数' \
       'Bandwidth must be an integer from 0 to 1000000 Mbps')"
@@ -3098,6 +3323,7 @@ users_add() {
   _U_QUOTA_MB="${USER_QUOTA_MB:-0}" _U_QUOTA_DAYS="${USER_QUOTA_DAYS:-0}"
   _U_QUOTA_MODE="$qmode"
   _U_EXPIRE="${expire_at}" _U_PACKAGE="${USER_PACKAGE:-}" _U_BW="$bw"
+  _U_ADVERTISE_HOST="$advertise_host" _U_ADVERTISE_PORT="$advertise_port"
   set +e
   users_py_locked '
 import json, os, time, sys, datetime, secrets
@@ -3123,6 +3349,8 @@ if qmode not in ("rolling", "calendar"):
     qmode = "rolling"
 expire = (os.environ.get("_U_EXPIRE") or "").strip()
 package = (os.environ.get("_U_PACKAGE") or "").strip() or ("custom" if qmb > 0 else "unlimited")
+advertise_host = (os.environ.get("_U_ADVERTISE_HOST") or "").strip()
+advertise_port = int(os.environ.get("_U_ADVERTISE_PORT")) if os.environ.get("_U_ADVERTISE_PORT") else ""
 try:
     d = json.load(open(path))
 except Exception:
@@ -3144,6 +3372,8 @@ users.append({
     "name": name,
     "password": password,
     "port": port,
+    "advertise_host": advertise_host,
+    "advertise_port": advertise_port,
     "enabled": True,
     "quota_mb": qmb,
     "quota_days": (qdays if qdays > 0 else 30) if qmb > 0 else 0,
@@ -3442,14 +3672,15 @@ for u in d.get("users") or []:
 
 apply_users_config() {
   # 每个启用用户对应一个独立 mita 实例；端口、认证、配额 metrics 均为专属资源。
-  local snapshot="${1:-}"
+  local snapshot="${1:-}" auto_host=""
   STAGE="应用多用户配置"
   admin_lock_acquire || return 1
-  if ! users_validate_state_file "$MITA_USERS_STATE" "${PROTOCOL:-TCP}"; then
+  auto_host="$(public_ip 2>/dev/null || true)"
+  if ! users_validate_state_file "$MITA_USERS_STATE" "${PROTOCOL:-TCP}" "$auto_host"; then
     users_tx_rollback "$snapshot" 0
     admin_lock_release
-    warn "$(t 'users.json 校验失败，未应用到专属实例' \
-      'users.json validation failed; dedicated instances were not changed')"
+    warn "$(t 'users.json 校验失败（字段、监听端口或客户端展示入口冲突），未应用到专属实例' \
+      'users.json validation failed (fields, listen ports, or client display endpoints conflict); dedicated instances were not changed')"
     return 1
   fi
   if [ "$(users_count)" -eq 0 ]; then
@@ -3554,6 +3785,30 @@ json.dump(d, open(path, "w"), indent=2)
   set -e
   [ "$rc" -eq 0 ] || return 1
   return 0
+}
+
+users_set_advertise_endpoint() {
+  local name="$1" host="${2:-}" port="${3:-}"
+  users_name_exists "$name" || return 1
+  validate_advertise_endpoint_values "$host" "$port" "${PROTOCOL:-TCP}" || return 1
+  [ -z "$port" ] || port="$(normalize_uint "$port")"
+  _U_NAME="$name" _U_ADVERTISE_HOST="$host" _U_ADVERTISE_PORT="$port"
+  users_py_locked '
+import json, os, sys, time
+path=os.environ["MITA_USERS_STATE"]
+name=os.environ.get("_U_NAME") or ""
+host=os.environ.get("_U_ADVERTISE_HOST") or ""
+port=os.environ.get("_U_ADVERTISE_PORT") or ""
+d=json.load(open(path))
+for u in d.get("users") or []:
+    if u.get("name") == name:
+        u["advertise_host"] = host
+        u["advertise_port"] = int(port) if port else ""
+        u["updated_at"] = int(time.time())
+        json.dump(d, open(path, "w"), indent=2)
+        raise SystemExit(0)
+raise SystemExit(2)
+'
 }
 
 # ---------- 专属实例按端口限速（仅管理本脚本拥有的 tc filter） ----------
@@ -4104,7 +4359,7 @@ users_backup_now() {
   if command -v python3 >/dev/null 2>&1; then
     MITA_USERS_BACKUP_DIR="$MITA_USERS_BACKUP_DIR" python3 -c '
 import os, glob
-d=os.environ.get("MITA_USERS_BACKUP_DIR", "/etc/mita/backups")
+d=os.environ.get("MITA_USERS_BACKUP_DIR", "/var/lib/mita-oneclick/backups")
 files=sorted(glob.glob(os.path.join(d, "users_*.json")), key=os.path.getmtime, reverse=True)
 for f in files[20:]:
     try: os.remove(f)
@@ -4115,18 +4370,24 @@ for f in files[20:]:
 }
 
 users_validate_state_file() {
-  local f="$1" protocol="${2:-${PROTOCOL:-TCP}}"
+  local f="$1" protocol="${2:-${PROTOCOL:-TCP}}" auto_host="${3:-}"
   [ -f "$f" ] || return 1
   python3 -c '
-import datetime,json,sys
+import datetime,ipaddress,json,sys
 d=json.load(open(sys.argv[1]))
 proto=(sys.argv[2] if len(sys.argv)>2 else "TCP").upper()
+auto_host=(sys.argv[3] if len(sys.argv)>3 else "").strip()
 if proto not in ("TCP", "UDP", "BOTH"):
     sys.exit(15)
+if auto_host:
+    try:
+        auto_host=str(ipaddress.ip_address(auto_host))
+    except Exception:
+        auto_host=""
 users=d.get("users")
 if not isinstance(users, list):
     sys.exit(2)
-names=set(); occupied_ports=set()
+names=set(); occupied_ports=set(); advertised_endpoints=set()
 for u in users:
     if not isinstance(u, dict):
         sys.exit(3)
@@ -4153,6 +4414,31 @@ for u in users:
     if any(port in occupied_ports for port in user_ports):
         sys.exit(7)
     occupied_ports.update(user_ports)
+    advertise_host=str(u.get("advertise_host") or "").strip()
+    advertise_port=u.get("advertise_port")
+    if bool(advertise_host) != bool(advertise_port):
+        sys.exit(17)
+    if advertise_host:
+        try:
+            advertise_host=str(ipaddress.ip_address(advertise_host))
+            advertise_port=int(advertise_port)
+        except Exception:
+            sys.exit(17)
+        if advertise_port < 1 or advertise_port > 65535 or (proto == "BOTH" and advertise_port > 65534):
+            sys.exit(17)
+    else:
+        advertise_port=""
+    u["advertise_host"]=advertise_host
+    u["advertise_port"]=advertise_port
+    effective_host=advertise_host or auto_host
+    effective_port=advertise_port if advertise_host else p
+    if effective_host:
+        endpoint_pairs=(("TCP", effective_port), ("UDP", effective_port+1)) if proto == "BOTH" else ((proto, effective_port),)
+        for endpoint_proto, endpoint_port in endpoint_pairs:
+            endpoint=(effective_host, endpoint_proto, endpoint_port)
+            if endpoint in advertised_endpoints:
+                sys.exit(18)
+            advertised_endpoints.add(endpoint)
     try:
         qmb=max(0, int(u.get("quota_mb") or 0))
         qdays=max(0, int(u.get("quota_days") or 0))
@@ -4190,7 +4476,7 @@ for u in users:
 d["version"]=2
 d["protocol"]=proto
 json.dump(d, open(sys.argv[1]+".norm","w"), indent=2)
-' "$f" "$protocol" 2>/dev/null || return 1
+' "$f" "$protocol" "$auto_host" 2>/dev/null || return 1
   if [ -f "${f}.norm" ]; then
     mv -f "${f}.norm" "$f" 2>/dev/null || return 1
   fi
@@ -4200,6 +4486,7 @@ json.dump(d, open(sys.argv[1]+".norm","w"), indent=2)
 users_restore_from_file() {
   local src="$1" bak tx tmp imported_protocol
   local old_protocol old_user old_password old_port old_pairs new_pairs close_pairs rollback_close_pairs
+  local old_advertise_host old_advertise_port
   [ -f "$src" ] || { warn "$(t "备份不存在: $src" "Backup not found: $src")"; return 1; }
   admin_lock_acquire || return 1
   load_install_state
@@ -4207,6 +4494,8 @@ users_restore_from_file() {
   old_user="${USERNAME:-}"
   old_password="${PASSWORD:-}"
   old_port="${PORT:-}"
+  old_advertise_host="${ADVERTISE_HOST:-}"
+  old_advertise_port="${ADVERTISE_PORT:-}"
   old_pairs="$(multi_user_port_protocol_pairs)"
   tmp="$(mktemp_file .json)"
   cp -f "$src" "$tmp"
@@ -4265,6 +4554,8 @@ print(str(d.get("protocol") or sys.argv[2]).strip().upper())
       USERNAME="$old_user"
       PASSWORD="$old_password"
       PORT="$old_port"
+      ADVERTISE_HOST="$old_advertise_host"
+      ADVERTISE_PORT="$old_advertise_port"
       if users_isolated_mode; then
         reconcile_isolated_instances 2>/dev/null || true
         apply_tc_limits 2>/dev/null || true
@@ -4281,6 +4572,8 @@ print(str(d.get("protocol") or sys.argv[2]).strip().upper())
       USERNAME="$old_user"
       PASSWORD="$old_password"
       PORT="$old_port"
+      ADVERTISE_HOST="$old_advertise_host"
+      ADVERTISE_PORT="$old_advertise_port"
       users_tx_rollback "$tx" 0
       admin_lock_release
       return 1
@@ -4294,6 +4587,8 @@ print(str(d.get("protocol") or sys.argv[2]).strip().upper())
     USERNAME="$old_user"
     PASSWORD="$old_password"
     PORT="$old_port"
+    ADVERTISE_HOST="$old_advertise_host"
+    ADVERTISE_PORT="$old_advertise_port"
     if mita_installed 2>/dev/null; then
       users_tx_rollback "$tx" 1
     else
@@ -4379,16 +4674,20 @@ do_user_import() {
 
 print_user_outputs() {
   local name="$1"
-  local ip password port saved_user saved_pass saved_port
+  local ip password port saved_user saved_pass saved_port saved_advertise_host saved_advertise_port
   password="$(users_get_field "$name" password)" || return 1
   port="$(users_get_field "$name" port)" || return 1
-  ip="$(public_ip || echo 'YOUR_SERVER_IP')"
   saved_user="$USERNAME"
   saved_pass="$PASSWORD"
   saved_port="$PORT"
+  saved_advertise_host="$ADVERTISE_HOST"
+  saved_advertise_port="$ADVERTISE_PORT"
   USERNAME="$name"
   PASSWORD="$password"
   PORT="$port"
+  ADVERTISE_HOST="$(users_get_field "$name" advertise_host 2>/dev/null || true)"
+  ADVERTISE_PORT="$(users_get_field "$name" advertise_port 2>/dev/null || true)"
+  ip="$(advertised_host || echo 'YOUR_SERVER_IP')"
   msg ""
   t "========== 用户 ${name} ==========" "========== User ${name} =========="
   t "  专属实例端口: ${port}（其它用户凭据无法在此实例认证）" \
@@ -4408,11 +4707,13 @@ print_user_outputs() {
   t "  服务器: ${ip}" "  Server:   ${ip}"
   t "  用户名: ${name}" "  Username: ${name}"
   t "  密码:   ${password}" "  Password: ${password}"
-  t "  协议:   $(protocol_label)" "  Protocol: $(protocol_label)"
+  t "  协议:   $(client_protocol_label)" "  Protocol: $(client_protocol_label)"
   if [ "$PROTOCOL" = "BOTH" ]; then
-    t "  端口:   TCP ${port} / UDP $((port + 1))" "  Ports:    TCP ${port} / UDP $((port + 1))"
+    t "  入口端口: TCP $(advertised_port_for_protocol TCP) / UDP $(advertised_port_for_protocol UDP)" \
+      "  Entry ports: TCP $(advertised_port_for_protocol TCP) / UDP $(advertised_port_for_protocol UDP)"
   else
-    t "  端口:   ${port}" "  Port:     ${port}"
+    t "  入口端口: $(advertised_port_for_protocol "$PROTOCOL")" \
+      "  Entry port:  $(advertised_port_for_protocol "$PROTOCOL")"
   fi
   if [ -n "$ip" ] && [ "$ip" != "YOUR_SERVER_IP" ]; then
     msg ""
@@ -4422,6 +4723,8 @@ print_user_outputs() {
   USERNAME="$saved_user"
   PASSWORD="$saved_pass"
   PORT="$saved_port"
+  ADVERTISE_HOST="$saved_advertise_host"
+  ADVERTISE_PORT="$saved_advertise_port"
 }
 
 open_firewall_for_pairs() {
@@ -4500,6 +4803,8 @@ do_user_add() {
   mita_installed || die "$(t 'mita 未安装，请先执行安装' 'mita is not installed; run install first')"
   # CLI 参数先保存，避免被 load_install_state 覆盖
   local name="${USERNAME:-}" password="${PASSWORD:-}" prefer="" tx
+  local requested_advertise_host="${ADVERTISE_HOST:-}" requested_advertise_port="${ADVERTISE_PORT:-}"
+  local requested_advertise_cli="${ADVERTISE_CLI:-0}"
   local saved_pkg="${USER_PACKAGE:-}" saved_qmb="${USER_QUOTA_MB:-}" saved_qd="${USER_QUOTA_DAYS:-}" saved_exp="${USER_EXPIRE:-}" saved_bw="${USER_BANDWIDTH_MBPS:-}"
   if [ "${PORT_CLI:-0}" -eq 1 ] && [ -n "${PORT:-}" ]; then
     prefer="$PORT"
@@ -4510,12 +4815,23 @@ do_user_add() {
   PORT_CLI=0
   PORT_RANGE_CLI=0
   PROTOCOL_CLI=0
+  ADVERTISE_CLI=0
   load_install_state
   USER_PACKAGE="$saved_pkg"
   USER_QUOTA_MB="$saved_qmb"
   USER_QUOTA_DAYS="$saved_qd"
   USER_EXPIRE="$saved_exp"
   USER_BANDWIDTH_MBPS="$saved_bw"
+  if [ "$requested_advertise_cli" -ne 1 ]; then
+    requested_advertise_host=""
+    requested_advertise_port=""
+  elif ! validate_advertise_endpoint_values "$requested_advertise_host" \
+    "$requested_advertise_port" "${PROTOCOL:-TCP}"; then
+    die "$(t '新用户的自定义客户端入口参数无效' \
+      'Invalid custom client entry parameters for the new user')"
+  fi
+  [ -z "$requested_advertise_port" ] \
+    || requested_advertise_port="$(normalize_uint "$requested_advertise_port")"
   if ! users_state_exists || [ "$(users_count)" -eq 0 ]; then
     load_config_from_mita || return 1
     load_credentials_fallback 2>/dev/null || true
@@ -4561,7 +4877,8 @@ do_user_add() {
   fi
   admin_lock_acquire || return 1
   tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
-  if ! users_add "$name" "$password" "$prefer" >/dev/null; then
+  if ! users_add "$name" "$password" "$prefer" \
+    "$requested_advertise_host" "$requested_advertise_port" >/dev/null; then
     users_tx_rollback "$tx" 0
     admin_lock_release
     return 1
@@ -4896,16 +5213,19 @@ do_user_export_clients() {
   dir="${dir%/}/${ts}"
   run mkdir -p "$dir"
   run chmod 0700 "$dir" 2>/dev/null || true
-  ip="$(public_ip || echo 'YOUR_SERVER_IP')"
   load_install_state
   t "导出目录: $dir" "Export dir: $dir" >&2
   while IFS= read -r name; do
     [ -n "$name" ] || continue
-    local password port saved_u saved_p saved_port proto f links_file
+    local password port saved_u saved_p saved_port saved_advertise_host saved_advertise_port proto f links_file
     password="$(users_get_field "$name" password)" || continue
     port="$(users_get_field "$name" port)" || continue
     saved_u="$USERNAME"; saved_p="$PASSWORD"; saved_port="$PORT"
+    saved_advertise_host="$ADVERTISE_HOST"; saved_advertise_port="$ADVERTISE_PORT"
     USERNAME="$name"; PASSWORD="$password"; PORT="$port"
+    ADVERTISE_HOST="$(users_get_field "$name" advertise_host 2>/dev/null || true)"
+    ADVERTISE_PORT="$(users_get_field "$name" advertise_port 2>/dev/null || true)"
+    ip="$(advertised_host || echo 'YOUR_SERVER_IP')"
     prepare_traffic_pattern_export
     safe_name="$(safe_filename_component "$name")"
     [ -n "$safe_name" ] || safe_name="user"
@@ -4921,6 +5241,7 @@ do_user_export_clients() {
     done < <(protocols_for_mode)
     chmod 0600 "$links_file" 2>/dev/null || true
     USERNAME="$saved_u"; PASSWORD="$saved_p"; PORT="$saved_port"
+    ADVERTISE_HOST="$saved_advertise_host"; ADVERTISE_PORT="$saved_advertise_port"
     t "  已导出: $name" "  Exported: $name" >&2
   done < <(python3 -c '
 import json,sys
@@ -5264,6 +5585,72 @@ do_user_del() {
   t "完成。已释放端口: ${freed:-?}" "Done. Freed port: ${freed:-?}"
 }
 
+do_user_set_endpoint() {
+  require_root
+  require_linux
+  local requested_name="${USERNAME:-}" requested_host="${ADVERTISE_HOST:-}"
+  local requested_port="${ADVERTISE_PORT:-}" requested_cli="${ADVERTISE_CLI:-0}"
+  local name host port actual_port tx auto_host=""
+  USERNAME_CLI=0
+  ADVERTISE_CLI=0
+  load_install_state
+  users_ensure_loaded
+  users_state_exists || die "$(t '无用户状态' 'No users state')"
+  name="${requested_name:-${USERNAME:-}}"
+  if [ -z "$name" ]; then
+    [ "$YES" -ne 1 ] || die "$(t '需要 --user NAME' 'Need --user NAME')"
+    read_tty name "$(t '用户名: ' 'Username: ')" || true
+  fi
+  users_name_exists "$name" || die "$(t "用户不存在: $name" "User not found: $name")"
+  actual_port="$(users_get_field "$name" port)"
+
+  if [ "$requested_cli" -eq 1 ]; then
+    host="$requested_host"
+    port="$requested_port"
+    validate_advertise_endpoint_values "$host" "$port" "$PROTOCOL" \
+      || die "$(t '自定义客户端入口参数无效' 'Invalid custom client entry parameters')"
+    [ -z "$port" ] || port="$(normalize_uint "$port")"
+  else
+    [ "$YES" -ne 1 ] || die "$(t '请提供 --advertise-host/--advertise-port 或 --advertise-auto' \
+      'Provide --advertise-host/--advertise-port or --advertise-auto')"
+    ADVERTISE_HOST="$(users_get_field "$name" advertise_host 2>/dev/null || true)"
+    ADVERTISE_PORT="$(users_get_field "$name" advertise_port 2>/dev/null || true)"
+    PORT="$actual_port"
+    msg ""
+    t "当前客户端入口: $([ -n "$ADVERTISE_HOST" ] && printf '%s:%s' "$ADVERTISE_HOST" "$ADVERTISE_PORT" || printf '自动探测')" \
+      "Current client entry: $([ -n "$ADVERTISE_HOST" ] && printf '%s:%s' "$ADVERTISE_HOST" "$ADVERTISE_PORT" || printf 'auto-detect')"
+    collect_advertise_endpoint_interactive
+    host="$ADVERTISE_HOST"
+    port="$ADVERTISE_PORT"
+  fi
+
+  admin_lock_acquire || return 1
+  tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
+  if ! users_set_advertise_endpoint "$name" "$host" "$port"; then
+    users_tx_rollback "$tx" 0
+    admin_lock_release
+    return 1
+  fi
+  auto_host="$(public_ip 2>/dev/null || true)"
+  if ! users_validate_state_file "$MITA_USERS_STATE" "$PROTOCOL" "$auto_host"; then
+    users_tx_rollback "$tx" 0
+    admin_lock_release
+    die "$(t '客户端展示入口与其它用户冲突' \
+      'Client display endpoint conflicts with another user')"
+  fi
+  users_sync_primary_globals
+  if ! save_install_state; then
+    users_tx_rollback "$tx" 0
+    admin_lock_release
+    return 1
+  fi
+  users_tx_commit "$tx"
+  admin_lock_release
+  t "已更新 ${name} 的客户端展示入口；服务端实例未重启" \
+    "Updated ${name} client display endpoint; server instance was not restarted"
+  print_user_outputs "$name"
+}
+
 do_user_show() {
   require_root
   load_install_state
@@ -5299,9 +5686,10 @@ do_user_manage() {
     msg "  14) 强制日历月配额重置"
     msg "  15) 查看流量/配额用量"
     msg "  16) 批量导出客户端配置"
-    msg "  17) 返回主菜单"
+    msg "  17) 设置客户端展示入口"
+    msg "  18) 返回主菜单"
     local c=""
-    read_tty c "$(t '请选择 [1-17]: ' 'Choose [1-17]: ')" || c=""
+    read_tty c "$(t '请选择 [1-18]: ' 'Choose [1-18]: ')" || c=""
     c="$(printf '%s' "$c" | tr -d '[:space:]')"
     case "$c" in
       1) do_user_list ;;
@@ -5384,6 +5772,11 @@ do_user_manage() {
       15) do_user_usage ;;
       16) do_user_export_clients ;;
       17)
+        USERNAME=""; ADVERTISE_HOST=""; ADVERTISE_PORT=""; ADVERTISE_CLI=0
+        read_tty USERNAME "$(t '用户名: ' 'Username: ')" || true
+        do_user_set_endpoint
+        ;;
+      18)
         [ "${MAIN_MENU_ACTIVE:-0}" -eq 1 ] && return 3
         return 0
         ;;
@@ -5414,6 +5807,58 @@ choose_protocol_interactive() {
       PROTOCOL="TCP"
       ;;
   esac
+}
+
+collect_advertise_endpoint_interactive() {
+  local input="" candidate="" default_port="${PORT:-}"
+  if [ "${ADVERTISE_CLI:-0}" -eq 1 ]; then
+    validate_advertise_endpoint || die "$(t '自定义客户端入口参数无效' \
+      'Invalid custom client entry parameters')"
+    [ -z "$ADVERTISE_PORT" ] || ADVERTISE_PORT="$(normalize_uint "$ADVERTISE_PORT")"
+    return
+  fi
+
+  msg ""
+  if ! confirm '是否自定义客户端配置中展示的入口 IP 和端口？[y/N]: ' \
+    'Use a custom entry IP and port in client configurations? [y/N]: ' n; then
+    ADVERTISE_HOST=""
+    ADVERTISE_PORT=""
+    return 0
+  fi
+
+  while true; do
+    input=""
+    read_tty input "$(t '客户端入口 IP: ' 'Client entry IP: ')" || input=""
+    candidate="$(printf '%s' "$input" | tr -d '[:space:]')"
+    if valid_ip_literal "$candidate"; then
+      ADVERTISE_HOST="$candidate"
+      break
+    fi
+    warn "$(t '入口 IP 格式无效，请重新输入 IPv4 或 IPv6 地址' \
+      'Invalid entry IP; enter an IPv4 or IPv6 address')"
+  done
+
+  while true; do
+    input=""
+    read_tty input "$(t "客户端入口端口 [${default_port}]: " \
+      "Client entry port [${default_port}]: ")" || input=""
+    candidate="${input:-$default_port}"
+    if validate_advertise_endpoint_values "$ADVERTISE_HOST" "$candidate" "$PROTOCOL"; then
+      ADVERTISE_PORT="$(normalize_uint "$candidate")"
+      break
+    fi
+  done
+
+  msg ""
+  if [ "$PROTOCOL" = "BOTH" ]; then
+    t "客户端配置将展示: ${ADVERTISE_HOST}，TCP ${ADVERTISE_PORT} / UDP $((ADVERTISE_PORT + 1))" \
+      "Client configs will show: ${ADVERTISE_HOST}, TCP ${ADVERTISE_PORT} / UDP $((ADVERTISE_PORT + 1))"
+  else
+    t "客户端配置将展示: ${ADVERTISE_HOST}:${ADVERTISE_PORT}" \
+      "Client configs will show: ${ADVERTISE_HOST}:${ADVERTISE_PORT}"
+  fi
+  t "服务端仍使用实际监听端口 ${PORT}；自定义入口不修改 mita、防火墙或 tc 配置" \
+    "The server still listens on ${PORT}; the custom entry does not change mita, firewall, or tc settings"
 }
 
 normalize_multiplexing() {
@@ -5653,6 +6098,7 @@ collect_config_interactive() {
         warn "$(t '非法端口，请重新输入' 'Invalid port; try again')"
         continue
       fi
+      candidate="$(normalize_uint "$candidate")"
       if [ "$PROTOCOL" = "BOTH" ] && [ "$candidate" -ge 65535 ]; then
         warn "$(t '双协议需要主端口 ≤65534（UDP 使用主端口+1）' \
           'Dual protocol needs main port ≤65534 (UDP uses main port + 1)')"
@@ -5682,6 +6128,7 @@ collect_config_interactive() {
   fi
   msg ""
   t "已选协议: $(protocol_label)" "Selected protocol: $(protocol_label)"
+  collect_advertise_endpoint_interactive
   choose_mtu_interactive
   choose_client_modes_interactive
   choose_traffic_pattern_interactive
@@ -5694,6 +6141,7 @@ load_config_from_mita() {
   local desc bin bindings live_mtu=""
   local cli_user="$USERNAME" cli_password="$PASSWORD"
   local cli_port="$PORT" cli_port_range="$PORT_RANGE" cli_protocol="$PROTOCOL"
+  local cli_advertise_host="$ADVERTISE_HOST" cli_advertise_port="$ADVERTISE_PORT"
   local cli_mtu_request="$MTU_REQUEST"
   load_install_state
   local state_user="$USERNAME" state_password="$PASSWORD"
@@ -5709,6 +6157,10 @@ load_config_from_mita() {
     [ "${PORT_CLI:-0}" -eq 1 ] && PORT="$cli_port"
     [ "${PORT_RANGE_CLI:-0}" -eq 1 ] && { PORT=""; PORT_RANGE="$cli_port_range"; }
     [ "${PROTOCOL_CLI:-0}" -eq 1 ] && PROTOCOL="$cli_protocol"
+    if [ "${ADVERTISE_CLI:-0}" -eq 1 ]; then
+      ADVERTISE_HOST="$cli_advertise_host"
+      ADVERTISE_PORT="$cli_advertise_port"
+    fi
     [ "${MTU_CLI:-0}" -eq 1 ] && MTU_REQUEST="$cli_mtu_request"
     validate_proxy_credentials || return 1
     return 0
@@ -5866,6 +6318,7 @@ print(f"{name}\t{pwd}")
 load_credentials_fallback() {
   local f line
   if [ -f "$MITA_STATE" ]; then
+    state_file_is_secure "$MITA_STATE" || return 1
     line="$(
       (
         local USERNAME="" PASSWORD=""
@@ -5956,6 +6409,7 @@ collect_reconfigure_interactive() {
     if [ -n "$input" ]; then
       PORT="$input"
       valid_port "$PORT" || die "$(t '非法端口' 'Invalid port')"
+      PORT="$(normalize_uint "$PORT")"
     fi
   fi
 
@@ -5989,6 +6443,7 @@ ensure_config_noninteractive() {
   fi
   if [ -n "$PORT" ]; then
     valid_port "$PORT" || die "$(t '非法端口' 'Invalid port')"
+    PORT="$(normalize_uint "$PORT")"
     local _base
     if _base="$(derive_port_base 2>/dev/null)" \
        && { [ "$PORT" -lt "$((_base + 1))" ] || [ "$PORT" -gt "$((_base + 99))" ]; }; then
@@ -6003,6 +6458,9 @@ ensure_config_noninteractive() {
   if [ "$PROTOCOL" = "BOTH" ] && [ -n "$PORT" ] && [ "$PORT" -ge 65535 ]; then
     die "$(t '双协议需要主端口 ≤65534' 'Dual protocol needs main port ≤65534')"
   fi
+  validate_advertise_endpoint || die "$(t '自定义客户端入口参数无效' \
+    'Invalid custom client entry parameters')"
+  [ -z "$ADVERTISE_PORT" ] || ADVERTISE_PORT="$(normalize_uint "$ADVERTISE_PORT")"
   resolve_mtu_request || return 1
   [ "${MTU_CLI:-0}" -eq 1 ] && print_mtu_selection
   TRAFFIC_PATTERN="$(normalize_traffic_pattern "$TRAFFIC_PATTERN")" || \
@@ -6271,6 +6729,7 @@ apply_config() {
 collect_ports_from_mita() {
   local saved_protocol="" saved_port="" saved_port_range=""
   if [ -f "$MITA_STATE" ]; then
+    state_file_is_secure "$MITA_STATE" || return 1
     # shellcheck disable=SC1090
     source "$MITA_STATE" 2>/dev/null || true
     saved_protocol="$PROTOCOL"
@@ -6777,6 +7236,37 @@ public_ip() {
   printf '%s' "$candidate"
 }
 
+advertised_host() {
+  if [ -n "${ADVERTISE_HOST:-}" ]; then
+    printf '%s' "$ADVERTISE_HOST"
+  else
+    public_ip
+  fi
+}
+
+advertised_port_for_protocol() {
+  local proto="$1" canonical_port
+  if [ -n "${ADVERTISE_PORT:-}" ]; then
+    canonical_port="$(normalize_uint "$ADVERTISE_PORT")" || return 1
+    if [ "${PROTOCOL:-TCP}" = "BOTH" ] && [ "$proto" = "UDP" ]; then
+      printf '%s' "$((canonical_port + 1))"
+    else
+      printf '%s' "$canonical_port"
+    fi
+  else
+    port_for_protocol "$proto"
+  fi
+}
+
+client_protocol_label() {
+  if [ "${PROTOCOL:-TCP}" = "BOTH" ]; then
+    printf 'TCP(%s) + UDP(%s)' \
+      "$(advertised_port_for_protocol TCP)" "$(advertised_port_for_protocol UDP)"
+  else
+    printf '%s' "${PROTOCOL:-TCP}"
+  fi
+}
+
 start_mita() {
   STAGE="启动服务"
   if [ "${DRY_RUN:-0}" -eq 1 ]; then
@@ -6878,22 +7368,221 @@ add_op_user() {
   fi
 }
 
-enable_tcp_bbr() {
-  STAGE="启用 TCP BBR"
-  if [ -f /etc/alpine-release ] && ! command -v python3 >/dev/null 2>&1; then
-    run apk add --no-cache python3 2>/dev/null || true
-  fi
-  local url="https://raw.githubusercontent.com/${UPSTREAM_REPO}/refs/heads/main/tools/enable_tcp_bbr.py"
-  local tmp
-  tmp="$(mktemp_file .py)"
-  curl -fsSL -o "$tmp" "$url"
-  chmod +x "$tmp"
-  if command -v python3 >/dev/null 2>&1; then
-    run python3 "$tmp"
+bbr_fq_sysctl_value() {
+  local key="$1" path value=""
+  if command -v sysctl >/dev/null 2>&1; then
+    value="$(sysctl -n "$key" 2>/dev/null || true)"
   else
-    warn "$(t '未找到 python3，跳过 BBR 配置' 'python3 not found, skipping BBR')"
+    path="/proc/sys/${key//./\/}"
+    [ -r "$path" ] && value="$(tr -d '\r\n' <"$path" 2>/dev/null || true)"
+  fi
+  printf '%s' "$value"
+}
+
+bbr_fq_enabled() {
+  [ "$(bbr_fq_sysctl_value net.ipv4.tcp_congestion_control)" = "bbr" ] \
+    && [ "$(bbr_fq_sysctl_value net.core.default_qdisc)" = "fq" ]
+}
+
+bbr_fq_active() {
+  local dev
+  bbr_fq_enabled || return 1
+  command -v tc >/dev/null 2>&1 || return 1
+  dev="$(tc_default_iface 2>/dev/null || mtu_default_iface 2>/dev/null || true)"
+  [ -n "$dev" ] || return 1
+  tc qdisc show dev "$dev" 2>/dev/null \
+    | grep -Eq '(^|[[:space:]])qdisc[[:space:]]+fq([[:space:]]|$)'
+}
+
+report_bbr_fq_status() {
+  if bbr_fq_active; then
+    t 'TCP BBR 已启用，当前出口网卡正在使用 FQ' \
+      'TCP BBR is enabled and the current egress interface is using FQ'
+  else
+    warn "$(t 'TCP BBR + FQ 默认策略已配置；当前出口网卡尚未使用 FQ，重启系统或重建网卡后生效' \
+      'TCP BBR + FQ defaults are configured; the current egress interface is not using FQ yet, so reboot or recreate the interface to activate it')"
+  fi
+}
+
+bbr_owned_mode() {
+  local mode=""
+  [ -f "$BBR_STATE_FILE" ] || return 1
+  IFS= read -r mode <"$BBR_STATE_FILE" || return 1
+  case "$mode" in
+    created|replaced) printf '%s' "$mode" ;;
+    *) return 1 ;;
+  esac
+}
+
+bbr_state_value() {
+  local line="$1" value=""
+  value="$(sed -n "${line}p" "$BBR_STATE_FILE" 2>/dev/null || true)"
+  [[ "$value" =~ ^[A-Za-z0-9_.-]*$ ]] || return 1
+  printf '%s' "$value"
+}
+
+write_bbr_state() {
+  local mode="$1" old_qdisc="$2" old_cc="$3" tmp
+  case "$mode" in created|replaced) ;; *) return 1 ;; esac
+  [[ "$old_qdisc" =~ ^[A-Za-z0-9_.-]*$ ]] || return 1
+  [[ "$old_cc" =~ ^[A-Za-z0-9_.-]*$ ]] || return 1
+  tmp="$(mktemp_file .bbr-state)" || return 1
+  printf '%s\n%s\n%s\n' "$mode" "$old_qdisc" "$old_cc" >"$tmp"
+  install -d -o root -g root -m 0700 "$MITA_MANAGER_STATE_DIR"
+  install -o root -g root -m 0600 "$tmp" "$BBR_STATE_FILE"
+  rm -f "$tmp"
+}
+
+bbr_conf_is_owned() {
+  [ -f "$BBR_SYSCTL_CONF" ] || return 1
+  [ "$(sed '/^[[:space:]]*#/d;/^[[:space:]]*$/d' "$BBR_SYSCTL_CONF" 2>/dev/null)" = \
+    $'net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr' ]
+}
+
+restore_bbr_fq() {
+  local backup="$1" old_qdisc="$2" old_cc="$3" had_conf="${4:-1}"
+  if [ "$had_conf" -eq 1 ] && [ -n "$backup" ] && [ -f "$backup" ]; then
+    install -o root -g root -m 0644 "$backup" "$BBR_SYSCTL_CONF" 2>/dev/null || true
+  else
+    rm -f "$BBR_SYSCTL_CONF" 2>/dev/null || true
+  fi
+  [ -n "$old_qdisc" ] \
+    && sysctl -q -w "net.core.default_qdisc=${old_qdisc}" >/dev/null 2>&1 || true
+  [ -n "$old_cc" ] \
+    && sysctl -q -w "net.ipv4.tcp_congestion_control=${old_cc}" >/dev/null 2>&1 || true
+  [ -z "$backup" ] || rm -f "$backup"
+}
+
+restore_owned_bbr_fq() {
+  local mode old_qdisc old_cc
+  mode="$(bbr_owned_mode 2>/dev/null || true)"
+  [ -n "$mode" ] || return 0
+  if ! bbr_conf_is_owned; then
+    warn "$(t 'BBR sysctl 文件已被外部修改，拒绝在卸载时删除或覆盖；请先人工核对' \
+      'The BBR sysctl file was modified externally; refusing to remove or overwrite it during uninstall')"
+    return 1
+  fi
+  old_qdisc="$(bbr_state_value 2)" || return 1
+  old_cc="$(bbr_state_value 3)" || return 1
+  case "$mode" in
+    created)
+      rm -f "$BBR_SYSCTL_CONF"
+      ;;
+    replaced)
+      [ -f "$BBR_BACKUP_FILE" ] || {
+        warn "$(t '缺少 BBR 原配置备份，拒绝删除当前 sysctl 文件' \
+          'BBR original-config backup is missing; refusing to remove the current sysctl file')"
+        return 1
+      }
+      install -o root -g root -m 0644 "$BBR_BACKUP_FILE" "$BBR_SYSCTL_CONF"
+      sysctl -p "$BBR_SYSCTL_CONF" >/dev/null 2>&1 || {
+        warn "$(t '原 BBR/sysctl 文件已恢复，但重新应用失败' \
+          'The original BBR/sysctl file was restored but could not be reapplied')"
+        return 1
+      }
+      ;;
+  esac
+  [ -z "$old_qdisc" ] \
+    || sysctl -q -w "net.core.default_qdisc=${old_qdisc}" >/dev/null 2>&1 || true
+  [ -z "$old_cc" ] \
+    || sysctl -q -w "net.ipv4.tcp_congestion_control=${old_cc}" >/dev/null 2>&1 || true
+  rm -f "$BBR_STATE_FILE" "$BBR_BACKUP_FILE"
+}
+
+enable_bbr_fq() {
+  STAGE="启用 TCP BBR + FQ"
+  if bbr_fq_enabled; then
+    report_bbr_fq_status
+    return 0
+  fi
+  require_cmd sysctl
+
+  local available old_qdisc old_cc tmp backup="" had_conf=0 owned_mode="" new_ownership=0
+  if command -v modprobe >/dev/null 2>&1; then
+    run modprobe tcp_bbr 2>/dev/null || true
+    run modprobe sch_fq 2>/dev/null || true
+  fi
+  available="$(bbr_fq_sysctl_value net.ipv4.tcp_available_congestion_control)"
+  case " ${available} " in
+    *' bbr '*) ;;
+    *)
+      die "$(t '当前内核不支持 TCP BBR' 'TCP BBR is not supported by the current kernel')"
+      return 1
+      ;;
+  esac
+
+  old_qdisc="$(bbr_fq_sysctl_value net.core.default_qdisc)"
+  old_cc="$(bbr_fq_sysctl_value net.ipv4.tcp_congestion_control)"
+  owned_mode="$(bbr_owned_mode 2>/dev/null || true)"
+  if [ -e "$BBR_STATE_FILE" ] && [ -z "$owned_mode" ]; then
+    die "$(t 'BBR 所有权状态损坏，拒绝覆盖系统 sysctl 配置' \
+      'BBR ownership state is invalid; refusing to overwrite system sysctl configuration')"
+    return 1
+  fi
+  if [ -n "$owned_mode" ] && ! bbr_conf_is_owned; then
+    die "$(t 'BBR sysctl 文件已被外部修改，拒绝覆盖；请先人工核对' \
+      'The BBR sysctl file was modified externally; refusing to overwrite it')"
+    return 1
+  fi
+  if [ -f "$BBR_SYSCTL_CONF" ]; then
+    had_conf=1
+    backup="$(mktemp_file .bbr-backup)" || return 1
+    cp -p "$BBR_SYSCTL_CONF" "$backup" || { rm -f "$backup"; return 1; }
+  fi
+  tmp="$(mktemp_file .bbr-conf)" || { [ -z "$backup" ] || rm -f "$backup"; return 1; }
+  printf '%s\n' \
+    'net.core.default_qdisc=fq' \
+    'net.ipv4.tcp_congestion_control=bbr' >"$tmp"
+  run mkdir -p "$(dirname "$BBR_SYSCTL_CONF")"
+  if ! run install -o root -g root -m 0644 "$tmp" "$BBR_SYSCTL_CONF"; then
+    rm -f "$tmp"
+    [ -z "$backup" ] || rm -f "$backup"
+    return 1
   fi
   rm -f "$tmp"
+
+  if ! run sysctl -p "$BBR_SYSCTL_CONF" || ! bbr_fq_enabled; then
+    restore_bbr_fq "$backup" "$old_qdisc" "$old_cc" "$had_conf"
+    die "$(t '启用 TCP BBR + FQ 失败，已恢复原配置' \
+      'Failed to enable TCP BBR + FQ; the previous configuration was restored')"
+    return 1
+  fi
+  if [ -z "$owned_mode" ]; then
+    new_ownership=1
+    if [ "$had_conf" -eq 1 ]; then
+      if ! install -d -o root -g root -m 0700 "$MITA_MANAGER_STATE_DIR" \
+         || ! install -o root -g root -m 0600 "$backup" "$BBR_BACKUP_FILE" \
+         || ! write_bbr_state replaced "$old_qdisc" "$old_cc"; then
+        rm -f "$BBR_STATE_FILE" "$BBR_BACKUP_FILE"
+        restore_bbr_fq "$backup" "$old_qdisc" "$old_cc" "$had_conf"
+        return 1
+      fi
+    elif ! write_bbr_state created "$old_qdisc" "$old_cc"; then
+      rm -f "$BBR_STATE_FILE" "$BBR_BACKUP_FILE"
+      restore_bbr_fq "$backup" "$old_qdisc" "$old_cc" "$had_conf"
+      return 1
+    fi
+  fi
+  [ -z "$backup" ] || rm -f "$backup"
+  [ "$new_ownership" -eq 0 ] || harden_mita_permissions 2>/dev/null || true
+  report_bbr_fq_status
+}
+
+offer_bbr_fq() {
+  if bbr_fq_enabled; then
+    t '检测到 TCP BBR + FQ 默认策略已配置，跳过写入' \
+      'TCP BBR + FQ defaults are already configured; skipping file changes'
+    report_bbr_fq_status
+    return 0
+  fi
+  if [ "$ENABLE_BBR" -eq 1 ]; then
+    enable_bbr_fq
+  elif confirm '未检测到完整的 TCP BBR + FQ，是否现在启用？[Y/n]: ' \
+    'TCP BBR + FQ are not fully enabled. Enable them now? [Y/n]: ' y; then
+    enable_bbr_fq
+  else
+    t '已跳过 TCP BBR + FQ 配置' 'Skipped TCP BBR + FQ configuration'
+  fi
 }
 
 urlencode() {
@@ -6955,7 +7644,7 @@ generate_share_link_for() {
   local enc_user enc_pass p host query tp enc_tp=""
   enc_user="$(urlencode "$USERNAME")"
   enc_pass="$(urlencode "$PASSWORD")"
-  p="$(port_for_protocol "$proto")"
+  p="$(advertised_port_for_protocol "$proto")"
   # 官方 simple URL 始终要求 port/protocol 在 query 中成对出现。
   host="$(url_host "$ip")"
   tp="$(export_traffic_pattern_value)"
@@ -6968,7 +7657,7 @@ build_client_json_for() {
   local ip="$1"
   local proto="$2"
   local p binding tp tp_section="" user_json password_json ip_json
-  p="$(port_for_protocol "$proto")"
+  p="$(advertised_port_for_protocol "$proto")"
   user_json="$(json_string "$USERNAME")"
   password_json="$(json_string "$PASSWORD")"
   ip_json="$(json_string "$ip")"
@@ -7033,7 +7722,7 @@ build_clash_yaml_entry() {
   local ip="$1"
   local proto="$2"
   local p port_lines name_suffix tp tp_line="" server_yaml user_yaml password_yaml
-  p="$(port_for_protocol "$proto")"
+  p="$(advertised_port_for_protocol "$proto")"
   name_suffix="$(proto_lower "$proto")"
   server_yaml="$(json_string "$ip")"
   user_yaml="$(json_string "$USERNAME")"
@@ -7122,16 +7811,17 @@ print_protocol_outputs() {
     fi
     if [ "$DRY_RUN" -ne 1 ]; then
       build_client_json_for "$ip" "$proto" >"$cfg_path"
+      chmod 0600 "$cfg_path" 2>/dev/null || true
       t "  已保存: ${cfg_path}" "  Saved:  ${cfg_path}"
+    else
+      t "  将保存: ${cfg_path}" "  Will save: ${cfg_path}"
     fi
-    msg ""
-    build_client_json_for "$ip" "$proto"
   done < <(protocols_for_mode)
 }
 
 print_summary() {
   local ip
-  ip="$(public_ip || true)"
+  ip="$(advertised_host || true)"
   msg ""
   t '========== 安装完成 ==========' '========== Installation complete =========='
   if [ -n "$ip" ]; then
@@ -7145,7 +7835,7 @@ print_summary() {
   t "  服务器: ${ip:-<未知>}" "  Server:   ${ip:-<unknown>}"
   t "  用户名: ${USERNAME}" "  Username: ${USERNAME}"
   t "  密码:   ${PASSWORD}" "  Password: ${PASSWORD}"
-  t "  协议:   $(protocol_label)" "  Protocol: $(protocol_label)"
+  t "  协议:   $(client_protocol_label)" "  Protocol: $(client_protocol_label)"
   t "  MTU:    ${MTU}（$(mtu_policy_label)）" \
     "  MTU:      ${MTU} ($(mtu_policy_label))"
   t "  流量伪装: $(traffic_label)" "  Obfuscation: $(traffic_label)"
@@ -7154,12 +7844,23 @@ print_summary() {
   t "  握手模式: ${HANDSHAKE_MODE}" "  Handshake: ${HANDSHAKE_MODE}"
   if [ -n "$PORT" ]; then
     if [ "$PROTOCOL" = "BOTH" ]; then
-      t "  端口:   TCP ${PORT} / UDP $((PORT + 1))" "  Ports:    TCP ${PORT} / UDP $((PORT + 1))"
+      t "  端口:   TCP $(advertised_port_for_protocol TCP) / UDP $(advertised_port_for_protocol UDP)" \
+        "  Ports:    TCP $(advertised_port_for_protocol TCP) / UDP $(advertised_port_for_protocol UDP)"
     else
-      t "  端口:   ${PORT}" "  Port:     ${PORT}"
+      t "  端口:   $(advertised_port_for_protocol "$PROTOCOL")" \
+        "  Port:     $(advertised_port_for_protocol "$PROTOCOL")"
     fi
   else
     t "  端口段: ${PORT_RANGE}" "  Port range: ${PORT_RANGE}"
+  fi
+  if [ -n "${ADVERTISE_HOST:-}" ]; then
+    if [ "$PROTOCOL" = "BOTH" ]; then
+      t "  实际监听: TCP ${PORT} / UDP $((PORT + 1))（客户端入口仅用于展示）" \
+        "  Actual listen: TCP ${PORT} / UDP $((PORT + 1)) (client entry is display-only)"
+    else
+      t "  实际监听: ${PORT}/${PROTOCOL}（客户端入口仅用于展示）" \
+        "  Actual listen: ${PORT}/${PROTOCOL} (client entry is display-only)"
+    fi
   fi
   msg ""
   t '导入方式:' 'Import options:'
@@ -7188,7 +7889,7 @@ print_summary() {
 
 generate_client_config() {
   local ip
-  ip="$(public_ip || echo 'YOUR_SERVER_IP')"
+  ip="$(advertised_host || echo 'YOUR_SERVER_IP')"
   msg ""
   t '========== 节点链接与客户端配置 ==========' \
     '========== Share links & client config =========='
@@ -7225,6 +7926,7 @@ do_install() {
   require_root
   require_linux
   require_cmd curl
+  ensure_manager_state_layout 1
 
   local pm arch ver url tmp cfg tx reinstall_existing=0 managed_existing=0
   pm="$(detect_pkg_manager)"
@@ -7246,6 +7948,7 @@ do_install() {
       if [ "$USERNAME_CLI" -eq 1 ] || [ "$PASSWORD_CLI" -eq 1 ] \
          || [ "$PORT_CLI" -eq 1 ] || [ "$PORT_RANGE_CLI" -eq 1 ] \
          || [ "$PROTOCOL_CLI" -eq 1 ] || [ "$MTU_CLI" -eq 1 ] \
+         || [ "$ADVERTISE_CLI" -eq 1 ] \
          || [ "$MULTIPLEXING_CLI" -eq 1 ] || [ "$HANDSHAKE_CLI" -eq 1 ] \
          || [ "$TRAFFIC_CLI" -eq 1 ] || [ "$LOW_ENTROPY_CLI" -eq 1 ]; then
         die "$(t '重装只保留当前配置；如需同时改节点参数，请使用 reconfigure' \
@@ -7277,6 +7980,7 @@ do_install() {
   fi
   [ -z "$PORT_RANGE" ] || die "$(t 'v2 用户专属实例不支持端口段，请改用单端口' \
     'v2 dedicated user instances do not support port ranges; use one port')"
+  [ -z "$PORT" ] || PORT="$(normalize_uint "$PORT")"
   if [ "$reinstall_existing" -eq 0 ]; then
     ensure_install_port_available
   fi
@@ -7352,11 +8056,7 @@ do_install() {
     verify_mita_running
   fi
 
-  if [ "$ENABLE_BBR" -eq 1 ]; then
-    enable_tcp_bbr
-  elif confirm '是否启用 TCP BBR？[y/N]: ' 'Enable TCP BBR? [y/N]: ' n; then
-    enable_tcp_bbr
-  fi
+  offer_bbr_fq
 
   print_summary
 }
@@ -7369,13 +8069,19 @@ do_reconfigure() {
   local old_bindings new_bindings close_bindings desired_bindings binding_proto binding_port desc bin tx
   local old_port old_port_range old_protocol old_mtu old_mtu_policy old_user old_password
   local old_traffic old_seed old_low_entropy old_mux old_handshake
+  local old_advertise_host old_advertise_port
+  local requested_advertise_host="$ADVERTISE_HOST" requested_advertise_port="$ADVERTISE_PORT"
+  local requested_advertise_cli="${ADVERTISE_CLI:-0}"
+  ADVERTISE_CLI=0
   load_install_state
+  ADVERTISE_CLI="$requested_advertise_cli"
   if users_state_exists && [ "$(users_count)" -gt 0 ]; then
     users_sync_primary_globals
   fi
   old_port="$PORT"; old_port_range="$PORT_RANGE"; old_protocol="$PROTOCOL"
   old_mtu="$MTU"; old_mtu_policy="$MTU_POLICY"
   old_user="$USERNAME"; old_password="$PASSWORD"
+  old_advertise_host="$ADVERTISE_HOST"; old_advertise_port="$ADVERTISE_PORT"
   old_traffic="$TRAFFIC_PATTERN"; old_seed="$TRAFFIC_SEED"
   old_low_entropy="$LOW_ENTROPY_MODE"; old_mux="$MULTIPLEXING"; old_handshake="$HANDSHAKE_MODE"
   bin="$(mita_bin)"
@@ -7386,6 +8092,10 @@ do_reconfigure() {
     old_bindings="$(extract_bindings_from_describe "$desc")"
   fi
 
+  if [ "${ADVERTISE_CLI:-0}" -eq 1 ]; then
+    ADVERTISE_HOST="$requested_advertise_host"
+    ADVERTISE_PORT="$requested_advertise_port"
+  fi
   if [ "$YES" -eq 1 ]; then
     load_config_from_mita
     ensure_config_noninteractive
@@ -7394,9 +8104,61 @@ do_reconfigure() {
   fi
   [ -z "$PORT_RANGE" ] || die "$(t 'v2 用户专属实例不支持端口段，请改用单端口' \
     'v2 dedicated user instances do not support port ranges; use one port')"
+  [ -z "$PORT" ] || PORT="$(normalize_uint "$PORT")"
+  validate_advertise_endpoint || die "$(t '自定义客户端入口参数无效' \
+    'Invalid custom client entry parameters')"
+  [ -z "$ADVERTISE_PORT" ] || ADVERTISE_PORT="$(normalize_uint "$ADVERTISE_PORT")"
+
+  # 展示入口、客户端握手/多路复用和 MTU 策略文本不改变服务端运行配置。
+  # 这些字段单独持久化，避免无意义地重启所有专属实例。
+  if [ "$PORT" = "$old_port" ] && [ "$PORT_RANGE" = "$old_port_range" ] \
+     && [ "$PROTOCOL" = "$old_protocol" ] && [ "$MTU" = "$old_mtu" ] \
+     && [ "$USERNAME" = "$old_user" ] && [ "$PASSWORD" = "$old_password" ] \
+     && [ "$TRAFFIC_PATTERN" = "$old_traffic" ] && [ "$TRAFFIC_SEED" = "$old_seed" ] \
+     && [ "$LOW_ENTROPY_MODE" = "$old_low_entropy" ]; then
+    if users_state_exists && [ "$(users_count)" -gt 0 ]; then
+      local state_only_auto_host=""
+      admin_lock_acquire || return 1
+      tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
+      if [ "$ADVERTISE_HOST" != "$old_advertise_host" ] \
+         || [ "$ADVERTISE_PORT" != "$old_advertise_port" ]; then
+        if ! users_set_advertise_endpoint "$old_user" "$ADVERTISE_HOST" "$ADVERTISE_PORT"; then
+          users_tx_rollback "$tx" 0
+          admin_lock_release
+          return 1
+        fi
+      fi
+      state_only_auto_host="$(public_ip 2>/dev/null || true)"
+      if ! users_validate_state_file "$MITA_USERS_STATE" "$PROTOCOL" "$state_only_auto_host"; then
+        users_tx_rollback "$tx" 0
+        admin_lock_release
+        die "$(t '客户端展示入口与其它用户冲突' \
+          'Client display endpoint conflicts with another user')"
+      fi
+      users_sync_primary_globals
+      if ! save_install_state; then
+        users_tx_rollback "$tx" 0
+        admin_lock_release
+        return 1
+      fi
+      users_tx_commit "$tx"
+      admin_lock_release
+    else
+      save_install_state
+    fi
+    msg ""
+    t '服务器运行配置未变化；仅保存客户端展示设置，未重启服务' \
+      'Server runtime configuration is unchanged; client display settings were saved without restarting services'
+    print_summary
+    return 0
+  fi
+
   if [ -n "${PORT:-}" ]; then
     if users_state_exists && [ "$(users_count)" -gt 0 ]; then
-      desired_bindings="$(multi_user_port_protocol_pairs)"
+      desired_bindings="$({
+        multi_user_port_protocol_pairs
+        port_required_bindings "$PORT"
+      } | sed '/^[[:space:]]*$/d' | LC_ALL=C sort -u)"
     else
       desired_bindings="$(port_required_bindings "$PORT")"
     fi
@@ -7422,6 +8184,7 @@ do_reconfigure() {
     admin_lock_acquire || return 1
     tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
     _U_NAME="$USERNAME" _U_PASS="$PASSWORD" _U_PORT="$PORT" _U_PROTO="$PROTOCOL"
+    _U_ADVERTISE_HOST="$ADVERTISE_HOST" _U_ADVERTISE_PORT="$ADVERTISE_PORT"
     _U_PRIMARY="${old_user}"
     users_py_locked '
 import json, os, time
@@ -7431,6 +8194,8 @@ name = os.environ.get("_U_NAME") or ""
 password = os.environ.get("_U_PASS") or ""
 port = os.environ.get("_U_PORT") or ""
 proto = os.environ.get("_U_PROTO") or "TCP"
+advertise_host = os.environ.get("_U_ADVERTISE_HOST") or ""
+advertise_port = os.environ.get("_U_ADVERTISE_PORT") or ""
 primary = os.environ.get("_U_PRIMARY") or ""
 users = d.get("users") or []
 # 定位主用户：优先同名，否则第一个
@@ -7455,6 +8220,8 @@ if users:
         if any(int(x.get("port") or 0) == new_port for j, x in enumerate(users) if j != idx):
             raise SystemExit(3)
         u["port"] = new_port
+    u["advertise_host"] = advertise_host
+    u["advertise_port"] = int(advertise_port) if advertise_port else ""
     u["updated_at"] = int(time.time())
 d["protocol"] = proto
 json.dump(d, open(path, "w"), indent=2)
@@ -7472,14 +8239,15 @@ json.dump(d, open(path, "w"), indent=2)
     if ! users_validate_state_file "$MITA_USERS_STATE" "$PROTOCOL"; then
       users_tx_rollback "$tx" 0
       admin_lock_release
-      die "$(t '新协议/端口组合会造成用户专属监听端口冲突' \
-        'The new protocol/port combination would collide between dedicated user listeners')"
+      die "$(t '新协议/端口组合会造成监听端口或客户端展示入口冲突' \
+        'The new protocol/port combination would collide between listeners or client display endpoints')"
     fi
     # 协议变更时所有用户 portBindings 随 PROTOCOL 重建；端口仅主用户可能变
     if ! apply_users_config "$tx"; then
       PORT="$old_port"; PORT_RANGE="$old_port_range"; PROTOCOL="$old_protocol"
       MTU="$old_mtu"; MTU_POLICY="$old_mtu_policy"
       USERNAME="$old_user"; PASSWORD="$old_password"
+      ADVERTISE_HOST="$old_advertise_host"; ADVERTISE_PORT="$old_advertise_port"
       TRAFFIC_PATTERN="$old_traffic"; TRAFFIC_SEED="$old_seed"
       LOW_ENTROPY_MODE="$old_low_entropy"; MULTIPLEXING="$old_mux"; HANDSHAKE_MODE="$old_handshake"
       if users_isolated_mode; then
@@ -7494,6 +8262,7 @@ json.dump(d, open(path, "w"), indent=2)
       PORT="$old_port"; PORT_RANGE="$old_port_range"; PROTOCOL="$old_protocol"
       MTU="$old_mtu"; MTU_POLICY="$old_mtu_policy"
       USERNAME="$old_user"; PASSWORD="$old_password"
+      ADVERTISE_HOST="$old_advertise_host"; ADVERTISE_PORT="$old_advertise_port"
       TRAFFIC_PATTERN="$old_traffic"; TRAFFIC_SEED="$old_seed"
       LOW_ENTROPY_MODE="$old_low_entropy"; MULTIPLEXING="$old_mux"; HANDSHAKE_MODE="$old_handshake"
       users_tx_rollback "$tx" 1
@@ -7518,6 +8287,7 @@ json.dump(d, open(path, "w"), indent=2)
       PORT="$old_port"; PORT_RANGE="$old_port_range"; PROTOCOL="$old_protocol"
       MTU="$old_mtu"; MTU_POLICY="$old_mtu_policy"
       USERNAME="$old_user"; PASSWORD="$old_password"
+      ADVERTISE_HOST="$old_advertise_host"; ADVERTISE_PORT="$old_advertise_port"
       TRAFFIC_PATTERN="$old_traffic"; TRAFFIC_SEED="$old_seed"
       LOW_ENTROPY_MODE="$old_low_entropy"; MULTIPLEXING="$old_mux"; HANDSHAKE_MODE="$old_handshake"
       users_tx_rollback "$tx" 0
@@ -7528,6 +8298,7 @@ json.dump(d, open(path, "w"), indent=2)
       PORT="$old_port"; PORT_RANGE="$old_port_range"; PROTOCOL="$old_protocol"
       MTU="$old_mtu"; MTU_POLICY="$old_mtu_policy"
       USERNAME="$old_user"; PASSWORD="$old_password"
+      ADVERTISE_HOST="$old_advertise_host"; ADVERTISE_PORT="$old_advertise_port"
       TRAFFIC_PATTERN="$old_traffic"; TRAFFIC_SEED="$old_seed"
       LOW_ENTROPY_MODE="$old_low_entropy"; MULTIPLEXING="$old_mux"; HANDSHAKE_MODE="$old_handshake"
       admin_lock_release
@@ -7539,6 +8310,7 @@ json.dump(d, open(path, "w"), indent=2)
       PORT="$old_port"; PORT_RANGE="$old_port_range"; PROTOCOL="$old_protocol"
       MTU="$old_mtu"; MTU_POLICY="$old_mtu_policy"
       USERNAME="$old_user"; PASSWORD="$old_password"
+      ADVERTISE_HOST="$old_advertise_host"; ADVERTISE_PORT="$old_advertise_port"
       TRAFFIC_PATTERN="$old_traffic"; TRAFFIC_SEED="$old_seed"
       LOW_ENTROPY_MODE="$old_low_entropy"; MULTIPLEXING="$old_mux"; HANDSHAKE_MODE="$old_handshake"
       isolated_stop_all
@@ -7630,6 +8402,8 @@ do_upgrade() {
 mita_uninstall_target_present() {
   mita_installed \
     || installed_by_oneclick \
+    || [ -e "$MITA_LEGACY_MARKER" ] \
+    || [ -d "$MITA_MANAGER_STATE_DIR" ] \
     || [ -x "$INSTALL_SCRIPT_PATH" ] \
     || is_mita_wrapper "$MITA_BIN" \
     || [ -d /etc/mita ] \
@@ -7669,7 +8443,7 @@ remove_mita_common() {
   run rm -f "$MITA_LOGROTATE_CONF" 2>/dev/null || true
   run rm -rf /etc/mita /var/lib/mita /run/mita /var/run/mita \
     /var/run/mita.sock "$MITA_INSTANCES_DIR" "$MITA_INSTANCE_RUN_DIR" \
-    "$MITA_INSTANCE_METRICS_DIR" "$MITA_USERS_BACKUP_DIR"
+    "$MITA_INSTANCE_METRICS_DIR" "$MITA_USERS_BACKUP_DIR" "$MITA_MANAGER_STATE_DIR"
   run rm -f "$MITA_USERS_STATE" "$MITA_USERS_LOCK" "$MITA_ADMIN_LOCK" \
     "$MITA_FIREWALL_OWNED_STATE" "$TC_OWNED_STATE" "$MITA_STATE"
   run rm -f "$MITA_BIN" "$MITA_REAL_BIN" /usr/bin/mita-real "$MITA_MARKER" "$OPENRC_SVC"
@@ -7680,7 +8454,6 @@ remove_mita_common() {
     run rm -f /usr/bin/mita
   fi
   run rm -f /lib/systemd/system/mita.service /usr/lib/systemd/system/mita.service "$SYSTEMD_SVC"
-  run rm -f /etc/sysctl.d/mieru_tcp_bbr.conf
   if [ -d /etc/systemd/system ]; then
     find /etc/systemd/system -type l \
       \( -name 'mita.service' -o -name 'mita-oneclick@*.service' \
@@ -7713,7 +8486,7 @@ verify_mita_uninstalled() {
     failed=1
   fi
   for path in \
-    /etc/mita /var/lib/mita /run/mita /var/run/mita \
+    /etc/mita /var/lib/mita /run/mita /var/run/mita "$MITA_MANAGER_STATE_DIR" \
     "$MITA_INSTANCES_DIR" "$MITA_INSTANCE_RUN_DIR" "$MITA_INSTANCE_METRICS_DIR" \
     "$MITA_USERS_STATE" "$MITA_USERS_LOCK" "$MITA_USERS_BACKUP_DIR" \
     "$MITA_ADMIN_LOCK" "$MITA_FIREWALL_OWNED_STATE" "$TC_OWNED_STATE" \
@@ -7723,7 +8496,7 @@ verify_mita_uninstalled() {
     "$MITA_INSTANCE_SYSTEMD_TEMPLATE" "$MITA_INSTANCE_TMPFILES" "$MITA_INSTANCE_RUNNER" \
     "$MITA_USERS_TIMER" "$MITA_USERS_SERVICE" "$MITA_USERS_CRON" "$MITA_LOGROTATE_CONF" \
     "$OPENRC_SVC" "$MITA_USERS_LOG" /var/log/mita.log /var/log/mita.err \
-    /etc/sysctl.d/mieru_tcp_bbr.conf; do
+    "$BBR_STATE_FILE" "$BBR_BACKUP_FILE"; do
     if [ -e "$path" ] || [ -L "$path" ]; then
       warn "$(t "卸载残留: ${path}" "Uninstall residue: ${path}")"
       failed=1
@@ -7793,6 +8566,13 @@ do_uninstall() {
     exit 0
   fi
   local pm
+  # 必须在停止服务、清理规则和卸载软件包之前确认 BBR 文件仍由本脚本拥有，
+  # 避免因人工修改触发保护后留下半卸载状态。
+  if ! restore_owned_bbr_fq; then
+    bail "$(t 'BBR/FQ 配置已被外部修改，卸载已在删除任何 mita 文件前停止' \
+      'BBR/FQ configuration was modified externally; uninstall stopped before removing any mita files')" || return 1
+    return 1
+  fi
   pm="$(detect_pkg_manager)"
   stop_mita_for_uninstall
   STAGE="清理防火墙规则"
@@ -8097,6 +8877,7 @@ menu_run_action() {
     user-del) do_user_del ;;
     user-show) do_user_show ;;
     user-manage) do_user_manage ;;
+    user-set-endpoint) do_user_set_endpoint ;;
     user-set-quota) do_user_set_quota ;;
     user-set-expire) do_user_set_expire ;;
     user-enable) do_user_enable ;;
@@ -8226,6 +9007,10 @@ show_menu() {
 }
 
 main() {
+  if [ "${DRY_RUN:-0}" -ne 1 ] \
+     && [ "$(id -u 2>/dev/null || echo 1)" -eq 0 ]; then
+    ensure_manager_state_layout
+  fi
   if [ -z "$ACTION" ]; then
     menu_loop
     exit 0
@@ -8258,6 +9043,7 @@ main() {
     user-del) do_user_del ;;
     user-show) do_user_show ;;
     user-manage) do_user_manage ;;
+    user-set-endpoint) do_user_set_endpoint ;;
     user-set-quota) do_user_set_quota ;;
     user-set-expire) do_user_set_expire ;;
     user-enable) do_user_enable ;;

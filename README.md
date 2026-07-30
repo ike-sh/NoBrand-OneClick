@@ -29,8 +29,22 @@ apk add --no-cache bash curl && \
 2. 自动生成随机用户名、密码；**询问端口时默认按本机内网 IP 尾号推导**，并询问 MTU 策略
 3. 应用配置并启动服务
 4. 尝试放行防火墙（ufw / firewalld / Alpine iptables）
-5. 安装完成**同时输出** `mierus://` 节点链接、客户端 JSON、**Clash/mihomo 片段**及连接信息摘要
+5. 安装完成**同时输出** `mierus://` 节点链接、客户端 JSON 保存路径、**Clash/mihomo 片段**及连接信息摘要
 6. 下载包 **SHA256 校验**；提示云安全组放行端口
+
+安装结束时会检测系统当前的 TCP BBR 与 FQ 状态：两者均已启用时直接跳过；缺少任一项时询问是否使用本地 sysctl 配置启用，回车默认执行，不下载或运行远程 BBR 脚本。
+
+安装过程中可选择自定义“客户端展示入口”IP 和端口，适用于 IPLC、端口转发或前置入口。该入口只写入节点链接、客户端 JSON、Clash/mihomo 配置和摘要，不修改 mita 实际监听端口、防火墙规则或 `tc` 限速；填写错误只会导致导出的客户端配置不可用，不影响服务端运行。
+
+### v2.1.0 本地 BBR/FQ 与客户端展示入口
+
+- BBR + FQ 改为本地检测和 sysctl 配置，不再下载并执行远程 Python；两者已启用时直接跳过，缺项时回车默认启用，失败自动恢复原配置
+- 安装交互支持自定义客户端展示入口 IP 和端口，节点链接、客户端 JSON、Clash/mihomo 与摘要使用该入口
+- 展示入口与 mita 实际监听完全分离，不参与端口占用、防火墙或 `tc`；普通 VPS 默认继续自动探测公网 IP
+- 自定义入口随用户状态持久化，`show`、用户查看、批量导出、备份恢复和升级后继续生效
+- OneClick 管理状态迁移到仅 root 可访问的 `/var/lib/mita-oneclick/`；`/etc/mita/` 只保留官方守护进程数据和专属实例配置
+- 可用 `user-set-endpoint` 单独修改某个用户的展示入口；只更新状态和客户端产物，不重启服务端实例
+- 卸载只恢复本脚本实际接管的 BBR/FQ 文件；接管后的文件若被人工修改，脚本会拒绝删除或覆盖
 
 ### v2.0.4 菜单返回修复
 
@@ -344,6 +358,17 @@ curl -fsSL https://raw.githubusercontent.com/ike-sh/mieru-OneClick/main/install-
     --enable-bbr
 ```
 
+前置入口 `203.0.113.10:443` 转发到本机监听端口 `2088` 时，可使用：
+
+```sh
+install-mita --install -y \
+  --port 2088 \
+  --advertise-host 203.0.113.10 \
+  --advertise-port 443
+```
+
+`--advertise-host` 与 `--advertise-port` 必须同时提供；执行 `install-mita reconfigure -y --advertise-auto` 可恢复自动探测。双协议模式下，展示的 UDP 入口端口为自定义入口端口加一。自定义入口只负责生成客户端信息，前置服务器必须自行建立到真实监听端口的四层转发。
+
 `--mtu` 支持：
 
 - `safe`：固定 `1400`，默认且推荐
@@ -414,13 +439,17 @@ install-mita user-set-rate --user bob --bandwidth 20
 install-mita user-set-rate --user bob --bandwidth 0
 install-mita rate-status
 
+# 单独修改客户端展示入口（不重启服务端实例）
+install-mita user-set-endpoint --user bob --advertise-host 203.0.113.10 --advertise-port 443
+install-mita user-set-endpoint --user bob --advertise-auto
+
 # 删除并释放端口
 install-mita user-del bob
 
 # 备份 / 恢复 / 导出
 install-mita user-backup
 install-mita user-export /root/users-export.json
-install-mita user-restore /etc/mita/backups/users_manual_*.json
+install-mita user-restore /var/lib/mita-oneclick/backups/users_manual_*.json
 
 # 用量与验收
 install-mita user-usage
@@ -437,10 +466,11 @@ install-mita doctor
 | 流量套餐 rolling | mita `quotas` 滚动 N 天 / MB |
 | 流量套餐 calendar | 仅支持 `QUOTA_RESET_METHOD=metrics`；每月只停止并清空到期用户自己的 `metrics.pb` |
 | 到期 | 本地 `expire_at`；`user-scan` 停止/禁用该用户实例并关闭本地防火墙端口，保留状态和 metrics 以便再启用；允许全部账号同时到期 |
-| 带宽 | `0-1000000` Mbps；默认出口网卡上的专属端口 IPv4/IPv6 ingress/egress police；只增删 `/etc/mita/tc-owned.filters` 记录的 pref，不替换现有 qdisc；多出口可设置 `TC_IFACE` |
-| 本地防火墙 | 所有权记录在 `/etc/mita/firewall-owned.bindings`；预先存在的同端口规则不会被接管或删除 |
+| 客户端展示入口 | 每个用户可独立设置 IP/端口；仅用于导出，不改真实监听。相同协议下两个用户不能使用同一有效展示入口，避免前置四层转发目标不明确 |
+| 带宽 | `0-1000000` Mbps；默认出口网卡上的专属端口 IPv4/IPv6 ingress/egress police；只增删 `/var/lib/mita-oneclick/tc-owned.filters` 记录的 pref，不替换现有 qdisc；多出口可设置 `TC_IFACE` |
+| 本地防火墙 | 所有权记录在 `/var/lib/mita-oneclick/firewall-owned.bindings`；预先存在的同端口规则不会被接管或删除 |
 | 用量 | 逐实例调用 `mita get users` / `mita get quotas` |
-| 状态与实例 | `users.json` 600；配置 `/etc/mita/instances/<instance_id>/server.json`；UDS `/run/mita-instances/<instance_id>.sock`；metrics `/var/lib/mita/instances/<instance_id>/metrics.pb` |
+| 状态与实例 | root 管理状态 `/var/lib/mita-oneclick/` 为 700、`users.json` 为 600；服务配置 `/etc/mita/instances/<instance_id>/server.json`；UDS `/run/mita-instances/<instance_id>.sock`；metrics `/var/lib/mita/instances/<instance_id>/metrics.pb` |
 | 删除用户 | `install-mita user-del NAME` 或 `--user-del NAME` |
 | 月配额重置 | `user-quota-reset` 仅影响过月 calendar 用户；`-y` 强制这些用户本月重置 |
 | 数值范围 | quota MB / days 使用上游 `int32` 范围；有限配额未指定周期时按 30 天 |
