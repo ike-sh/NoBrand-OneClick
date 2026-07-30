@@ -5,7 +5,7 @@
 set -euo pipefail
 umask 077
 
-SCRIPT_VERSION="2.0.2"
+SCRIPT_VERSION="2.0.3"
 SCRIPT_AUTHOR="ike"
 SCRIPT_REPO="ike-sh/mieru-OneClick"
 UPSTREAM_REPO="enfein/mieru"
@@ -88,6 +88,7 @@ LOW_ENTROPY_MODE="LOW_ENTROPY_MODE_OFF"
 LOW_ENTROPY_CLI=0
 PORT_CLI=0
 PORT_RANGE_CLI=0
+PORT_AUTO_SELECTED=0
 CLIENT_RPC_PORT=8964
 CLIENT_SOCKS5_PORT=1080
 CLIENT_HTTP_PORT=8080
@@ -1592,6 +1593,20 @@ random_port() {
   printf '%s' "$p"
 }
 
+random_available_port() {
+  local p i
+  i=0
+  while [ "$i" -lt 256 ]; do
+    p="$(random_port)"
+    if port_available_for_mode "$p"; then
+      printf '%s' "$p"
+      return 0
+    fi
+    i=$((i + 1))
+  done
+  return 1
+}
+
 # 取本机主用 IPv4：优先默认路由出口地址（ip route get 不发包，仅查路由表，
 # 内网无外网也可用），回退首个非回环地址。
 detect_local_ip() {
@@ -1621,12 +1636,22 @@ derive_port_base() {
 # 在 IP 尾号端口段内随机取一个可用端口：xx01-xx99（xx00 留给 SSH）；不可用返回非0。
 # BOTH 双协议时末两位上限取 98，避免 UDP=主端口+1 溢出到 xx00 或下一机器段。
 derive_port_from_ip() {
-  local base hi off
+  local base hi start i off p
   base="$(derive_port_base)" || return 1
   hi=99
   [ "$PROTOCOL" = "BOTH" ] && hi=98
-  off=$(( (RANDOM % hi) + 1 ))
-  printf '%s' "$((base + off))"
+  start=$(( (RANDOM % hi) + 1 ))
+  i=0
+  while [ "$i" -lt "$hi" ]; do
+    off=$(( ((start - 1 + i) % hi) + 1 ))
+    p=$((base + off))
+    if port_available_for_mode "$p"; then
+      printf '%s' "$p"
+      return 0
+    fi
+    i=$((i + 1))
+  done
+  return 1
 }
 
 valid_port() {
@@ -2699,14 +2724,170 @@ for u in d.get("users") or []:
 }
 
 port_is_listening() {
-  local p="$1"
+  local p="$1" proto="${2:-ANY}" flags
+  case "$proto" in
+    TCP) flags="-Hlnt" ;;
+    UDP) flags="-Hlnu" ;;
+    *) flags="-Hlntu" ;;
+  esac
   if command -v ss >/dev/null 2>&1; then
-    ss -lntu 2>/dev/null | grep -Eq "[:.]${p}\\s" && return 0
+    if ss "$flags" 2>/dev/null | awk -v port="$p" '
+      {
+        for (i = 1; i <= NF; i++) {
+          if ($i ~ (":" port "$")) {
+            found = 1
+            exit
+          }
+        }
+      }
+      END { exit(found ? 0 : 1) }
+    '; then
+      return 0
+    fi
+    return 1
   fi
   if command -v netstat >/dev/null 2>&1; then
-    netstat -lntu 2>/dev/null | grep -Eq "[:.]${p}\\s" && return 0
+    case "$proto" in
+      TCP) flags="-lnt" ;;
+      UDP) flags="-lnu" ;;
+      *) flags="-lntu" ;;
+    esac
+    if netstat "$flags" 2>/dev/null | awk -v port="$p" '
+      {
+        for (i = 1; i <= NF; i++) {
+          if ($i ~ (":" port "$")) {
+            found = 1
+            exit
+          }
+        }
+      }
+      END { exit(found ? 0 : 1) }
+    '; then
+      return 0
+    fi
+    return 1
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$p" "$proto" <<'PY'
+import errno
+import socket
+import sys
+
+port = int(sys.argv[1])
+proto = sys.argv[2]
+protocols = ("TCP", "UDP") if proto == "ANY" else (proto,)
+for current_proto in protocols:
+    sock_type = socket.SOCK_DGRAM if current_proto == "UDP" else socket.SOCK_STREAM
+    for family in (socket.AF_INET6, socket.AF_INET):
+        try:
+            sock = socket.socket(family, sock_type)
+        except OSError:
+            continue
+        try:
+            if family == socket.AF_INET6:
+                try:
+                    sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+                except OSError:
+                    pass
+                sock.bind(("::", port))
+            else:
+                sock.bind(("0.0.0.0", port))
+        except OSError as exc:
+            sock.close()
+            if exc.errno in (errno.EADDRINUSE, errno.EACCES):
+                raise SystemExit(0)
+            continue
+        sock.close()
+raise SystemExit(1)
+PY
+    return $?
   fi
   return 1
+}
+
+port_required_bindings() {
+  local p="$1"
+  case "${PROTOCOL:-TCP}" in
+    UDP) printf 'UDP|%s\n' "$p" ;;
+    BOTH)
+      printf 'TCP|%s\n' "$p"
+      printf 'UDP|%s\n' "$((p + 1))"
+      ;;
+    *) printf 'TCP|%s\n' "$p" ;;
+  esac
+}
+
+port_available_for_mode() {
+  local p="$1" binding proto bind_port
+  valid_port "$p" || return 1
+  if [ "${PROTOCOL:-TCP}" = "BOTH" ] && [ "$p" -ge 65535 ]; then
+    return 1
+  fi
+  while IFS='|' read -r proto bind_port; do
+    [ -n "$proto" ] && [ -n "$bind_port" ] || continue
+    port_is_listening "$bind_port" "$proto" && return 1
+  done < <(port_required_bindings "$p")
+  return 0
+}
+
+port_listener_details() {
+  local p="$1" only_proto="${2:-}" bindings proto bind_port flags line
+  command -v ss >/dev/null 2>&1 || return 0
+  if [ -n "$only_proto" ]; then
+    bindings="${only_proto}|${p}"
+  else
+    bindings="$(port_required_bindings "$p")"
+  fi
+  while IFS='|' read -r proto bind_port; do
+    [ -n "$proto" ] && [ -n "$bind_port" ] || continue
+    case "$proto" in
+      TCP) flags="-Hlntp" ;;
+      UDP) flags="-Hlnup" ;;
+      *) flags="-Hlntup" ;;
+    esac
+    while IFS= read -r line; do
+      [ -n "$line" ] && msg "  ${proto}/${bind_port}: ${line}"
+    done < <(ss "$flags" 2>/dev/null | awk -v port="$bind_port" '
+      {
+        for (i = 1; i <= NF; i++) {
+          if ($i ~ (":" port "$")) {
+            print
+            break
+          }
+        }
+      }
+    ')
+  done <<<"$bindings"
+}
+
+select_available_port() {
+  local selected=""
+  if selected="$(derive_port_from_ip 2>/dev/null)" && [ -n "$selected" ]; then
+    printf '%s' "$selected"
+    return 0
+  fi
+  selected="$(random_available_port 2>/dev/null)" || return 1
+  [ -n "$selected" ] || return 1
+  printf '%s' "$selected"
+}
+
+ensure_install_port_available() {
+  local old_port="$PORT" replacement=""
+  port_available_for_mode "$PORT" && return 0
+  warn "$(t "端口 ${PORT} 与当前 ${PROTOCOL} 监听需求冲突" \
+    "Port ${PORT} conflicts with current ${PROTOCOL} listener requirements")"
+  port_listener_details "$PORT"
+  if [ "${PORT_AUTO_SELECTED:-0}" -eq 1 ]; then
+    replacement="$(select_available_port)" || {
+      die "$(t '未找到可用监听端口' 'No available listen port found')" || return 1
+    }
+    PORT="$replacement"
+    t "自动端口 ${old_port} 已被占用，改用 ${PORT}" \
+      "Auto-selected port ${old_port} became busy; switched to ${PORT}"
+    return 0
+  fi
+  die "$(t "指定端口 ${PORT} 已被占用，请换一个端口" \
+    "Requested port ${PORT} is already in use; choose another port")" || return 1
 }
 
 port_is_allocated() {
@@ -2757,11 +2938,13 @@ allocate_user_port() {
       warn "$(t "端口 ${prefer} 已被其它用户占用" "Port ${prefer} already allocated")"
       return 1
     fi
-    if port_is_listening "$prefer"; then
-      warn "$(t "端口 ${prefer} 已被系统占用" "Port ${prefer} is in use")"
+    if ! port_available_for_mode "$prefer"; then
+      warn "$(t "端口 ${prefer} 不满足 ${PROTOCOL} 监听需求" \
+        "Port ${prefer} is unavailable for ${PROTOCOL}")"
+      port_listener_details "$prefer"
       return 1
     fi
-    if [ "$PROTOCOL" = "BOTH" ] && { port_is_allocated "$((prefer + 1))" || port_is_listening "$((prefer + 1))"; }; then
+    if [ "$PROTOCOL" = "BOTH" ] && port_is_allocated "$((prefer + 1))"; then
       warn "$(t "UDP 端口 $((prefer + 1)) 不可用" "UDP port $((prefer + 1)) unavailable")"
       return 1
     fi
@@ -2771,8 +2954,8 @@ allocate_user_port() {
   users_port_pool_bounds
   p="$_pool_lo"
   while [ "$p" -le "$_pool_hi" ]; do
-    if ! port_is_allocated "$p" && ! port_is_listening "$p"; then
-      if [ "$PROTOCOL" != "BOTH" ] || { ! port_is_allocated "$((p + 1))" && ! port_is_listening "$((p + 1))"; }; then
+    if ! port_is_allocated "$p" && port_available_for_mode "$p"; then
+      if [ "$PROTOCOL" != "BOTH" ] || ! port_is_allocated "$((p + 1))"; then
         printf '%s' "$p"
         return 0
       fi
@@ -5440,26 +5623,50 @@ collect_config_interactive() {
 
   msg ""
   if [ -z "$PORT" ] && [ -z "$PORT_RANGE" ]; then
-    local default_port input="" base="" localip=""
+    local default_port input="" candidate="" base="" localip="" segment_hi=99
     localip="$(detect_local_ip)"
+    [ "$PROTOCOL" = "BOTH" ] && segment_hi=98
     if base="$(derive_port_base)"; then
-      default_port="$(derive_port_from_ip)"
-      t "检测到本机 IP ${localip}，按尾号规则端口段 $((base + 1))-$((base + 99))（${base} 留给 SSH，默认段内随机）" \
-        "Detected local IP ${localip}; by last-octet rule port range $((base + 1))-$((base + 99)) (${base} reserved for SSH, random within range)"
+      if ! default_port="$(derive_port_from_ip)"; then
+        warn "$(t "IP 尾号端口段 $((base + 1))-$((base + segment_hi)) 当前没有可用端口，回退全局随机端口" \
+          "No available port in IP-derived range $((base + 1))-$((base + segment_hi)); falling back to a global random port")"
+        default_port="$(random_available_port)" \
+          || die "$(t '未找到可用监听端口' 'No available listen port found')"
+      fi
+      t "检测到本机 IP ${localip}，按尾号规则端口段 $((base + 1))-$((base + segment_hi))（${base} 留给 SSH，默认选择已校验的空闲端口）" \
+        "Detected local IP ${localip}; range $((base + 1))-$((base + segment_hi)) (${base} reserved for SSH); default is a verified free port"
     else
-      default_port="$(random_port)"
+      default_port="$(random_available_port)" \
+        || die "$(t '未找到可用监听端口' 'No available listen port found')"
       warn "$(t "无法按 IP 尾号推导端口（IP=${localip:-未知}，尾号过小或无法识别），回退随机端口" \
         "Cannot derive port from IP last octet (IP=${localip:-unknown}); falling back to random port")"
     fi
-    if [ "$PROTOCOL" = "BOTH" ] && [ "$default_port" -ge 65535 ]; then
-      default_port=65534
-    fi
-    read_tty input "$(t "监听端口 [${default_port}]: " "Listen port [${default_port}]: ")" || input=""
-    PORT="${input:-$default_port}"
-    valid_port "$PORT" || die "$(t '非法端口' 'Invalid port')"
-    if [ -n "$base" ] && { [ "$PORT" -lt "$((base + 1))" ] || [ "$PORT" -gt "$((base + 99))" ]; }; then
-      warn "$(t "注意：端口 ${PORT} 不在 IP 尾号段 $((base + 1))-$((base + 99)) 内，可能与按 IP 分配端口的约定冲突" \
-        "Note: port ${PORT} is outside the IP last-octet range $((base + 1))-$((base + 99)); may break the per-IP port convention")"
+    while true; do
+      input=""
+      read_tty input "$(t "监听端口 [${default_port}]: " "Listen port [${default_port}]: ")" || input=""
+      candidate="${input:-$default_port}"
+      if ! valid_port "$candidate"; then
+        warn "$(t '非法端口，请重新输入' 'Invalid port; try again')"
+        continue
+      fi
+      if [ "$PROTOCOL" = "BOTH" ] && [ "$candidate" -ge 65535 ]; then
+        warn "$(t '双协议需要主端口 ≤65534（UDP 使用主端口+1）' \
+          'Dual protocol needs main port ≤65534 (UDP uses main port + 1)')"
+        continue
+      fi
+      if ! port_available_for_mode "$candidate"; then
+        warn "$(t "端口 ${candidate} 已被占用，请重新输入" \
+          "Port ${candidate} is already in use; try again")"
+        port_listener_details "$candidate"
+        continue
+      fi
+      PORT="$candidate"
+      [ -z "$input" ] && PORT_AUTO_SELECTED=1 || PORT_AUTO_SELECTED=0
+      break
+    done
+    if [ -n "$base" ] && { [ "$PORT" -lt "$((base + 1))" ] || [ "$PORT" -gt "$((base + segment_hi))" ]; }; then
+      warn "$(t "注意：端口 ${PORT} 不在 IP 尾号段 $((base + 1))-$((base + segment_hi)) 内，可能与按 IP 分配端口的约定冲突" \
+        "Note: port ${PORT} is outside the IP last-octet range $((base + 1))-$((base + segment_hi)); may break the per-IP port convention")"
     fi
   elif [ -n "$PORT" ] && [ -n "$PORT_RANGE" ]; then
     die "$(t '不能同时指定端口与端口段' 'Cannot set both port and port range')"
@@ -5768,12 +5975,13 @@ ensure_config_noninteractive() {
   [ -n "$USERNAME" ] || USERNAME="$(random_token)"
   [ -n "$PASSWORD" ] || PASSWORD="$(random_token)"
   validate_proxy_credentials
+  PROTOCOL="$(normalize_protocol "$PROTOCOL")" || \
+    die "$(t '非法协议（仅支持 TCP/UDP/BOTH）' \
+      'Invalid protocol (only TCP/UDP/BOTH are supported)')"
   if [ -z "$PORT" ] && [ -z "$PORT_RANGE" ]; then
-    if PORT="$(derive_port_from_ip)"; then
-      :
-    else
-      PORT="$(random_port)"
-    fi
+    PORT="$(select_available_port)" \
+      || die "$(t '未找到可用监听端口' 'No available listen port found')"
+    PORT_AUTO_SELECTED=1
   fi
   if [ -n "$PORT" ]; then
     valid_port "$PORT" || die "$(t '非法端口' 'Invalid port')"
@@ -5788,9 +5996,6 @@ ensure_config_noninteractive() {
     die "$(t 'v2 用户专属实例不支持 --port-range，请使用单个 --port' \
       'v2 dedicated user instances do not support --port-range; use one --port')"
   fi
-  PROTOCOL="$(normalize_protocol "$PROTOCOL")" || \
-    die "$(t '非法协议（仅支持 TCP/UDP/BOTH）' \
-      'Invalid protocol (only TCP/UDP/BOTH are supported)')"
   if [ "$PROTOCOL" = "BOTH" ] && [ -n "$PORT" ] && [ "$PORT" -ge 65535 ]; then
     die "$(t '双协议需要主端口 ≤65534' 'Dual protocol needs main port ≤65534')"
   fi
@@ -7007,12 +7212,17 @@ generate_client_config() {
   cloud_firewall_hint
 }
 
+mita_preservable_config_exists() {
+  [ -s "$MITA_STATE" ] && return 0
+  users_state_exists && [ "$(users_count)" -gt 0 ]
+}
+
 do_install() {
   require_root
   require_linux
   require_cmd curl
 
-  local pm arch ver url pkg tmp cfg tx reinstall_existing=0 managed_existing=0
+  local pm arch ver url tmp cfg tx reinstall_existing=0 managed_existing=0
   pm="$(detect_pkg_manager)"
   arch="$(detect_arch)"
   ensure_management_dependencies "$pm"
@@ -7021,26 +7231,36 @@ do_install() {
     local cur
     cur="$(installed_version || true)"
     t "检测到已安装 mita ${cur:-未知版本}" "mita already installed (${cur:-unknown})"
-    t '如需改端口/密码/协议，请选菜单「重新配置」或执行: install-mita reconfigure' \
-      'To change port/password/protocol, use menu Reconfigure or: install-mita reconfigure'
-    if ! confirm '继续重新下载安装包并保留当前用户/节点配置？[y/N]: ' \
-      'Re-download the package and keep the current users/node config? [y/N]: ' n; then
-      [ "${MENU_MODE:-0}" -eq 1 ] && return 0
-      exit 0
-    fi
-    if [ "$USERNAME_CLI" -eq 1 ] || [ "$PASSWORD_CLI" -eq 1 ] \
-       || [ "$PORT_CLI" -eq 1 ] || [ "$PORT_RANGE_CLI" -eq 1 ] \
-       || [ "$PROTOCOL_CLI" -eq 1 ] || [ "$MTU_CLI" -eq 1 ] \
-       || [ "$MULTIPLEXING_CLI" -eq 1 ] || [ "$HANDSHAKE_CLI" -eq 1 ] \
-       || [ "$TRAFFIC_CLI" -eq 1 ] || [ "$LOW_ENTROPY_CLI" -eq 1 ]; then
-      die "$(t '重装只保留当前配置；如需同时改节点参数，请使用 reconfigure' \
-        'Reinstall preserves current config; use reconfigure to change node parameters')"
-    fi
-    reinstall_existing=1
-    load_install_state
-    if users_state_exists && [ "$(users_count)" -gt 0 ]; then
-      managed_existing=1
-      users_sync_primary_globals
+    if mita_preservable_config_exists; then
+      t '如需改端口/密码/协议，请选菜单「重新配置」或执行: install-mita reconfigure' \
+        'To change port/password/protocol, use menu Reconfigure or: install-mita reconfigure'
+      if ! confirm '继续重新下载安装包并保留当前用户/节点配置？[y/N]: ' \
+        'Re-download the package and keep the current users/node config? [y/N]: ' n; then
+        [ "${MENU_MODE:-0}" -eq 1 ] && return 0
+        exit 0
+      fi
+      if [ "$USERNAME_CLI" -eq 1 ] || [ "$PASSWORD_CLI" -eq 1 ] \
+         || [ "$PORT_CLI" -eq 1 ] || [ "$PORT_RANGE_CLI" -eq 1 ] \
+         || [ "$PROTOCOL_CLI" -eq 1 ] || [ "$MTU_CLI" -eq 1 ] \
+         || [ "$MULTIPLEXING_CLI" -eq 1 ] || [ "$HANDSHAKE_CLI" -eq 1 ] \
+         || [ "$TRAFFIC_CLI" -eq 1 ] || [ "$LOW_ENTROPY_CLI" -eq 1 ]; then
+        die "$(t '重装只保留当前配置；如需同时改节点参数，请使用 reconfigure' \
+          'Reinstall preserves current config; use reconfigure to change node parameters')"
+      fi
+      reinstall_existing=1
+      load_install_state
+      if users_state_exists && [ "$(users_count)" -gt 0 ]; then
+        managed_existing=1
+        users_sync_primary_globals
+      fi
+    else
+      warn "$(t '检测到上次安装未完成，且没有可恢复的 OneClick 状态；本次将重新生成配置并完成安装' \
+        'Previous install is incomplete and has no recoverable OneClick state; configuration will be regenerated')"
+      if ! confirm '继续修复并完成安装？[y/N]: ' \
+        'Repair and complete the installation? [y/N]: ' n; then
+        [ "${MENU_MODE:-0}" -eq 1 ] && return 0
+        exit 0
+      fi
     fi
   fi
 
@@ -7053,6 +7273,9 @@ do_install() {
   fi
   [ -z "$PORT_RANGE" ] || die "$(t 'v2 用户专属实例不支持端口段，请改用单端口' \
     'v2 dedicated user instances do not support port ranges; use one port')"
+  if [ "$reinstall_existing" -eq 0 ]; then
+    ensure_install_port_available
+  fi
 
   ver="$(query_latest_version)"
   url="$(package_url "$ver" "$pm" "$arch")"
@@ -7094,6 +7317,10 @@ do_install() {
     users_tx_commit "$tx"
     admin_lock_release
   else
+    if [ "$reinstall_existing" -eq 0 ]; then
+      # 下载/安装期间端口可能被其它进程抢占，落盘前再验一次。
+      ensure_install_port_available
+    fi
     cfg="$(write_server_config)"
     apply_config "$cfg"
     mita_sync_single_user "$USERNAME"
@@ -7135,7 +7362,7 @@ do_reconfigure() {
   require_linux
   mita_installed || die "$(t 'mita 未安装，请先执行安装' 'mita is not installed; run install first')"
 
-  local old_bindings new_bindings close_bindings desc bin tx
+  local old_bindings new_bindings close_bindings desired_bindings binding_proto binding_port desc bin tx
   local old_port old_port_range old_protocol old_mtu old_mtu_policy old_user old_password
   local old_traffic old_seed old_low_entropy old_mux old_handshake
   load_install_state
@@ -7164,17 +7391,22 @@ do_reconfigure() {
   [ -z "$PORT_RANGE" ] || die "$(t 'v2 用户专属实例不支持端口段，请改用单端口' \
     'v2 dedicated user instances do not support port ranges; use one port')"
   if [ -n "${PORT:-}" ]; then
-    if ! printf '%s\n' "$old_bindings" | grep -qxE '[A-Z]+[|]'"${PORT}" \
-       && port_is_listening "$PORT"; then
-      die "$(t "新端口 ${PORT} 已被系统其它服务占用" \
-        "New port ${PORT} is already used by another service")"
+    if users_state_exists && [ "$(users_count)" -gt 0 ]; then
+      desired_bindings="$(multi_user_port_protocol_pairs)"
+    else
+      desired_bindings="$(port_required_bindings "$PORT")"
     fi
-    if [ "$PROTOCOL" = "BOTH" ] \
-       && ! printf '%s\n' "$old_bindings" | grep -qxE '[A-Z]+[|]'"$((PORT + 1))" \
-       && port_is_listening "$((PORT + 1))"; then
-      die "$(t "新 UDP 端口 $((PORT + 1)) 已被系统其它服务占用" \
-        "New UDP port $((PORT + 1)) is already used by another service")"
-    fi
+    while IFS='|' read -r binding_proto binding_port; do
+      [ -n "$binding_proto" ] && [ -n "$binding_port" ] || continue
+      printf '%s\n' "$old_bindings" | grep -qxF "${binding_proto}|${binding_port}" && continue
+      if port_is_listening "$binding_port" "$binding_proto"; then
+        warn "$(t "新监听 ${binding_proto}/${binding_port} 已被系统其它服务占用" \
+          "New listener ${binding_proto}/${binding_port} is already used by another service")"
+        port_listener_details "$binding_port" "$binding_proto"
+        die "$(t '重新配置已取消，请选择其它端口或协议' \
+          'Reconfigure cancelled; choose another port or protocol')"
+      fi
+    done <<<"$desired_bindings"
   fi
 
   warn_traffic_unsupported

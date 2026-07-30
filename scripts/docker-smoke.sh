@@ -102,6 +102,48 @@ yaml="$(build_clash_yaml_full 1.2.3.4)"
 grep -q 'username: "user: with/slash"' <<<"$yaml"
 grep -Fq 'password: "p\"ass\\word"' <<<"$yaml"
 
+# 端口探测必须区分 TCP/UDP；尾号段选择不得返回已监听端口。
+python3 -c 'import socket,time; s=socket.socket(); s.bind(("127.0.0.1",26801)); s.listen(); time.sleep(20)' &
+listener_pid=$!
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  port_is_listening 26801 TCP && break
+  sleep 0.1
+done
+port_is_listening 26801 TCP
+! port_is_listening 26801 UDP
+PROTOCOL=TCP
+! port_available_for_mode 26801
+kill "$listener_pid"
+wait "$listener_pid" 2>/dev/null || true
+port_available_for_mode 26801
+(
+  derive_port_base(){ echo 26800; }
+  port_is_listening(){ [ "$1" -ne 26899 ]; }
+  PROTOCOL=TCP
+  test "$(derive_port_from_ip)" = 26899
+)
+# 自动端口在落盘前被抢占时应自动更换；显式端口则必须拒绝。
+(
+  PORT=26801 PROTOCOL=TCP PORT_AUTO_SELECTED=1
+  port_available_for_mode(){ [ "$1" = 26802 ]; }
+  select_available_port(){ echo 26802; }
+  ensure_install_port_available >/dev/null
+  test "$PORT" = 26802
+)
+if (
+  PORT=26801 PROTOCOL=TCP PORT_AUTO_SELECTED=0
+  port_available_for_mode(){ return 1; }
+  ensure_install_port_available >/dev/null 2>&1
+); then
+  echo "explicit occupied port unexpectedly accepted" >&2
+  exit 1
+fi
+(
+  MITA_STATE=/tmp/no-install-state.env
+  MITA_USERS_STATE=/tmp/no-users-state.json
+  ! mita_preservable_config_exists
+)
+
 # 构造用户状态；正数 bandwidth 在专属实例模型中必须允许。
 require_root(){ :; }
 require_linux(){ :; }
