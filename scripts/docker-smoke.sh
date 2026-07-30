@@ -192,6 +192,8 @@ after="$(sha256sum "$MITA_USERS_STATE" | awk '{print $1}')"
 test "$before" = "$after"
 users_name_exists bob
 grep -q bob-usage "$(instance_metrics_file "$bob_id")"
+# apply 已消费回滚快照；外层重复调用必须幂等且不再报回滚失败。
+users_tx_rollback "$tx" 0
 
 # 不在状态中的实例数据只能在事务提交阶段清理。
 orphan_id=u0000000000000001
@@ -305,6 +307,17 @@ grep -q 'for ipt in iptables ip6tables' /work/install-mita.sh
 grep -q 'BindPaths=.*MITA_INSTANCE_METRICS_DIR' /work/install-mita.sh
 grep -q 'MITA_CONFIG_JSON_FILE=' /work/install-mita.sh
 grep -q 'MITA_UDS_PATH=' /work/install-mita.sh
+grep -Fq 'run chown root:mita "$MITA_INSTANCES_DIR"' /work/install-mita.sh
+perm_root=/tmp/instance-permission
+mkdir -p "$perm_root/u0000000000000002"
+chown root:mita "$perm_root"
+chown mita:mita "$perm_root/u0000000000000002"
+chmod 0750 "$perm_root" "$perm_root/u0000000000000002"
+printf '{}' >"$perm_root/u0000000000000002/server.json"
+chown mita:mita "$perm_root/u0000000000000002/server.json"
+chmod 0600 "$perm_root/u0000000000000002/server.json"
+setpriv --reuid=mita --regid=mita --init-groups \
+  test -r "$perm_root/u0000000000000002/server.json"
 
 # 菜单动作首个错误即停止；dry-run 不触碰持久化状态。
 set +e

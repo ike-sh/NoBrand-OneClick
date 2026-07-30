@@ -32,6 +32,12 @@ apk add --no-cache bash curl && \
 5. 安装完成**同时输出** `mierus://` 节点链接、客户端 JSON、**Clash/mihomo 片段**及连接信息摘要
 6. 下载包 **SHA256 校验**；提示云安全组放行端口
 
+### v2.0.1 首次迁移修复
+
+- 修复 `/etc/mita/instances` 为 `root:root 0750` 时服务用户无法穿越父目录、导致首次专属实例启动失败
+- 回滚快照改为幂等，消除首次迁移失败后的重复“用户状态回滚失败”误报
+- 专属实例启动、RPC `start` 或 RUNNING 验收失败时自动输出对应 systemd/OpenRC 日志尾部
+
 ### v2.0.0 用户专属实例模型
 
 - `users.json` 是管理面的权威状态；每个启用账号运行一个独立 mita 实例，并拥有稳定 `instance_id`、单用户配置、专属监听端口、UDS 和 `metrics.pb`

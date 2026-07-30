@@ -5,7 +5,7 @@
 set -euo pipefail
 umask 077
 
-SCRIPT_VERSION="2.0.0"
+SCRIPT_VERSION="2.0.1"
 SCRIPT_AUTHOR="ike"
 SCRIPT_REPO="ike-sh/mieru-OneClick"
 UPSTREAM_REPO="enfein/mieru"
@@ -788,6 +788,10 @@ harden_mita_permissions() {
   if [ -f "$MITA_USERS_STATE" ]; then
     run chown root:root "$MITA_USERS_STATE" 2>/dev/null || true
     run chmod 0600 "$MITA_USERS_STATE" 2>/dev/null || true
+  fi
+  if [ -d "$MITA_INSTANCES_DIR" ]; then
+    run chown root:mita "$MITA_INSTANCES_DIR" 2>/dev/null || true
+    run chmod 0750 "$MITA_INSTANCES_DIR" 2>/dev/null || true
   fi
   [ -d "$MITA_USERS_BACKUP_DIR" ] && run chmod 0700 "$MITA_USERS_BACKUP_DIR" 2>/dev/null || true
   if [ -d "$MITA_USERS_BACKUP_DIR" ]; then
@@ -2064,6 +2068,8 @@ users_tx_restore() {
 users_tx_rollback() {
   local snapshot="${1:-}" reapply="${2:-0}" restored=0 restore_rc=0 cfg bin
   [ -n "$snapshot" ] || return 0
+  # apply_users_config 失败时会自行消费快照；外层再次回滚应是安全空操作。
+  [ -f "$snapshot" ] || return 0
   if users_tx_restore "$snapshot"; then
     restored=1
   else
@@ -2247,6 +2253,8 @@ install_instance_runtime() {
   }
   run mkdir -p "$MITA_INSTANCES_DIR" "$MITA_INSTANCE_RUN_DIR" \
     "$MITA_INSTANCE_METRICS_DIR" /usr/local/libexec /var/lib/mita
+  # 配置子目录/文件属于 mita，但父目录必须至少允许 mita 组穿越。
+  run chown root:mita "$MITA_INSTANCES_DIR"
   run chown mita:mita "$MITA_INSTANCE_RUN_DIR" "$MITA_INSTANCE_METRICS_DIR" /var/lib/mita
   run chmod 0750 "$MITA_INSTANCES_DIR" "$MITA_INSTANCE_RUN_DIR" "$MITA_INSTANCE_METRICS_DIR"
 
@@ -2445,13 +2453,39 @@ instance_daemon_stop() {
   run rm -f "$(instance_socket_path "$id")" 2>/dev/null || true
 }
 
+instance_log_tail() {
+  local id="$1" sm unit
+  instance_valid_id "$id" || return 0
+  sm="$(service_manager)"
+  case "$sm" in
+    systemd)
+      unit="$(instance_systemd_unit "$id")"
+      journalctl -u "$unit" -n 20 --no-pager 2>/dev/null >&2 || true
+      ;;
+    openrc)
+      tail -n 20 "/var/log/mita-oneclick-${id}.err" \
+        "/var/log/mita-oneclick-${id}.log" 2>/dev/null >&2 || true
+      ;;
+  esac
+}
+
 instance_start_proxy() {
   local id="$1" status_out
-  instance_daemon_start "$id" || return 1
-  instance_cmd "$id" start >/dev/null 2>&1 || return 1
+  if ! instance_daemon_start "$id"; then
+    instance_log_tail "$id"
+    return 1
+  fi
+  if ! instance_cmd "$id" start >/dev/null 2>&1; then
+    instance_log_tail "$id"
+    return 1
+  fi
   sleep 1
   status_out="$(instance_cmd "$id" status 2>/dev/null || true)"
-  printf '%s' "$status_out" | grep -q 'status is "RUNNING"'
+  if ! printf '%s' "$status_out" | grep -q 'status is "RUNNING"'; then
+    instance_log_tail "$id"
+    return 1
+  fi
+  return 0
 }
 
 default_mita_stop() {
@@ -7049,7 +7083,12 @@ do_install() {
     admin_lock_acquire || return 1
     tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
     isolated_stop_all
-    if ! apply_users_config "$tx" || ! verify_mita_running; then
+    if ! apply_users_config "$tx"; then
+      admin_lock_release
+      die "$(t '重装后二次应用专属实例失败；用户状态已回滚' \
+        'Failed to reapply dedicated instances after reinstall; user state was rolled back')"
+    fi
+    if ! verify_mita_running; then
       users_tx_rollback "$tx" 1
       admin_lock_release
       die "$(t '重装后二次启动专属实例失败；用户状态已回滚' \
@@ -7075,8 +7114,14 @@ do_install() {
     save_install_state
     admin_lock_acquire || return 1
     tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
-    if ! users_migrate_from_primary || ! apply_users_config "$tx"; then
+    if ! users_migrate_from_primary; then
       users_tx_rollback "$tx" 0
+      admin_lock_release
+      die "$(t '生成用户专属实例状态失败；旧单实例服务已保留' \
+        'Failed to create dedicated-user state; the legacy single service was kept')"
+    fi
+    if ! apply_users_config "$tx"; then
+      # apply_users_config 已完成事务回滚并恢复旧单实例，勿重复消费快照。
       admin_lock_release
       die "$(t '迁移到用户专属实例失败；旧单实例服务已恢复' \
         'Migration to dedicated user instance failed; the legacy single service was restored')"
@@ -7243,7 +7288,17 @@ json.dump(d, open(path, "w"), indent=2)
   else
     admin_lock_acquire || return 1
     tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
-    if ! users_migrate_from_primary || ! apply_users_config "$tx"; then
+    if ! users_migrate_from_primary; then
+      PORT="$old_port"; PORT_RANGE="$old_port_range"; PROTOCOL="$old_protocol"
+      MTU="$old_mtu"; MTU_POLICY="$old_mtu_policy"
+      USERNAME="$old_user"; PASSWORD="$old_password"
+      TRAFFIC_PATTERN="$old_traffic"; TRAFFIC_SEED="$old_seed"
+      LOW_ENTROPY_MODE="$old_low_entropy"; MULTIPLEXING="$old_mux"; HANDSHAKE_MODE="$old_handshake"
+      users_tx_rollback "$tx" 0
+      admin_lock_release
+      return 1
+    fi
+    if ! apply_users_config "$tx"; then
       PORT="$old_port"; PORT_RANGE="$old_port_range"; PROTOCOL="$old_protocol"
       MTU="$old_mtu"; MTU_POLICY="$old_mtu_policy"
       USERNAME="$old_user"; PASSWORD="$old_password"
