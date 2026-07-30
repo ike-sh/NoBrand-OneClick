@@ -225,10 +225,24 @@ ADVERTISE_PORT=443
 custom_yaml="$(build_clash_yaml_full "$ADVERTISE_HOST")"
 grep -q 'server: "203.0.113.10"' <<<"$custom_yaml"
 grep -q 'port: 443' <<<"$custom_yaml"
+printf stale > /root/mieru_client_legacy.json
 compact_output="$(print_protocol_outputs "$ADVERTISE_HOST")"
-grep -Eq '(已保存|Saved):[[:space:]]+/root/mieru_client_' <<<"$compact_output"
+grep -Eq '(已保存|Saved):[[:space:]]+/root/mieru-clients/current/alice_tcp\.json' <<<"$compact_output"
 ! grep -q '"profiles"' <<<"$compact_output"
-test -n "$(find /root -maxdepth 1 -type f -name 'mieru_client_*.json' -print -quit)"
+test -f /root/mieru-clients/current/alice_tcp.json
+first_client_hash="$(sha256sum /root/mieru-clients/current/alice_tcp.json | awk '{print $1}')"
+print_protocol_outputs "$ADVERTISE_HOST" >/dev/null
+test "$(find /root/mieru-clients/current -maxdepth 1 -type f -name 'alice_tcp.json' | wc -l)" -eq 1
+test "$(sha256sum /root/mieru-clients/current/alice_tcp.json | awk '{print $1}')" = "$first_client_hash"
+test -z "$(find /root -maxdepth 1 -type f -name 'mieru_client_*.json' -print -quit)"
+client_config_output="$(
+  public_ip(){ echo 198.51.100.40; }
+  generate_client_config
+)"
+grep -q 'mieru apply config <客户端本地 JSON 路径>' <<<"$client_config_output"
+! grep -q 'mieru apply config /root' <<<"$client_config_output"
+! grep -q 'mieru_client_.*\*\.json' <<<"$client_config_output"
+grep -q '203.0.113.10:443 -> 198.51.100.40:26000/TCP' <<<"$client_config_output"
 server_cfg="$(write_server_config)"
 python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["portBindings"]==[{"port":26000,"protocol":"TCP"}] and "203.0.113.10" not in open(sys.argv[1]).read()' "$server_cfg"
 rm -f "$server_cfg"
@@ -238,6 +252,15 @@ grep -q '26000/TCP' <<<"$firewall_hint"
 PROTOCOL=BOTH
 grep -q 'port=443' <<<"$(generate_share_link_for "$ADVERTISE_HOST" TCP)"
 grep -q 'port=444' <<<"$(generate_share_link_for "$ADVERTISE_HOST" UDP)"
+dual_output="$(print_protocol_outputs "$ADVERTISE_HOST")"
+grep -q '/root/mieru-clients/current/alice_tcp.json' <<<"$dual_output"
+grep -q '/root/mieru-clients/current/alice_udp.json' <<<"$dual_output"
+test -f /root/mieru-clients/current/alice_tcp.json
+test -f /root/mieru-clients/current/alice_udp.json
+PROTOCOL=TCP
+print_protocol_outputs "$ADVERTISE_HOST" >/dev/null
+test -f /root/mieru-clients/current/alice_tcp.json
+test ! -e /root/mieru-clients/current/alice_udp.json
 ADVERTISE_HOST="" ADVERTISE_PORT="" PROTOCOL=TCP
 
 # 安装交互默认保留自动探测；选择自定义时读取独立的展示 IP 和端口。
@@ -342,6 +365,35 @@ if users_validate_state_file "$conflict_state" TCP 1.2.3.4; then
   exit 1
 fi
 rm -f "$conflict_state" "$conflict_state.norm"
+
+# 凭据恢复先使用权威 users.json；只有状态均不可用时才读取最新客户端导出。
+(
+  MITA_STATE=/tmp/missing-install-state.env
+  printf '%s\n' '{"profiles":[{"user":{"name":"stale-user","password":"stale-pass"}}]}' \
+    >/root/mieru-clients/current/stale_tcp.json
+  USERNAME="" PASSWORD=""
+  load_credentials_fallback
+  test "$USERNAME|$PASSWORD" = 'alice|alice-pass'
+  rm -f /root/mieru-clients/current/stale_tcp.json
+)
+(
+  fallback_dir=/tmp/fallback-client-exports
+  rm -rf "$fallback_dir"
+  mkdir -p "$fallback_dir/current"
+  chmod 0700 "$fallback_dir" "$fallback_dir/current"
+  MITA_CLIENT_EXPORT_DIR="$fallback_dir"
+  MITA_STATE=/tmp/missing-fallback-install-state.env
+  MITA_USERS_STATE=/tmp/missing-fallback-users.json
+  printf '%s\n' '{"profiles":[{"user":{"name":"old-user","password":"old-pass"}}]}' \
+    >"$fallback_dir/current/old_tcp.json"
+  printf '%s\n' '{"profiles":[{"user":{"name":"new-user","password":"new-pass"}}]}' \
+    >"$fallback_dir/current/new_tcp.json"
+  touch -d '@1' "$fallback_dir/current/old_tcp.json"
+  touch -d '@2' "$fallback_dir/current/new_tcp.json"
+  USERNAME="" PASSWORD=""
+  load_credentials_fallback
+  test "$USERNAME|$PASSWORD" = 'new-user|new-pass'
+)
 
 # 独立修改用户展示入口只更新状态，不应用或重启任何服务端实例。
 (
@@ -471,9 +523,13 @@ test ! -d "$MITA_INSTANCES_DIR/$orphan_id"
 # 恢复必须采用备份内协议，并同时更新实例配置与 install-state。
 cp -f "$MITA_USERS_STATE" /tmp/users-import.json
 python3 -c 'import json; p="/tmp/users-import.json"; d=json.load(open(p)); d["protocol"]="UDP"; json.dump(d,open(p,"w"),indent=2)'
+mkdir -p /root/mieru-clients/current
+printf stale > /root/mieru-clients/current/alice_tcp.json
+printf stale > /root/mieru-clients/current/removed-user_udp.json
 users_restore_from_file /tmp/users-import.json >/dev/null
 test "$PROTOCOL" = UDP
 grep -qx 'PROTOCOL=UDP' "$MITA_STATE"
+test -z "$(find /root/mieru-clients/current -maxdepth 1 -type f -name '*.json' -print -quit)"
 python3 - <<'PY'
 import glob,json
 for path in glob.glob("/tmp/instances/*/server.json"):
@@ -595,6 +651,17 @@ grep -qx 'USERNAME=alice' "$MITA_STATE"
 grep -qx 'ADVERTISE_HOST=203.0.113.10' "$MITA_STATE"
 grep -qx 'ADVERTISE_PORT=443' "$MITA_STATE"
 
+# 删除用户后只清理该用户的稳定客户端导出。
+mkdir -p /root/mieru-clients/current
+printf keep > /root/mieru-clients/current/alice_tcp.json
+printf stale > /root/mieru-clients/current/bob_tcp.json
+printf stale > /root/mieru-clients/current/bob_udp.json
+USER_DEL_NAME=bob YES=1
+do_user_del >/dev/null
+test -f /root/mieru-clients/current/alice_tcp.json
+test ! -e /root/mieru-clients/current/bob_tcp.json
+test ! -e /root/mieru-clients/current/bob_udp.json
+
 # 静态安全边界：双栈防火墙、私有 metrics 挂载和稳定实例环境变量。
 grep -q 'for ipt in iptables ip6tables' /work/install-mita.sh
 grep -q 'BindPaths=.*MITA_INSTANCE_METRICS_DIR' /work/install-mita.sh
@@ -612,6 +679,22 @@ chown mita:mita "$perm_root/u0000000000000002/server.json"
 chmod 0600 "$perm_root/u0000000000000002/server.json"
 setpriv --reuid=mita --regid=mita --init-groups \
   test -r "$perm_root/u0000000000000002/server.json"
+
+# isolated-v2 卸载只停止专属实例，不调用已停用的默认 mita daemon。
+(
+  mock_mita=/tmp/mock-default-mita
+  printf '%s\n' '#!/bin/sh' 'touch /tmp/unexpected-default-mita-stop' >"$mock_mita"
+  chmod 0755 "$mock_mita"
+  mita_bin(){ echo "$mock_mita"; }
+  users_isolated_mode(){ return 0; }
+  isolated_stop_all(){ touch /tmp/isolated-stop-called; }
+  tc_clear_owned_filters(){ :; }
+  service_manager(){ echo none; }
+  rm -f /tmp/unexpected-default-mita-stop /tmp/isolated-stop-called
+  stop_mita_for_uninstall
+  test -e /tmp/isolated-stop-called
+  test ! -e /tmp/unexpected-default-mita-stop
+)
 
 # BBR + FQ 已完整启用时不询问；缺项时回车默认执行本地配置。
 (

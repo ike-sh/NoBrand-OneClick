@@ -5,7 +5,7 @@
 set -euo pipefail
 umask 077
 
-SCRIPT_VERSION="2.1.0"
+SCRIPT_VERSION="2.1.1"
 SCRIPT_AUTHOR="ike"
 SCRIPT_REPO="ike-sh/mieru-OneClick"
 UPSTREAM_REPO="enfein/mieru"
@@ -4604,6 +4604,7 @@ print(str(d.get("protocol") or sys.argv[2]).strip().upper())
     <(printf '%s\n' "$new_pairs" | sed '/^[[:space:]]*$/d' | LC_ALL=C sort -u))"
   [ -z "$close_pairs" ] || close_firewall_for_bindings "$close_pairs"
   users_tx_commit "$tx"
+  client_exports_clear_current 2>/dev/null || true
   admin_lock_release
   t "已从备份恢复用户状态" "Users restored from backup"
 }
@@ -4715,6 +4716,7 @@ print_user_outputs() {
     t "  入口端口: $(advertised_port_for_protocol "$PROTOCOL")" \
       "  Entry port:  $(advertised_port_for_protocol "$PROTOCOL")"
   fi
+  print_client_endpoint_mapping
   if [ -n "$ip" ] && [ "$ip" != "YOUR_SERVER_IP" ]; then
     msg ""
     t '【Clash / mihomo 配置片段】' '[Clash / mihomo snippet]'
@@ -5581,6 +5583,7 @@ do_user_del() {
     return 1
   fi
   users_tx_commit "$tx"
+  client_export_remove_user "$name" 2>/dev/null || true
   admin_lock_release
   t "完成。已释放端口: ${freed:-?}" "Done. Freed port: ${freed:-?}"
 }
@@ -6316,7 +6319,7 @@ print(f"{name}\t{pwd}")
 # serialized line is consumed in the parent.
 # shellcheck disable=SC2030,SC2031
 load_credentials_fallback() {
-  local f line
+  local line
   if [ -f "$MITA_STATE" ]; then
     state_file_is_secure "$MITA_STATE" || return 1
     line="$(
@@ -6336,31 +6339,57 @@ load_credentials_fallback() {
   if ! command -v python3 >/dev/null 2>&1; then
     return 1
   fi
-  for f in /root/mieru_client_*.json /root/mieru_client_tcp_*.json /root/mieru_client_udp_*.json; do
-    [ -f "$f" ] || continue
-    line="$(python3 -c "
-import json, sys
-try:
-    d = json.load(open(sys.argv[1]))
-except Exception:
-    sys.exit(1)
-if 'profiles' in d:
-    p = d['profiles'][0]
-    u = p.get('user') or {}
-    print(f\"{u.get('name','')}\t{u.get('password','')}\")
-    sys.exit(0)
-users = d.get('users') or []
-if users:
-    u = users[0]
-    print(f\"{u.get('name','')}\t{u.get('password','')}\")
-" "$f" 2>/dev/null)" || continue
+  # users.json 是管理面的权威状态；安装状态损坏时也不应先从旧客户端导出恢复凭据。
+  if users_state_exists && state_file_is_secure "$MITA_USERS_STATE"; then
+    line="$(python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+users=d.get("users") or []
+ordered=[u for u in users if u.get("enabled", True)] + [u for u in users if not u.get("enabled", True)]
+for u in ordered:
+    name=u.get("name") or ""
+    password=u.get("password") or ""
+    if name and password:
+        print(f"{name}\t{password}")
+        raise SystemExit(0)
+raise SystemExit(1)
+' "$MITA_USERS_STATE" 2>/dev/null || true)"
     [ -z "$USERNAME" ] && USERNAME="${line%%$'\t'*}"
     if [ -z "$PASSWORD" ] || [[ "$PASSWORD" == \** ]]; then
       PASSWORD="${line#*$'\t'}"
     fi
     [ -n "$USERNAME" ] && [ -n "$PASSWORD" ] && [[ "$PASSWORD" != \** ]] && return 0
-  done
-  return 1
+  fi
+
+  # 最后兜底才读取客户端文件，并按 mtime 取最新有效文件，避免恢复到旧密码。
+  line="$(CLIENT_CURRENT_DIR="$(client_current_dir)" python3 - <<'PY' 2>/dev/null || true
+import glob, json, os
+
+paths = glob.glob(os.path.join(os.environ["CLIENT_CURRENT_DIR"], "*.json"))
+paths += glob.glob("/root/mieru_client_*.json")
+paths = sorted(set(paths), key=lambda p: os.path.getmtime(p), reverse=True)
+for path in paths:
+    try:
+        data = json.load(open(path))
+        if "profiles" in data:
+            user = (data.get("profiles") or [{}])[0].get("user") or {}
+        else:
+            user = (data.get("users") or [{}])[0]
+        name = user.get("name") or ""
+        password = user.get("password") or ""
+        if name and password:
+            print(f"{name}\t{password}")
+            raise SystemExit(0)
+    except Exception:
+        continue
+raise SystemExit(1)
+PY
+)"
+  [ -z "$USERNAME" ] && USERNAME="${line%%$'\t'*}"
+  if [ -z "$PASSWORD" ] || [[ "$PASSWORD" == \** ]]; then
+    PASSWORD="${line#*$'\t'}"
+  fi
+  [ -n "$USERNAME" ] && [ -n "$PASSWORD" ] && [[ "$PASSWORD" != \** ]]
 }
 
 collect_reconfigure_interactive() {
@@ -7776,18 +7805,60 @@ protocol_output_count() {
   printf '%s' "$n"
 }
 
+client_current_dir() {
+  printf '%s/current' "${MITA_CLIENT_EXPORT_DIR%/}"
+}
+
+client_json_path_for() {
+  local proto="$1" safe_user
+  safe_user="$(safe_filename_component "${USERNAME:-user}")"
+  [ -n "$safe_user" ] || safe_user=user
+  printf '%s/%s_%s.json' "$(client_current_dir)" "$safe_user" "$(proto_lower "$proto")"
+}
+
+client_export_remove_user() {
+  local name="$1" current_dir safe_user
+  current_dir="$(client_current_dir)"
+  safe_user="$(safe_filename_component "$name")"
+  [ -n "$safe_user" ] || return 0
+  run rm -f -- "${current_dir}/${safe_user}_tcp.json" "${current_dir}/${safe_user}_udp.json"
+}
+
+client_exports_clear_current() {
+  local current_dir
+  current_dir="$(client_current_dir)"
+  [ -d "$current_dir" ] || return 0
+  run rm -f -- "${current_dir}/"*.json
+}
+
+print_json_import_hint() {
+  if [ "${PROTOCOL:-TCP}" = "BOTH" ]; then
+    t '  先将上方 TCP 或 UDP JSON 下载到客户端，再执行:' \
+      '  Download the TCP or UDP JSON shown above to the client, then run:'
+  else
+    t '  先将上方 JSON 下载到客户端，再执行:' \
+      '  Download the JSON shown above to the client, then run:'
+  fi
+  t '    mieru apply config <客户端本地 JSON 路径>' \
+    '    mieru apply config <local-client-JSON-path>'
+}
+
 print_protocol_outputs() {
   local ip="$1"
-  local proto link cfg_path ts suffix multi=0 count
-  ts="$(date +%Y%m%d_%H%M%S)_$$_${RANDOM}"
+  local proto link cfg_path cfg_tmp multi=0 count current_dir safe_user
   prepare_traffic_pattern_export
   count="$(protocol_output_count)"
   if [ "$count" -gt 1 ]; then
     multi=1
   fi
+  current_dir="$(client_current_dir)"
+  safe_user="$(safe_filename_component "${USERNAME:-user}")"
+  [ -n "$safe_user" ] || safe_user=user
+  if [ "$DRY_RUN" -ne 1 ]; then
+    install -d -o root -g root -m 0700 "$current_dir"
+  fi
   while IFS= read -r proto; do
     [ -n "$proto" ] || continue
-    suffix="$(proto_lower "$proto")"
     msg ""
     if [ "$multi" -eq 1 ]; then
       t "【${proto} 节点链接】" "[${proto} share link]"
@@ -7796,11 +7867,7 @@ print_protocol_outputs() {
     fi
     link="$(generate_share_link_for "$ip" "$proto")"
     msg "$link"
-    if [ "$multi" -eq 1 ]; then
-      cfg_path="/root/mieru_client_${suffix}_${ts}.json"
-    else
-      cfg_path="/root/mieru_client_${ts}.json"
-    fi
+    cfg_path="$(client_json_path_for "$proto")"
     msg ""
     if [ "$multi" -eq 1 ]; then
       t "【${proto} 客户端 JSON】（供 mieru 客户端使用，勿在服务器 mita apply）" \
@@ -7810,13 +7877,51 @@ print_protocol_outputs() {
         '[Client JSON] (for mieru client only — do NOT mita apply on server)'
     fi
     if [ "$DRY_RUN" -ne 1 ]; then
-      build_client_json_for "$ip" "$proto" >"$cfg_path"
-      chmod 0600 "$cfg_path" 2>/dev/null || true
+      cfg_tmp="$(mktemp "${cfg_path}.XXXXXX")" || return 1
+      if ! build_client_json_for "$ip" "$proto" >"$cfg_tmp" \
+         || ! chmod 0600 "$cfg_tmp" \
+         || ! mv -f "$cfg_tmp" "$cfg_path"; then
+        rm -f "$cfg_tmp"
+        return 1
+      fi
       t "  已保存: ${cfg_path}" "  Saved:  ${cfg_path}"
     else
       t "  将保存: ${cfg_path}" "  Will save: ${cfg_path}"
     fi
   done < <(protocols_for_mode)
+  if [ "$DRY_RUN" -ne 1 ]; then
+    # v2.1.0 及更早版本的时间戳文件会造成通配符歧义和旧凭据回退，
+    # 成功写入稳定文件后清理这些由脚本生成的旧导出。
+    rm -f /root/mieru_client_*.json 2>/dev/null || true
+    case "${PROTOCOL:-TCP}" in
+      TCP) rm -f "${current_dir}/${safe_user}_udp.json" 2>/dev/null || true ;;
+      UDP) rm -f "${current_dir}/${safe_user}_tcp.json" 2>/dev/null || true ;;
+    esac
+  fi
+}
+
+print_client_endpoint_mapping() {
+  [ -n "${ADVERTISE_HOST:-}" ] || return 0
+  local backend_ip="" entry_host backend_host
+  backend_ip="$(public_ip 2>/dev/null || true)"
+  entry_host="$(url_host "$ADVERTISE_HOST")"
+  if [ -n "$backend_ip" ]; then
+    backend_host="$(url_host "$backend_ip")"
+  else
+    backend_host="$(t '<本机可达 IP>' '<server reachable IP>')"
+  fi
+  msg ""
+  t '【前置转发映射】（仅提示，不修改服务器配置）' \
+    '[Frontend forwarding map] (display only; server config is unchanged)'
+  if [ "${PROTOCOL:-TCP}" = "BOTH" ]; then
+    t "  TCP ${entry_host}:$(advertised_port_for_protocol TCP) -> ${backend_host}:${PORT}/TCP" \
+      "  TCP ${entry_host}:$(advertised_port_for_protocol TCP) -> ${backend_host}:${PORT}/TCP"
+    t "  UDP ${entry_host}:$(advertised_port_for_protocol UDP) -> ${backend_host}:$((PORT + 1))/UDP" \
+      "  UDP ${entry_host}:$(advertised_port_for_protocol UDP) -> ${backend_host}:$((PORT + 1))/UDP"
+  else
+    t "  ${entry_host}:$(advertised_port_for_protocol "$PROTOCOL") -> ${backend_host}:${PORT}/${PROTOCOL}" \
+      "  ${entry_host}:$(advertised_port_for_protocol "$PROTOCOL") -> ${backend_host}:${PORT}/${PROTOCOL}"
+  fi
 }
 
 print_summary() {
@@ -7832,7 +7937,11 @@ print_summary() {
   fi
   msg ""
   t '【连接信息】' '[Connection info]'
-  t "  服务器: ${ip:-<未知>}" "  Server:   ${ip:-<unknown>}"
+  if [ -n "${ADVERTISE_HOST:-}" ]; then
+    t "  客户端入口: ${ip:-<未知>}" "  Client entry: ${ip:-<unknown>}"
+  else
+    t "  服务器: ${ip:-<未知>}" "  Server:   ${ip:-<unknown>}"
+  fi
   t "  用户名: ${USERNAME}" "  Username: ${USERNAME}"
   t "  密码:   ${PASSWORD}" "  Password: ${PASSWORD}"
   t "  协议:   $(client_protocol_label)" "  Protocol: $(client_protocol_label)"
@@ -7853,25 +7962,15 @@ print_summary() {
   else
     t "  端口段: ${PORT_RANGE}" "  Port range: ${PORT_RANGE}"
   fi
-  if [ -n "${ADVERTISE_HOST:-}" ]; then
-    if [ "$PROTOCOL" = "BOTH" ]; then
-      t "  实际监听: TCP ${PORT} / UDP $((PORT + 1))（客户端入口仅用于展示）" \
-        "  Actual listen: TCP ${PORT} / UDP $((PORT + 1)) (client entry is display-only)"
-    else
-      t "  实际监听: ${PORT}/${PROTOCOL}（客户端入口仅用于展示）" \
-        "  Actual listen: ${PORT}/${PROTOCOL} (client entry is display-only)"
-    fi
-  fi
+  print_client_endpoint_mapping
   msg ""
   t '导入方式:' 'Import options:'
   if [ "$PROTOCOL" = "BOTH" ]; then
     msg '  mieru import config "<TCP 节点链接>"   # 或分别导入 TCP / UDP 链接'
-    msg '  mieru apply config /root/mieru_client_tcp_*.json'
-    msg '  mieru apply config /root/mieru_client_udp_*.json'
   else
     msg '  mieru import config "<节点链接>"   # 简单链接不含 socks5Port，全新设备建议用 JSON'
-    msg '  mieru apply config /root/mieru_client_*.json'
   fi
+  print_json_import_hint
   if [ "$PROTOCOL" = "BOTH" ]; then
     msg ''
     t '【客户端提示】双协议已分开输出：TCP 与 UDP 各用对应链接/JSON；' \
@@ -7898,16 +7997,15 @@ generate_client_config() {
   t 'MTU 已同步写入 mierus:// 节点链接和 mieru 客户端 JSON；mihomo 当前节点字段不单独配置 MTU。' \
     'MTU is included in the mierus:// link and mieru client JSON; current mihomo proxy fields do not expose a separate MTU option.'
   print_protocol_outputs "$ip"
+  print_client_endpoint_mapping
   msg ""
   t '【导入方式】' '[How to import]'
   if [ "$PROTOCOL" = "BOTH" ]; then
     msg '  mieru import config "<TCP 节点链接>"   # TCP / UDP 各用对应链接'
-    msg '  mieru apply config /root/mieru_client_tcp_*.json'
-    msg '  mieru apply config /root/mieru_client_udp_*.json'
   else
     msg '  mieru import config "<节点链接>"   # 一键导入（简单链接）'
-    msg '  mieru apply config /root/mieru_client_*.json   # 完整 JSON（含 socks5 端口）'
   fi
+  print_json_import_hint
   msg ""
   t '说明: 上方 mierus:// 为分享链接；JSON 为 mieru **客户端**配置（在电脑/手机导入，勿在服务器 mita apply）' \
     'Note: mierus:// is the share link; JSON is for mieru **client** on your device — do NOT mita apply on server'
@@ -8413,12 +8511,15 @@ mita_uninstall_target_present() {
 }
 
 stop_mita_for_uninstall() {
-  local bin sm
+  local bin sm isolated=0
   STAGE="停止 mita 服务"
   bin="$(mita_bin)"
+  users_isolated_mode && isolated=1
   isolated_stop_all
   tc_clear_owned_filters 2>/dev/null || true
-  [ -x "$bin" ] && run "$bin" stop 2>/dev/null || true
+  if [ "$isolated" -eq 0 ] && [ -x "$bin" ]; then
+    run "$bin" stop >/dev/null 2>&1 || true
+  fi
   sm="$(service_manager)"
   case "$sm" in
     systemd)
@@ -8437,7 +8538,7 @@ stop_mita_for_uninstall() {
 remove_mita_common() {
   STAGE="删除 mita 文件与账号"
   run rm -f /var/log/mita.log /var/log/mita.err /var/log/mita-oneclick-*.log /var/log/mita-oneclick-*.err
-  run rm -f /root/mieru_client_*.json /root/mieru_client_tcp_*.json /root/mieru_client_udp_*.json 2>/dev/null || true
+  run rm -f /root/mieru_client_*.json 2>/dev/null || true
   run rm -rf "$MITA_CLIENT_EXPORT_DIR"
   remove_users_scheduler 2>/dev/null || true
   run rm -f "$MITA_LOGROTATE_CONF" 2>/dev/null || true
@@ -8504,8 +8605,7 @@ verify_mita_uninstalled() {
   done
   for pattern in \
     "${MITA_INSTANCE_OPENRC_PREFIX}*" '/var/log/mita-oneclick-*.log' \
-    '/var/log/mita-oneclick-*.err' '/root/mieru_client_*.json' \
-    '/root/mieru_client_tcp_*.json' '/root/mieru_client_udp_*.json'; do
+    '/var/log/mita-oneclick-*.err' '/root/mieru_client_*.json'; do
     if compgen -G "$pattern" >/dev/null 2>&1; then
       warn "$(t "卸载仍有匹配残留: ${pattern}" "Uninstall residue matches: ${pattern}")"
       failed=1
@@ -8961,15 +9061,15 @@ show_menu() {
   fi
   print_banner
   msg "  1) 新装 / 安装"
-  msg "  2) 重新配置（端口 / 密码 / 协议 / MTU）"
+  msg "  2) 重新配置（端口 / 密码 / 协议 / MTU / 客户端模式）"
   msg "  3) 升级"
   msg "  4) 卸载"
   msg "  5) 状态"
-  msg "  6) 查看节点链接 / 客户端配置"
+  msg "  6) 查看节点链接 / 导出客户端配置"
   msg "  7) 启动服务"
   msg "  8) 停止服务"
   msg "  9) 重启服务"
-  msg "  10) 用户管理（增删 / 套餐 / 限速）"
+  msg "  10) 用户管理（增删 / 套餐 / 限速 / 展示入口）"
   msg "  11) 一键验收 doctor"
   msg "  12) 调整 MTU（自动计算 / 自定义）"
   msg "  13) 退出"
