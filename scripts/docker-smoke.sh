@@ -416,6 +416,39 @@ menu_rc=$?
 set -e
 test "$menu_rc" -ne 0
 ! grep -q MENU_SHOULD_NOT_CONTINUE <<<"$menu_probe"
+# 用户管理 17 在主菜单上下文返回专用码，外层应立即重绘主菜单；独立调用则正常结束。
+set +e
+(
+  MAIN_MENU_ACTIVE=1
+  read_tty(){ printf -v "$1" '%s' 17; }
+  do_user_manage >/dev/null
+)
+user_back_rc=$?
+set -e
+test "$user_back_rc" -eq 3
+(
+  MAIN_MENU_ACTIVE=0
+  read_tty(){ printf -v "$1" '%s' 17; }
+  do_user_manage >/dev/null
+)
+# 覆盖外层 menu_loop：用户管理返回码 3 必须直接重绘，不能落到 menu_pause。
+(
+  menu_show_count=0
+  mita_installed(){ return 1; }
+  show_menu(){
+    menu_show_count=$((menu_show_count + 1))
+    if [ "$menu_show_count" -eq 1 ]; then
+      ACTION=user-manage
+      return 0
+    fi
+    return 2
+  }
+  read_tty(){ printf -v "$1" '%s' 17; }
+  menu_pause(){ touch /tmp/user-back-extra-pause; }
+  rm -f /tmp/user-back-extra-pause
+  menu_loop >/dev/null
+  test ! -e /tmp/user-back-extra-pause
+)
 # 卸载成功通过特殊返回码退出菜单；用户取消则留在菜单且不报错。
 set +e
 (

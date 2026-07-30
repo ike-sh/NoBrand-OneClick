@@ -5,7 +5,7 @@
 set -euo pipefail
 umask 077
 
-SCRIPT_VERSION="2.0.3"
+SCRIPT_VERSION="2.0.4"
 SCRIPT_AUTHOR="ike"
 SCRIPT_REPO="ike-sh/mieru-OneClick"
 UPSTREAM_REPO="enfein/mieru"
@@ -52,6 +52,7 @@ USER_PORT_POOL_END="${USER_PORT_POOL_END:-}"
 ACTION=""
 MENU_MODE=0
 MENU_SCRIPTS_READY=0
+MAIN_MENU_ACTIVE=0
 UNINSTALL_CANCELLED=0
 MITA_REINSTALL_TRIED=0
 YES=0
@@ -5382,10 +5383,13 @@ do_user_manage() {
         ;;
       15) do_user_usage ;;
       16) do_user_export_clients ;;
-      17) return 0 ;;
+      17)
+        [ "${MAIN_MENU_ACTIVE:-0}" -eq 1 ] && return 3
+        return 0
+        ;;
       *) warn "$(t '无效选择' 'Invalid choice')" ;;
     esac
-    menu_pause
+    user_menu_pause
   done
 }
 
@@ -8060,6 +8064,13 @@ menu_pause() {
   read_tty _ignore "$(t '按回车返回主菜单...' 'Press Enter to return to the menu...')" || true
 }
 
+user_menu_pause() {
+  local _ignore=""
+  msg ""
+  read_tty _ignore "$(t '按回车返回用户管理菜单...' \
+    'Press Enter to return to user management...')" || true
+}
+
 menu_run_action() {
   if dry_run_should_preview "$ACTION"; then
     dry_run_action_preview "$ACTION"
@@ -8115,6 +8126,7 @@ menu_run_action() {
 
 menu_loop() {
   MENU_MODE=1
+  MAIN_MENU_ACTIVE=1
   trap - ERR
   # 仅当已安装(或半装/损坏状态)时才做二进制修复。否则在「全新系统」上，repair_mita_binary_paths
   # 会因找不到二进制而走 recover_deb_mita → reinstall_mita_package，在显示菜单前就「自动重下安装」mita，
@@ -8141,13 +8153,16 @@ menu_loop() {
     set +e
     (
       set -Eeuo pipefail
-      trap 'rc=$?; if [ "$rc" -eq 2 ]; then exit 2; fi; on_error' ERR
+      trap 'rc=$?; if [ "$rc" -eq 2 ] || [ "$rc" -eq 3 ]; then exit "$rc"; fi; on_error' ERR
       menu_run_action
     )
     rc=$?
     set -e
     if [ "$rc" -eq 2 ]; then
       break
+    fi
+    if [ "$rc" -eq 3 ]; then
+      continue
     fi
     if [ "$rc" -ne 0 ]; then
       warn "$(t '操作未完成，请重试或选 5) 状态 排查' 'Action failed; retry or use 5) Status')"
