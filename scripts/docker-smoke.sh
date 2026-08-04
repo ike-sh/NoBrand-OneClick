@@ -263,6 +263,29 @@ test -f /root/mieru-clients/current/alice_tcp.json
 test ! -e /root/mieru-clients/current/alice_udp.json
 ADVERTISE_HOST="" ADVERTISE_PORT="" PROTOCOL=TCP
 
+# 主用户改名只删除旧用户名导出；全局客户端参数变化必须失效全部用户导出。
+(
+  invalidation_dir=/tmp/client-invalidation
+  MITA_CLIENT_EXPORT_DIR="$invalidation_dir"
+  mkdir -p "$invalidation_dir/current"
+  printf stale >"$invalidation_dir/current/old-user_tcp.json"
+  printf stale >"$invalidation_dir/current/old-user_udp.json"
+  printf keep >"$invalidation_dir/current/bob_tcp.json"
+  USERNAME=new-user PROTOCOL=TCP MTU=1400 TRAFFIC_PATTERN=off TRAFFIC_SEED=""
+  LOW_ENTROPY_MODE=LOW_ENTROPY_MODE_OFF MULTIPLEXING=MULTIPLEXING_OFF
+  HANDSHAKE_MODE=HANDSHAKE_NO_WAIT
+  client_exports_after_reconfigure old-user TCP 1400 off "" \
+    LOW_ENTROPY_MODE_OFF MULTIPLEXING_OFF HANDSHAKE_NO_WAIT
+  test ! -e "$invalidation_dir/current/old-user_tcp.json"
+  test ! -e "$invalidation_dir/current/old-user_udp.json"
+  test -f "$invalidation_dir/current/bob_tcp.json"
+  printf stale >"$invalidation_dir/current/new-user_tcp.json"
+  PROTOCOL=UDP
+  client_exports_after_reconfigure new-user TCP 1400 off "" \
+    LOW_ENTROPY_MODE_OFF MULTIPLEXING_OFF HANDSHAKE_NO_WAIT
+  test -z "$(find "$invalidation_dir/current" -maxdepth 1 -type f -name '*.json' -print -quit)"
+)
+
 # 安装交互默认保留自动探测；选择自定义时读取独立的展示 IP 和端口。
 (
   ADVERTISE_HOST=198.51.100.1 ADVERTISE_PORT=1234 ADVERTISE_CLI=0
@@ -395,6 +418,126 @@ rm -f "$conflict_state" "$conflict_state.norm"
   test "$USERNAME|$PASSWORD" = 'new-user|new-pass'
 )
 
+# doctor: 无限速用户时规则缺失是正常状态；有限速用户缺规则必须失败。
+(
+  check(){ printf '%s|%s|%s\n' "$2" "$1" "${3:-}"; }
+  users_rate_limited_count(){ echo 0; }
+  doctor_tc_output="$(doctor_check_tc_limits)"
+  grep -q '^1|rate-limit rules|' <<<"$doctor_tc_output"
+  ! grep -q '^0|' <<<"$doctor_tc_output"
+)
+(
+  check(){ printf '%s|%s|%s\n' "$2" "$1" "${3:-}"; }
+  users_rate_limited_count(){ echo 1; }
+  tc_default_iface(){ echo eth-test; }
+  tc(){ :; }
+  TC_OWNED_STATE=/tmp/missing-doctor-tc-owned.filters
+  rm -f "$TC_OWNED_STATE"
+  doctor_tc_output="$(doctor_check_tc_limits)"
+  grep -q '^0|clsact|' <<<"$doctor_tc_output"
+  grep -q '^0|owned filter manifest|' <<<"$doctor_tc_output"
+)
+
+# 状态页只显示运行与监听摘要，不调用 describe config 或暴露密码。
+(
+  status_bin=/tmp/mock-status-mita
+  printf '%s\n' '#!/bin/sh' '[ "${1:-}" = version ] && echo 3.35.0' >"$status_bin"
+  chmod 0755 "$status_bin"
+  mita_bin(){ echo "$status_bin"; }
+  service_manager(){ echo none; }
+  users_isolated_mode(){ return 0; }
+  users_enabled_instance_rows(){ printf 'u0000000000000001\talice\t26000\n'; }
+  load_install_state(){ PROTOCOL=TCP; PASSWORD=alice-pass; }
+  instance_cmd(){
+    if [ "${2:-}" = status ]; then
+      echo 'mita server status is "RUNNING"'
+    else
+      touch /tmp/status-unexpected-describe
+      echo 'password: alice-pass'
+    fi
+  }
+  rm -f /tmp/status-unexpected-describe
+  status_output="$(do_status)"
+  grep -q 'TCP 26000' <<<"$status_output"
+  grep -q '隐藏密码' <<<"$status_output"
+  ! grep -q 'alice-pass' <<<"$status_output"
+  test ! -e /tmp/status-unexpected-describe
+)
+
+# 软件包安装前后必须成对创建/解除 runtime mask；原服务未运行时不得误启动。
+(
+  PACKAGE_GUARD_LOG=/tmp/package-service-guard.log
+  : >"$PACKAGE_GUARD_LOG"
+  service_manager(){ echo systemd; }
+  systemctl(){
+    printf '%s\n' "$*" >>"$PACKAGE_GUARD_LOG"
+    case "${1:-}" in
+      is-enabled|is-active) return 1 ;;
+    esac
+    return 0
+  }
+  dpkg(){ return 0; }
+  mark_oneclick_install(){ :; }
+  install_package /tmp/mock-mita.deb deb
+  grep -q '^mask --runtime --now mita.service$' "$PACKAGE_GUARD_LOG"
+  grep -q '^unmask --runtime mita.service$' "$PACKAGE_GUARD_LOG"
+  ! grep -q '^start mita.service$' "$PACKAGE_GUARD_LOG"
+)
+
+# 安装前运行中的默认服务必须在解除 mask 后恢复。
+(
+  PACKAGE_GUARD_LOG=/tmp/package-service-guard-active.log
+  : >"$PACKAGE_GUARD_LOG"
+  service_manager(){ echo systemd; }
+  systemctl(){
+    printf '%s\n' "$*" >>"$PACKAGE_GUARD_LOG"
+    [ "${1:-}" != is-enabled ]
+  }
+  dpkg(){ return 0; }
+  mark_oneclick_install(){ :; }
+  install_package /tmp/mock-mita.deb deb
+  grep -q '^start mita.service$' "$PACKAGE_GUARD_LOG"
+)
+(
+  PACKAGE_GUARD_LOG=/tmp/package-service-guard-failure.log
+  : >"$PACKAGE_GUARD_LOG"
+  service_manager(){ echo systemd; }
+  systemctl(){
+    printf '%s\n' "$*" >>"$PACKAGE_GUARD_LOG"
+    [ "${1:-}" != is-enabled ]
+  }
+  dpkg(){ return 1; }
+  apt-get(){ return 1; }
+  MENU_MODE=1
+  if install_package /tmp/mock-mita.deb deb >/dev/null 2>&1; then
+    echo "failed package install unexpectedly succeeded" >&2
+    exit 1
+  fi
+  grep -q '^unmask --runtime mita.service$' "$PACKAGE_GUARD_LOG"
+  grep -q '^start mita.service$' "$PACKAGE_GUARD_LOG"
+)
+(
+  PACKAGE_GUARD_LOG=/tmp/package-service-guard-mask-failure.log
+  : >"$PACKAGE_GUARD_LOG"
+  service_manager(){ echo systemd; }
+  systemctl(){
+    printf '%s\n' "$*" >>"$PACKAGE_GUARD_LOG"
+    case "${1:-}" in
+      is-enabled|is-active) return 1 ;;
+      mask) return 1 ;;
+    esac
+    return 0
+  }
+  dpkg(){ touch /tmp/package-unexpected-dpkg; }
+  rm -f /tmp/package-unexpected-dpkg
+  MENU_MODE=1
+  if install_package /tmp/mock-mita.deb deb >/dev/null 2>&1; then
+    echo "package install unexpectedly continued after mask failure" >&2
+    exit 1
+  fi
+  test ! -e /tmp/package-unexpected-dpkg
+)
+
 # 独立修改用户展示入口只更新状态，不应用或重启任何服务端实例。
 (
   endpoint_state_dir=/tmp/endpoint-only-state
@@ -461,6 +604,95 @@ tc(){
   esac
   return 0
 }
+
+# 首次安装直接创建 isolated-v2，不应用或启动旧默认单实例。
+(
+  fresh=/tmp/fresh-isolated
+  rm -rf "$fresh"
+  mkdir -p "$fresh/backups" "$fresh/instances" "$fresh/run" "$fresh/metrics"
+  chmod 0700 "$fresh" "$fresh/backups"
+  MITA_MANAGER_STATE_DIR="$fresh"
+  MITA_STATE="$fresh/install-state.env"
+  MITA_USERS_STATE="$fresh/users.json"
+  MITA_USERS_LOCK="$fresh/users.lock"
+  MITA_ADMIN_LOCK="$fresh/admin.lock"
+  MITA_USERS_BACKUP_DIR="$fresh/backups"
+  MITA_INSTANCES_DIR="$fresh/instances"
+  MITA_INSTANCE_RUN_DIR="$fresh/run"
+  MITA_INSTANCE_METRICS_DIR="$fresh/metrics"
+  MITA_CLIENT_EXPORT_DIR="$fresh/clients"
+  TC_OWNED_STATE="$fresh/tc-owned.filters"
+  USERNAME=fresh-user PASSWORD=fresh-pass PORT=26100 PORT_RANGE="" PROTOCOL=TCP
+  ADVERTISE_HOST="" ADVERTISE_PORT="" MTU=1400 MTU_POLICY=safe
+  TRAFFIC_PATTERN=off TRAFFIC_SEED="" LOW_ENTROPY_MODE=LOW_ENTROPY_MODE_OFF
+  MULTIPLEXING=MULTIPLEXING_OFF HANDSHAKE_MODE=HANDSHAKE_NO_WAIT
+  install_self_script(){ :; }
+  install_users_scheduler(){ :; }
+  open_firewall_for_pairs(){ touch /tmp/fresh-firewall-opened; }
+  close_firewall_for_bindings(){ :; }
+  default_mita_stop(){ touch /tmp/fresh-default-stopped; }
+  default_mita_restore(){ touch /tmp/fresh-unexpected-default-restore; }
+  apply_config(){ touch /tmp/fresh-unexpected-default-apply; }
+  start_mita(){ touch /tmp/fresh-unexpected-default-start; }
+  rm -f /tmp/fresh-firewall-opened /tmp/fresh-default-stopped \
+    /tmp/fresh-unexpected-default-restore /tmp/fresh-unexpected-default-apply \
+    /tmp/fresh-unexpected-default-start
+  install_fresh_isolated
+  test "$(users_deployment_model)" = isolated-v2
+  test "$(users_count)" -eq 1
+  test -e /tmp/fresh-firewall-opened
+  test -e /tmp/fresh-default-stopped
+  test ! -e /tmp/fresh-unexpected-default-restore
+  test ! -e /tmp/fresh-unexpected-default-apply
+  test ! -e /tmp/fresh-unexpected-default-start
+)
+
+# 首次安装的专属实例启动失败时，不得恢复从未启用的默认服务，并清理运行时资源。
+(
+  fresh=/tmp/fresh-isolated-failure
+  rm -rf "$fresh"
+  mkdir -p "$fresh/backups" "$fresh/instances" "$fresh/run" "$fresh/metrics"
+  chmod 0700 "$fresh" "$fresh/backups"
+  MITA_MANAGER_STATE_DIR="$fresh"
+  MITA_STATE="$fresh/install-state.env"
+  MITA_USERS_STATE="$fresh/users.json"
+  MITA_USERS_LOCK="$fresh/users.lock"
+  MITA_ADMIN_LOCK="$fresh/admin.lock"
+  MITA_USERS_BACKUP_DIR="$fresh/backups"
+  MITA_INSTANCES_DIR="$fresh/instances"
+  MITA_INSTANCE_RUN_DIR="$fresh/run"
+  MITA_INSTANCE_METRICS_DIR="$fresh/metrics"
+  MITA_CLIENT_EXPORT_DIR="$fresh/clients"
+  TC_OWNED_STATE="$fresh/tc-owned.filters"
+  USERNAME=fresh-fail PASSWORD=fresh-pass PORT=26110 PORT_RANGE="" PROTOCOL=TCP
+  ADVERTISE_HOST="" ADVERTISE_PORT="" MTU=1400 MTU_POLICY=safe
+  TRAFFIC_PATTERN=off TRAFFIC_SEED="" LOW_ENTROPY_MODE=LOW_ENTROPY_MODE_OFF
+  MULTIPLEXING=MULTIPLEXING_OFF HANDSHAKE_MODE=HANDSHAKE_NO_WAIT
+  install_self_script(){ :; }
+  install_users_scheduler(){ touch /tmp/fresh-fail-scheduler-created; }
+  remove_users_scheduler(){ touch /tmp/fresh-fail-scheduler-removed; }
+  instance_start_proxy(){ return 1; }
+  instance_daemon_stop(){ touch /tmp/fresh-fail-instance-stopped; }
+  default_mita_stop(){ touch /tmp/fresh-fail-default-stopped; }
+  default_mita_restore(){ touch /tmp/fresh-fail-unexpected-default-restore; }
+  open_firewall_for_pairs(){ touch /tmp/fresh-fail-unexpected-firewall; }
+  tc_clear_owned_filters(){ touch /tmp/fresh-fail-tc-cleared; }
+  rm -f /tmp/fresh-fail-*
+  MENU_MODE=1
+  if install_fresh_isolated >/dev/null 2>&1; then
+    echo "failed fresh isolated install unexpectedly succeeded" >&2
+    exit 1
+  fi
+  test ! -e "$MITA_USERS_STATE"
+  test -e /tmp/fresh-fail-default-stopped
+  test -e /tmp/fresh-fail-instance-stopped
+  test -e /tmp/fresh-fail-scheduler-created
+  test -e /tmp/fresh-fail-scheduler-removed
+  test -e /tmp/fresh-fail-tc-cleared
+  test ! -e /tmp/fresh-fail-unexpected-default-restore
+  test ! -e /tmp/fresh-fail-unexpected-firewall
+)
+
 apply_users_config
 test "$(users_deployment_model)" = isolated-v2
 python3 - <<'PY'
@@ -479,6 +711,79 @@ python3 -c 'import glob,json; assert all("trafficPattern" in json.load(open(p)) 
 TRAFFIC_PATTERN=off
 apply_users_config
 python3 -c 'import glob,json; assert all("trafficPattern" not in json.load(open(p)) for p in glob.glob("/tmp/instances/*/server.json"))'
+
+setup_reconfigure_fixture(){
+  local fixture="$1"
+  rm -rf "$fixture"
+  mkdir -p "$fixture/backups" "$fixture/clients/current"
+  chmod 0700 "$fixture" "$fixture/backups" "$fixture/clients" "$fixture/clients/current"
+  MITA_STATE="$fixture/install-state.env"
+  MITA_USERS_STATE="$fixture/users.json"
+  MITA_USERS_LOCK="$fixture/users.lock"
+  MITA_ADMIN_LOCK="$fixture/admin.lock"
+  MITA_USERS_BACKUP_DIR="$fixture/backups"
+  MITA_CLIENT_EXPORT_DIR="$fixture/clients"
+  cp -f /tmp/manager-state/install-state.env "$MITA_STATE"
+  cp -f /tmp/manager-state/users.json "$MITA_USERS_STATE"
+  chmod 0600 "$MITA_STATE" "$MITA_USERS_STATE"
+}
+
+# 完全无变化时必须明确报告 no-op，且不应用服务端配置。
+(
+  setup_reconfigure_fixture /tmp/reconfigure-noop
+  collect_reconfigure_interactive(){ :; }
+  apply_users_config(){ touch /tmp/reconfigure-noop-unexpected-apply; }
+  print_summary(){ :; }
+  rm -f /tmp/reconfigure-noop-unexpected-apply
+  reconfigure_output="$(do_reconfigure)"
+  grep -q '未检测到配置变化' <<<"$reconfigure_output"
+  test ! -e /tmp/reconfigure-noop-unexpected-apply
+)
+
+# 客户端全局模式变化不重启服务，但必须失效所有用户的旧导出。
+(
+  setup_reconfigure_fixture /tmp/reconfigure-client-only
+  printf stale >"$(client_current_dir)/alice_tcp.json"
+  printf stale >"$(client_current_dir)/bob_tcp.json"
+  collect_reconfigure_interactive(){ MULTIPLEXING=MULTIPLEXING_LOW; }
+  apply_users_config(){ touch /tmp/reconfigure-client-unexpected-apply; }
+  print_summary(){ :; }
+  rm -f /tmp/reconfigure-client-unexpected-apply
+  reconfigure_output="$(do_reconfigure)"
+  grep -q '仅客户端参数已更新' <<<"$reconfigure_output"
+  grep -qx 'MULTIPLEXING=MULTIPLEXING_LOW' "$MITA_STATE"
+  test -z "$(find "$(client_current_dir)" -maxdepth 1 -type f -name '*.json' -print -quit)"
+  test ! -e /tmp/reconfigure-client-unexpected-apply
+)
+
+# 主用户名变化只清理旧主用户导出，不删除其它用户仍有效的文件。
+(
+  setup_reconfigure_fixture /tmp/reconfigure-rename
+  printf stale >"$(client_current_dir)/alice_tcp.json"
+  printf keep >"$(client_current_dir)/bob_tcp.json"
+  collect_reconfigure_interactive(){ USERNAME=alice-renamed; }
+  apply_users_config(){ :; }
+  print_summary(){ :; }
+  reconfigure_output="$(do_reconfigure)"
+  grep -q '重新配置完成' <<<"$reconfigure_output"
+  users_name_exists alice-renamed
+  test ! -e "$(client_current_dir)/alice_tcp.json"
+  test -f "$(client_current_dir)/bob_tcp.json"
+)
+
+# MTU 是全局参数，数值变化后必须失效所有用户的稳定导出。
+(
+  setup_reconfigure_fixture /tmp/mtu-global-invalidation
+  printf stale >"$(client_current_dir)/alice_tcp.json"
+  printf stale >"$(client_current_dir)/bob_tcp.json"
+  choose_mtu_interactive(){ MTU=1390; MTU_POLICY=custom; }
+  reconcile_isolated_instances(){ :; }
+  verify_mita_running(){ return 0; }
+  generate_client_config(){ :; }
+  do_mtu_config >/dev/null
+  grep -qx 'MTU=1390' "$MITA_STATE"
+  test -z "$(find "$(client_current_dir)" -maxdepth 1 -type f -name '*.json' -print -quit)"
+)
 
 # 改端口不能改变实例 ID，也不能丢失专属 metrics。
 bob_id="$(users_get_field bob instance_id)"

@@ -5,7 +5,7 @@
 set -euo pipefail
 umask 077
 
-SCRIPT_VERSION="2.1.1"
+SCRIPT_VERSION="2.1.2"
 SCRIPT_AUTHOR="ike"
 SCRIPT_REPO="ike-sh/mieru-OneClick"
 UPSTREAM_REPO="enfein/mieru"
@@ -717,6 +717,22 @@ read_tty() {
     else
       return 1
     fi
+  fi
+  printf -v "$_var" '%s' "$_line"
+}
+
+read_tty_secret() {
+  local _var="$1"
+  local _prompt="${2:-}"
+  local _line=""
+  if [ -t 0 ]; then
+    read -r -s -p "$_prompt" _line || _line=""
+    printf '\n'
+  elif [ -r /dev/tty ]; then
+    read -r -s -p "$_prompt" _line </dev/tty || _line=""
+    printf '\n' >/dev/tty
+  else
+    return 1
   fi
   printf -v "$_var" '%s' "$_line"
 }
@@ -1704,6 +1720,42 @@ install_mita_service() {
   esac
 }
 
+package_service_guard_begin() {
+  PACKAGE_SERVICE_GUARD_MASKED=0
+  PACKAGE_SERVICE_GUARD_WAS_ACTIVE=0
+  [ "$(service_manager)" = systemd ] || return 0
+  case "$(systemctl is-enabled mita.service 2>/dev/null || true)" in
+    masked|masked-runtime) return 0 ;;
+  esac
+  if systemctl is-active --quiet mita.service 2>/dev/null; then
+    PACKAGE_SERVICE_GUARD_WAS_ACTIVE=1
+  fi
+  if ! run systemctl mask --runtime --now mita.service >/dev/null 2>&1; then
+    warn "$(t '无法在安装期间临时屏蔽 mita.service，已取消软件包安装' \
+      'Failed to temporarily mask mita.service; package installation was cancelled')"
+    return 1
+  fi
+  PACKAGE_SERVICE_GUARD_MASKED=1
+}
+
+package_service_guard_end() {
+  local restore_rc=0
+  [ "${PACKAGE_SERVICE_GUARD_MASKED:-0}" -eq 1 ] || return 0
+  if ! run systemctl unmask --runtime mita.service >/dev/null 2>&1; then
+    warn "$(t '无法解除安装期间创建的 mita.service 临时屏蔽' \
+      'Failed to remove the temporary mita.service mask created during package installation')"
+    restore_rc=1
+  elif [ "${PACKAGE_SERVICE_GUARD_WAS_ACTIVE:-0}" -eq 1 ] \
+       && ! run systemctl start mita.service >/dev/null 2>&1; then
+    warn "$(t 'mita.service 安装前正在运行，但软件包安装后无法恢复启动' \
+      'mita.service was active before installation but could not be restarted afterward')"
+    restore_rc=1
+  fi
+  PACKAGE_SERVICE_GUARD_MASKED=0
+  PACKAGE_SERVICE_GUARD_WAS_ACTIVE=0
+  return "$restore_rc"
+}
+
 extract_mita_tarball() {
   local tarball="$1"
   STAGE="解压 mita 二进制"
@@ -1723,23 +1775,38 @@ extract_mita_tarball() {
 install_package() {
   local path="$1"
   local pm="$2"
+  local install_rc=0 guard_rc=0
   STAGE="安装软件包"
+  if ! package_service_guard_begin; then
+    die "$(t '无法安全准备 mita 软件包安装' \
+      'Could not safely prepare the mita package installation')" || return 1
+  fi
   case "$pm" in
     deb)
-      run dpkg -i "$path" || run apt-get install -f -y
-      mark_oneclick_install
+      if ! run dpkg -i "$path" && ! run apt-get install -f -y; then
+        install_rc=1
+      fi
       ;;
     rpm)
-      run rpm -Uvh --force "$path"
-      mark_oneclick_install
+      run rpm -Uvh --force "$path" || install_rc=1
       ;;
     alpine)
-      install_alpine_deps
-      ensure_mita_account
-      extract_mita_tarball "$path"
-      install_mita_service
+      if ! install_alpine_deps \
+         || ! ensure_mita_account \
+         || ! extract_mita_tarball "$path" \
+         || ! install_mita_service; then
+        install_rc=1
+      fi
       ;;
-    *) die "$(t '未知包管理器' 'Unknown package manager')" ;;
+    *) install_rc=1 ;;
+  esac
+  package_service_guard_end || guard_rc=1
+  if [ "$install_rc" -ne 0 ] || [ "$guard_rc" -ne 0 ]; then
+    die "$(t 'mita 软件包安装或原服务状态恢复失败' \
+      'The mita package installation or previous service-state restoration failed')" || return 1
+  fi
+  case "$pm" in
+    deb|rpm) mark_oneclick_install ;;
   esac
 }
 
@@ -2325,6 +2392,19 @@ users_count() {
     "$MITA_USERS_STATE" 2>/dev/null || printf '0'
 }
 
+users_rate_limited_count() {
+  users_state_exists || { printf '0'; return 0; }
+  command -v python3 >/dev/null 2>&1 || { printf '0'; return 0; }
+  python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+print(sum(
+    1 for u in (d.get("users") or [])
+    if u.get("enabled", True) and int(u.get("bandwidth_mbps") or 0) > 0
+))
+' "$MITA_USERS_STATE" 2>/dev/null || printf '0'
+}
+
 users_deployment_model() {
   users_state_exists || return 1
   python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("deployment_model") or "")' \
@@ -2807,7 +2887,7 @@ reconcile_isolated_instances() {
 }
 
 ensure_isolated_deployment() {
-  local id name port migrated=0
+  local restore_default="${1:-1}" id name port migrated=0
   users_isolated_mode && {
     reconcile_isolated_instances
     return
@@ -2825,7 +2905,9 @@ ensure_isolated_deployment() {
     [ -n "$id" ] && [ -n "$name" ] && [ -n "$port" ] || continue
     if [ -s "$MITA_METRICS_FILE" ] && [ ! -s "$(instance_metrics_file "$id")" ]; then
       if ! cp -f "$MITA_METRICS_FILE" "$(instance_metrics_file "$id")"; then
-        default_mita_restore || true
+        if [ "$restore_default" -eq 1 ]; then
+          default_mita_restore || true
+        fi
         return 1
       fi
       chown mita:mita "$(instance_metrics_file "$id")" 2>/dev/null || true
@@ -2836,13 +2918,17 @@ ensure_isolated_deployment() {
   if reconcile_isolated_instances; then
     users_set_deployment_model "$MITA_DEPLOYMENT_MODEL" || {
       isolated_stop_all
-      default_mita_restore || true
+      if [ "$restore_default" -eq 1 ]; then
+        default_mita_restore || true
+      fi
       return 1
     }
     migrated=1
   else
     isolated_stop_all
-    default_mita_restore || true
+    if [ "$restore_default" -eq 1 ]; then
+      default_mita_restore || true
+    fi
     return 1
   fi
   [ "$migrated" -eq 1 ] && users_log "deployment migrated to ${MITA_DEPLOYMENT_MODEL}"
@@ -3672,7 +3758,7 @@ for u in d.get("users") or []:
 
 apply_users_config() {
   # 每个启用用户对应一个独立 mita 实例；端口、认证、配额 metrics 均为专属资源。
-  local snapshot="${1:-}" auto_host=""
+  local snapshot="${1:-}" rollback_reapply="${2:-1}" auto_host=""
   STAGE="应用多用户配置"
   admin_lock_acquire || return 1
   auto_host="$(public_ip 2>/dev/null || true)"
@@ -3689,13 +3775,13 @@ apply_users_config() {
     warn "$(t '至少保留一个用户' 'Keep at least one user')"
     return 1
   fi
-  if ! ensure_isolated_deployment; then
-    users_tx_rollback "$snapshot" 1
+  if ! ensure_isolated_deployment "$rollback_reapply"; then
+    users_tx_rollback "$snapshot" "$rollback_reapply"
     admin_lock_release
     return 1
   fi
   if ! apply_tc_limits; then
-    users_tx_rollback "$snapshot" 1
+    users_tx_rollback "$snapshot" "$rollback_reapply"
     admin_lock_release
     return 1
   fi
@@ -4855,7 +4941,7 @@ do_user_add() {
     if [ "$YES" -eq 1 ]; then
       password="$(random_token)"
     else
-      read_tty password "$(t '密码（回车随机）: ' 'Password (Enter=random): ')" || true
+      read_tty_secret password "$(t '密码（回车随机）: ' 'Password (Enter=random): ')" || true
       [ -n "$password" ] || password="$(random_token)"
     fi
   fi
@@ -5256,6 +5342,38 @@ for u in d.get("users") or []:
   printf '%s\n' "$dir"
 }
 
+doctor_check_tc_limits() {
+  local dev rate_users
+  rate_users="$(users_rate_limited_count)"
+  if [ "${rate_users:-0}" -eq 0 ]; then
+    check "rate-limit rules" 1 "$(t '未配置用户限速，clsact/filter 无需创建' \
+      'No users have rate limits; clsact/filter rules are not required')"
+  elif ! command -v tc >/dev/null 2>&1; then
+    check "tc binary" 0 "$(t "${rate_users} 个限速用户，但 tc 未安装" \
+      "${rate_users} rate-limited user(s), but tc is not installed")"
+  else
+    dev="$(tc_default_iface 2>/dev/null || true)"
+    if [ -z "$dev" ]; then
+      check "nic detect" 0 "$(t "${rate_users} 个限速用户，但未检测到网卡；可设置 TC_IFACE" \
+        "${rate_users} rate-limited user(s), but no interface was detected; set TC_IFACE")"
+    else
+      check "nic" 1 "$dev"
+      if tc qdisc show dev "$dev" 2>/dev/null | grep -qw clsact; then
+        check "clsact" 1
+      else
+        check "clsact" 0 "$(t "${rate_users} 个限速用户，但 clsact 缺失" \
+          "${rate_users} rate-limited user(s), but clsact is missing")"
+      fi
+      if [ -s "$TC_OWNED_STATE" ]; then
+        check "owned filter manifest" 1 "$TC_OWNED_STATE"
+      else
+        check "owned filter manifest" 0 "$(t "${rate_users} 个限速用户，但规则清单缺失" \
+          "${rate_users} rate-limited user(s), but the owned-filter manifest is missing")"
+      fi
+    fi
+  fi
+}
+
 do_doctor() {
   require_root 2>/dev/null || true
   local pass=0 fail=0 warn_n=0
@@ -5401,25 +5519,7 @@ print("; ".join(parts))
   fi
 
   t '【专属实例 tc 限速】' '[Dedicated-instance tc limits]'
-  local dev
-  dev="$(tc_default_iface 2>/dev/null || true)"
-  if ! command -v tc >/dev/null 2>&1; then
-    check "tc binary" 2 "未安装"
-  elif [ -z "$dev" ]; then
-    check "nic detect" 2 "设 TC_IFACE="
-  else
-    check "nic" 1 "$dev"
-    if tc qdisc show dev "$dev" 2>/dev/null | grep -qw clsact; then
-      check "clsact" 1
-    else
-      check "clsact" 2 "无用户限速时无需创建"
-    fi
-    if [ -f "$TC_OWNED_STATE" ]; then
-      check "owned filter manifest" 1 "$TC_OWNED_STATE"
-    else
-      check "owned filter manifest" 2 "无用户限速规则"
-    fi
-  fi
+  doctor_check_tc_limits
 
   t '【定时任务】' '[Scheduler]'
   if [ -f "$MITA_USERS_TIMER" ] || systemctl is-enabled mita-users-scan.timer >/dev/null 2>&1; then
@@ -6398,7 +6498,7 @@ collect_reconfigure_interactive() {
   msg ""
   t '【当前配置】' '[Current config]'
   t "  用户名: ${USERNAME}" "  Username: ${USERNAME}"
-  t "  密码:   ${PASSWORD}" "  Password: ${PASSWORD}"
+  t '  密码:   （已隐藏）' '  Password: (hidden)'
   t "  协议:   $(protocol_label)" "  Protocol: $(protocol_label)"
   t "  MTU:    ${MTU}（$(mtu_policy_label)）" \
     "  MTU:      ${MTU} ($(mtu_policy_label))"
@@ -6415,7 +6515,7 @@ collect_reconfigure_interactive() {
   [ -n "$input" ] && USERNAME="$input"
 
   input=""
-  read_tty input "$(t "新密码 [${PASSWORD}]: " "New password [${PASSWORD}]: ")" || input=""
+  read_tty_secret input "$(t '新密码（留空保持当前）: ' 'New password (Enter to keep current): ')" || input=""
   [ -n "$input" ] && PASSWORD="$input"
 
   if [ "$PROTOCOL_CLI" -eq 0 ]; then
@@ -7831,6 +7931,22 @@ client_exports_clear_current() {
   run rm -f -- "${current_dir}/"*.json
 }
 
+client_exports_after_reconfigure() {
+  local old_user="$1" old_protocol="$2" old_mtu="$3" old_traffic="$4"
+  local old_seed="$5" old_low_entropy="$6" old_mux="$7" old_handshake="$8"
+  if [ "${PROTOCOL:-TCP}" != "$old_protocol" ] \
+     || [ "${MTU:-1400}" != "$old_mtu" ] \
+     || [ "${TRAFFIC_PATTERN:-off}" != "$old_traffic" ] \
+     || [ "${TRAFFIC_SEED:-}" != "$old_seed" ] \
+     || [ "${LOW_ENTROPY_MODE:-LOW_ENTROPY_MODE_OFF}" != "$old_low_entropy" ] \
+     || [ "${MULTIPLEXING:-MULTIPLEXING_OFF}" != "$old_mux" ] \
+     || [ "${HANDSHAKE_MODE:-HANDSHAKE_NO_WAIT}" != "$old_handshake" ]; then
+    client_exports_clear_current
+  elif [ "${USERNAME:-}" != "$old_user" ]; then
+    client_export_remove_user "$old_user"
+  fi
+}
+
 print_json_import_hint() {
   if [ "${PROTOCOL:-TCP}" = "BOTH" ]; then
     t '  先将上方 TCP 或 UDP JSON 下载到客户端，再执行:' \
@@ -7925,10 +8041,13 @@ print_client_endpoint_mapping() {
 }
 
 print_summary() {
-  local ip
+  local context="${1:-install}" ip
   ip="$(advertised_host || true)"
   msg ""
-  t '========== 安装完成 ==========' '========== Installation complete =========='
+  case "$context" in
+    install) t '========== 安装完成 ==========' '========== Installation complete ==========' ;;
+    *) t '========== 当前节点配置 ==========' '========== Current node configuration ==========' ;;
+  esac
   if [ -n "$ip" ]; then
     print_protocol_outputs "$ip"
   else
@@ -7975,8 +8094,8 @@ print_summary() {
     msg ''
     t '【客户端提示】双协议已分开输出：TCP 与 UDP 各用对应链接/JSON；' \
       '[Client tip] Dual protocol outputs are split: use matching TCP or UDP link/JSON.'
-    t '  v2rayN 导入后传输协议选 **tcp** 或 **udp**（勿选「两个都」）。' \
-      '  In v2rayN pick transport **tcp** or **udp** (not "both").'
+    t '  v2rayN 导入后传输协议选 tcp 或 udp（勿选「两个都」）。' \
+      '  In v2rayN pick transport tcp or udp (not "both").'
   fi
   if [ -n "$ip" ]; then
     msg ""
@@ -8007,12 +8126,57 @@ generate_client_config() {
   fi
   print_json_import_hint
   msg ""
-  t '说明: 上方 mierus:// 为分享链接；JSON 为 mieru **客户端**配置（在电脑/手机导入，勿在服务器 mita apply）' \
-    'Note: mierus:// is the share link; JSON is for mieru **client** on your device — do NOT mita apply on server'
+  t '说明: 上方 mierus:// 为分享链接；JSON 为 mieru 客户端配置（在电脑/手机导入，勿在服务器 mita apply）' \
+    'Note: mierus:// is the share link; JSON is for the mieru client on your device — do NOT mita apply on server'
   msg ""
   t '【Clash / mihomo 配置片段】' '[Clash / mihomo snippet]'
   build_clash_yaml_full "$ip"
   cloud_firewall_hint
+}
+
+install_fresh_rollback() {
+  local snapshot="$1" bindings="${2:-}"
+  if [ -n "$bindings" ]; then
+    close_firewall_for_bindings "$bindings" 2>/dev/null || true
+  fi
+  isolated_stop_all 2>/dev/null || true
+  tc_clear_owned_filters 2>/dev/null || true
+  remove_users_scheduler 2>/dev/null || true
+  users_tx_rollback "$snapshot" 0 || true
+}
+
+install_fresh_isolated() {
+  local tx bindings
+  install_self_script
+  admin_lock_acquire || return 1
+  tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
+  if ! users_migrate_from_primary; then
+    install_fresh_rollback "$tx"
+    admin_lock_release
+    die "$(t '创建初始用户状态失败' 'Failed to create the initial user state')" || return 1
+  fi
+  if ! apply_users_config "$tx" 0; then
+    install_fresh_rollback "$tx"
+    admin_lock_release
+    die "$(t '启动首个用户专属实例失败；未启用旧默认服务' \
+      'Failed to start the first dedicated user instance; the legacy default service was not enabled')" || return 1
+  fi
+  bindings="$(multi_user_port_protocol_pairs)"
+  if ! open_firewall_for_pairs "$bindings"; then
+    install_fresh_rollback "$tx" "$bindings"
+    admin_lock_release
+    die "$(t '放行专属实例端口失败，安装状态已回滚' \
+      'Failed to allow dedicated-instance ports; installation state was rolled back')" || return 1
+  fi
+  if ! verify_mita_running || ! save_install_state; then
+    install_fresh_rollback "$tx" "$bindings"
+    admin_lock_release
+    die "$(t '专属实例验收或状态保存失败，安装状态已回滚' \
+      'Dedicated-instance verification or state persistence failed; installation state was rolled back')" || return 1
+  fi
+  users_tx_commit "$tx"
+  client_exports_clear_current 2>/dev/null || true
+  admin_lock_release
 }
 
 mita_preservable_config_exists() {
@@ -8026,7 +8190,7 @@ do_install() {
   require_cmd curl
   ensure_manager_state_layout 1
 
-  local pm arch ver url tmp cfg tx reinstall_existing=0 managed_existing=0
+  local pm arch ver url tmp tx reinstall_existing=0 managed_existing=0
   pm="$(detect_pkg_manager)"
   arch="$(detect_arch)"
   ensure_management_dependencies "$pm"
@@ -8089,10 +8253,6 @@ do_install() {
   download_package "$url" "$tmp"
   install_package "$tmp" "$pm"
   rm -f "$tmp"
-  if [ "$managed_existing" -eq 0 ]; then
-    ensure_mita_daemon
-    wait_mita_socket 30 || true
-  fi
 
   add_op_user "$OP_USER"
   warn_traffic_unsupported
@@ -8127,31 +8287,7 @@ do_install() {
       # 下载/安装期间端口可能被其它进程抢占，落盘前再验一次。
       ensure_install_port_available
     fi
-    cfg="$(write_server_config)"
-    apply_config "$cfg"
-    mita_sync_single_user "$USERNAME"
-    open_firewall
-    start_mita
-    verify_mita_running
-    install_self_script
-    save_install_state
-    admin_lock_acquire || return 1
-    tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
-    if ! users_migrate_from_primary; then
-      users_tx_rollback "$tx" 0
-      admin_lock_release
-      die "$(t '生成用户专属实例状态失败；旧单实例服务已保留' \
-        'Failed to create dedicated-user state; the legacy single service was kept')"
-    fi
-    if ! apply_users_config "$tx"; then
-      # apply_users_config 已完成事务回滚并恢复旧单实例，勿重复消费快照。
-      admin_lock_release
-      die "$(t '迁移到用户专属实例失败；旧单实例服务已恢复' \
-        'Migration to dedicated user instance failed; the legacy single service was restored')"
-    fi
-    users_tx_commit "$tx"
-    admin_lock_release
-    verify_mita_running
+    install_fresh_isolated
   fi
 
   offer_bbr_fq
@@ -8168,6 +8304,7 @@ do_reconfigure() {
   local old_port old_port_range old_protocol old_mtu old_mtu_policy old_user old_password
   local old_traffic old_seed old_low_entropy old_mux old_handshake
   local old_advertise_host old_advertise_port
+  local client_state_changed=0
   local requested_advertise_host="$ADVERTISE_HOST" requested_advertise_port="$ADVERTISE_PORT"
   local requested_advertise_cli="${ADVERTISE_CLI:-0}"
   ADVERTISE_CLI=0
@@ -8207,6 +8344,14 @@ do_reconfigure() {
     'Invalid custom client entry parameters')"
   [ -z "$ADVERTISE_PORT" ] || ADVERTISE_PORT="$(normalize_uint "$ADVERTISE_PORT")"
 
+  if [ "$ADVERTISE_HOST" != "$old_advertise_host" ] \
+     || [ "$ADVERTISE_PORT" != "$old_advertise_port" ] \
+     || [ "$MTU_POLICY" != "$old_mtu_policy" ] \
+     || [ "$MULTIPLEXING" != "$old_mux" ] \
+     || [ "$HANDSHAKE_MODE" != "$old_handshake" ]; then
+    client_state_changed=1
+  fi
+
   # 展示入口、客户端握手/多路复用和 MTU 策略文本不改变服务端运行配置。
   # 这些字段单独持久化，避免无意义地重启所有专属实例。
   if [ "$PORT" = "$old_port" ] && [ "$PORT_RANGE" = "$old_port_range" ] \
@@ -8214,6 +8359,13 @@ do_reconfigure() {
      && [ "$USERNAME" = "$old_user" ] && [ "$PASSWORD" = "$old_password" ] \
      && [ "$TRAFFIC_PATTERN" = "$old_traffic" ] && [ "$TRAFFIC_SEED" = "$old_seed" ] \
      && [ "$LOW_ENTROPY_MODE" = "$old_low_entropy" ]; then
+    if [ "$client_state_changed" -eq 0 ]; then
+      msg ""
+      t '未检测到配置变化；服务未重启' \
+        'No configuration changes detected; services were not restarted'
+      print_summary current
+      return 0
+    fi
     if users_state_exists && [ "$(users_count)" -gt 0 ]; then
       local state_only_auto_host=""
       admin_lock_acquire || return 1
@@ -8244,10 +8396,13 @@ do_reconfigure() {
     else
       save_install_state
     fi
+    client_exports_after_reconfigure "$old_user" "$old_protocol" "$old_mtu" \
+      "$old_traffic" "$old_seed" "$old_low_entropy" "$old_mux" "$old_handshake" \
+      2>/dev/null || true
     msg ""
-    t '服务器运行配置未变化；仅保存客户端展示设置，未重启服务' \
-      'Server runtime configuration is unchanged; client display settings were saved without restarting services'
-    print_summary
+    t '仅客户端参数已更新；服务器运行配置未变化，服务未重启' \
+      'Client-only settings were updated; server runtime is unchanged and services were not restarted'
+    print_summary current
     return 0
   fi
 
@@ -8373,6 +8528,9 @@ json.dump(d, open(path, "w"), indent=2)
       return 1
     fi
     users_tx_commit "$tx"
+    client_exports_after_reconfigure "$old_user" "$old_protocol" "$old_mtu" \
+      "$old_traffic" "$old_seed" "$old_low_entropy" "$old_mux" "$old_handshake" \
+      2>/dev/null || true
     close_bindings="$(comm -23 \
       <(printf '%s\n' "$old_bindings" | sed '/^[[:space:]]*$/d' | LC_ALL=C sort -u) \
       <(printf '%s\n' "$new_bindings" | sed '/^[[:space:]]*$/d' | LC_ALL=C sort -u))"
@@ -8424,6 +8582,9 @@ json.dump(d, open(path, "w"), indent=2)
       return 1
     fi
     users_tx_commit "$tx"
+    client_exports_after_reconfigure "$old_user" "$old_protocol" "$old_mtu" \
+      "$old_traffic" "$old_seed" "$old_low_entropy" "$old_mux" "$old_handshake" \
+      2>/dev/null || true
     close_bindings="$(comm -23 \
       <(printf '%s\n' "$old_bindings" | sed '/^[[:space:]]*$/d' | LC_ALL=C sort -u) \
       <(printf '%s\n' "$new_bindings" | sed '/^[[:space:]]*$/d' | LC_ALL=C sort -u))"
@@ -8436,7 +8597,7 @@ json.dump(d, open(path, "w"), indent=2)
     t '提示: 多用户模式下「重新配置」只改主用户凭据/端口与全局协议；其它用户端口不变' \
       'Note: multi-user reconfigure updates primary user + global protocol only; other ports unchanged'
   fi
-  print_summary
+  print_summary current
 }
 
 do_upgrade() {
@@ -8705,6 +8866,15 @@ do_uninstall() {
   t '新登录终端不会再加载该函数。' 'New login shells will no longer load that function.'
 }
 
+status_binding_text() {
+  local port="$1"
+  case "${PROTOCOL:-TCP}" in
+    BOTH) printf 'TCP %s / UDP %s' "$port" "$((port + 1))" ;;
+    UDP) printf 'UDP %s' "$port" ;;
+    *) printf 'TCP %s' "$port" ;;
+  esac
+}
+
 do_status() {
   local bin sm status_out recovered=0 iid iname iport
   bin="$(mita_bin)"
@@ -8716,6 +8886,7 @@ do_status() {
   fi
   msg ""
   "$bin" version 2>/dev/null || true
+  load_install_state 2>/dev/null || true
   msg ""
   if users_isolated_mode; then
     t '部署模型: 用户专属实例 isolated-v2' 'Deployment: dedicated user instances (isolated-v2)'
@@ -8727,14 +8898,18 @@ do_status() {
       [ -n "$iid" ] || continue
       msg ""
       t "【${iname} / ${iid}】" "[${iname} / ${iid}]"
+      t "  监听: $(status_binding_text "$iport")" \
+        "  Listen: $(status_binding_text "$iport")"
       case "$sm" in
         systemd) systemctl status "$(instance_systemd_unit "$iid")" --no-pager 2>/dev/null | head -n 12 || true ;;
         openrc) rc-service "$(instance_openrc_service "$iid")" status 2>/dev/null || true ;;
       esac
       status_out="$(instance_cmd "$iid" status 2>/dev/null || true)"
       msg "${status_out:-status unavailable}"
-      instance_cmd "$iid" describe config 2>/dev/null || true
     done < <(users_enabled_instance_rows)
+    msg ""
+    t '状态页已隐藏密码；查看或导出节点配置请使用主菜单 6' \
+      'Passwords are hidden on the status page; use main menu 6 to view or export node configuration'
     return 0
   fi
   case "$sm" in
@@ -8776,7 +8951,12 @@ do_status() {
     warn "$(t "查看日志: $(mita_log_hint)" "Check logs: $(mita_log_hint)")"
   fi
   msg ""
-  "$bin" describe config 2>/dev/null || true
+  if [ -n "${PORT:-}" ]; then
+    t "监听: $(status_binding_text "$PORT")" \
+      "Listen: $(status_binding_text "$PORT")"
+  fi
+  t '状态页已隐藏密码；查看或导出节点配置请使用主菜单 6' \
+    'Passwords are hidden on the status page; use main menu 6 to view or export node configuration'
 }
 
 do_client_config() {
@@ -8863,6 +9043,7 @@ do_mtu_config() {
     return 1
   fi
   admin_lock_release
+  client_exports_clear_current 2>/dev/null || true
 
   msg ""
   t "========== MTU 调整完成：${old_mtu} → ${MTU} ==========" \
