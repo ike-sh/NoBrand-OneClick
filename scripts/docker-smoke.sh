@@ -464,75 +464,140 @@ rm -f "$conflict_state" "$conflict_state.norm"
   test ! -e /tmp/status-unexpected-describe
 )
 
-# 软件包安装前后必须成对创建/解除 runtime mask；原服务未运行时不得误启动。
+# 用真实可执行文件模拟 systemctl，验证包维护脚本只被拦截 mita enable/start。
+setup_package_systemctl_mock(){
+  local mock_bin="$1"
+  rm -rf "$mock_bin"
+  mkdir -p "$mock_bin"
+  cat >"$mock_bin/systemctl" <<'MOCK_SYSTEMCTL'
+#!/bin/sh
+printf '%s\n' "$*" >>"$PACKAGE_GUARD_LOG"
+case "${1:-}" in
+  is-active) [ "${PACKAGE_SERVICE_WAS_ACTIVE:-0}" -eq 1 ] ;;
+  *) exit 0 ;;
+esac
+MOCK_SYSTEMCTL
+  chmod 0700 "$mock_bin/systemctl"
+  PATH="$mock_bin:$PATH"
+  export PATH PACKAGE_GUARD_LOG PACKAGE_SERVICE_WAS_ACTIVE
+}
+
+# 原服务未运行时，官方 postinst 可完成，但不得真的 enable/start 默认服务。
 (
   PACKAGE_GUARD_LOG=/tmp/package-service-guard.log
   : >"$PACKAGE_GUARD_LOG"
+  PACKAGE_SERVICE_WAS_ACTIVE=0
+  setup_package_systemctl_mock /tmp/package-systemctl-inactive
   service_manager(){ echo systemd; }
-  systemctl(){
-    printf '%s\n' "$*" >>"$PACKAGE_GUARD_LOG"
-    case "${1:-}" in
-      is-enabled|is-active) return 1 ;;
-    esac
-    return 0
+  dpkg(){
+    systemctl daemon-reload
+    systemctl enable mita.service
+    systemctl start mita.service
   }
-  dpkg(){ return 0; }
   mark_oneclick_install(){ :; }
   install_package /tmp/mock-mita.deb deb
-  grep -q '^mask --runtime --now mita.service$' "$PACKAGE_GUARD_LOG"
-  grep -q '^unmask --runtime mita.service$' "$PACKAGE_GUARD_LOG"
+  grep -q '^is-active --quiet mita.service$' "$PACKAGE_GUARD_LOG"
+  grep -q '^daemon-reload$' "$PACKAGE_GUARD_LOG"
+  ! grep -q '^enable mita.service$' "$PACKAGE_GUARD_LOG"
   ! grep -q '^start mita.service$' "$PACKAGE_GUARD_LOG"
 )
 
-# 安装前运行中的默认服务必须在解除 mask 后恢复。
+# 安装前运行中的默认服务必须在包维护脚本结束后恢复一次。
 (
   PACKAGE_GUARD_LOG=/tmp/package-service-guard-active.log
   : >"$PACKAGE_GUARD_LOG"
+  PACKAGE_SERVICE_WAS_ACTIVE=1
+  setup_package_systemctl_mock /tmp/package-systemctl-active
   service_manager(){ echo systemd; }
-  systemctl(){
-    printf '%s\n' "$*" >>"$PACKAGE_GUARD_LOG"
-    [ "${1:-}" != is-enabled ]
+  dpkg(){
+    systemctl enable mita.service
+    systemctl start mita.service
   }
-  dpkg(){ return 0; }
   mark_oneclick_install(){ :; }
   install_package /tmp/mock-mita.deb deb
-  grep -q '^start mita.service$' "$PACKAGE_GUARD_LOG"
+  test "$(grep -c '^start mita.service$' "$PACKAGE_GUARD_LOG")" -eq 1
+  ! grep -q '^enable mita.service$' "$PACKAGE_GUARD_LOG"
 )
+
+# dpkg 首次失败后，apt-get -f 继承相同代理并可完成半安装修复。
+(
+  PACKAGE_GUARD_LOG=/tmp/package-service-guard-apt-repair.log
+  : >"$PACKAGE_GUARD_LOG"
+  PACKAGE_SERVICE_WAS_ACTIVE=0
+  setup_package_systemctl_mock /tmp/package-systemctl-apt-repair
+  service_manager(){ echo systemd; }
+  dpkg(){ return 1; }
+  apt-get(){
+    systemctl daemon-reload
+    systemctl enable mita.service
+    systemctl start mita.service
+    touch /tmp/package-apt-repair-complete
+    return 0
+  }
+  mark_oneclick_install(){ :; }
+  rm -f /tmp/package-apt-repair-complete
+  install_package /tmp/mock-mita.deb deb
+  test -e /tmp/package-apt-repair-complete
+  grep -q '^daemon-reload$' "$PACKAGE_GUARD_LOG"
+  ! grep -q '^enable mita.service$' "$PACKAGE_GUARD_LOG"
+  ! grep -q '^start mita.service$' "$PACKAGE_GUARD_LOG"
+)
+
+# dpkg --configure -a 自愈路径也必须使用代理，并在结束后删除临时目录。
+(
+  PACKAGE_GUARD_LOG=/tmp/package-service-guard-configure.log
+  : >"$PACKAGE_GUARD_LOG"
+  PACKAGE_SERVICE_WAS_ACTIVE=0
+  setup_package_systemctl_mock /tmp/package-systemctl-configure
+  service_manager(){ echo systemd; }
+  dpkg(){
+    test "$*" = '--configure -a'
+    dirname "$(type -P systemctl)" >/tmp/package-configure-guard-dir
+    systemctl enable mita.service
+    systemctl start mita.service
+  }
+  configure_pending_deb_packages
+  test ! -d "$(cat /tmp/package-configure-guard-dir)"
+  ! grep -q '^enable mita.service$' "$PACKAGE_GUARD_LOG"
+  ! grep -q '^start mita.service$' "$PACKAGE_GUARD_LOG"
+)
+
+# 安装失败也必须恢复旧服务并清理代理目录。
 (
   PACKAGE_GUARD_LOG=/tmp/package-service-guard-failure.log
   : >"$PACKAGE_GUARD_LOG"
+  PACKAGE_SERVICE_WAS_ACTIVE=1
+  setup_package_systemctl_mock /tmp/package-systemctl-failure
   service_manager(){ echo systemd; }
-  systemctl(){
-    printf '%s\n' "$*" >>"$PACKAGE_GUARD_LOG"
-    [ "${1:-}" != is-enabled ]
+  dpkg(){
+    dirname "$(type -P systemctl)" >/tmp/package-failure-guard-dir
+    return 1
   }
-  dpkg(){ return 1; }
   apt-get(){ return 1; }
   MENU_MODE=1
   if install_package /tmp/mock-mita.deb deb >/dev/null 2>&1; then
     echo "failed package install unexpectedly succeeded" >&2
     exit 1
   fi
-  grep -q '^unmask --runtime mita.service$' "$PACKAGE_GUARD_LOG"
+  test ! -d "$(cat /tmp/package-failure-guard-dir)"
   grep -q '^start mita.service$' "$PACKAGE_GUARD_LOG"
 )
+
+# 找不到真实 systemctl 时必须在调用包管理器前失败。
 (
-  PACKAGE_GUARD_LOG=/tmp/package-service-guard-mask-failure.log
+  PACKAGE_GUARD_LOG=/tmp/package-service-guard-setup-failure.log
   : >"$PACKAGE_GUARD_LOG"
-  service_manager(){ echo systemd; }
-  systemctl(){
-    printf '%s\n' "$*" >>"$PACKAGE_GUARD_LOG"
-    case "${1:-}" in
-      is-enabled|is-active) return 1 ;;
-      mask) return 1 ;;
-    esac
-    return 0
-  }
-  dpkg(){ touch /tmp/package-unexpected-dpkg; }
+  empty_path=/tmp/package-empty-path
+  rm -rf "$empty_path"
+  mkdir -p "$empty_path"
   rm -f /tmp/package-unexpected-dpkg
+  PATH="$empty_path"
+  export PATH
+  service_manager(){ echo systemd; }
+  dpkg(){ : >/tmp/package-unexpected-dpkg; }
   MENU_MODE=1
   if install_package /tmp/mock-mita.deb deb >/dev/null 2>&1; then
-    echo "package install unexpectedly continued after mask failure" >&2
+    echo "package install unexpectedly continued without real systemctl" >&2
     exit 1
   fi
   test ! -e /tmp/package-unexpected-dpkg

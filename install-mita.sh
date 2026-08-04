@@ -5,7 +5,7 @@
 set -euo pipefail
 umask 077
 
-SCRIPT_VERSION="2.1.2"
+SCRIPT_VERSION="2.1.3"
 SCRIPT_AUTHOR="ike"
 SCRIPT_REPO="ike-sh/mieru-OneClick"
 UPSTREAM_REPO="enfein/mieru"
@@ -1297,7 +1297,7 @@ reinstall_mita_package() {
 recover_deb_mita() {
   command -v dpkg >/dev/null 2>&1 || return 1
   # dpkg --configure -a 幂等：无中断时为空操作，有中断时完成收尾
-  run dpkg --configure -a 2>/dev/null || true
+  configure_pending_deb_packages 2>/dev/null || true
   local deb_bin
   deb_bin="$(dpkg -L mita 2>/dev/null | grep '/bin/mita$' | head -n1)"
   if [ -n "$deb_bin" ] && [ -x "$deb_bin" ] && [ ! -e /usr/bin/mita ]; then
@@ -1721,39 +1721,101 @@ install_mita_service() {
 }
 
 package_service_guard_begin() {
-  PACKAGE_SERVICE_GUARD_MASKED=0
+  local guard_dir
+  PACKAGE_SERVICE_GUARD_DIR=""
+  PACKAGE_SERVICE_GUARD_REAL_SYSTEMCTL=""
   PACKAGE_SERVICE_GUARD_WAS_ACTIVE=0
   [ "$(service_manager)" = systemd ] || return 0
-  case "$(systemctl is-enabled mita.service 2>/dev/null || true)" in
-    masked|masked-runtime) return 0 ;;
-  esac
-  if systemctl is-active --quiet mita.service 2>/dev/null; then
-    PACKAGE_SERVICE_GUARD_WAS_ACTIVE=1
-  fi
-  if ! run systemctl mask --runtime --now mita.service >/dev/null 2>&1; then
-    warn "$(t '无法在安装期间临时屏蔽 mita.service，已取消软件包安装' \
-      'Failed to temporarily mask mita.service; package installation was cancelled')"
+  PACKAGE_SERVICE_GUARD_REAL_SYSTEMCTL="$(type -P systemctl 2>/dev/null || true)"
+  if [ -z "$PACKAGE_SERVICE_GUARD_REAL_SYSTEMCTL" ] \
+     || [ ! -x "$PACKAGE_SERVICE_GUARD_REAL_SYSTEMCTL" ]; then
+    warn "$(t '无法定位真实 systemctl，已取消软件包安装' \
+      'Could not locate the real systemctl; package installation was cancelled')"
     return 1
   fi
-  PACKAGE_SERVICE_GUARD_MASKED=1
+  if "$PACKAGE_SERVICE_GUARD_REAL_SYSTEMCTL" is-active --quiet mita.service 2>/dev/null; then
+    PACKAGE_SERVICE_GUARD_WAS_ACTIVE=1
+  fi
+  guard_dir="$(mktemp_dir)" || return 1
+  if ! cat >"${guard_dir}/systemctl" <<'EOF'
+#!/bin/sh
+real="${MITA_REAL_SYSTEMCTL:?}"
+action=""
+target=0
+for arg in "$@"; do
+    case "$arg" in
+        -*) continue ;;
+    esac
+    if [ -z "$action" ]; then
+        action="$arg"
+        continue
+    fi
+    case "$arg" in
+        mita|mita.service) target=1 ;;
+    esac
+done
+if [ "$target" -eq 1 ]; then
+    case "$action" in
+        enable|reenable|preset|start|restart|try-restart|reload|reload-or-restart|reload-or-try-restart)
+            exit 0
+            ;;
+    esac
+fi
+exec "$real" "$@"
+EOF
+  then
+    rm -rf -- "$guard_dir"
+    return 1
+  fi
+  if ! chmod 0700 "${guard_dir}/systemctl"; then
+    rm -rf -- "$guard_dir"
+    return 1
+  fi
+  PACKAGE_SERVICE_GUARD_DIR="$guard_dir"
+}
+
+package_service_guard_run() {
+  if [ -n "${PACKAGE_SERVICE_GUARD_DIR:-}" ]; then
+    (
+      export PATH="${PACKAGE_SERVICE_GUARD_DIR}:${PATH}"
+      export MITA_REAL_SYSTEMCTL="$PACKAGE_SERVICE_GUARD_REAL_SYSTEMCTL"
+      run "$@"
+    )
+  else
+    run "$@"
+  fi
 }
 
 package_service_guard_end() {
-  local restore_rc=0
-  [ "${PACKAGE_SERVICE_GUARD_MASKED:-0}" -eq 1 ] || return 0
-  if ! run systemctl unmask --runtime mita.service >/dev/null 2>&1; then
-    warn "$(t '无法解除安装期间创建的 mita.service 临时屏蔽' \
-      'Failed to remove the temporary mita.service mask created during package installation')"
-    restore_rc=1
-  elif [ "${PACKAGE_SERVICE_GUARD_WAS_ACTIVE:-0}" -eq 1 ] \
-       && ! run systemctl start mita.service >/dev/null 2>&1; then
+  local guard_dir="${PACKAGE_SERVICE_GUARD_DIR:-}" restore_rc=0
+  if [ -n "$guard_dir" ]; then
+    case "$guard_dir" in
+      /tmp/mita.*|/tmp/mita_*) rm -rf -- "$guard_dir" || restore_rc=1 ;;
+      *)
+        warn "$(t '拒绝清理异常的软件包服务保护目录' \
+          'Refusing to remove an unexpected package-service guard directory')"
+        restore_rc=1
+        ;;
+    esac
+  fi
+  if [ "${PACKAGE_SERVICE_GUARD_WAS_ACTIVE:-0}" -eq 1 ] \
+     && ! run "$PACKAGE_SERVICE_GUARD_REAL_SYSTEMCTL" start mita.service >/dev/null 2>&1; then
     warn "$(t 'mita.service 安装前正在运行，但软件包安装后无法恢复启动' \
       'mita.service was active before installation but could not be restarted afterward')"
     restore_rc=1
   fi
-  PACKAGE_SERVICE_GUARD_MASKED=0
+  PACKAGE_SERVICE_GUARD_DIR=""
+  PACKAGE_SERVICE_GUARD_REAL_SYSTEMCTL=""
   PACKAGE_SERVICE_GUARD_WAS_ACTIVE=0
   return "$restore_rc"
+}
+
+configure_pending_deb_packages() {
+  local configure_rc=0 guard_rc=0
+  package_service_guard_begin || return 1
+  package_service_guard_run dpkg --configure -a || configure_rc=1
+  package_service_guard_end || guard_rc=1
+  [ "$configure_rc" -eq 0 ] && [ "$guard_rc" -eq 0 ]
 }
 
 extract_mita_tarball() {
@@ -1783,12 +1845,13 @@ install_package() {
   fi
   case "$pm" in
     deb)
-      if ! run dpkg -i "$path" && ! run apt-get install -f -y; then
+      if ! package_service_guard_run dpkg -i "$path" \
+         && ! package_service_guard_run apt-get install -f -y; then
         install_rc=1
       fi
       ;;
     rpm)
-      run rpm -Uvh --force "$path" || install_rc=1
+      package_service_guard_run rpm -Uvh --force "$path" || install_rc=1
       ;;
     alpine)
       if ! install_alpine_deps \
