@@ -33,6 +33,7 @@ getent group mita >/dev/null || groupadd --system mita
 id mita >/dev/null 2>&1 || useradd --system -g mita -s /usr/sbin/nologin -d /tmp/metrics mita
 
 source /work/install-mita.sh
+test "$SCRIPT_VERSION" = 2.1.4
 trap - ERR
 MITA_STATE=/tmp/manager-state/install-state.env
 
@@ -369,6 +370,9 @@ USER_BANDWIDTH_MBPS=10 USER_PACKAGE=custom USER_QUOTA_MB=1024 USER_QUOTA_DAYS=30
 users_add bob bob-pass 26005 >/dev/null
 test "$(users_count)" -eq 2
 python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert all(u.get("instance_id","").startswith("u") for u in d["users"]); assert next(u for u in d["users"] if u["name"]=="bob")["bandwidth_mbps"]==10; assert not next(u for u in d["users"] if u["name"]=="bob")["advertise_host"]' "$MITA_USERS_STATE"
+user_list_output="$(do_user_list)"
+grep -Eq '^alice[[:space:]]+26000[[:space:]]+on[[:space:]]+unlimited[[:space:]]+unlimited[[:space:]]+-' \
+  <<<"$user_list_output"
 
 # flock 分支必须传递展示入口字段；重复入口及自定义/自动入口碰撞都应拒绝。
 users_set_advertise_endpoint bob 198.51.100.20 8443
@@ -1228,6 +1232,84 @@ menu_rc=$?
 set -e
 test "$menu_rc" -ne 0
 ! grep -q MENU_SHOULD_NOT_CONTINUE <<<"$menu_probe"
+# 删除最后一个用户属于业务拒绝：显示警告、留在用户管理，且不触发全局步骤失败。
+(
+  require_root(){ :; }
+  require_linux(){ :; }
+  mita_installed(){ return 0; }
+  load_install_state(){ :; }
+  users_ensure_loaded(){ :; }
+  users_count(){ echo 1; }
+  users_name_exists(){ return 0; }
+  users_tx_snapshot(){ echo snapshot; }
+  users_tx_commit(){ :; }
+  admin_lock_acquire(){ :; }
+  admin_lock_release(){ :; }
+  do_user_list(){ :; }
+  LANG_ZH=0
+  menu_choice_count=0
+  read_tty(){
+    local value="" prompt="${2:-}"
+    case "$prompt" in
+      *1-18*)
+        menu_choice_count=$((menu_choice_count + 1))
+        [ "$menu_choice_count" -eq 1 ] && value=3 || value=18
+        ;;
+      *) value=alice ;;
+    esac
+    printf -v "$1" '%s' "$value"
+  }
+  set +e
+  user_delete_output="$(MAIN_MENU_ACTIVE=1 do_user_manage 2>&1)"
+  user_delete_rc=$?
+  set -e
+  test "$user_delete_rc" -eq 3
+  grep -q '\[警告\] Cannot delete the last user' <<<"$user_delete_output"
+  ! grep -q '步骤失败' <<<"$user_delete_output"
+  test "$(grep -c '^\[Users\]' <<<"$user_delete_output")" -eq 2
+)
+# 真实子操作错误也必须留在用户管理，并保留准确阶段且停止后续命令。
+(
+  require_root(){ :; }
+  do_user_list(){ false; echo USER_ACTION_SHOULD_NOT_CONTINUE; }
+  LANG_ZH=0
+  menu_choice_count=0
+  read_tty(){
+    local value="" prompt="${2:-}"
+    if [[ "$prompt" == *1-18* ]]; then
+      menu_choice_count=$((menu_choice_count + 1))
+      [ "$menu_choice_count" -eq 1 ] && value=1 || value=18
+    fi
+    printf -v "$1" '%s' "$value"
+  }
+  set +e
+  user_failure_output="$(MAIN_MENU_ACTIVE=1 do_user_manage 2>&1)"
+  user_failure_rc=$?
+  set -e
+  test "$user_failure_rc" -eq 3
+  grep -q '步骤失败: 列出用户' <<<"$user_failure_output"
+  grep -q 'User operation failed' <<<"$user_failure_output"
+  ! grep -q USER_ACTION_SHOULD_NOT_CONTINUE <<<"$user_failure_output"
+  test "$(grep -c '^\[Users\]' <<<"$user_failure_output")" -eq 2
+)
+# 专属实例启动和重启只输出一条对应的最终结果。
+(
+  require_root(){ :; }
+  mita_installed(){ return 0; }
+  repair_mita_binary_paths(){ :; }
+  start_mita(){ :; }
+  users_isolated_mode(){ return 0; }
+  verify_mita_running(){ test "${1:-0}" -eq 1; }
+  LANG_ZH=0
+  start_output="$(do_start)"
+  test "$start_output" = 'All dedicated mita user instances started'
+
+  users_enabled_instance_rows(){ printf 'u1\talice\t26000\n'; }
+  instance_daemon_stop(){ :; }
+  instance_start_proxy(){ :; }
+  restart_output="$(do_restart)"
+  test "$restart_output" = 'All dedicated mita user instances restarted'
+)
 # 用户管理 18 在主菜单上下文返回专用码，外层应立即重绘主菜单；独立调用则正常结束。
 set +e
 (

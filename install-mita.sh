@@ -5,7 +5,7 @@
 set -euo pipefail
 umask 077
 
-SCRIPT_VERSION="2.1.3"
+SCRIPT_VERSION="2.1.4"
 SCRIPT_AUTHOR="ike"
 SCRIPT_REPO="ike-sh/mieru-OneClick"
 UPSTREAM_REPO="enfein/mieru"
@@ -64,6 +64,7 @@ ACTION=""
 MENU_MODE=0
 MENU_SCRIPTS_READY=0
 MAIN_MENU_ACTIVE=0
+USER_MENU_HANDLED_RC=64
 UNINSTALL_CANCELLED=0
 MITA_REINSTALL_TRIED=0
 YES=0
@@ -760,10 +761,10 @@ confirm() {
 }
 
 require_root() {
-  STAGE="权限检查"
   if [ "$(id -u)" -eq 0 ]; then
     return 0
   fi
+  STAGE="权限检查"
   if [ -f /etc/alpine-release ]; then
     die "$(t '需要 root 权限；Alpine 请 su - 或 docker exec -u root 后直接 bash 运行（无 sudo）' \
       'Root required; on Alpine use su - or docker exec -u root, then run with bash (no sudo)')"
@@ -4917,10 +4918,10 @@ do_user_list() {
     return 0
   fi
   msg ""
-  t '用户名      端口 状态 套餐     配额        模式  限速  到期' \
-    'USER        PORT ST  PACKAGE  QUOTA       MODE  RATE  EXPIRE'
-  t '----------- ---- ---- -------- ----------- ----- ----- ----------' \
-    '----------- ---- ---- -------- ----------- ----- ----- ----------'
+  t '用户名      端口 状态 套餐      配额      模式  限速  到期' \
+    'USER        PORT ST  PACKAGE   QUOTA     MODE  RATE  EXPIRE'
+  t '----------- ---- ---- --------- --------- ----- ----- ----------' \
+    '----------- ---- ---- --------- --------- ----- ----- ----------'
   python3 -c '
 import json, sys
 d = json.load(open(sys.argv[1]))
@@ -4928,12 +4929,12 @@ for u in d.get("users") or []:
     name = (u.get("name") or "")[:11]
     port = str(u.get("port") or "")
     st = "on" if u.get("enabled", True) else "off"
-    pkg = (u.get("package") or "-")[:8]
+    pkg = (u.get("package") or "-")[:9]
     qmb = int(u.get("quota_mb") or 0)
     qdays = int(u.get("quota_days") or 0)
     mode = (u.get("quota_mode") or "rolling")[:5]
     if qmb <= 0:
-        quota = "unlim"
+        quota = "unlimited"
         mode = "-"
     elif qmb >= 1024:
         quota = "%dG/%dd" % (qmb // 1024, qdays or 30)
@@ -4942,7 +4943,7 @@ for u in d.get("users") or []:
     bw = int(u.get("bandwidth_mbps") or 0)
     bws = str(bw) if bw > 0 else "-"
     exp = (u.get("expire_at") or "never")[:10]
-    print(f"{name:<11} {port:<4} {st:<4} {pkg:<8} {quota:<11} {mode:<5} {bws:<5} {exp}")
+    print(f"{name:<11} {port:<4} {st:<4} {pkg:<9} {quota:<9} {mode:<5} {bws:<5} {exp}")
 ' "$MITA_USERS_STATE"
   t "共 $(users_count) 个用户（rolling=滚动窗；calendar=每月1日重置）" \
     "Total $(users_count) (rolling window; calendar=reset on 1st)"
@@ -5604,7 +5605,11 @@ print("; ".join(parts))
     t '存在失败项，请根据上方提示排查' 'Failures above need attention'
     return 1
   fi
-  t '验收通过（警告可忽略或稍后处理）' 'Verify OK (warnings optional)'
+  if [ "$warn_n" -gt 0 ]; then
+    t '验收通过（警告可忽略或稍后处理）' 'Verify OK (warnings optional)'
+  else
+    t '验收通过' 'Verify OK'
+  fi
   return 0
 }
 
@@ -5721,6 +5726,10 @@ do_user_del() {
   if [ "${n:-0}" -le 1 ] && users_name_exists "$name"; then
     users_tx_commit "$tx"
     admin_lock_release
+    if [ "${MENU_MODE:-0}" -eq 1 ]; then
+      warn "$(t '不能删除最后一个用户' 'Cannot delete the last user')"
+      return "$USER_MENU_HANDLED_RC"
+    fi
     die "$(t '不能删除最后一个用户' 'Cannot delete the last user')"
   fi
   if ! freed="$(users_del "$name")"; then
@@ -5857,7 +5866,36 @@ do_user_manage() {
     local c=""
     read_tty c "$(t '请选择 [1-18]: ' 'Choose [1-18]: ')" || c=""
     c="$(printf '%s' "$c" | tr -d '[:space:]')"
-    case "$c" in
+    if [ "$c" = 18 ]; then
+      [ "${MAIN_MENU_ACTIVE:-0}" -eq 1 ] && return 3
+      return 0
+    fi
+    local action_rc=0
+    set +e
+    (
+      set -Eeuo pipefail
+      trap 'rc=$?; if [ "$rc" -eq 3 ] || [ "$rc" -eq "$USER_MENU_HANDLED_RC" ]; then exit "$rc"; fi; on_error' ERR
+      case "$c" in
+        1) STAGE="列出用户" ;;
+        2) STAGE="添加用户" ;;
+        3) STAGE="删除用户" ;;
+        4) STAGE="查看用户节点配置" ;;
+        5) STAGE="设置用户套餐" ;;
+        6) STAGE="设置用户到期日" ;;
+        7) STAGE="启用用户" ;;
+        8) STAGE="停用用户" ;;
+        9) STAGE="扫描用户配额" ;;
+        10) STAGE="设置用户限速" ;;
+        11) STAGE="查看限速状态" ;;
+        12) STAGE="备份用户配置" ;;
+        13) STAGE="恢复用户配置" ;;
+        14) STAGE="重置用户配额" ;;
+        15) STAGE="查看用户用量" ;;
+        16) STAGE="导出用户客户端配置" ;;
+        17) STAGE="设置用户展示入口" ;;
+        *) STAGE="用户管理" ;;
+      esac
+      case "$c" in
       1) do_user_list ;;
       2)
         USERNAME=""; PASSWORD=""; PORT=""; PORT_CLI=0
@@ -5942,12 +5980,16 @@ do_user_manage() {
         read_tty USERNAME "$(t '用户名: ' 'Username: ')" || true
         do_user_set_endpoint
         ;;
-      18)
-        [ "${MAIN_MENU_ACTIVE:-0}" -eq 1 ] && return 3
-        return 0
-        ;;
       *) warn "$(t '无效选择' 'Invalid choice')" ;;
-    esac
+      esac
+    )
+    action_rc=$?
+    set -e
+    [ "$action_rc" -ne 3 ] || return 3
+    if [ "$action_rc" -ne 0 ] && [ "$action_rc" -ne "$USER_MENU_HANDLED_RC" ]; then
+      warn "$(t '用户操作未完成，请根据上方错误重试' \
+        'User operation failed; review the error above and retry')"
+    fi
     user_menu_pause
   done
 }
@@ -7506,6 +7548,7 @@ start_mita() {
 
 verify_mita_running() {
   STAGE="验证服务状态"
+  local quiet="${1:-0}"
   if [ "${DRY_RUN:-0}" -eq 1 ]; then
     msg "[dry-run] verify mita RUNNING"
     return 0
@@ -7522,7 +7565,8 @@ verify_mita_running() {
       fi
     done < <(users_enabled_instance_rows)
     [ "$failed" -eq 0 ] || return 1
-    t '所有用户专属 mita 实例运行正常' 'All dedicated mita user instances are running'
+    [ "$quiet" -eq 1 ] || \
+      t '所有用户专属 mita 实例运行正常' 'All dedicated mita user instances are running'
     return 0
   fi
   local bin status_out _attempt
@@ -7531,7 +7575,7 @@ verify_mita_running() {
     sleep 2
     status_out="$("$bin" status 2>/dev/null || true)"
     if printf '%s' "$status_out" | grep -q 'status is "RUNNING"'; then
-      t 'mita 服务运行正常' 'mita service is running'
+      [ "$quiet" -eq 1 ] || t 'mita 服务运行正常' 'mita service is running'
       return 0
     fi
     ensure_mita_daemon
@@ -9121,8 +9165,12 @@ do_start() {
   mita_installed || bail "$(t 'mita 未安装，请先安装' 'mita is not installed')" || return 1
   repair_mita_binary_paths 2>/dev/null || true
   start_mita
-  verify_mita_running
-  t 'mita 服务已启动' 'mita service started'
+  verify_mita_running 1
+  if users_isolated_mode; then
+    t '所有用户专属 mita 实例已启动' 'All dedicated mita user instances started'
+  else
+    t 'mita 服务已启动' 'mita service started'
+  fi
 }
 
 do_stop() {
@@ -9163,7 +9211,7 @@ do_restart() {
       instance_daemon_stop "$iid" 0
       instance_start_proxy "$iid" || return 1
     done < <(users_enabled_instance_rows)
-    verify_mita_running
+    verify_mita_running 1
     t '所有用户专属 mita 实例已重启' 'All dedicated mita user instances restarted'
     return 0
   fi
@@ -9178,7 +9226,7 @@ do_restart() {
     *) true ;;
   esac
   start_mita
-  verify_mita_running
+  verify_mita_running 1
   t 'mita 服务已重启' 'mita service restarted'
 }
 
