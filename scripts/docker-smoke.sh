@@ -6,7 +6,7 @@ ROOT="$(cd "$(dirname "$0")/.." && { pwd -W 2>/dev/null || pwd; })"
 docker run --rm --cap-add=NET_ADMIN -v "$ROOT:/work:ro" debian:bookworm-slim bash -s <<'DOCKER_TEST'
 set -Eeuo pipefail
 apt-get update -qq >/dev/null
-apt-get install -y -qq python3 bash util-linux iproute2 passwd >/dev/null
+apt-get install -y -qq python3 bash curl util-linux iproute2 passwd >/dev/null
 bash -n /work/install-mita.sh
 
 export MITA_SOURCE_ONLY=1
@@ -33,9 +33,75 @@ getent group mita >/dev/null || groupadd --system mita
 id mita >/dev/null 2>&1 || useradd --system -g mita -s /usr/sbin/nologin -d /tmp/metrics mita
 
 source /work/install-mita.sh
-test "$SCRIPT_VERSION" = 2.1.4
+test "$SCRIPT_VERSION" = 2.2.0
 trap - ERR
 MITA_STATE=/tmp/manager-state/install-state.env
+
+# RC2 UI：品牌格式恢复；主菜单编号固定，卸载为直接入口，未安装摘要不泄漏默认 Profile/state。
+grep -q '^# 作者: ike / https://github.com/ike-sh/mieru-OneClick$' /work/install-mita.sh
+grep -q '作者: ${SCRIPT_AUTHOR} / https://github.com/${SCRIPT_REPO}' /work/install-mita.sh
+! grep -Eq '主菜单[[:space:]]+[0-9]+|main menu[[:space:]]+[0-9]+|菜单[[:space:]]+\*{0,2}[0-9]+\)' \
+  /work/install-mita.sh /work/README.md
+(
+  LANG_ZH=1 MENU_SCRIPTS_READY=1
+  mita_installed(){ return 1; }
+  load_install_state(){ PROFILE=custom; MIERU_VERSION=9.9.9; }
+  users_count(){ echo 99; }
+  installed_version(){ echo 9.9.9; }
+  read_tty(){ printf -v "$1" '%s' 0; }
+  set +e
+  menu_output="$(show_menu)"
+  menu_rc=$?
+  set -e
+  test "$menu_rc" -eq 2
+  grep -q '^状态: 未安装$' <<<"$menu_output"
+  grep -q '^用户: -$' <<<"$menu_output"
+  grep -q '^Profile: -$' <<<"$menu_output"
+  grep -q '^Mieru Version: 未安装$' <<<"$menu_output"
+  ! grep -q 'Profile: 高级自定义' <<<"$menu_output"
+  menu_entries="$(grep -E '^[[:space:]]+[0-9]+\)' <<<"$menu_output")"
+  expected_entries="$(cat <<'EOF'
+  1) 新装 / 安装
+  2) 查看节点
+  3) 用户管理
+  4) 性能与网络
+  5) 重新配置（需先安装）
+  6) 服务管理
+  7) 备份 / 恢复
+  8) 升级
+  9) Doctor
+ 10) 卸载
+  0) 退出
+EOF
+)"
+  test "$menu_entries" = "$expected_entries"
+)
+(
+  LANG_ZH=1 MENU_SCRIPTS_READY=1 ACTION=""
+  mita_installed(){ return 0; }
+  load_install_state(){ :; }
+  users_count(){ echo 1; }
+  installed_version(){ echo 3.35.0; }
+  ensure_management_scripts(){ :; }
+  read_tty(){ printf -v "$1" '%s' 10; }
+  installed_menu_output_file=/tmp/rc2-installed-menu.out
+  show_menu >"$installed_menu_output_file"
+  grep -q '^  1) 修复安装$' "$installed_menu_output_file"
+  test "$ACTION" = uninstall
+)
+(
+  LANG_ZH=1 ACTION=""
+  read_tty(){ printf -v "$1" '%s' 0; }
+  set +e
+  advanced_output="$(show_advanced_menu)"
+  advanced_rc=$?
+  set -e
+  test "$advanced_rc" -eq 2
+  ! grep -q '卸载' <<<"$advanced_output"
+  ! grep -Eq '新装 / 安装|修复安装' <<<"$advanced_output"
+)
+grep -q '确认卸载 mita、OneClick 管理脚本及本项目管理的配置？\[y/N\]:' \
+  /work/install-mita.sh
 
 # 安装状态只允许从 root 所有且父目录不可写的常规文件读取。
 (
@@ -152,6 +218,76 @@ chmod 600 "$MITA_STATE"
 load_install_state
 test "$USERNAME|$PASSWORD|$PORT|$PROTOCOL|$MTU|$MTU_POLICY" = \
   "alice|alice-pass|26000|TCP|1452|custom"
+test "$PROFILE|$MIERU_CHANNEL" = "custom|latest"
+
+# v2.0/v2.1 install-state migration：仅新增元数据推导，原始真实参数逐项保留。
+(
+  migration_dir=/tmp/state-migration-v20
+  rm -rf "$migration_dir"; mkdir -p "$migration_dir"; chmod 0700 "$migration_dir"
+  MITA_STATE="$migration_dir/install-state.env"
+  printf '%s\n' \
+    'PORT=30000' 'PORT_RANGE=' 'PROTOCOL=TCP' \
+    'ADVERTISE_HOST=cm-entry.example.com' 'ADVERTISE_PORT=10086' \
+    'MTU=1400' 'MTU_POLICY=safe' 'USERNAME=legacy20' 'PASSWORD=legacy-pass' \
+    'TRAFFIC_PATTERN=conservative' 'TRAFFIC_SEED=42' \
+    'LOW_ENTROPY_MODE=LOW_ENTROPY_MODE_OFF' \
+    'MULTIPLEXING=MULTIPLEXING_OFF' 'HANDSHAKE_MODE=HANDSHAKE_NO_WAIT' >"$MITA_STATE"
+  chmod 0600 "$MITA_STATE"
+  load_install_state
+  test "$PROFILE|$MIERU_CHANNEL" = 'balanced|latest'
+  test "$PORT|$PROTOCOL|$ADVERTISE_HOST|$ADVERTISE_PORT|$MTU|$USERNAME|$PASSWORD|$TRAFFIC_PATTERN|$TRAFFIC_SEED|$LOW_ENTROPY_MODE|$MULTIPLEXING|$HANDSHAKE_MODE" = \
+    '30000|TCP|cm-entry.example.com|10086|1400|legacy20|legacy-pass|conservative|42|LOW_ENTROPY_MODE_OFF|MULTIPLEXING_OFF|HANDSHAKE_NO_WAIT'
+)
+(
+  migration_dir=/tmp/state-migration-v21
+  rm -rf "$migration_dir"; mkdir -p "$migration_dir"; chmod 0700 "$migration_dir"
+  MITA_STATE="$migration_dir/install-state.env"
+  printf '%s\n' \
+    'PORT=31000' 'PORT_RANGE=' 'PROTOCOL=UDP' \
+    'ADVERTISE_HOST=2001:db8::20' 'ADVERTISE_PORT=12000' \
+    'MTU=1380' 'MTU_POLICY=custom' 'USERNAME=legacy21' 'PASSWORD=legacy-pass-21' \
+    'TRAFFIC_PATTERN=aggressive' 'TRAFFIC_SEED=99' \
+    'LOW_ENTROPY_MODE=LOW_ENTROPY_MODE_48' \
+    'MULTIPLEXING=MULTIPLEXING_HIGH' 'HANDSHAKE_MODE=HANDSHAKE_STANDARD' >"$MITA_STATE"
+  chmod 0600 "$MITA_STATE"
+  load_install_state
+  test "$PROFILE|$MIERU_CHANNEL" = 'custom|latest'
+  test "$PORT|$PROTOCOL|$ADVERTISE_HOST|$ADVERTISE_PORT|$MTU|$USERNAME|$PASSWORD|$TRAFFIC_PATTERN|$TRAFFIC_SEED|$LOW_ENTROPY_MODE|$MULTIPLEXING|$HANDSHAKE_MODE" = \
+    '31000|UDP|2001:db8::20|12000|1380|legacy21|legacy-pass-21|aggressive|99|LOW_ENTROPY_MODE_48|MULTIPLEXING_HIGH|HANDSHAKE_STANDARD'
+)
+# stable 升级不得自动切 latest，也不得把已安装的更高版本降级。
+(
+  upgrade_dir=/tmp/stable-upgrade
+  rm -rf "$upgrade_dir"; mkdir -p "$upgrade_dir"; chmod 0700 "$upgrade_dir"
+  MITA_MANAGER_STATE_DIR="$upgrade_dir"
+  MITA_STATE="$upgrade_dir/install-state.env"
+  MITA_USERS_STATE="$upgrade_dir/users.json"
+  MITA_MARKER="$upgrade_dir/.installed"
+  printf '%s\n' \
+    'PORT=30000' 'PORT_RANGE=' 'PROTOCOL=TCP' 'PROFILE=balanced' \
+    'ADVERTISE_HOST=cm-entry.example.com' 'ADVERTISE_PORT=10086' \
+    'MTU=1400' 'MTU_POLICY=safe' 'USERNAME=stable-user' 'PASSWORD=stable-pass' \
+    'TRAFFIC_PATTERN=conservative' 'TRAFFIC_SEED=42' \
+    'LOW_ENTROPY_MODE=LOW_ENTROPY_MODE_OFF' \
+    'MULTIPLEXING=MULTIPLEXING_OFF' 'HANDSHAKE_MODE=HANDSHAKE_NO_WAIT' \
+    'MIERU_CHANNEL=stable' 'MIERU_VERSION=3.35.0' >"$MITA_STATE"
+  chmod 0600 "$MITA_STATE"
+  require_root(){ :; }
+  require_linux(){ :; }
+  require_cmd(){ :; }
+  detect_pkg_manager(){ echo deb; }
+  detect_arch(){ echo amd64; }
+  ensure_management_dependencies(){ :; }
+  installed_version(){ echo 3.40.0; }
+  install_self_script(){ :; }
+  download_package(){ touch /tmp/stable-unexpected-download; }
+  MENU_MODE=1
+  rm -f /tmp/stable-unexpected-download
+  do_upgrade >/dev/null
+  test ! -e /tmp/stable-unexpected-download
+  grep -qx 'MIERU_CHANNEL=stable' "$MITA_STATE"
+  grep -qx 'MIERU_VERSION=3.35.0' "$MITA_STATE"
+)
 test "$(normalize_multiplexing off)" = MULTIPLEXING_OFF
 test "$(normalize_handshake_mode no-wait)" = HANDSHAKE_NO_WAIT
 test "$(normalize_low_entropy_mode 56)" = LOW_ENTROPY_MODE_56
@@ -169,6 +305,11 @@ valid_advertise_port 443
 valid_advertise_port 65535
 ! valid_advertise_port 0
 ! valid_advertise_port 65536
+valid_advertise_host 203.0.113.10
+valid_advertise_host 2001:db8::1
+valid_advertise_host cm-entry.example.com
+! valid_advertise_host 'https://cm-entry.example.com'
+! valid_advertise_host '-bad.example.com'
 test "$(normalize_uint 00008)" = 8
 ADVERTISE_HOST=203.0.113.10 ADVERTISE_PORT=443 PROTOCOL=TCP
 validate_advertise_endpoint
@@ -184,6 +325,38 @@ mtu_route_family(){ echo IPv4; }
 PROTOCOL=UDP
 calculate_optimized_mtu
 test "$MTU|$MTU_AUTO_LINK|$MTU_AUTO_OVERHEAD" = "1400|1500|28"
+
+# Profile 只设置完整真实参数；反推只做精确匹配，手工偏离后自动变为 custom。
+LANG_ZH=1
+test "$(profile_label iplc)" = 'IPLC / 专线性能'
+test "$(profile_label balanced)" = '普通公网'
+test "$(profile_label stealth)" = '强化伪装'
+test "$(profile_label custom)" = '高级自定义'
+grep -q 'profile=default 是上游客户端的 profileName' /work/install-mita.sh
+grep -q 'profile=default.*上游 Mieru 客户端的.*profileName' /work/README.md
+apply_profile_values iplc
+test "$PROFILE|$PROTOCOL|$MTU|$MULTIPLEXING|$HANDSHAKE_MODE|$TRAFFIC_PATTERN|$LOW_ENTROPY_MODE" = \
+  'iplc|TCP|1400|MULTIPLEXING_OFF|HANDSHAKE_NO_WAIT|off|LOW_ENTROPY_MODE_OFF'
+test "$(infer_profile_from_values)" = iplc
+MTU=1390
+profile_reconcile_metadata
+test "$PROFILE" = custom
+apply_profile_values balanced
+test "$(infer_profile_from_values)" = balanced
+apply_profile_values stealth
+test "$TRAFFIC_PATTERN|$LOW_ENTROPY_MODE|$(infer_profile_from_values)" = \
+  'aggressive|LOW_ENTROPY_MODE_OFF|stealth'
+(
+  MIERU_CHANNEL=stable
+  test "$(target_mieru_version)" = "$TESTED_MIERU_VERSION"
+  query_latest_version(){ echo 9.9.9; }
+  MIERU_CHANNEL=latest
+  test "$(target_mieru_version)" = 9.9.9
+  MIERU_CHANNEL=pinned MIERU_VERSION=3.40.1
+  test "$(target_mieru_version)" = 3.40.1
+)
+apply_profile_values balanced
+MIERU_CHANNEL=latest MIERU_VERSION=""
 
 # trafficPattern、分享链接、官方客户端 JSON 与 mihomo YAML。
 mita_supports_traffic_pattern(){ return 0; }
@@ -226,6 +399,25 @@ ADVERTISE_PORT=443
 custom_yaml="$(build_clash_yaml_full "$ADVERTISE_HOST")"
 grep -q 'server: "203.0.113.10"' <<<"$custom_yaml"
 grep -q 'port: 443' <<<"$custom_yaml"
+
+# Golden：后端 203.0.113.10:30000 与客户端域名入口 cm-entry.example.com:10086 严格分离。
+PORT=30000 ADVERTISE_HOST=cm-entry.example.com ADVERTISE_PORT=10086
+domain_link="$(generate_share_link_for "$ADVERTISE_HOST" TCP)"
+grep -q '@cm-entry.example.com?' <<<"$domain_link"
+grep -q 'port=10086' <<<"$domain_link"
+domain_json="$(build_client_json_for "$ADVERTISE_HOST" TCP)"
+python3 -c 'import json,sys; s=json.load(sys.stdin)["profiles"][0]["servers"][0]; assert s["ipAddress"]=="" and s["domainName"]=="cm-entry.example.com" and s["portBindings"]==[{"port":10086,"protocol":"TCP"}]' <<<"$domain_json"
+domain_yaml="$(build_clash_yaml_full "$ADVERTISE_HOST")"
+grep -q 'server: "cm-entry.example.com"' <<<"$domain_yaml"
+grep -q 'port: 10086' <<<"$domain_yaml"
+domain_server_cfg="$(write_server_config)"
+python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); raw=open(p).read(); assert d["portBindings"]==[{"port":30000,"protocol":"TCP"}] and "cm-entry.example.com" not in raw and "10086" not in raw' "$domain_server_cfg"
+rm -f "$domain_server_cfg"
+domain_fw_hint="$(cloud_firewall_hint)"
+grep -q '30000/TCP' <<<"$domain_fw_hint"
+! grep -q '10086/TCP' <<<"$domain_fw_hint"
+
+PORT=26000 ADVERTISE_HOST=203.0.113.10 ADVERTISE_PORT=443
 printf stale > /root/mieru_client_legacy.json
 compact_output="$(print_protocol_outputs "$ADVERTISE_HOST")"
 grep -Eq '(已保存|Saved):[[:space:]]+/root/mieru-clients/current/alice_tcp\.json' <<<"$compact_output"
@@ -243,7 +435,44 @@ client_config_output="$(
 grep -q 'mieru apply config <客户端本地 JSON 路径>' <<<"$client_config_output"
 ! grep -q 'mieru apply config /root' <<<"$client_config_output"
 ! grep -q 'mieru_client_.*\*\.json' <<<"$client_config_output"
-grep -q '203.0.113.10:443 -> 198.51.100.40:26000/TCP' <<<"$client_config_output"
+grep -q '【客户端入口映射】' <<<"$client_config_output"
+grep -q '客户端: 203.0.113.10:443/TCP' <<<"$client_config_output"
+grep -q -- '-> 后端: 198.51.100.40:26000/TCP' <<<"$client_config_output"
+
+# 显式填写的入口若与探测公网 IP/后端端口相同，不显示独立入口或映射。
+(
+  PORT=17353 PROTOCOL=TCP ADVERTISE_HOST=192.236.242.173 ADVERTISE_PORT=17353
+  public_ip(){ echo 192.236.242.173; }
+  print_protocol_outputs(){ :; }
+  same_mapping="$(print_client_endpoint_mapping)"
+  test -z "$same_mapping"
+  same_summary="$(print_summary current)"
+  ! grep -q '客户端入口映射' <<<"$same_summary"
+)
+
+# 批量导出的人类可读输出也解释独立客户端入口，但客户端文件仍只写入口值。
+(
+  batch_root=/tmp/rc2-batch-export
+  rm -rf "$batch_root"
+  mkdir -p "$batch_root"
+  MITA_USERS_STATE="$batch_root/users.json"
+  MITA_CLIENT_EXPORT_DIR="$batch_root/clients"
+  printf '%s\n' '{"version":2,"users":[{"name":"batch-user","password":"batch-pass","port":30000,"enabled":true,"advertise_host":"cm-entry.example.com","advertise_port":10086}]}' >"$MITA_USERS_STATE"
+  chmod 0600 "$MITA_USERS_STATE"
+  load_install_state(){
+    PROTOCOL=TCP PORT=30000 PORT_RANGE="" MTU=1400 MTU_POLICY=safe
+    MULTIPLEXING=MULTIPLEXING_OFF HANDSHAKE_MODE=HANDSHAKE_NO_WAIT
+    TRAFFIC_PATTERN=off LOW_ENTROPY_MODE=LOW_ENTROPY_MODE_OFF
+  }
+  users_ensure_loaded(){ :; }
+  public_ip(){ echo 192.236.242.173; }
+  batch_output="$(do_user_export_clients 2>&1)"
+  grep -q '【客户端入口映射】' <<<"$batch_output"
+  grep -q '客户端: cm-entry.example.com:10086/TCP' <<<"$batch_output"
+  grep -q -- '-> 后端: 192.236.242.173:30000/TCP' <<<"$batch_output"
+  python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); s=d["profiles"][0]["servers"][0]; assert s["domainName"]=="cm-entry.example.com" and s["portBindings"][0]["port"]==10086' \
+    "$(find "$MITA_CLIENT_EXPORT_DIR" -name 'batch-user_tcp.json' -print -quit)"
+)
 server_cfg="$(write_server_config)"
 python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["portBindings"]==[{"port":26000,"protocol":"TCP"}] and "203.0.113.10" not in open(sys.argv[1]).read()' "$server_cfg"
 rm -f "$server_cfg"
@@ -287,29 +516,37 @@ ADVERTISE_HOST="" ADVERTISE_PORT="" PROTOCOL=TCP
   test -z "$(find "$invalidation_dir/current" -maxdepth 1 -type f -name '*.json' -print -quit)"
 )
 
-# 安装交互默认保留自动探测；选择自定义时读取独立的展示 IP 和端口。
+# 安装交互必须始终显示地址和端口问题；公网 IP / 后端端口只能作为默认建议值。
 (
-  ADVERTISE_HOST=198.51.100.1 ADVERTISE_PORT=1234 ADVERTISE_CLI=0
-  confirm(){ return 1; }
+  ADVERTISE_HOST="" ADVERTISE_PORT="" ADVERTISE_CLI=0 PORT=26000 PROTOCOL=TCP
+  public_ip(){ echo 198.51.100.1; }
+  read_tty(){ printf -v "$1" '%s' ''; }
   collect_advertise_endpoint_interactive >/dev/null
-  test -z "$ADVERTISE_HOST"
-  test -z "$ADVERTISE_PORT"
+  test "$ADVERTISE_HOST|$ADVERTISE_PORT" = '198.51.100.1|26000'
 )
 (
   ADVERTISE_HOST="" ADVERTISE_PORT="" ADVERTISE_CLI=0 PORT=26000 PROTOCOL=TCP
-  confirm(){ return 0; }
+  public_ip(){ echo 198.51.100.2; }
   advertise_read_count=0
   read_tty(){
     advertise_read_count=$((advertise_read_count + 1))
     if [ "$advertise_read_count" -eq 1 ]; then
-      printf -v "$1" '%s' 203.0.113.20
+      printf -v "$1" '%s' cm-entry.example.com
     else
       printf -v "$1" '%s' 8443
     fi
   }
   collect_advertise_endpoint_interactive >/dev/null
-  test "$ADVERTISE_HOST|$ADVERTISE_PORT" = '203.0.113.20|8443'
+  test "$ADVERTISE_HOST|$ADVERTISE_PORT" = 'cm-entry.example.com|8443'
 )
+# -y 也不能静默跳过入口确认；必须显式给 endpoint 或 --advertise-auto。
+set +e
+noninteractive_endpoint_output="$(MITA_SOURCE_ONLY=0 bash /work/install-mita.sh \
+  --install -y --port 26000 --user explicit-user --password explicit-pass 2>&1)"
+noninteractive_endpoint_rc=$?
+set -e
+test "$noninteractive_endpoint_rc" -ne 0
+grep -q -- '--advertise-host/--advertise-port' <<<"$noninteractive_endpoint_output"
 
 # 端口探测必须区分 TCP/UDP；尾号段选择不得返回已监听端口。
 python3 -c 'import socket,time; s=socket.socket(); s.bind(("127.0.0.1",26801)); s.listen(); time.sleep(20)' &
@@ -377,6 +614,9 @@ grep -Eq '^alice[[:space:]]+26000[[:space:]]+on[[:space:]]+unlimited[[:space:]]+
 # flock 分支必须传递展示入口字段；重复入口及自定义/自动入口碰撞都应拒绝。
 users_set_advertise_endpoint bob 198.51.100.20 8443
 test "$(users_get_field bob advertise_host)|$(users_get_field bob advertise_port)" = '198.51.100.20|8443'
+users_set_advertise_endpoint bob CM-Entry.Example.com 10086
+users_validate_state_file "$MITA_USERS_STATE" TCP 1.2.3.4
+test "$(users_get_field bob advertise_host)|$(users_get_field bob advertise_port)" = 'cm-entry.example.com|10086'
 users_set_advertise_endpoint bob '' ''
 conflict_state=/tmp/users-conflict.json
 cp -f "$MITA_USERS_STATE" "$conflict_state"
@@ -392,6 +632,43 @@ if users_validate_state_file "$conflict_state" TCP 1.2.3.4; then
   exit 1
 fi
 rm -f "$conflict_state" "$conflict_state.norm"
+
+# mita perf 必须只读；仅独立入口显示 INFO，同公网 IP/端口不误报。
+(
+  rm -f /tmp/perf-unexpected-write
+  run(){ touch /tmp/perf-unexpected-write; }
+  save_install_state(){ touch /tmp/perf-unexpected-write; }
+  apply_users_config(){ touch /tmp/perf-unexpected-write; }
+  reconcile_isolated_instances(){ touch /tmp/perf-unexpected-write; }
+  ensure_mita_daemon(){ touch /tmp/perf-unexpected-write; }
+  start_mita(){ touch /tmp/perf-unexpected-write; }
+  enable_bbr_fq(){ touch /tmp/perf-unexpected-write; }
+  load_install_state(){ :; }
+  users_state_exists(){ return 1; }
+  installed_version(){ echo 3.35.0; }
+  detect_public_ip_family(){ [ "$1" = 4 ] && echo 192.236.242.173 || echo 2606:4700:4700::1111; }
+  perf_sysctl_value(){ [ "$1" = net.ipv4.tcp_congestion_control ] && echo bbr || echo fq; }
+  tc_default_iface(){ echo eth-test; }
+  mtu_iface_value(){ echo 1500; }
+  tc(){ echo 'qdisc fq 0: root'; }
+  ps(){ printf '1 0.1 1024 mita mita-real run\n'; }
+  PORT=17353 PROTOCOL=TCP ADVERTISE_HOST=192.236.242.173 ADVERTISE_PORT=17353
+  same_perf_output="$(do_perf)"
+  ! grep -q '当前使用独立客户端入口' <<<"$same_perf_output"
+  ! grep -q 'An independent client endpoint' <<<"$same_perf_output"
+
+  PORT=30000 PROTOCOL=TCP ADVERTISE_HOST=cm-entry.example.com ADVERTISE_PORT=10086
+  perf_output="$(do_perf)"
+  grep -q 'Mieru Performance' <<<"$perf_output"
+  grep -q 'Backend listen port: 30000' <<<"$perf_output"
+  grep -q 'Advertised client address: cm-entry.example.com' <<<"$perf_output"
+  grep -q '\[INFO\] 当前使用独立客户端入口' <<<"$perf_output"
+  grep -q 'Client: cm-entry.example.com:10086' <<<"$perf_output"
+  grep -q 'Backend: 192.236.242.173:30000' <<<"$perf_output"
+  ! grep -Eq '\[WARN\].*客户端入口|\[FAIL\].*客户端入口' <<<"$perf_output"
+  grep -q '本报告为只读' <<<"$perf_output"
+  test ! -e /tmp/perf-unexpected-write
+)
 
 # 凭据恢复先使用权威 users.json；只有状态均不可用时才读取最新客户端导出。
 (
@@ -625,9 +902,9 @@ MOCK_SYSTEMCTL
   isolated_stop_all(){ touch /tmp/endpoint-unexpected-stop; }
   print_user_outputs(){ :; }
   rm -f /tmp/endpoint-unexpected-apply /tmp/endpoint-unexpected-start /tmp/endpoint-unexpected-stop
-  USERNAME=bob ADVERTISE_HOST=198.51.100.30 ADVERTISE_PORT=9443 ADVERTISE_CLI=1
+  USERNAME=bob ADVERTISE_HOST=cm-entry.example.com ADVERTISE_PORT=9443 ADVERTISE_CLI=1
   do_user_set_endpoint >/dev/null
-  test "$(users_get_field bob advertise_host)|$(users_get_field bob advertise_port)" = '198.51.100.30|9443'
+  test "$(users_get_field bob advertise_host)|$(users_get_field bob advertise_port)" = 'cm-entry.example.com|9443'
   test ! -e /tmp/endpoint-unexpected-apply
   test ! -e /tmp/endpoint-unexpected-start
   test ! -e /tmp/endpoint-unexpected-stop
@@ -823,6 +1100,24 @@ setup_reconfigure_fixture(){
   grep -qx 'MULTIPLEXING=MULTIPLEXING_LOW' "$MITA_STATE"
   test -z "$(find "$(client_current_dir)" -maxdepth 1 -type f -name '*.json' -print -quit)"
   test ! -e /tmp/reconfigure-client-unexpected-apply
+)
+
+# 应用 Profile 时保存完整真实参数；不是在运行时只保存/推算 PROFILE。
+(
+  setup_reconfigure_fixture /tmp/reconfigure-profile
+  apply_profile_values iplc
+  PROFILE_CLI=1 PROTOCOL_CLI=1 MTU_CLI=1 MULTIPLEXING_CLI=1
+  HANDSHAKE_CLI=1 TRAFFIC_CLI=1 LOW_ENTROPY_CLI=1
+  MTU_REQUEST=1400 YES=1
+  print_summary(){ :; }
+  do_reconfigure >/dev/null
+  grep -qx 'PROFILE=iplc' "$MITA_STATE"
+  grep -qx 'PROTOCOL=TCP' "$MITA_STATE"
+  grep -qx 'MTU=1400' "$MITA_STATE"
+  grep -qx 'MULTIPLEXING=MULTIPLEXING_OFF' "$MITA_STATE"
+  grep -qx 'HANDSHAKE_MODE=HANDSHAKE_NO_WAIT' "$MITA_STATE"
+  grep -qx 'TRAFFIC_PATTERN=off' "$MITA_STATE"
+  grep -qx 'LOW_ENTROPY_MODE=LOW_ENTROPY_MODE_OFF' "$MITA_STATE"
 )
 
 # 主用户名变化只清理旧主用户导出，不删除其它用户仍有效的文件。
@@ -1247,6 +1542,8 @@ test "$menu_rc" -ne 0
   admin_lock_release(){ :; }
   do_user_list(){ :; }
   LANG_ZH=0
+  YES=0
+  USER_DEL_NAME=""
   menu_choice_count=0
   read_tty(){
     local value="" prompt="${2:-}"
@@ -1264,7 +1561,10 @@ test "$menu_rc" -ne 0
   user_delete_rc=$?
   set -e
   test "$user_delete_rc" -eq 3
-  grep -q '\[警告\] Cannot delete the last user' <<<"$user_delete_output"
+  if ! grep -q '\[警告\] Cannot delete the last user' <<<"$user_delete_output"; then
+    printf 'unexpected user deletion output:\n%s\n' "$user_delete_output" >&2
+    exit 1
+  fi
   ! grep -q '步骤失败' <<<"$user_delete_output"
   test "$(grep -c '^\[Users\]' <<<"$user_delete_output")" -eq 2
 )
@@ -1358,6 +1658,92 @@ test "$uninstall_menu_rc" -eq 2
   ACTION=uninstall
   menu_run_action
 )
+
+# 首次接管前已存在的包/系统账号要记录为外部资源；卸载时不得删除包、账号或公共目录。
+(
+  ownership_dir=/tmp/preexisting-ownership
+  rm -rf "$ownership_dir"
+  MITA_MANAGER_STATE_DIR="$ownership_dir"
+  MITA_MARKER="$ownership_dir/.installed"
+  MITA_PRESERVE_PACKAGE_MARKER="$ownership_dir/preserve-preexisting-package"
+  MITA_PRESERVE_USER_MARKER="$ownership_dir/preserve-preexisting-user"
+  MITA_PRESERVE_GROUP_MARKER="$ownership_dir/preserve-preexisting-group"
+  installed_by_oneclick(){ return 1; }
+  mita_package_is_installed(){ return 0; }
+  _has_user(){ return 0; }
+  _has_group(){ return 0; }
+  run(){ "$@"; }
+  record_preexisting_mita_resources deb
+  test -f "$MITA_PRESERVE_PACKAGE_MARKER"
+  test -f "$MITA_PRESERVE_USER_MARKER"
+  test -f "$MITA_PRESERVE_GROUP_MARKER"
+)
+(
+  UNINSTALL_PRESERVE_EXTERNAL=1
+  UNINSTALL_PRESERVE_PACKAGE=1
+  UNINSTALL_PRESERVE_USER=1
+  UNINSTALL_PRESERVE_GROUP=1
+  run(){ printf 'RUN %s\n' "$*"; }
+  find(){ :; }
+  remove_users_scheduler(){ :; }
+  remove_self_script(){ :; }
+  preserved_cleanup_log="$(remove_mita_common)"
+  ! grep -Eq '(^| )(deluser|userdel|delgroup|groupdel)( |$)' <<<"$preserved_cleanup_log"
+  ! grep -Fq 'rm -rf /etc/mita /var/lib/mita' <<<"$preserved_cleanup_log"
+  ! grep -Fq '/lib/systemd/system/mita.service' <<<"$preserved_cleanup_log"
+  ! grep -Fq '/usr/lib/systemd/system/mita.service' <<<"$preserved_cleanup_log"
+  ! grep -Fq '/var/log/mita.log /var/log/mita.err' <<<"$preserved_cleanup_log"
+)
+# 所有权标记必须逐项生效：只保留预先存在的用户时，OneClick 安装的包资源和组仍会清理。
+(
+  UNINSTALL_PRESERVE_EXTERNAL=1
+  UNINSTALL_PRESERVE_PACKAGE=0
+  UNINSTALL_PRESERVE_USER=1
+  UNINSTALL_PRESERVE_GROUP=0
+  run(){ printf 'RUN %s\n' "$*"; }
+  find(){ :; }
+  dpkg(){ return 1; }
+  _has_user(){ return 0; }
+  _has_group(){ return 0; }
+  remove_users_scheduler(){ :; }
+  remove_self_script(){ :; }
+  user_only_cleanup_log="$(remove_mita_common)"
+  grep -Fq 'rm -rf /etc/mita /var/lib/mita' <<<"$user_only_cleanup_log"
+  grep -Fq '/lib/systemd/system/mita.service' <<<"$user_only_cleanup_log"
+  grep -Fq '/var/log/mita.log /var/log/mita.err' <<<"$user_only_cleanup_log"
+  ! grep -Eq '(^| )(deluser|userdel) mita( |$)' <<<"$user_only_cleanup_log"
+  grep -Eq '(^| )(delgroup|groupdel) mita( |$)' <<<"$user_only_cleanup_log"
+)
+(
+  ownership_dir=/tmp/preexisting-uninstall
+  rm -rf "$ownership_dir"
+  mkdir -p "$ownership_dir"
+  MITA_PRESERVE_PACKAGE_MARKER="$ownership_dir/preserve-preexisting-package"
+  MITA_PRESERVE_USER_MARKER="$ownership_dir/preserve-preexisting-user"
+  MITA_PRESERVE_GROUP_MARKER="$ownership_dir/preserve-preexisting-group"
+  touch "$MITA_PRESERVE_PACKAGE_MARKER" "$MITA_PRESERVE_USER_MARKER" "$MITA_PRESERVE_GROUP_MARKER"
+  require_root(){ :; }
+  mita_uninstall_target_present(){ return 0; }
+  installed_by_oneclick(){ return 0; }
+  confirm(){ return 0; }
+  restore_owned_bbr_fq(){ return 0; }
+  detect_pkg_manager(){ echo deb; }
+  stop_mita_for_uninstall(){ :; }
+  close_firewall(){ :; }
+  firewall_clear_all_owned(){ :; }
+  remove_mita_common(){
+    test "$UNINSTALL_PRESERVE_EXTERNAL" -eq 1
+    test "$UNINSTALL_PRESERVE_PACKAGE" -eq 1
+    test "$UNINSTALL_PRESERVE_USER" -eq 1
+    test "$UNINSTALL_PRESERVE_GROUP" -eq 1
+  }
+  verify_mita_uninstalled(){ return 0; }
+  run(){ printf 'RUN %s\n' "$*"; }
+  preserved_uninstall_output="$(do_uninstall)"
+  grep -q '外部资源已保留' <<<"$preserved_uninstall_output"
+  ! grep -Eq 'dpkg -P mita|rpm -e mita|userdel mita|groupdel mita' <<<"$preserved_uninstall_output"
+)
+
 rm -f /tmp/dry-run-mutated
 do_install(){ touch /tmp/dry-run-mutated; }
 repair_mita_binary_paths(){ touch /tmp/dry-run-mutated; }
@@ -1367,9 +1753,14 @@ test ! -e /tmp/dry-run-mutated
 grep -q DRY-RUN /tmp/dry-run.out
 
 # 在无软件包、只有 OneClick 残留的半安装状态下也能完整卸载并给出父 shell 提示。
+rm -f "$MITA_PRESERVE_PACKAGE_MARKER" "$MITA_PRESERVE_USER_MARKER" \
+  "$MITA_PRESERVE_GROUP_MARKER"
+detect_pkg_manager(){ echo alpine; }
+dpkg(){ return 1; }
+dpkg-query(){ return 1; }
 mkdir -p /etc/mita /etc/profile.d
 touch "$MITA_MARKER" "$MITA_PROFILE_D"
-YES=1 DRY_RUN=0
+YES=1 DRY_RUN=0 LANG_ZH=1
 set +e
 uninstall_output="$(do_uninstall 2>&1)"
 uninstall_rc=$?
@@ -1378,7 +1769,10 @@ if [ "$uninstall_rc" -ne 0 ]; then
   printf '%s\n' "$uninstall_output" >&2
   exit "$uninstall_rc"
 fi
-grep -q '完全卸载' <<<"$uninstall_output"
+if ! grep -q '完全卸载' <<<"$uninstall_output"; then
+  printf 'unexpected uninstall output:\n%s\n' "$uninstall_output" >&2
+  exit 1
+fi
 grep -q 'unset -f mita' <<<"$uninstall_output"
 ! grep -q '\[错误\]' <<<"$uninstall_output"
 test ! -e "$MITA_PROFILE_D"

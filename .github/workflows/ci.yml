@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build deterministic release artifact
+        run: |
+          bash scripts/build.sh
+          cp install-mita.sh "$RUNNER_TEMP/install-mita.first.sh"
+          bash scripts/build.sh
+          cmp -s "$RUNNER_TEMP/install-mita.first.sh" install-mita.sh
+          cmp -s install-mita.sh dist/install-mita.sh
+          bash scripts/build.sh --check
+          git diff --exit-code -- install-mita.sh dist/install-mita.sh
+          test -z "$(git status --porcelain --untracked-files=all)"
+      - name: Bash syntax
+        run: |
+          for file in install-mita.sh src/*.sh scripts/*.sh; do
+            bash -n "$file"
+          done
+      - name: ShellCheck
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          shellcheck -x install-mita.sh scripts/*.sh
+      - name: Cross-distribution compatibility smoke
+        run: bash scripts/compat-smoke.sh
+      - name: Debian lifecycle and ownership regression
+        run: bash scripts/docker-smoke.sh
