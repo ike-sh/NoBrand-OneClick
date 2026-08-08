@@ -26,9 +26,11 @@ jobs:
           done
       - name: ShellCheck
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq shellcheck
-          shellcheck -x install-mita.sh scripts/*.sh
+          docker run --rm \
+            -v "$PWD:/mnt:ro" \
+            -w /mnt \
+            koalaman/shellcheck:v0.11.0 \
+            -x install-mita.sh scripts/*.sh
       - name: Cross-distribution compatibility smoke
         run: bash scripts/compat-smoke.sh
       - name: Debian lifecycle and ownership regression
