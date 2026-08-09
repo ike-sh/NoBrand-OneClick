@@ -2,7 +2,7 @@
 
 本文档是 v2.2.0 RC 的真实环境人工验收步骤和填写模板，不是已完成的测试报告。
 
-- 当前执行状态：`NOT RUN`
+- 当前总体状态：部分完成（§0.4 已记录真实 systemd 部署、URI 与 mihomo 客户端证据；其余完整场景按各节结果执行）
 - 当前发布建议：`尚未给出（必须在真实测试完成后填写）`
 - 允许的结果值：`PASS`、`FAIL`、`BLOCKED`、`NOT RUN`
 - 只有执行了步骤、核对了预期并保存了证据，才可勾选对应项目。
@@ -83,6 +83,46 @@ sudo find /root/mieru-acceptance-v2.2.0 -type f -exec chmod 0600 {} +
 | Suspected blocker | `Yes / No` |
 | Issue/link | |
 | Operator | |
+
+### 0.4 已接收的部分真机记录：RW-20260809-RACKNERD-01
+
+本节是对执行人提供的终端记录所作的脱敏摘要。原记录包含自动生成的密码、完整 URI 和客户端配置，不得提交到仓库、公开 issue 或正式报告；本节不保存这些值。
+
+| 字段 | 记录 |
+|---|---|
+| 测试日期 | 2026-08-09；VPS 时区未记录 |
+| 环境 | RackNerd、Debian 系发行版、systemd；OS 精确版本、内核和架构未记录 |
+| 脚本来源 | 从 GitHub `main` 的 raw URL 直接管道执行 |
+| 候选身份 | 仓库侧确认 `origin/main` 与 `v2.2.0` 的 `install-mita.sh` 无差异，冻结 SHA-256 仍为 §0.1 的值；但 VPS 未保存脚本、未执行 `sha256sum`/`bash -n`，因此本次运行本身的产物身份证据不完整 |
+| Mieru | 3.35.0 |
+| 安装配置 | IPLC，TCP，MTU 1400，MULTIPLEXING_OFF，HANDSHAKE_NO_WAIT，Traffic Pattern 关闭，Low Entropy 关闭 |
+| Endpoint | 安装时主动填写了独立客户端入口；advertised endpoint 与 backend 不同，因此没有测试默认 endpoint |
+| 证据 | 执行人提供的终端记录；因含凭据仅保存在仓库外 |
+
+已观察到：
+
+- 未安装菜单包含预期状态字段及 `0` 至 `10` 的完整入口。
+- 交互安装结束且未回滚；部署迁移到 `isolated-v2`，专属实例报告运行正常，BBR/FQ 已启用。
+- `mita show`、URI、JSON、mihomo 片段和 `mita perf` 均使用自定义 advertised endpoint，并把它与实际 backend 分开显示。
+- 新增用户获得专属端口和实例；删除后报告端口已释放。
+- `mita perf` 完成只读诊断，无 WARN/FAIL；`mita doctor` 为 `PASS=23 WARN=0 FAIL=0`。
+- 菜单“升级”只确认当前脚本为 v2.2.0、Mieru 已满足 stable 目标；这不是 v2.1.x 到 v2.2.0 的升级测试。
+- 卸载流程报告 package purge、管理脚本和 crontab 清理以及 `mita` 用户删除，并正常结束。
+- 执行人随后确认该部署已经实际用于代理，独立入口可以端到端连接和传输；生成的节点链接及 mihomo 配置均已实际使用且工作正常。按本文上下文，“节点链接”记录为 `mierus://` URI 验证，不扩展为尚未明确确认的官方 JSON 验证。
+
+这份记录不能证明：
+
+- 默认 endpoint；本次安装明确使用了独立入口。
+- Endpoint-only fast path；独立入口在首次安装时填写，没有 PID、启动时间、backend、firewall 和 tc 的 before/after 对比。
+- 真实 IPLC 场景的完整服务端控制面核对；端到端连通已经由执行人确认，但仍没有入口转发配置、`ss`、backend JSON、firewall 和 tc 的原始证据。
+- `server.json` 只含 backend、实际监听端口以及 firewall/tc 不受 advertised endpoint 影响；没有保存相应原始快照。
+- 官方 Mieru JSON 的真实导入和连接。
+- v2.1.x 原地升级、backup/restore、OpenRC、性能 A/B。
+- clean-host ownership 的完整结果；虽然卸载命令正常完成，但缺少 §8.0 规定的 before/managed/after 快照以及 package、group、服务、进程、state、firewall、tc 的卸载后核对。
+
+发现一个非阻塞交互问题：用户管理中新增用户并在第一次密码提示直接回车时，会再次显示一次“密码（回车随机）”提示。源码确认菜单层和动作层都会在空值时提示，v2.1.4 中已存在相同路径，因此不是模块化引入的回归；本次操作最终成功，Phase 8 不修改代码，留待后续补丁版本单独处理。
+
+本记录未确认任何 release blocker。mihomo 实际使用与官方 Mieru URI 节点链接可标记 `PASS`；由于客户端版本、逐命令输出和脱敏流量记录未保存，证据质量限制保留在对应结果中。其余发布阻塞场景仍不足以给出 `READY`。
 
 ## 1. 场景 A：普通 systemd VPS fresh install
 
@@ -198,7 +238,7 @@ sudo ss -lntp
 |---|---|
 | Result | `NOT RUN` |
 | Evidence | |
-| Notes | |
+| Notes | 2026-08-09 的部分运行使用了自定义入口，且缺少候选 hash、`bash -n`、`systemctl status`、`ss` 和 state/backend 原始证据；见 §0.4。完整场景仍为 `NOT RUN`。 |
 
 ## 2. Endpoint-only fast path
 
@@ -357,7 +397,7 @@ mita doctor
 | Before evidence | |
 | After evidence | |
 | Diff evidence | |
-| Notes | |
+| Notes | 2026-08-09 的部分运行只在首次安装时填写独立入口，没有执行本节的 endpoint-only 更新或 before/after 比较；见 §0.4。 |
 
 ## 3. 场景 B：真实 v2.1.x 到 v2.2.0 原地升级
 
@@ -725,25 +765,25 @@ sudo find /root/mieru-clients/current -maxdepth 1 -type f -print
 
 逐一检查终端中的 `mierus://`、官方 Mieru JSON 和完整 mihomo YAML 片段：
 
-- [ ] 三种导出均使用 `CM_ENTRY_IP:10086`
-- [ ] 三种导出均不泄漏 `JP_PUBLIC_IP:30000` 作为客户端连接入口
-- [ ] `mita show` 显示 `Client -> Backend` 映射
-- [ ] `mita perf` 显示 `[INFO] 当前使用独立客户端入口`
-- [ ] Client 显示 `CM_ENTRY_IP:10086`
-- [ ] Backend 显示 `JP_PUBLIC_IP:30000`
-- [ ] `mita perf` 本次完整输出没有 WARN/FAIL
-- [ ] `mita doctor` 成功
-- [ ] 中国移动真实客户端可经该入口建立连接并传输数据
+- [x] 三种导出均使用客户端 advertised endpoint
+- [x] 三种导出均不泄漏实际 backend 作为客户端连接入口
+- [x] `mita show` 显示 `Client -> Backend` 映射
+- [x] `mita perf` 显示 `[INFO] 当前使用独立客户端入口`
+- [x] Client 显示实际 advertised endpoint
+- [x] Backend 显示实际公网地址和监听端口
+- [x] `mita perf` 本次完整输出没有 WARN/FAIL
+- [x] `mita doctor` 成功
+- [x] 真实客户端可经独立入口建立连接并传输数据（执行人后续确认）
 
 ### 4.4 IPLC 结果
 
 | 字段 | 记录 |
 |---|---|
 | Result | `NOT RUN` |
-| Server evidence | |
-| CM forwarding evidence | |
-| Client connectivity evidence | |
-| Notes | |
+| Server evidence | 终端记录中的 `mita show`、`mita perf`、`mita doctor`；缺少 §4.2 的原始快照 |
+| CM forwarding evidence | 执行人确认部署后的独立入口可以正常代理；未保存脱敏的商家转发配置 |
+| Client connectivity evidence | 执行人确认节点链接和 mihomo 配置均可正常代理 |
+| Notes | 客户端功能面已通过；由于 §4.2 的 `ss`、backend JSON、firewall/tc 核对未执行，完整场景仍为 `NOT RUN`。 |
 
 ## 5. 实际 mihomo 导入
 
@@ -779,9 +819,9 @@ mihomo -t -f /path/to/test-config.yaml
 
 | 字段 | 记录 |
 |---|---|
-| Result | `NOT RUN` |
-| Evidence | |
-| Notes | |
+| Result | `PASS` |
+| Evidence | 执行人确认生成的 mihomo 配置已实际部署并可正常代理 |
+| Notes | 客户端/core 版本及逐命令、TCP/UDP 分项输出未保留；不得据此宣称官方 Mieru JSON 已验证。 |
 
 ## 6. 官方 Mieru 客户端导入
 
@@ -837,10 +877,10 @@ mieru apply config /path/to/generated-client.json
 |---|---|
 | Client OS | |
 | Mieru client version | |
-| URI result | `NOT RUN` |
+| URI result | `PASS` |
 | JSON result | `NOT RUN` |
-| Evidence | |
-| Notes | |
+| Evidence | 执行人确认生成的节点链接已实际部署并可正常代理 |
+| Notes | 按上下文将“节点链接”记录为 `mierus://` URI；未提供客户端版本或逐命令输出，且未确认 JSON apply。 |
 
 ## 7. Backup/restore 真实状态恢复
 
@@ -1007,7 +1047,7 @@ sudo install-mita --uninstall -y
 - [ ] `/var/lib/mita-oneclick`、`/etc/mita/instances`、实例服务、客户端导出和 owned firewall/tc 均清理
 - [ ] 非 OneClick 资源未被删除
 
-Result：`NOT RUN`　Evidence：____________________
+Result：`NOT RUN`　Evidence：2026-08-09 的部分运行仅记录到卸载命令正常结束，缺少 §8.0 的三阶段证据和卸载后独立核对；见 §0.4。
 
 ### 8.2 B：preinstalled mita package
 
