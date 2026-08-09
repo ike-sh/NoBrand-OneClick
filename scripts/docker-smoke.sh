@@ -33,7 +33,7 @@ getent group mita >/dev/null || groupadd --system mita
 id mita >/dev/null 2>&1 || useradd --system -g mita -s /usr/sbin/nologin -d /tmp/metrics mita
 
 source /work/install-mita.sh
-test "$SCRIPT_VERSION" = 2.2.0
+test "$SCRIPT_VERSION" = 2.2.1
 trap - ERR
 MITA_STATE=/tmp/manager-state/install-state.env
 
@@ -54,6 +54,7 @@ grep -q '作者: ${SCRIPT_AUTHOR} / https://github.com/${SCRIPT_REPO}' /work/ins
   menu_rc=$?
   set -e
   test "$menu_rc" -eq 2
+  grep -q '^作者: ike / https://github.com/ike-sh/mieru-OneClick$' <<<"$menu_output"
   grep -q '^状态: 未安装$' <<<"$menu_output"
   grep -q '^用户: -$' <<<"$menu_output"
   grep -q '^Profile: -$' <<<"$menu_output"

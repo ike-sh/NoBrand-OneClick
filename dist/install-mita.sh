@@ -13,7 +13,7 @@
 set -euo pipefail
 umask 077
 
-SCRIPT_VERSION="2.2.0"
+SCRIPT_VERSION="2.2.1"
 SCRIPT_AUTHOR="ike"
 SCRIPT_REPO="ike-sh/mieru-OneClick"
 UPSTREAM_REPO="enfein/mieru"
@@ -10314,6 +10314,8 @@ show_menu() {
   fi
   msg ''
   t '========== Mieru OneClick ==========' '========== Mieru OneClick =========='
+  t "作者: ${SCRIPT_AUTHOR} / https://github.com/${SCRIPT_REPO}" \
+    "Author: ${SCRIPT_AUTHOR} / https://github.com/${SCRIPT_REPO}"
   t "状态: $([ "$installed" = yes ] && printf '已安装' || printf '未安装')" \
     "Status: $([ "$installed" = yes ] && printf 'installed' || printf 'not installed')"
   t "用户: ${users}" "Users: ${users}"

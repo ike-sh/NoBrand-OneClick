@@ -226,6 +226,8 @@ show_menu() {
   fi
   msg ''
   t '========== Mieru OneClick ==========' '========== Mieru OneClick =========='
+  t "作者: ${SCRIPT_AUTHOR} / https://github.com/${SCRIPT_REPO}" \
+    "Author: ${SCRIPT_AUTHOR} / https://github.com/${SCRIPT_REPO}"
   t "状态: $([ "$installed" = yes ] && printf '已安装' || printf '未安装')" \
     "Status: $([ "$installed" = yes ] && printf 'installed' || printf 'not installed')"
   t "用户: ${users}" "Users: ${users}"
