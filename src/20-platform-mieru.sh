@@ -1,6 +1,6 @@
 install_self_script() {
   STAGE="安装管理脚本"
-  local main_url="https://raw.githubusercontent.com/ike-sh/mieru-OneClick/main/install-mita.sh"
+  local main_url="https://raw.githubusercontent.com/ike-sh/NoBrand-OneClick/main/install-nobrand.sh"
   local tmp src_real="" dest_real="" installed=0
   tmp="$(mktemp_file .sh)"
   # 已发布版本优先；下载到临时文件且版本必须精确匹配，避免截断现有脚本或被 main 降级。
@@ -31,6 +31,8 @@ install_self_script() {
   install_mita_wrapper_force
   migrate_mita_binary_layout
   install_mita_shortcuts
+  # NoBrand 的统一入口与 Mieru 兼容入口使用同一份生成脚本；保留 install-mita/mita。
+  nobrand_install_manager_script || true
 }
 
 install_mita_wrapper_force() {
@@ -73,7 +75,7 @@ if [ $# -eq 0 ]; then
     exec "$INSTALL_MITA"
   fi
   echo "[错误] 未找到 install-mita，请先运行一键安装脚本" >&2
-  echo "  curl -fsSL https://raw.githubusercontent.com/ike-sh/mieru-OneClick/main/install-mita.sh | bash" >&2
+  echo "  curl -fsSL https://raw.githubusercontent.com/ike-sh/NoBrand-OneClick/main/install-mita.sh | bash" >&2
   exit 1
 fi
 
@@ -94,7 +96,7 @@ fi
 
 if [ -z "$MITA_REAL" ]; then
   echo "[错误] 未找到 mita 二进制；请重新运行安装脚本并选择「升级」自动重装：" >&2
-  echo "  curl -fsSL https://raw.githubusercontent.com/ike-sh/mieru-OneClick/main/install-mita.sh | sudo bash -s -- upgrade -y" >&2
+  echo "  curl -fsSL https://raw.githubusercontent.com/ike-sh/NoBrand-OneClick/main/install-mita.sh | sudo bash -s -- upgrade -y" >&2
   exit 127
 fi
 exec "$MITA_REAL" "$@"

@@ -3,11 +3,23 @@ main() {
      && [ "$(id -u 2>/dev/null || echo 1)" -eq 0 ]; then
     ensure_manager_state_layout
   fi
+  if [ "${NOBRAND_ENTRY:-0}" -eq 1 ] \
+     && [ "${DRY_RUN:-0}" -ne 1 ] \
+     && [ "$(id -u 2>/dev/null || echo 1)" -eq 0 ]; then
+    case "${ACTION:-menu}" in
+      nobrand-version|nobrand-help) ;;
+      *) snell_migrate_removed_v6 || die 'Snell v6 removal migration did not complete safely' ;;
+    esac
+  fi
   if [ -z "$ACTION" ]; then
-    menu_loop
+    if [ "${NOBRAND_ENTRY:-0}" -eq 1 ]; then
+      nobrand_menu_loop
+    else
+      menu_loop
+    fi
     exit 0
   fi
-  if [ "$ACTION" != "menu" ]; then
+  if [ "$ACTION" != "menu" ] && [[ "$ACTION" != nobrand-* ]]; then
     print_banner
   fi
   if dry_run_should_preview "$ACTION"; then
@@ -65,6 +77,18 @@ main() {
     low-entropy-config) do_tuning_config low-entropy ;;
     bbr-config) do_bbr_config ;;
     version-channel) do_version_channel_config ;;
+    nobrand-status) nobrand_status ;;
+    nobrand-nodes) nobrand_nodes ;;
+    nobrand-doctor) nobrand_doctor ;;
+    nobrand-backup) nobrand_backup_action ;;
+    nobrand-uninstall) nobrand_uninstall ;;
+    nobrand-network) do_perf ;;
+    nobrand-snell) nobrand_run_snell_action ;;
+    nobrand-hy2) nobrand_run_hy2_action ;;
+    nobrand-vless-sudoku) nobrand_run_vless_sudoku_action ;;
+    nobrand-mieru-menu) menu_loop ;;
+    nobrand-help) nobrand_usage ;;
+    nobrand-version) nobrand_version ;;
     help) usage; exit 0 ;;
     menu)
       menu_loop

@@ -3,7 +3,7 @@ if [ -z "${BASH_VERSION:-}" ]; then
   if [ -f /etc/alpine-release ]; then
     echo "Alpine 默认无 bash，请先安装后执行（root 无需 sudo）：" >&2
     echo "  apk add --no-cache bash curl" >&2
-    echo "  curl -fsSL https://raw.githubusercontent.com/ike-sh/mieru-OneClick/main/install-mita.sh | bash" >&2
+    echo "  curl -fsSL https://raw.githubusercontent.com/ike-sh/NoBrand-OneClick/main/install-nobrand.sh | bash" >&2
   else
     echo "  curl -fsSL .../install-mita.sh | sudo bash" >&2
   fi
@@ -108,14 +108,14 @@ mieru mita 服务端一键安装 ${SCRIPT_VERSION}
   其余如 mita run/apply/reload     仍透传官方二进制
 
 一键安装（交互式，Debian/Ubuntu/CentOS 等）：
-  curl -fsSL https://raw.githubusercontent.com/ike-sh/mieru-OneClick/main/install-mita.sh | sudo bash
+  curl -fsSL https://raw.githubusercontent.com/ike-sh/NoBrand-OneClick/main/install-nobrand.sh | sudo bash
 
 Alpine Linux（无 sudo，需先装 bash）：
   apk add --no-cache bash curl
-  curl -fsSL https://raw.githubusercontent.com/ike-sh/mieru-OneClick/main/install-mita.sh | bash
+  curl -fsSL https://raw.githubusercontent.com/ike-sh/NoBrand-OneClick/main/install-nobrand.sh | bash
 
 Alpine 一行命令：
-  apk add --no-cache bash curl && curl -fsSL https://raw.githubusercontent.com/ike-sh/mieru-OneClick/main/install-mita.sh | bash
+  apk add --no-cache bash curl && curl -fsSL https://raw.githubusercontent.com/ike-sh/NoBrand-OneClick/main/install-nobrand.sh | bash
 
 非交互示例：
   curl -fsSL .../install-mita.sh | sudo bash -s -- --install -y --port 2088 --user alice --password 'secret'
@@ -155,7 +155,276 @@ print_banner() {
     "Author: ${SCRIPT_AUTHOR} / https://github.com/${SCRIPT_REPO}"
 }
 
-while [ $# -gt 0 ]; do
+parse_nobrand_common_option() {
+  case "${1:-}" in
+    --yes|-y) YES=1 ;;
+    --dry-run) DRY_RUN=1 ;;
+    --port)
+      PORT="${2:-}"
+      PORT_CLI=1
+      [ -n "$PORT" ] || die "--port 需要端口号"
+      return 2
+      ;;
+    --advertise-host)
+      ADVERTISE_HOST="${2:-}"
+      ADVERTISE_CLI=1
+      ADVERTISE_AUTO_REQUESTED=0
+      [ -n "$ADVERTISE_HOST" ] || die "--advertise-host 需要地址"
+      return 2
+      ;;
+    --advertise-port)
+      ADVERTISE_PORT="${2:-}"
+      ADVERTISE_CLI=1
+      ADVERTISE_AUTO_REQUESTED=0
+      [ -n "$ADVERTISE_PORT" ] || die "--advertise-port 需要端口"
+      return 2
+      ;;
+    --advertise-auto)
+      ADVERTISE_HOST=""
+      ADVERTISE_PORT=""
+      ADVERTISE_CLI=1
+      ADVERTISE_AUTO_REQUESTED=1
+      ;;
+    *) return 1 ;;
+  esac
+  return 0
+}
+
+parse_nobrand_snell_args() {
+  SNELL_ACTION="${1:-menu}"
+  [ "$#" -eq 0 ] || shift
+  case "$SNELL_ACTION" in
+    v4|4) SNELL_ACTION=install; SNELL_VERSION=4; SNELL_VERSION_CLI=1 ;;
+    v5|5) SNELL_ACTION=install; SNELL_VERSION=5; SNELL_VERSION_CLI=1 ;;
+    add|create) SNELL_ACTION=install ;;
+    list|nodes) SNELL_ACTION=show ;;
+    delete|uninstall) SNELL_ACTION=remove ;;
+    endpoint) SNELL_ACTION=set-endpoint ;;
+    quic|set-quic) SNELL_ACTION=set-quic ;;
+    menu|install|show|set-endpoint|remove|start|stop|restart|status|doctor|upgrade) ;;
+    help|-h|--help) SNELL_ACTION=help ;;
+    *) die "未知 Snell 操作: $SNELL_ACTION" ;;
+  esac
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --name)
+        SNELL_NAME="${2:-}"
+        [ -n "$SNELL_NAME" ] || die "--name 需要节点名"
+        shift 2
+        ;;
+      --version)
+        SNELL_VERSION="${2:-}"
+        SNELL_VERSION_CLI=1
+        [ -n "$SNELL_VERSION" ] || die "--version 需要 4 或 5"
+        shift 2
+        ;;
+      --psk)
+        SNELL_PSK="${2:-}"
+        [ -n "$SNELL_PSK" ] || die "--psk 需要值"
+        shift 2
+        ;;
+      --quic)
+        SNELL_QUIC_PROXY="${2:-}"
+        SNELL_QUIC_CLI=1
+        [ -n "$SNELL_QUIC_PROXY" ] || die "--quic 需要 on 或 off"
+        case "$SNELL_QUIC_PROXY" in
+          on|off) ;;
+          *) die "--quic 只支持 on 或 off" ;;
+        esac
+        shift 2
+        ;;
+      *)
+        local consumed=0 rc=0
+        parse_nobrand_common_option "$1" "${2:-}" || rc=$?
+        case "$rc" in
+          0) consumed=1 ;;
+          2) consumed=2 ;;
+          *) die "未知 Snell 参数: $1" ;;
+        esac
+        shift "$consumed"
+        ;;
+    esac
+  done
+  case "$SNELL_VERSION" in
+    4|5) ;;
+    *) die "Snell 只支持 v4、v5" ;;
+  esac
+  if [ "$SNELL_VERSION" = 4 ] && [ "$SNELL_QUIC_PROXY" = on ]; then
+    die "Snell v4 不支持 QUIC Proxy Mode"
+  fi
+  ACTION="nobrand-snell"
+  NOBRAND_ARGS_HANDLED=1
+}
+
+parse_nobrand_hy2_args() {
+  HY2_ACTION="${1:-menu}"
+  [ "$#" -eq 0 ] || shift
+  case "$HY2_ACTION" in
+    add|create|reconfigure) HY2_ACTION=install ;;
+    nodes) HY2_ACTION=show ;;
+    delete|uninstall) HY2_ACTION=remove ;;
+    endpoint) HY2_ACTION=set-endpoint ;;
+    menu|install|show|set-endpoint|remove|start|stop|restart|status|doctor|upgrade) ;;
+    help|-h|--help) HY2_ACTION=help ;;
+    *) die "未知 Hysteria2 操作: $HY2_ACTION" ;;
+  esac
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --sni)
+        HY2_SNI="${2:-}"
+        [ -n "$HY2_SNI" ] || die "--sni 需要域名或 IPv4"
+        shift 2
+        ;;
+      *)
+        local consumed=0 rc=0
+        parse_nobrand_common_option "$1" "${2:-}" || rc=$?
+        case "$rc" in
+          0) consumed=1 ;;
+          2) consumed=2 ;;
+          *) die "未知 Hysteria2 参数: $1" ;;
+        esac
+        shift "$consumed"
+        ;;
+    esac
+  done
+  ACTION="nobrand-hy2"
+  NOBRAND_ARGS_HANDLED=1
+}
+
+parse_nobrand_vless_sudoku_args() {
+  VLESS_SUDOKU_ACTION="${1:-menu}"
+  [ "$#" -eq 0 ] || shift
+  case "$VLESS_SUDOKU_ACTION" in
+    add|create|reconfigure) VLESS_SUDOKU_ACTION=install ;;
+    nodes) VLESS_SUDOKU_ACTION=show ;;
+    delete|uninstall) VLESS_SUDOKU_ACTION=remove ;;
+    endpoint) VLESS_SUDOKU_ACTION=set-endpoint ;;
+    menu|install|show|set-endpoint|remove|start|stop|restart|status|doctor|smoke|upgrade) ;;
+    help|-h|--help) VLESS_SUDOKU_ACTION=help ;;
+    *) die "未知 VLESS Sudoku 操作: $VLESS_SUDOKU_ACTION" ;;
+  esac
+  while [ "$#" -gt 0 ]; do
+    local consumed=0 rc=0
+    parse_nobrand_common_option "$1" "${2:-}" || rc=$?
+    case "$rc" in
+      0) consumed=1 ;;
+      2) consumed=2 ;;
+      *) die "未知 VLESS Sudoku 参数: $1" ;;
+    esac
+    shift "$consumed"
+  done
+  ACTION="nobrand-vless-sudoku"
+  NOBRAND_ARGS_HANDLED=1
+}
+
+detect_nobrand_entry() {
+  local entry
+  entry="$(basename -- "$0" 2>/dev/null || printf '%s' "$0")"
+  case "$entry" in
+    install-nobrand.sh|install-nobrand|nobrand|nb) NOBRAND_ENTRY=1 ;;
+  esac
+  if [ "${1:-}" = nobrand ]; then
+    NOBRAND_ENTRY=1
+    shift
+    set -- "$@"
+  fi
+  [ "$NOBRAND_ENTRY" -eq 1 ] || return 0
+  [ "$#" -gt 0 ] || { NOBRAND_ARGS_HANDLED=1; return 0; }
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+    mieru)
+      shift
+      if [ "$#" -eq 0 ]; then
+        ACTION="nobrand-mieru-menu"
+        NOBRAND_ARGS_HANDLED=1
+      else
+        # 将剩余参数交回原 Mieru 解析器，保持兼容 CLI。
+        NOBRAND_REPARSED_ARGS=("$@")
+      fi
+      ;;
+    snell)
+      shift
+      parse_nobrand_snell_args "$@"
+      ;;
+    hy2|hysteria2)
+      shift
+      parse_nobrand_hy2_args "$@"
+      ;;
+    vless-sudoku|sudoku)
+      shift
+      parse_nobrand_vless_sudoku_args "$@"
+      ;;
+    status)
+      [ "$#" -eq 1 ] || die 'status 不接受参数'
+      ACTION=nobrand-status; NOBRAND_ARGS_HANDLED=1
+      ;;
+    nodes)
+      shift
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          --protocol)
+            NOBRAND_PROTOCOL_FILTER="${2:-}"
+            [ -n "$NOBRAND_PROTOCOL_FILTER" ] \
+              || die "--protocol 需要 mieru、snell、hy2 或 vless-sudoku"
+            shift 2
+            ;;
+          *) die "未知 nodes 参数: $1" ;;
+        esac
+      done
+      ACTION=nobrand-nodes; NOBRAND_ARGS_HANDLED=1
+      ;;
+    doctor)
+      [ "$#" -eq 1 ] || die 'doctor 不接受参数'
+      ACTION=nobrand-doctor; NOBRAND_ARGS_HANDLED=1
+      ;;
+    backup)
+      shift
+      NOBRAND_BACKUP_ACTION="${1:-create}"
+      [ "$#" -eq 0 ] || shift
+      case "$NOBRAND_BACKUP_ACTION" in create|restore|list) ;; *) die "backup 只支持 create、restore、list" ;; esac
+      if [ "$#" -gt 0 ]; then
+        NOBRAND_BACKUP_PATH="$1"
+        shift
+      fi
+      [ "$#" -eq 0 ] || die "backup 参数过多"
+      ACTION=nobrand-backup; NOBRAND_ARGS_HANDLED=1
+      ;;
+    uninstall|remove)
+      shift
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          --yes|-y) YES=1; shift ;;
+          *) die "未知 uninstall 参数: $1" ;;
+        esac
+      done
+      ACTION=nobrand-uninstall; NOBRAND_ARGS_HANDLED=1
+      ;;
+    network|bbr)
+      [ "$#" -eq 1 ] || die 'network/bbr 不接受参数'
+      ACTION=nobrand-network; NOBRAND_ARGS_HANDLED=1
+      ;;
+    menu)
+      [ "$#" -eq 1 ] || die 'menu 不接受参数'
+      ACTION=""; NOBRAND_ARGS_HANDLED=1
+      ;;
+    help|-h|--help)
+      [ "$#" -eq 1 ] || die 'help 不接受参数'
+      ACTION=nobrand-help; NOBRAND_ARGS_HANDLED=1
+      ;;
+    version|--version)
+      [ "$#" -eq 1 ] || die 'version 不接受参数'
+      ACTION=nobrand-version; NOBRAND_ARGS_HANDLED=1
+      ;;
+    *) die "未知 NoBrand 操作: $1（使用 --help 查看帮助）" ;;
+  esac
+}
+
+NOBRAND_REPARSED_ARGS=()
+detect_nobrand_entry "$@"
+if [ "${#NOBRAND_REPARSED_ARGS[@]}" -gt 0 ]; then
+  set -- "${NOBRAND_REPARSED_ARGS[@]}"
+fi
+
+while [ "$NOBRAND_ARGS_HANDLED" -eq 0 ] && [ $# -gt 0 ]; do
   _arg_lc="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
   case "$_arg_lc" in
     --install) ACTION=install ;;
@@ -412,7 +681,7 @@ while [ $# -gt 0 ]; do
       shift
       ;;
     --help|-h) usage; exit 0 ;;
-    --version) echo "mieru-OneClick install-mita.sh ${SCRIPT_VERSION} by ${SCRIPT_AUTHOR}"; exit 0 ;;
+    --version) echo "${SCRIPT_NAME} Mieru compatibility installer ${SCRIPT_VERSION} by ${SCRIPT_AUTHOR}"; exit 0 ;;
     *)
       if [[ "$1" == --* ]]; then
         die "未知参数：$1（使用 --help 查看帮助）"

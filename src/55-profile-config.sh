@@ -8,6 +8,8 @@ normalize_profile() {
   esac
 }
 
+# Optional argument is part of the public helper API.
+# shellcheck disable=SC2120
 profile_label() {
   case "$(normalize_profile "${1:-${PROFILE:-custom}}" 2>/dev/null || printf custom)" in
     iplc) t 'IPLC / 专线性能' 'IPLC / Dedicated-line Performance' ;;

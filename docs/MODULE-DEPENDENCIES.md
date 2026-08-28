@@ -1,59 +1,34 @@
-# Module Dependencies
+# Module Dependencies and Runtime Contracts
 
-本文记录 v2.2.0 模块化必须保持的 Bash 顺序与全局副作用。它是维护约束，不定义新的模块 API。
+## 顶层顺序
 
-## 构建顺序
+1. strict mode、umask、attribution；
+2. 路径、版本、CLI globals；
+3. Bash check、日志、ERR trap；
+4. 根据 `$0`/argv 选择 parser；
+5. Common/platform/engines/presentation；
+6. 唯一 `main` 和 `MITA_SOURCE_ONLY` guard。
 
-`scripts/build.sh` 显式列出 20 个模块，并按数字前缀从 `00-bootstrap.sh` 拼接到 `99-main.sh`。模块不得通过运行时 `source` 组装，发布产物始终是自包含的 `install-mita.sh`。
+Mieru 保留原 global/state 传递。管理锁继续使用 fd 8 与 `_ADMIN_LOCK_HELD`。NoBrand firewall adapter 动态设置 `MITA_FIREWALL_OWNED_STATE=/var/lib/nobrand-oneclick/firewall-owned.bindings` 和 comment，再调用原 implementation。
 
-依赖层次可概括为：
+| Owner | Authority |
+|---|---|
+| Mieru | `/var/lib/mita-oneclick`, `/etc/mita` |
+| Snell | `/var/lib/nobrand-oneclick/snell`, `/etc/nobrand-oneclick/snell` |
+| HY2 | `/var/lib/nobrand-oneclick/hysteria2`, `/etc/nobrand-oneclick/hysteria2` |
+| VLESS Sudoku | `/var/lib/nobrand-oneclick/vless-sudoku`, `/etc/nobrand-oneclick/vless-sudoku` |
+| Shared Xray binary | `/usr/local/lib/nobrand-oneclick/bin/xray`（仅 NoBrand HY2/VLESS） |
 
-```text
-bootstrap / constants / CLI prelude
-                 ↓
-             core / state
-                 ↓
- platform / network / profile configuration
-                 ↓
- users / instances ↔ users state ↔ tc / quota ↔ backup actions
-                 ↓
- daemon / firewall ↔ service / BBR ↔ client export
-                 ↓
- lifecycle → status actions → UI → main
-```
+旧 Mieru single-instance state 必须先通过 `state_file_is_secure`，并在子 shell source。
 
-用户、实例、配置、回滚和服务层存在合法的函数向后引用。最终平铺脚本会在调用 `main` 前完成全部函数定义，因此不要为了消除这些循环依赖而改写函数接口。
+Port registry normalize transport；Snell v4 与 VLESS Sudoku 只申请 TCP，Snell v5 QUIC OFF 只申请 TCP、QUIC ON 申请同号 TCP+UDP，HY2 只申请 UDP，Mieru 按 TCP/UDP/BOTH adapter 输出。自动分配提交前二次检查。同数字 TCP/UDP 可以共存，同 transport 冲突。
 
-## 顶层执行顺序
+Endpoint contract：`listen_*` 是服务端权威配置；`advertise_*` 只属客户端。setter 禁止调用 config writer、service、firewall、tc、quota。
 
-以下顺序会影响 source 与直接执行语义，必须保持：
+安装事务顺序：prepare → admin lock → snapshot → runtime/config compatibility → 收集请求 → 停旧实例 → TOCTOU → 临时 config/state/client → JSON/semantic/Xray validation → atomic server config → service/firewall → active+listener → atomic client/state commit → 清理旧 firewall。失败执行 ownership-aware rollback，且 listener 验收前不提交 VLESS state。
 
-1. `set -euo pipefail` 与 `umask 077`；
-2. 路径、版本、默认值和可变运行时全局变量；
-3. Bash 环境检查；
-4. `on_error` 与全局 `ERR` trap；
-5. usage、日志与翻译 helpers；
-6. 顶层 argv `while` 解析；
-7. 其余函数定义；
-8. 唯一 `main`；
-9. 现有 `MITA_SOURCE_ONLY` guard。
+共享 Xray upgrade：snapshot binary + HY2/VLESS state → 安装并用新 binary 校验两个现存配置 → 只重启升级前 active 的服务 → UDP/TCP listener acceptance → 更新两个 runtime metadata。任一步失败恢复旧 binary/state 并在旧 runtime 上重启原 active 集合。
 
-`MITA_SOURCE_ONLY=1` 只跳过 `main`；strict mode、umask、trap 和参数解析仍按原有行为执行。不要擅自替换为 `BASH_SOURCE` 判断，也不要改变裸 `main` 调用方式。
+Plain VLESS contract：server `decryption=none`、client `encryption=none`、TCP、`security=none`、FinalMask `tcp[0].type=sudoku`。不存在 Encryption key pair、method、RTT、ticket 或 key-generation dependency。
 
-## 全局状态与动态作用域
-
-- 配置、Profile、endpoint、版本通道和用户操作通过共享全局变量传递状态。
-- `load_install_state` 在安全检查后读取 state，并更新这些共享配置变量。
-- 管理锁使用文件描述符 8 和 `_ADMIN_LOCK_HELD` 实现可重入计数。
-- package service guard 使用 `PACKAGE_SERVICE_GUARD_*` 动态状态，并在受控子 shell 中导出真实 systemctl 路径。
-- 用户事务与 Python helpers 使用 `_U_*` 等动态变量；不要用额外函数或子 shell 包裹模块内容。
-- 全局 `ERR` trap 位于 CLI prelude；菜单路径还包含局部 trap 清理，移动时必须保留其作用域。
-
-源码模块没有 `readonly` 或顶层 `export` 契约。新增跨模块状态前应优先沿用现有调用与测试模式，避免创建隐式初始化顺序。
-
-## 维护规则
-
-- 移动代码时保持完整函数、heredoc 和节标题，不在 heredoc 中间切分。
-- 不直接编辑 `install-mita.sh` 或 `dist/install-mita.sh`。
-- 修改 `src/` 后重新构建，并对生成产物运行完整 ShellCheck、Docker smoke 和 compatibility smoke。
-- 模块文件可由 lint-only `scripts/shellcheck-src.sh` 按构建顺序 source；用户运行的发布脚本绝不依赖该文件。
+节点内部行：`protocol|name|display endpoint|status|transport`；Stopped 不丢弃。Running 必须同时满足 service active 和 listener。

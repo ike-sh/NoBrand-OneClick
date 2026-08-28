@@ -292,3 +292,304 @@ show_menu() {
   esac
   return 0
 }
+
+# ---------- NoBrand unified interactive presentation ----------
+
+nobrand_menu_run() {
+  local rc=0
+  set +e
+  (
+    set -Eeuo pipefail
+    trap 'rc=$?; on_error' ERR
+    "$@"
+  )
+  rc=$?
+  set -e
+  if [ "$rc" -ne 0 ]; then
+    warn "$(t '操作未完成；请重试或运行 nobrand doctor' \
+      'Action did not complete; retry or run nobrand doctor')"
+  fi
+  return 0
+}
+
+snell_menu_select_instance() {
+  local id name major found=0 choice=""
+  msg ''
+  msg 'Snell 节点:'
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    name="$(snell_state_field "$id" name)"
+    major="$(snell_state_field "$id" version)"
+    printf '  - %s (v%s, %s)\n' "$name" "$major" "$id"
+    found=1
+  done < <(snell_instance_ids)
+  [ "$found" -eq 1 ] || { warn 'Snell 尚无节点'; return 1; }
+  read_tty choice "$(t '输入节点名: ' 'Enter node name: ')" || choice=""
+  [ -n "$choice" ] && snell_find_id_by_name "$choice" >/dev/null 2>&1 \
+    || { warn '节点名不存在'; return 1; }
+  SNELL_NAME="$choice"
+}
+
+snell_menu_install_version() {
+  local version="$1"
+  SNELL_VERSION="$version" SNELL_VERSION_CLI=1 SNELL_NAME="" SNELL_PSK=""
+  SNELL_QUIC_PROXY="" SNELL_QUIC_CLI=0
+  PORT="" PORT_CLI=0 ADVERTISE_HOST="" ADVERTISE_PORT="" ADVERTISE_CLI=0 ADVERTISE_AUTO_REQUESTED=0
+  YES=0 SNELL_ACTION=install
+  nobrand_menu_run nobrand_run_snell_action
+}
+
+snell_menu_set_quic() {
+  local choice=""
+  snell_menu_select_instance || return 0
+  msg '  1) 关闭 QUIC Proxy Mode [默认 / 推荐兼容]'
+  msg '  2) 启用 QUIC Proxy Mode [开放同号 UDP]'
+  read_tty choice "$(t '请选择 [1-2]: ' 'Choose [1-2]: ')" || choice=""
+  case "$choice" in
+    1) SNELL_QUIC_PROXY=off ;;
+    2) SNELL_QUIC_PROXY=on ;;
+    *) warn '无效选择'; return 0 ;;
+  esac
+  SNELL_QUIC_CLI=1 YES=0 SNELL_ACTION=set-quic
+  nobrand_menu_run nobrand_run_snell_action
+}
+
+snell_menu_service() {
+  local choice=""
+  snell_menu_select_instance || return 0
+  msg '  1) 状态'
+  msg '  2) 启动'
+  msg '  3) 停止'
+  msg '  4) 重启'
+  read_tty choice "$(t '请选择 [1-4]: ' 'Choose [1-4]: ')" || choice=""
+  case "$choice" in
+    1) SNELL_ACTION=status ;;
+    2) SNELL_ACTION=start ;;
+    3) SNELL_ACTION=stop ;;
+    4) SNELL_ACTION=restart ;;
+    *) warn '无效选择'; return 0 ;;
+  esac
+  nobrand_menu_run nobrand_run_snell_action
+}
+
+snell_menu_loop() {
+  local choice="" confirm=""
+  trap - ERR
+  while true; do
+    msg ''
+    msg '========== Snell =========='
+    msg '  1) 安装 Snell v5 [推荐]'
+    msg '  2) 安装 Snell v4 [兼容]'
+    msg '  3) 查看 Snell 节点'
+    msg '  4) QUIC 设置'
+    msg '  5) 修改 Display Endpoint'
+    msg '  6) 服务管理'
+    msg '  7) 升级官方 runtime'
+    msg '  8) Doctor'
+    msg '  9) 删除节点'
+    msg '  0) 返回'
+    read_tty choice "$(t '请选择 [0-9]: ' 'Choose [0-9]: ')" || choice=""
+    case "$choice" in
+      1) snell_menu_install_version 5 ;;
+      2) snell_menu_install_version 4 ;;
+      3) SNELL_NAME=""; SNELL_ACTION=show; nobrand_menu_run nobrand_run_snell_action ;;
+      4) snell_menu_set_quic ;;
+      5)
+        snell_menu_select_instance || continue
+        ADVERTISE_CLI=0 ADVERTISE_AUTO_REQUESTED=0 YES=0 SNELL_ACTION=set-endpoint
+        nobrand_menu_run nobrand_run_snell_action
+        ;;
+      6) snell_menu_service ;;
+      7)
+        msg '升级版本: 1) v5  2) v4'
+        read_tty confirm '请选择 [1-2]: ' || confirm=""
+        case "$confirm" in 1) SNELL_VERSION=5 ;; 2) SNELL_VERSION=4 ;; *) warn '无效选择'; continue ;; esac
+        SNELL_NAME="" SNELL_ACTION=upgrade
+        nobrand_menu_run nobrand_run_snell_action
+        ;;
+      8) SNELL_ACTION=doctor; nobrand_menu_run nobrand_run_snell_action ;;
+      9)
+        snell_menu_select_instance || continue
+        read_tty confirm "确认删除 ${SNELL_NAME}？输入 yes: " || confirm=""
+        [ "$confirm" = yes ] || { warn '已取消'; continue; }
+        SNELL_ACTION=remove
+        nobrand_menu_run nobrand_run_snell_action
+        ;;
+      0) return 0 ;;
+      *) warn '无效选择' ;;
+    esac
+    menu_pause
+  done
+}
+
+hysteria2_menu_loop() {
+  local choice="" confirm=""
+  trap - ERR
+  while true; do
+    msg ''
+    msg '========== Hysteria2 / Xray-core =========='
+    msg '  1) 安装 / 重新部署'
+    msg '  2) 查看节点'
+    msg '  3) 修改 Display Endpoint'
+    msg '  4) 状态'
+    msg '  5) 启动'
+    msg '  6) 停止'
+    msg '  7) 重启'
+    msg '  8) 升级 NoBrand 独立 Xray-core'
+    msg '  9) Doctor'
+    msg ' 10) 删除 Hysteria2'
+    msg '  0) 返回'
+    read_tty choice "$(t '请选择 [0-10]: ' 'Choose [0-10]: ')" || choice=""
+    case "$choice" in
+      1)
+        PORT="" PORT_CLI=0 HY2_SNI="" ADVERTISE_HOST="" ADVERTISE_PORT=""
+        ADVERTISE_CLI=0 ADVERTISE_AUTO_REQUESTED=0 YES=0 HY2_ACTION=install
+        nobrand_menu_run nobrand_run_hy2_action
+        ;;
+      2) HY2_ACTION=show; nobrand_menu_run nobrand_run_hy2_action ;;
+      3)
+        ADVERTISE_CLI=0 ADVERTISE_AUTO_REQUESTED=0 YES=0 HY2_ACTION=set-endpoint
+        nobrand_menu_run nobrand_run_hy2_action
+        ;;
+      4) HY2_ACTION=status; nobrand_menu_run nobrand_run_hy2_action ;;
+      5) HY2_ACTION=start; nobrand_menu_run nobrand_run_hy2_action ;;
+      6) HY2_ACTION=stop; nobrand_menu_run nobrand_run_hy2_action ;;
+      7) HY2_ACTION=restart; nobrand_menu_run nobrand_run_hy2_action ;;
+      8) HY2_ACTION=upgrade; nobrand_menu_run nobrand_run_hy2_action ;;
+      9) HY2_ACTION=doctor; nobrand_menu_run nobrand_run_hy2_action ;;
+      10)
+        read_tty confirm '确认只删除 NoBrand Hysteria2？输入 yes: ' || confirm=""
+        [ "$confirm" = yes ] || { warn '已取消'; continue; }
+        HY2_ACTION=remove
+        nobrand_menu_run nobrand_run_hy2_action
+        ;;
+      0) return 0 ;;
+      *) warn '无效选择' ;;
+    esac
+    menu_pause
+  done
+}
+
+vless_sudoku_menu_loop() {
+  local choice="" confirm=""
+  trap - ERR
+  while true; do
+    msg ''
+    msg '========== Plain VLESS + FinalMask + Sudoku / TCP =========='
+    msg 'VLESS Encryption: NOT USED'
+    msg '  1) 安装 / 重新配置'
+    msg '  2) 查看节点'
+    msg '  3) 修改客户端展示入口'
+    msg '  4) 状态'
+    msg '  5) 启动'
+    msg '  6) 停止'
+    msg '  7) 重启'
+    msg '  8) Doctor'
+    msg '  9) Smoke / 配置验证'
+    msg ' 10) 升级共享 Xray runtime'
+    msg ' 11) 删除'
+    msg '  0) 返回'
+    read_tty choice "$(t '请选择 [0-11]: ' 'Choose [0-11]: ')" || choice=""
+    case "$choice" in
+      1)
+        PORT="" PORT_CLI=0 VLESS_SUDOKU_UUID="" VLESS_SUDOKU_PASSWORD=""
+        ADVERTISE_HOST="" ADVERTISE_PORT="" ADVERTISE_CLI=0 ADVERTISE_AUTO_REQUESTED=0
+        YES=0 VLESS_SUDOKU_ACTION=install
+        nobrand_menu_run nobrand_run_vless_sudoku_action
+        ;;
+      2) VLESS_SUDOKU_ACTION=show; nobrand_menu_run nobrand_run_vless_sudoku_action ;;
+      3)
+        ADVERTISE_HOST="" ADVERTISE_PORT="" ADVERTISE_CLI=0 ADVERTISE_AUTO_REQUESTED=0
+        YES=0 VLESS_SUDOKU_ACTION=set-endpoint
+        nobrand_menu_run nobrand_run_vless_sudoku_action
+        ;;
+      4) VLESS_SUDOKU_ACTION=status; nobrand_menu_run nobrand_run_vless_sudoku_action ;;
+      5) VLESS_SUDOKU_ACTION=start; nobrand_menu_run nobrand_run_vless_sudoku_action ;;
+      6) VLESS_SUDOKU_ACTION=stop; nobrand_menu_run nobrand_run_vless_sudoku_action ;;
+      7) VLESS_SUDOKU_ACTION=restart; nobrand_menu_run nobrand_run_vless_sudoku_action ;;
+      8) VLESS_SUDOKU_ACTION=doctor; nobrand_menu_run nobrand_run_vless_sudoku_action ;;
+      9) VLESS_SUDOKU_ACTION=smoke; nobrand_menu_run nobrand_run_vless_sudoku_action ;;
+      10) VLESS_SUDOKU_ACTION=upgrade; nobrand_menu_run nobrand_run_vless_sudoku_action ;;
+      11)
+        read_tty confirm '确认只删除 NoBrand VLESS Sudoku？输入 yes: ' || confirm=""
+        [ "$confirm" = yes ] || { warn '已取消'; continue; }
+        VLESS_SUDOKU_ACTION=remove
+        nobrand_menu_run nobrand_run_vless_sudoku_action
+        ;;
+      0) return 0 ;;
+      *) warn '无效选择' ;;
+    esac
+    menu_pause
+  done
+}
+
+nobrand_backup_menu_loop() {
+  local choice="" path=""
+  trap - ERR
+  while true; do
+    msg ''
+    msg '========== NoBrand 备份 / 恢复 =========='
+    msg '  1) 创建备份'
+    msg '  2) 列出备份'
+    msg '  3) 从备份恢复'
+    msg '  0) 返回'
+    read_tty choice "$(t '请选择 [0-3]: ' 'Choose [0-3]: ')" || choice=""
+    case "$choice" in
+      1)
+        NOBRAND_BACKUP_ACTION=create NOBRAND_BACKUP_PATH=""
+        nobrand_menu_run nobrand_backup_action
+        ;;
+      2)
+        NOBRAND_BACKUP_ACTION=list NOBRAND_BACKUP_PATH=""
+        nobrand_menu_run nobrand_backup_action
+        ;;
+      3)
+        read_tty path "$(t '备份文件绝对路径: ' 'Absolute backup path: ')" || path=""
+        [ -n "$path" ] || { warn '备份路径不能为空'; continue; }
+        NOBRAND_BACKUP_ACTION=restore NOBRAND_BACKUP_PATH="$path"
+        nobrand_menu_run nobrand_backup_action
+        ;;
+      0) return 0 ;;
+      *) warn '无效选择' ;;
+    esac
+    menu_pause
+  done
+}
+
+nobrand_menu_loop() {
+  local choice=""
+  MENU_MODE=1
+  trap - ERR
+  while true; do
+    nobrand_print_banner
+    msg ''
+    msg '  1) Mieru'
+    msg '  2) Snell v4 / v5'
+    msg '  3) Hysteria2 (Xray-core)'
+    msg '  4) VLESS + FinalMask + Sudoku (TCP)'
+    msg '  5) 查看全部节点'
+    msg '  6) 综合状态'
+    msg '  7) Doctor'
+    msg '  8) 性能 / BBR / FQ（Mieru 公共网络工具）'
+    msg '  9) 备份 / 恢复'
+    msg ' 10) 帮助 / CLI'
+    msg ' 11) 卸载 NoBrand Snell/HY2/VLESS/Common（保留 Mieru）'
+    msg '  0) 退出'
+    read_tty choice "$(t '请选择 [0-11]: ' 'Choose [0-11]: ')" || choice=""
+    case "$choice" in
+      1) menu_loop ;;
+      2) snell_menu_loop ;;
+      3) hysteria2_menu_loop ;;
+      4) vless_sudoku_menu_loop ;;
+      5) NOBRAND_PROTOCOL_FILTER=""; nobrand_menu_run nobrand_nodes; menu_pause ;;
+      6) nobrand_menu_run nobrand_status; menu_pause ;;
+      7) nobrand_menu_run nobrand_doctor; menu_pause ;;
+      8) nobrand_menu_run do_perf; menu_pause ;;
+      9) nobrand_backup_menu_loop ;;
+      10) nobrand_usage; menu_pause ;;
+      11) YES=0; nobrand_menu_run nobrand_uninstall; menu_pause ;;
+      0) return 0 ;;
+      *) warn '无效选择' ;;
+    esac
+  done
+}

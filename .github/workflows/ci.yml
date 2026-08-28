@@ -1,37 +1,49 @@
-name: CI
+name: NoBrand CI
 
 on:
   push:
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
-  shell:
+  unit:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [debian:12, ubuntu:24.04, alpine:3.20]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and unit tests
+        run: |
+          if [[ "${{ matrix.image }}" == alpine:* ]]; then
+            setup='apk add --no-cache bash curl jq unzip openssl python3 iproute2 util-linux tar coreutils shellcheck'
+          else
+            setup='apt-get update && apt-get install -y bash curl ca-certificates jq unzip openssl python3 iproute2 util-linux tar coreutils shellcheck'
+          fi
+          docker run --rm -v "$PWD:/work" -w /work "${{ matrix.image }}" sh -lc "$setup && bash scripts/test.sh"
+          git diff --exit-code -- install-nobrand.sh install-mita.sh dist/install-nobrand.sh dist/install-mita.sh
+
+  mieru-regression:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Build deterministic release artifact
-        run: |
-          bash scripts/build.sh
-          cp install-mita.sh "$RUNNER_TEMP/install-mita.first.sh"
-          bash scripts/build.sh
-          cmp -s "$RUNNER_TEMP/install-mita.first.sh" install-mita.sh
-          cmp -s install-mita.sh dist/install-mita.sh
-          bash scripts/build.sh --check
-          git diff --exit-code -- install-mita.sh dist/install-mita.sh
-          test -z "$(git status --porcelain --untracked-files=all)"
-      - name: Bash syntax
-        run: |
-          for file in install-mita.sh src/*.sh scripts/*.sh; do
-            bash -n "$file"
-          done
-      - name: ShellCheck
-        run: |
-          docker run --rm \
-            -v "$PWD:/mnt:ro" \
-            -w /mnt \
-            koalaman/shellcheck:v0.11.0 \
-            -x install-mita.sh scripts/*.sh
-      - name: Cross-distribution compatibility smoke
-        run: bash scripts/compat-smoke.sh
-      - name: Debian lifecycle and ownership regression
+      - name: Original Mieru isolated-v2 regression
         run: bash scripts/docker-smoke.sh
+      - name: Debian Ubuntu Rocky Alpine compatibility
+        run: bash scripts/compat-smoke.sh
+
+  runtime:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Real HY2 and VLESS FinalMask Xray data plane plus Surge Snell runtimes
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work debian:12 sh -lc '
+            apt-get update &&
+            apt-get install -y bash curl ca-certificates jq unzip openssl python3 iproute2 util-linux tar coreutils shellcheck libstdc++6 &&
+            bash scripts/test.sh --runtime
+          '

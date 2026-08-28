@@ -44,48 +44,24 @@ normalize_uint() {
 # 取本机主用 IPv4：优先默认路由出口地址（ip route get 不发包，仅查路由表，
 # 内网无外网也可用），回退首个非回环地址。
 detect_local_ip() {
-  local ip=""
-  if command -v ip >/dev/null 2>&1; then
-    ip="$(ip route get 1.1.1.1 2>/dev/null | sed -n 's/.*src \([0-9.]*\).*/\1/p' | head -n1)" || true
-  fi
-  if [ -z "$ip" ]; then
-    ip="$(hostname -I 2>/dev/null | tr ' ' '\n' \
-      | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | grep -vE '^127\.' | head -n1)" || true
-  fi
-  printf '%s' "$ip"
+  nb_detect_local_ipv4
 }
 
 # 由本机 IP 末位八位组推导端口基数 N*100（要求 N=1-254 且基数≥1025）；不可用返回非0
 derive_port_base() {
-  local ip n base
+  local ip
   ip="$(detect_local_ip)"
-  n="${ip##*.}"
-  [[ "$n" =~ ^[0-9]+$ ]] || return 1
-  [ "$n" -ge 1 ] && [ "$n" -le 254 ] || return 1
-  base=$((n * 100))
-  [ "$base" -ge 1025 ] || return 1   # 小尾号兜底：基数落入特权端口段则放弃
-  printf '%s' "$base"
+  nb_port_base_for_ip "$ip"
 }
 
 # 在 IP 尾号端口段内随机取一个可用端口：xx01-xx99（xx00 留给 SSH）；不可用返回非0。
 # BOTH 双协议时末两位上限取 98，避免 UDP=主端口+1 溢出到 xx00 或下一机器段。
 derive_port_from_ip() {
-  local base hi start i off p
+  local base hi
   base="$(derive_port_base)" || return 1
   hi=99
   [ "$PROTOCOL" = "BOTH" ] && hi=98
-  start=$(( (RANDOM % hi) + 1 ))
-  i=0
-  while [ "$i" -lt "$hi" ]; do
-    off=$(( ((start - 1 + i) % hi) + 1 ))
-    p=$((base + off))
-    if port_available_for_mode "$p"; then
-      printf '%s' "$p"
-      return 0
-    fi
-    i=$((i + 1))
-  done
-  return 1
+  nb_scan_port_span "$((base + 1))" "$((base + hi))" port_available_for_mode
 }
 
 valid_port() {
@@ -110,19 +86,9 @@ validate_advertise_endpoint_values() {
       'Custom client entry requires both a host and a port')"
     return 1
   }
-  valid_advertise_host "$host" || {
-    warn "$(t '客户端入口地址无效；请输入 IPv4、IPv6 或域名' \
-      'Invalid client entry host; enter an IPv4 address, IPv6 address, or domain name')"
-    return 1
-  }
-  valid_advertise_port "$port" || {
-    warn "$(t '自定义客户端入口端口必须是 1-65535' \
-      'Custom client entry port must be between 1 and 65535')"
-    return 1
-  }
-  if [ "$protocol" = "BOTH" ] && [ "$port" -ge 65535 ]; then
-    warn "$(t '双协议的客户端入口主端口必须 ≤65534（UDP 使用入口端口+1）' \
-      'Dual protocol requires client entry port <=65534 (UDP uses entry port + 1)')"
+  if ! nb_validate_advertise_endpoint "$host" "$port" "$protocol"; then
+    warn "$(t '客户端入口无效；请输入有效 IPv4、IPv6 或域名及 1-65535 端口（双协议主端口 ≤65534）' \
+      'Invalid client endpoint; use a valid IPv4, IPv6, or domain and port 1-65535 (dual main port <=65534)')"
     return 1
   fi
 }

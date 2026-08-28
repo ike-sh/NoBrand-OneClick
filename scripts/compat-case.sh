@@ -8,7 +8,8 @@ export MITA_SOURCE_ONLY=1
 source /work/install-mita.sh
 trap - ERR
 
-test "$SCRIPT_VERSION" = 2.2.1
+test "$SCRIPT_VERSION" = 1.3.0
+test "$SCRIPT_NAME|$SCRIPT_REPO" = 'NoBrand-OneClick|ike-sh/NoBrand-OneClick'
 case "$(detect_pkg_manager)" in
   deb|rpm|alpine) ;;
   *) echo "unsupported package-manager detection" >&2; exit 1 ;;

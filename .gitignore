@@ -1,3 +1,5 @@
 *.swp
 *.bak
 .DS_Store
+.codex-backup/
+.lab/

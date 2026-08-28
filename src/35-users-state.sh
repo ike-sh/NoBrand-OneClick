@@ -89,85 +89,11 @@ for u in d.get("users") or []:
 }
 
 port_is_listening() {
-  local p="$1" proto="${2:-ANY}" flags
+  local p="$1" proto="${2:-ANY}"
   case "$proto" in
-    TCP) flags="-Hlnt" ;;
-    UDP) flags="-Hlnu" ;;
-    *) flags="-Hlntu" ;;
+    TCP|UDP) nb_port_is_listening "$proto" "$p" ;;
+    *) nb_port_is_listening TCP "$p" || nb_port_is_listening UDP "$p" ;;
   esac
-  if command -v ss >/dev/null 2>&1; then
-    if ss "$flags" 2>/dev/null | awk -v port="$p" '
-      {
-        for (i = 1; i <= NF; i++) {
-          if ($i ~ (":" port "$")) {
-            found = 1
-            exit
-          }
-        }
-      }
-      END { exit(found ? 0 : 1) }
-    '; then
-      return 0
-    fi
-    return 1
-  fi
-  if command -v netstat >/dev/null 2>&1; then
-    case "$proto" in
-      TCP) flags="-lnt" ;;
-      UDP) flags="-lnu" ;;
-      *) flags="-lntu" ;;
-    esac
-    if netstat "$flags" 2>/dev/null | awk -v port="$p" '
-      {
-        for (i = 1; i <= NF; i++) {
-          if ($i ~ (":" port "$")) {
-            found = 1
-            exit
-          }
-        }
-      }
-      END { exit(found ? 0 : 1) }
-    '; then
-      return 0
-    fi
-    return 1
-  fi
-  if command -v python3 >/dev/null 2>&1; then
-    python3 - "$p" "$proto" <<'PY'
-import errno
-import socket
-import sys
-
-port = int(sys.argv[1])
-proto = sys.argv[2]
-protocols = ("TCP", "UDP") if proto == "ANY" else (proto,)
-for current_proto in protocols:
-    sock_type = socket.SOCK_DGRAM if current_proto == "UDP" else socket.SOCK_STREAM
-    for family in (socket.AF_INET6, socket.AF_INET):
-        try:
-            sock = socket.socket(family, sock_type)
-        except OSError:
-            continue
-        try:
-            if family == socket.AF_INET6:
-                try:
-                    sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
-                except OSError:
-                    pass
-                sock.bind(("::", port))
-            else:
-                sock.bind(("0.0.0.0", port))
-        except OSError as exc:
-            sock.close()
-            if exc.errno in (errno.EADDRINUSE, errno.EACCES):
-                raise SystemExit(0)
-            continue
-        sock.close()
-raise SystemExit(1)
-PY
-    return $?
-  fi
-  return 1
 }
 
 port_required_bindings() {
@@ -191,6 +117,7 @@ port_available_for_mode() {
   fi
   while IFS='|' read -r proto bind_port; do
     [ -n "$proto" ] && [ -n "$bind_port" ] || continue
+    nb_port_is_tail_base_reserved "$bind_port" && return 1
     port_is_listening "$bind_port" "$proto" && return 1
   done < <(port_required_bindings "$p")
   return 0
@@ -206,6 +133,10 @@ port_listener_details() {
   fi
   while IFS='|' read -r proto bind_port; do
     [ -n "$proto" ] && [ -n "$bind_port" ] || continue
+    if nb_port_is_tail_base_reserved "$bind_port"; then
+      nb_describe_port_conflict "$proto" "$bind_port"
+      continue
+    fi
     case "$proto" in
       TCP) flags="-Hlntp" ;;
       UDP) flags="-Hlnup" ;;

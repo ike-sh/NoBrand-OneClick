@@ -33,12 +33,13 @@ getent group mita >/dev/null || groupadd --system mita
 id mita >/dev/null 2>&1 || useradd --system -g mita -s /usr/sbin/nologin -d /tmp/metrics mita
 
 source /work/install-mita.sh
-test "$SCRIPT_VERSION" = 2.2.1
+test "$SCRIPT_VERSION" = 1.3.0
+test "$SCRIPT_NAME|$SCRIPT_REPO" = 'NoBrand-OneClick|ike-sh/NoBrand-OneClick'
 trap - ERR
 MITA_STATE=/tmp/manager-state/install-state.env
 
 # RC2 UI：品牌格式恢复；主菜单编号固定，卸载为直接入口，未安装摘要不泄漏默认 Profile/state。
-grep -q '^# 作者: ike / https://github.com/ike-sh/mieru-OneClick$' /work/install-mita.sh
+grep -q '^# 作者: ike / https://github.com/ike-sh/NoBrand-OneClick$' /work/install-mita.sh
 grep -q '作者: ${SCRIPT_AUTHOR} / https://github.com/${SCRIPT_REPO}' /work/install-mita.sh
 ! grep -Eq '主菜单[[:space:]]+[0-9]+|main menu[[:space:]]+[0-9]+|菜单[[:space:]]+\*{0,2}[0-9]+\)' \
   /work/install-mita.sh /work/README.md
@@ -54,7 +55,7 @@ grep -q '作者: ${SCRIPT_AUTHOR} / https://github.com/${SCRIPT_REPO}' /work/ins
   menu_rc=$?
   set -e
   test "$menu_rc" -eq 2
-  grep -q '^作者: ike / https://github.com/ike-sh/mieru-OneClick$' <<<"$menu_output"
+  grep -q '^作者: ike / https://github.com/ike-sh/NoBrand-OneClick$' <<<"$menu_output"
   grep -q '^状态: 未安装$' <<<"$menu_output"
   grep -q '^用户: -$' <<<"$menu_output"
   grep -q '^Profile: -$' <<<"$menu_output"

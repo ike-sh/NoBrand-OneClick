@@ -7,15 +7,18 @@
 # The menu intentionally mutates globals inside isolated action subshells; the
 # parent only consumes exit codes, so SC2030/SC2031 are false positives here.
 # shellcheck disable=SC2030,SC2031
-# mieru / mita 服务端一键安装脚本
-# 作者: ike / https://github.com/ike-sh/mieru-OneClick
-# 基于 https://github.com/enfein/mieru
+# NoBrand-OneClick — Mieru / Snell / Hysteria2 / Plain VLESS Sudoku 工具箱
+# 作者: ike / https://github.com/ike-sh/NoBrand-OneClick
+# Mieru 母体代码源自 ike-sh/mieru-OneClick (MIT)；Hysteria2 与 VLESS
+# FinalMask/Sudoku 逻辑参考 ike-sh/Xray-OneClick (GPL-3.0)。本融合项目按
+# GPL-3.0 发布；VLESS 为 plain VLESS/TCP，不使用 VLESS Encryption。
 set -euo pipefail
 umask 077
 
-SCRIPT_VERSION="2.2.1"
+SCRIPT_VERSION="1.3.0"
 SCRIPT_AUTHOR="ike"
-SCRIPT_REPO="ike-sh/mieru-OneClick"
+SCRIPT_NAME="NoBrand-OneClick"
+SCRIPT_REPO="ike-sh/NoBrand-OneClick"
 UPSTREAM_REPO="enfein/mieru"
 TESTED_MIERU_VERSION="3.35.0"
 GITHUB_API="https://api.github.com/repos/${UPSTREAM_REPO}/releases/latest"
@@ -65,9 +68,67 @@ QUOTA_RESET_METHOD="${QUOTA_RESET_METHOD:-metrics}"
 INSTALL_SCRIPT_PATH="/usr/local/bin/install-mita"
 MITA_MENU_PATH="/usr/local/bin/mita-menu"
 MITA_PROFILE_D="/etc/profile.d/mita-oneclick.sh"
-SCRIPT_REPO_RAW="https://raw.githubusercontent.com/ike-sh/mieru-OneClick/v${SCRIPT_VERSION}/install-mita.sh"
+SCRIPT_REPO_RAW="https://raw.githubusercontent.com/${SCRIPT_REPO}/v${SCRIPT_VERSION}/install-nobrand.sh"
 OPENRC_SVC="/etc/init.d/mita"
 SYSTEMD_SVC="/etc/systemd/system/mita.service"
+
+# NoBrand Common Core。Mieru 的权威 state 和 /etc/mita 语义保持不变；这些
+# 路径只管理公共 metadata、Snell 与独立的 Xray-core 协议进程。
+NOBRAND_STATE_DIR="${NOBRAND_STATE_DIR:-/var/lib/nobrand-oneclick}"
+NOBRAND_CONFIG_DIR="${NOBRAND_CONFIG_DIR:-/etc/nobrand-oneclick}"
+NOBRAND_LIB_DIR="${NOBRAND_LIB_DIR:-/usr/local/lib/nobrand-oneclick}"
+NOBRAND_BIN_DIR="${NOBRAND_BIN_DIR:-${NOBRAND_LIB_DIR}/bin}"
+NOBRAND_BACKUP_DIR="${NOBRAND_BACKUP_DIR:-${NOBRAND_STATE_DIR}/backups}"
+NOBRAND_LOCK_DIR="${NOBRAND_LOCK_DIR:-${NOBRAND_STATE_DIR}/locks}"
+NOBRAND_REGISTRY_FILE="${NOBRAND_REGISTRY_FILE:-${NOBRAND_STATE_DIR}/state.json}"
+NOBRAND_FIREWALL_OWNED_STATE="${NOBRAND_FIREWALL_OWNED_STATE:-${NOBRAND_STATE_DIR}/firewall-owned.bindings}"
+NOBRAND_FIREWALL_COMMENT="nobrand-oneclick"
+NOBRAND_INSTALL_SCRIPT_PATH="${NOBRAND_INSTALL_SCRIPT_PATH:-/usr/local/bin/install-nobrand}"
+NOBRAND_COMMAND_PATH="${NOBRAND_COMMAND_PATH:-/usr/local/bin/nobrand}"
+NOBRAND_SHORT_COMMAND_PATH="${NOBRAND_SHORT_COMMAND_PATH:-/usr/local/bin/nb}"
+
+NOBRAND_SNELL_STATE_DIR="${NOBRAND_SNELL_STATE_DIR:-${NOBRAND_STATE_DIR}/snell/instances}"
+NOBRAND_SNELL_CONFIG_DIR="${NOBRAND_SNELL_CONFIG_DIR:-${NOBRAND_CONFIG_DIR}/snell/instances}"
+NOBRAND_SNELL_RUNTIME_DIR="${NOBRAND_SNELL_RUNTIME_DIR:-${NOBRAND_BIN_DIR}/snell}"
+NOBRAND_SNELL_SYSTEMD_TEMPLATE="${NOBRAND_SNELL_SYSTEMD_TEMPLATE:-/etc/systemd/system/nobrand-snell@.service}"
+NOBRAND_SNELL_OPENRC_PREFIX="${NOBRAND_SNELL_OPENRC_PREFIX:-/etc/init.d/nobrand-snell-}"
+NOBRAND_SNELL_RUNNER="${NOBRAND_SNELL_RUNNER:-${NOBRAND_LIB_DIR}/snell-run}"
+SNELL_RELEASE_PAGE="https://kb.nssurge.com/surge-knowledge-base/release-notes/snell.md"
+
+NOBRAND_HY2_STATE_DIR="${NOBRAND_HY2_STATE_DIR:-${NOBRAND_STATE_DIR}/hysteria2}"
+NOBRAND_HY2_STATE_FILE="${NOBRAND_HY2_STATE_FILE:-${NOBRAND_HY2_STATE_DIR}/state.json}"
+NOBRAND_HY2_CONFIG_DIR="${NOBRAND_HY2_CONFIG_DIR:-${NOBRAND_CONFIG_DIR}/hysteria2}"
+NOBRAND_HY2_CONFIG_FILE="${NOBRAND_HY2_CONFIG_FILE:-${NOBRAND_HY2_CONFIG_DIR}/config.json}"
+NOBRAND_HY2_CERT_FILE="${NOBRAND_HY2_CERT_FILE:-${NOBRAND_HY2_CONFIG_DIR}/hysteria2-cert.pem}"
+NOBRAND_HY2_KEY_FILE="${NOBRAND_HY2_KEY_FILE:-${NOBRAND_HY2_CONFIG_DIR}/hysteria2-key.pem}"
+NOBRAND_XRAY_BIN="${NOBRAND_XRAY_BIN:-${NOBRAND_BIN_DIR}/xray}"
+NOBRAND_XRAY_ASSET_DIR="${NOBRAND_XRAY_ASSET_DIR:-${NOBRAND_LIB_DIR}/xray-assets}"
+NOBRAND_HY2_SERVICE_NAME="nobrand-hysteria2"
+NOBRAND_HY2_SYSTEMD_SERVICE="${NOBRAND_HY2_SYSTEMD_SERVICE:-/etc/systemd/system/nobrand-hysteria2.service}"
+NOBRAND_HY2_OPENRC_SERVICE="${NOBRAND_HY2_OPENRC_SERVICE:-/etc/init.d/nobrand-hysteria2}"
+NOBRAND_XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
+NOBRAND_HY2_TAG="nobrand-hysteria2-in"
+
+NOBRAND_VLESS_STATE_DIR="${NOBRAND_VLESS_STATE_DIR:-${NOBRAND_STATE_DIR}/vless-sudoku}"
+NOBRAND_VLESS_STATE_FILE="${NOBRAND_VLESS_STATE_FILE:-${NOBRAND_VLESS_STATE_DIR}/state.json}"
+NOBRAND_VLESS_CLIENT_FILE="${NOBRAND_VLESS_CLIENT_FILE:-${NOBRAND_VLESS_STATE_DIR}/client.json}"
+NOBRAND_VLESS_CONFIG_DIR="${NOBRAND_VLESS_CONFIG_DIR:-${NOBRAND_CONFIG_DIR}/vless-sudoku}"
+NOBRAND_VLESS_CONFIG_FILE="${NOBRAND_VLESS_CONFIG_FILE:-${NOBRAND_VLESS_CONFIG_DIR}/config.json}"
+NOBRAND_VLESS_SERVICE_NAME="nobrand-vless-sudoku"
+NOBRAND_VLESS_SYSTEMD_SERVICE="${NOBRAND_VLESS_SYSTEMD_SERVICE:-/etc/systemd/system/nobrand-vless-sudoku.service}"
+NOBRAND_VLESS_OPENRC_SERVICE="${NOBRAND_VLESS_OPENRC_SERVICE:-/etc/init.d/nobrand-vless-sudoku}"
+NOBRAND_VLESS_TAG="nobrand-vless-sudoku-in"
+
+# Xray-OneClick 57-hysteria2.sh 的原始候选集合，顺序也是非交互默认语义。
+NOBRAND_HY2_SNI_CANDIDATES=(
+  "www.abmindustriesgroup.com"
+  "www.microsoft.com"
+  "www.oracle.com"
+  "www.ibm.com"
+  "www.amazon.com"
+  "www.samsung.com"
+  "www.nvidia.com"
+)
 # 多用户端口池：相对主端口偏移，或 IP 尾号段内扫描
 USER_PORT_POOL_START="${USER_PORT_POOL_START:-}"
 USER_PORT_POOL_END="${USER_PORT_POOL_END:-}"
@@ -148,12 +209,41 @@ TC_PREF_MAX=42999
 # 0=首次安装的短暂兼容路径；1=使用 users.json 管理用户专属实例。
 MULTI_USER_MODE=0
 
+# NoBrand 顶层 CLI 状态。旧 install-mita/mita 路径仍由原解析器处理。
+NOBRAND_ENTRY=0
+NOBRAND_ARGS_HANDLED=0
+NOBRAND_PROTOCOL_FILTER=""
+NOBRAND_BACKUP_ACTION=""
+NOBRAND_BACKUP_PATH=""
+SNELL_ACTION=""
+SNELL_NAME=""
+SNELL_VERSION="5"
+SNELL_VERSION_CLI=0
+SNELL_PSK=""
+SNELL_QUIC_PROXY=""
+SNELL_QUIC_CLI=0
+SNELL_RESOLVED_VERSION=""
+SNELL_RESOLVED_URL=""
+SNELL_RESOLVED_STATUS=""
+SNELL_RESOLVED_SHA256=""
+HY2_ACTION=""
+HY2_SNI=""
+HY2_AUTH=""
+HY2_OBFS=""
+HY2_LISTEN="0.0.0.0"
+VLESS_SUDOKU_ACTION=""
+VLESS_SUDOKU_UUID=""
+VLESS_SUDOKU_PASSWORD=""
+VLESS_SUDOKU_LISTEN="0.0.0.0"
+VLESS_SUDOKU_CLIENT_SOCKS_PORT="${VLESS_SUDOKU_CLIENT_SOCKS_PORT:-18080}"
+ADVERTISE_AUTO_REQUESTED=0
+
 if [ -z "${BASH_VERSION:-}" ]; then
   echo "[错误] 请使用 bash 运行此脚本" >&2
   if [ -f /etc/alpine-release ]; then
     echo "Alpine 默认无 bash，请先安装后执行（root 无需 sudo）：" >&2
     echo "  apk add --no-cache bash curl" >&2
-    echo "  curl -fsSL https://raw.githubusercontent.com/ike-sh/mieru-OneClick/main/install-mita.sh | bash" >&2
+    echo "  curl -fsSL https://raw.githubusercontent.com/ike-sh/NoBrand-OneClick/main/install-nobrand.sh | bash" >&2
   else
     echo "  curl -fsSL .../install-mita.sh | sudo bash" >&2
   fi
@@ -258,14 +348,14 @@ mieru mita 服务端一键安装 ${SCRIPT_VERSION}
   其余如 mita run/apply/reload     仍透传官方二进制
 
 一键安装（交互式，Debian/Ubuntu/CentOS 等）：
-  curl -fsSL https://raw.githubusercontent.com/ike-sh/mieru-OneClick/main/install-mita.sh | sudo bash
+  curl -fsSL https://raw.githubusercontent.com/ike-sh/NoBrand-OneClick/main/install-nobrand.sh | sudo bash
 
 Alpine Linux（无 sudo，需先装 bash）：
   apk add --no-cache bash curl
-  curl -fsSL https://raw.githubusercontent.com/ike-sh/mieru-OneClick/main/install-mita.sh | bash
+  curl -fsSL https://raw.githubusercontent.com/ike-sh/NoBrand-OneClick/main/install-nobrand.sh | bash
 
 Alpine 一行命令：
-  apk add --no-cache bash curl && curl -fsSL https://raw.githubusercontent.com/ike-sh/mieru-OneClick/main/install-mita.sh | bash
+  apk add --no-cache bash curl && curl -fsSL https://raw.githubusercontent.com/ike-sh/NoBrand-OneClick/main/install-nobrand.sh | bash
 
 非交互示例：
   curl -fsSL .../install-mita.sh | sudo bash -s -- --install -y --port 2088 --user alice --password 'secret'
@@ -305,7 +395,276 @@ print_banner() {
     "Author: ${SCRIPT_AUTHOR} / https://github.com/${SCRIPT_REPO}"
 }
 
-while [ $# -gt 0 ]; do
+parse_nobrand_common_option() {
+  case "${1:-}" in
+    --yes|-y) YES=1 ;;
+    --dry-run) DRY_RUN=1 ;;
+    --port)
+      PORT="${2:-}"
+      PORT_CLI=1
+      [ -n "$PORT" ] || die "--port 需要端口号"
+      return 2
+      ;;
+    --advertise-host)
+      ADVERTISE_HOST="${2:-}"
+      ADVERTISE_CLI=1
+      ADVERTISE_AUTO_REQUESTED=0
+      [ -n "$ADVERTISE_HOST" ] || die "--advertise-host 需要地址"
+      return 2
+      ;;
+    --advertise-port)
+      ADVERTISE_PORT="${2:-}"
+      ADVERTISE_CLI=1
+      ADVERTISE_AUTO_REQUESTED=0
+      [ -n "$ADVERTISE_PORT" ] || die "--advertise-port 需要端口"
+      return 2
+      ;;
+    --advertise-auto)
+      ADVERTISE_HOST=""
+      ADVERTISE_PORT=""
+      ADVERTISE_CLI=1
+      ADVERTISE_AUTO_REQUESTED=1
+      ;;
+    *) return 1 ;;
+  esac
+  return 0
+}
+
+parse_nobrand_snell_args() {
+  SNELL_ACTION="${1:-menu}"
+  [ "$#" -eq 0 ] || shift
+  case "$SNELL_ACTION" in
+    v4|4) SNELL_ACTION=install; SNELL_VERSION=4; SNELL_VERSION_CLI=1 ;;
+    v5|5) SNELL_ACTION=install; SNELL_VERSION=5; SNELL_VERSION_CLI=1 ;;
+    add|create) SNELL_ACTION=install ;;
+    list|nodes) SNELL_ACTION=show ;;
+    delete|uninstall) SNELL_ACTION=remove ;;
+    endpoint) SNELL_ACTION=set-endpoint ;;
+    quic|set-quic) SNELL_ACTION=set-quic ;;
+    menu|install|show|set-endpoint|remove|start|stop|restart|status|doctor|upgrade) ;;
+    help|-h|--help) SNELL_ACTION=help ;;
+    *) die "未知 Snell 操作: $SNELL_ACTION" ;;
+  esac
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --name)
+        SNELL_NAME="${2:-}"
+        [ -n "$SNELL_NAME" ] || die "--name 需要节点名"
+        shift 2
+        ;;
+      --version)
+        SNELL_VERSION="${2:-}"
+        SNELL_VERSION_CLI=1
+        [ -n "$SNELL_VERSION" ] || die "--version 需要 4 或 5"
+        shift 2
+        ;;
+      --psk)
+        SNELL_PSK="${2:-}"
+        [ -n "$SNELL_PSK" ] || die "--psk 需要值"
+        shift 2
+        ;;
+      --quic)
+        SNELL_QUIC_PROXY="${2:-}"
+        SNELL_QUIC_CLI=1
+        [ -n "$SNELL_QUIC_PROXY" ] || die "--quic 需要 on 或 off"
+        case "$SNELL_QUIC_PROXY" in
+          on|off) ;;
+          *) die "--quic 只支持 on 或 off" ;;
+        esac
+        shift 2
+        ;;
+      *)
+        local consumed=0 rc=0
+        parse_nobrand_common_option "$1" "${2:-}" || rc=$?
+        case "$rc" in
+          0) consumed=1 ;;
+          2) consumed=2 ;;
+          *) die "未知 Snell 参数: $1" ;;
+        esac
+        shift "$consumed"
+        ;;
+    esac
+  done
+  case "$SNELL_VERSION" in
+    4|5) ;;
+    *) die "Snell 只支持 v4、v5" ;;
+  esac
+  if [ "$SNELL_VERSION" = 4 ] && [ "$SNELL_QUIC_PROXY" = on ]; then
+    die "Snell v4 不支持 QUIC Proxy Mode"
+  fi
+  ACTION="nobrand-snell"
+  NOBRAND_ARGS_HANDLED=1
+}
+
+parse_nobrand_hy2_args() {
+  HY2_ACTION="${1:-menu}"
+  [ "$#" -eq 0 ] || shift
+  case "$HY2_ACTION" in
+    add|create|reconfigure) HY2_ACTION=install ;;
+    nodes) HY2_ACTION=show ;;
+    delete|uninstall) HY2_ACTION=remove ;;
+    endpoint) HY2_ACTION=set-endpoint ;;
+    menu|install|show|set-endpoint|remove|start|stop|restart|status|doctor|upgrade) ;;
+    help|-h|--help) HY2_ACTION=help ;;
+    *) die "未知 Hysteria2 操作: $HY2_ACTION" ;;
+  esac
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --sni)
+        HY2_SNI="${2:-}"
+        [ -n "$HY2_SNI" ] || die "--sni 需要域名或 IPv4"
+        shift 2
+        ;;
+      *)
+        local consumed=0 rc=0
+        parse_nobrand_common_option "$1" "${2:-}" || rc=$?
+        case "$rc" in
+          0) consumed=1 ;;
+          2) consumed=2 ;;
+          *) die "未知 Hysteria2 参数: $1" ;;
+        esac
+        shift "$consumed"
+        ;;
+    esac
+  done
+  ACTION="nobrand-hy2"
+  NOBRAND_ARGS_HANDLED=1
+}
+
+parse_nobrand_vless_sudoku_args() {
+  VLESS_SUDOKU_ACTION="${1:-menu}"
+  [ "$#" -eq 0 ] || shift
+  case "$VLESS_SUDOKU_ACTION" in
+    add|create|reconfigure) VLESS_SUDOKU_ACTION=install ;;
+    nodes) VLESS_SUDOKU_ACTION=show ;;
+    delete|uninstall) VLESS_SUDOKU_ACTION=remove ;;
+    endpoint) VLESS_SUDOKU_ACTION=set-endpoint ;;
+    menu|install|show|set-endpoint|remove|start|stop|restart|status|doctor|smoke|upgrade) ;;
+    help|-h|--help) VLESS_SUDOKU_ACTION=help ;;
+    *) die "未知 VLESS Sudoku 操作: $VLESS_SUDOKU_ACTION" ;;
+  esac
+  while [ "$#" -gt 0 ]; do
+    local consumed=0 rc=0
+    parse_nobrand_common_option "$1" "${2:-}" || rc=$?
+    case "$rc" in
+      0) consumed=1 ;;
+      2) consumed=2 ;;
+      *) die "未知 VLESS Sudoku 参数: $1" ;;
+    esac
+    shift "$consumed"
+  done
+  ACTION="nobrand-vless-sudoku"
+  NOBRAND_ARGS_HANDLED=1
+}
+
+detect_nobrand_entry() {
+  local entry
+  entry="$(basename -- "$0" 2>/dev/null || printf '%s' "$0")"
+  case "$entry" in
+    install-nobrand.sh|install-nobrand|nobrand|nb) NOBRAND_ENTRY=1 ;;
+  esac
+  if [ "${1:-}" = nobrand ]; then
+    NOBRAND_ENTRY=1
+    shift
+    set -- "$@"
+  fi
+  [ "$NOBRAND_ENTRY" -eq 1 ] || return 0
+  [ "$#" -gt 0 ] || { NOBRAND_ARGS_HANDLED=1; return 0; }
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+    mieru)
+      shift
+      if [ "$#" -eq 0 ]; then
+        ACTION="nobrand-mieru-menu"
+        NOBRAND_ARGS_HANDLED=1
+      else
+        # 将剩余参数交回原 Mieru 解析器，保持兼容 CLI。
+        NOBRAND_REPARSED_ARGS=("$@")
+      fi
+      ;;
+    snell)
+      shift
+      parse_nobrand_snell_args "$@"
+      ;;
+    hy2|hysteria2)
+      shift
+      parse_nobrand_hy2_args "$@"
+      ;;
+    vless-sudoku|sudoku)
+      shift
+      parse_nobrand_vless_sudoku_args "$@"
+      ;;
+    status)
+      [ "$#" -eq 1 ] || die 'status 不接受参数'
+      ACTION=nobrand-status; NOBRAND_ARGS_HANDLED=1
+      ;;
+    nodes)
+      shift
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          --protocol)
+            NOBRAND_PROTOCOL_FILTER="${2:-}"
+            [ -n "$NOBRAND_PROTOCOL_FILTER" ] \
+              || die "--protocol 需要 mieru、snell、hy2 或 vless-sudoku"
+            shift 2
+            ;;
+          *) die "未知 nodes 参数: $1" ;;
+        esac
+      done
+      ACTION=nobrand-nodes; NOBRAND_ARGS_HANDLED=1
+      ;;
+    doctor)
+      [ "$#" -eq 1 ] || die 'doctor 不接受参数'
+      ACTION=nobrand-doctor; NOBRAND_ARGS_HANDLED=1
+      ;;
+    backup)
+      shift
+      NOBRAND_BACKUP_ACTION="${1:-create}"
+      [ "$#" -eq 0 ] || shift
+      case "$NOBRAND_BACKUP_ACTION" in create|restore|list) ;; *) die "backup 只支持 create、restore、list" ;; esac
+      if [ "$#" -gt 0 ]; then
+        NOBRAND_BACKUP_PATH="$1"
+        shift
+      fi
+      [ "$#" -eq 0 ] || die "backup 参数过多"
+      ACTION=nobrand-backup; NOBRAND_ARGS_HANDLED=1
+      ;;
+    uninstall|remove)
+      shift
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          --yes|-y) YES=1; shift ;;
+          *) die "未知 uninstall 参数: $1" ;;
+        esac
+      done
+      ACTION=nobrand-uninstall; NOBRAND_ARGS_HANDLED=1
+      ;;
+    network|bbr)
+      [ "$#" -eq 1 ] || die 'network/bbr 不接受参数'
+      ACTION=nobrand-network; NOBRAND_ARGS_HANDLED=1
+      ;;
+    menu)
+      [ "$#" -eq 1 ] || die 'menu 不接受参数'
+      ACTION=""; NOBRAND_ARGS_HANDLED=1
+      ;;
+    help|-h|--help)
+      [ "$#" -eq 1 ] || die 'help 不接受参数'
+      ACTION=nobrand-help; NOBRAND_ARGS_HANDLED=1
+      ;;
+    version|--version)
+      [ "$#" -eq 1 ] || die 'version 不接受参数'
+      ACTION=nobrand-version; NOBRAND_ARGS_HANDLED=1
+      ;;
+    *) die "未知 NoBrand 操作: $1（使用 --help 查看帮助）" ;;
+  esac
+}
+
+NOBRAND_REPARSED_ARGS=()
+detect_nobrand_entry "$@"
+if [ "${#NOBRAND_REPARSED_ARGS[@]}" -gt 0 ]; then
+  set -- "${NOBRAND_REPARSED_ARGS[@]}"
+fi
+
+while [ "$NOBRAND_ARGS_HANDLED" -eq 0 ] && [ $# -gt 0 ]; do
   _arg_lc="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
   case "$_arg_lc" in
     --install) ACTION=install ;;
@@ -562,7 +921,7 @@ while [ $# -gt 0 ]; do
       shift
       ;;
     --help|-h) usage; exit 0 ;;
-    --version) echo "mieru-OneClick install-mita.sh ${SCRIPT_VERSION} by ${SCRIPT_AUTHOR}"; exit 0 ;;
+    --version) echo "${SCRIPT_NAME} Mieru compatibility installer ${SCRIPT_VERSION} by ${SCRIPT_AUTHOR}"; exit 0 ;;
     *)
       if [[ "$1" == --* ]]; then
         die "未知参数：$1（使用 --help 查看帮助）"
@@ -1275,9 +1634,1170 @@ load_install_state() {
   return 0
 }
 
+# ---------- NoBrand Common Core: transport-aware 端口注册表与分配 ----------
+
+nb_normalize_transport() {
+  case "$(printf '%s' "${1:-}" | tr '[:lower:]' '[:upper:]')" in
+    TCP) printf 'TCP' ;;
+    UDP) printf 'UDP' ;;
+    *) return 1 ;;
+  esac
+}
+
+nb_normalized_port_key() {
+  local transport port
+  transport="$(nb_normalize_transport "${1:-}")" || return 1
+  port="$(normalize_uint "${2:-}")" || return 1
+  printf '%s:%s' "$(printf '%s' "$transport" | tr '[:upper:]' '[:lower:]')" "$port"
+}
+
+# 手工端口允许 1-65535；自动分配始终从 1025 起。Mieru 自身仍通过
+# valid_port 保持原有 1025 下限。
+nb_valid_port() {
+  local port
+  port="$(normalize_uint "${1:-}")" || return 1
+  [ "${#port}" -le 5 ] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ]
+}
+
+# 默认路由出口优先，避免 Docker bridge/第二网卡抢占端口尾号语义。
+nb_detect_local_ipv4() {
+  local candidate=""
+  if [ -n "${NOBRAND_TEST_LOCAL_IPV4:-}" ]; then
+    printf '%s' "$NOBRAND_TEST_LOCAL_IPV4"
+    return 0
+  fi
+  if command -v ip >/dev/null 2>&1; then
+    candidate="$(ip -4 route get 1.1.1.1 2>/dev/null \
+      | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')" || true
+  fi
+  if [ -z "$candidate" ] && command -v ip >/dev/null 2>&1; then
+    candidate="$(ip -o -4 route show default 2>/dev/null \
+      | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}' \
+      | while IFS= read -r iface; do
+          [ -n "$iface" ] || continue
+          ip -o -4 addr show dev "$iface" scope global 2>/dev/null \
+            | awk '{split($4,a,"/"); print a[1]; exit}'
+          break
+        done)" || true
+  fi
+  if [ -z "$candidate" ]; then
+    candidate="$(hostname -I 2>/dev/null | tr ' ' '\n' \
+      | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' \
+      | grep -vE '^(127|169\.254)\.' | head -n1)" || true
+  fi
+  case "$candidate" in
+    *.*.*.*) printf '%s' "$candidate" ;;
+    *) return 1 ;;
+  esac
+}
+
+nb_port_base_for_ip() {
+  local ip="${1:-}" octet base
+  octet="${ip##*.}"
+  [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+  [[ "$octet" =~ ^[0-9]+$ ]] || return 1
+  [ "$octet" -ge 1 ] && [ "$octet" -le 254 ] || return 1
+  base=$((10#$octet * 100))
+  [ "$base" -ge 1025 ] && [ "$((base + 99))" -le 65535 ] || return 1
+  printf '%s' "$base"
+}
+
+nb_tail_port_bounds() {
+  local ip="${1:-}" base
+  [ -n "$ip" ] || ip="$(nb_detect_local_ipv4)" || return 1
+  base="$(nb_port_base_for_ip "$ip")" || return 1
+  printf '%s|%s' "$((base + 1))" "$((base + 99))"
+}
+
+# 尾号算法只把 base+1..base+99 分配给代理。base（xx00）保留给
+# 外部 NAT、SSH 或实验室入口等带外设施；这些占用在 guest 内通常不可见。
+# 规则由本机默认路由 IPv4 推导，不包含任何环境专用 IP 或端口常量。
+nb_tail_base_reservation_owner() {
+  local port ip base
+  port="$(normalize_uint "${1:-}")" || return 1
+  ip="$(nb_detect_local_ipv4 2>/dev/null || true)"
+  [ -n "$ip" ] || return 1
+  base="$(nb_port_base_for_ip "$ip" 2>/dev/null || true)"
+  [ -n "$base" ] && [ "$port" -eq "$base" ] || return 1
+  printf 'common:tail-base:%s' "$ip"
+}
+
+nb_port_is_tail_base_reserved() {
+  nb_tail_base_reservation_owner "$1" >/dev/null 2>&1
+}
+
+# 随机起点 + 环形遍历。check_fn 成功表示端口可用。
+nb_scan_port_span() {
+  local lo="$1" hi="$2" check_fn="$3"
+  shift 3
+  local span start index offset port
+  [ "$lo" -le "$hi" ] || return 1
+  span=$((hi - lo + 1))
+  if [ -n "${NOBRAND_TEST_RANDOM_START:-}" ]; then
+    start=$((NOBRAND_TEST_RANDOM_START % span))
+  else
+    start=$((RANDOM % span))
+  fi
+  index=0
+  while [ "$index" -lt "$span" ]; do
+    offset=$(((start + index) % span))
+    port=$((lo + offset))
+    if "$check_fn" "$port" "$@"; then
+      printf '%s' "$port"
+      return 0
+    fi
+    index=$((index + 1))
+  done
+  return 1
+}
+
+nb_port_bind_probe_in_use() {
+  local transport port
+  transport="$(nb_normalize_transport "$1")" || return 2
+  port="$(normalize_uint "$2")" || return 2
+  command -v python3 >/dev/null 2>&1 || return 2
+  python3 - "$transport" "$port" <<'PY'
+import errno
+import socket
+import sys
+
+transport, raw_port = sys.argv[1:3]
+port = int(raw_port)
+sock_type = socket.SOCK_STREAM if transport == "TCP" else socket.SOCK_DGRAM
+attempted = False
+for family, address in ((socket.AF_INET6, "::"), (socket.AF_INET, "0.0.0.0")):
+    try:
+        sock = socket.socket(family, sock_type)
+    except OSError:
+        continue
+    attempted = True
+    try:
+        if family == socket.AF_INET6:
+            try:
+                sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+            except OSError:
+                pass
+        sock.bind((address, port))
+    except OSError as exc:
+        sock.close()
+        if exc.errno in (errno.EADDRINUSE, errno.EACCES):
+            raise SystemExit(0)
+        continue
+    sock.close()
+raise SystemExit(1 if attempted else 2)
+PY
+}
+
+# 成功表示该 transport 的端口已有 listener。
+nb_port_is_listening() {
+  local transport port flags
+  transport="$(nb_normalize_transport "$1")" || return 1
+  port="$(normalize_uint "$2")" || return 1
+  if command -v ss >/dev/null 2>&1; then
+    [ "$transport" = TCP ] && flags='-Hlnt' || flags='-Hlnu'
+    ss "$flags" 2>/dev/null | awk -v port="$port" '
+      { for (i=1; i<=NF; i++) if ($i ~ (":" port "$")) { found=1; exit } }
+      END { exit(found ? 0 : 1) }
+    '
+    return $?
+  fi
+  if command -v netstat >/dev/null 2>&1; then
+    [ "$transport" = TCP ] && flags='-lnt' || flags='-lnu'
+    netstat "$flags" 2>/dev/null | awk -v port="$port" '
+      { for (i=1; i<=NF; i++) if ($i ~ (":" port "$")) { found=1; exit } }
+      END { exit(found ? 0 : 1) }
+    '
+    return $?
+  fi
+  nb_port_bind_probe_in_use "$transport" "$port"
+}
+
+nb_port_listener_details() {
+  local transport port flags
+  transport="$(nb_normalize_transport "$1")" || return 0
+  port="$(normalize_uint "$2")" || return 0
+  if command -v ss >/dev/null 2>&1; then
+    [ "$transport" = TCP ] && flags='-Hlntp' || flags='-Hlnup'
+    ss "$flags" 2>/dev/null | awk -v port="$port" '
+      { for (i=1; i<=NF; i++) if ($i ~ (":" port "$")) { print; break } }
+    '
+  elif command -v netstat >/dev/null 2>&1; then
+    [ "$transport" = TCP ] && flags='-lntp' || flags='-lnup'
+    netstat "$flags" 2>/dev/null | awk -v port="$port" '
+      { for (i=1; i<=NF; i++) if ($i ~ (":" port "$")) { print; break } }
+    '
+  fi
+}
+
+# Return the socket-owner PIDs reported by ss/netstat. Doctor runs as root on
+# supported deployments, so ss normally exposes pid=NNN; the netstat form is
+# retained for compatibility. An empty result means ownership was not visible.
+nb_port_listener_pids() {
+  local details
+  details="$(nb_port_listener_details "$1" "$2" 2>/dev/null || true)"
+  [ -n "$details" ] || return 0
+  printf '%s\n' "$details" \
+    | sed -nE \
+      -e 's/.*pid=([0-9]+).*/\1/p' \
+      -e 's/.*[[:space:]]([0-9]+)\/[^[:space:]]+[[:space:]]*$/\1/p' \
+    | LC_ALL=C sort -u
+}
+
+# 输出 owner|transport|port|advertise_host|advertise_port。Mieru 仍从原
+# /var/lib/mita-oneclick adapter 读取，不复制、不迁移其 state。
+nb_registry_rows() {
+  command -v python3 >/dev/null 2>&1 || return 0
+  NOBRAND_SNELL_STATE_DIR="$NOBRAND_SNELL_STATE_DIR" \
+  NOBRAND_HY2_STATE_FILE="$NOBRAND_HY2_STATE_FILE" \
+  NOBRAND_VLESS_STATE_FILE="$NOBRAND_VLESS_STATE_FILE" \
+  MITA_USERS_STATE="$MITA_USERS_STATE" MITA_STATE="$MITA_STATE" \
+  python3 - <<'PY'
+import glob
+import json
+import os
+import shlex
+
+def emit(owner, transport, port, host="", advertise_port=""):
+    try:
+        port = int(port)
+    except Exception:
+        return
+    print("%s|%s|%s|%s|%s" % (owner, transport.upper(), port, host or "", advertise_port or ""))
+
+snell_dir = os.environ.get("NOBRAND_SNELL_STATE_DIR", "")
+for path in sorted(glob.glob(os.path.join(snell_dir, "*.json"))):
+    try:
+        state = json.load(open(path, encoding="utf-8"))
+        file_id = os.path.basename(path)[:-5]
+        instance_id = str(state.get("instance_id") or "")
+        version = state.get("version")
+        if state.get("protocol") != "snell" or instance_id != file_id or version not in (4, 5):
+            continue
+        owner = "snell:" + instance_id
+        emit(owner, "TCP", state.get("listen_port"), state.get("advertise_host"), state.get("advertise_port"))
+        if version == 5 and state.get("managed_udp") is True:
+            emit(owner, "UDP", state.get("listen_port"), state.get("advertise_host"), state.get("advertise_port"))
+    except Exception:
+        continue
+
+hy2_path = os.environ.get("NOBRAND_HY2_STATE_FILE", "")
+if hy2_path and os.path.isfile(hy2_path):
+    try:
+        state = json.load(open(hy2_path, encoding="utf-8"))
+        emit("hy2:default", "UDP", state.get("listen_port"), state.get("advertise_host"), state.get("advertise_port"))
+    except Exception:
+        pass
+
+vless_path = os.environ.get("NOBRAND_VLESS_STATE_FILE", "")
+if vless_path and os.path.isfile(vless_path):
+    try:
+        state = json.load(open(vless_path, encoding="utf-8"))
+        emit("vless-sudoku:default", "TCP", state.get("listen_port"),
+             state.get("advertise_host"), state.get("advertise_port"))
+    except Exception:
+        pass
+
+mita_users = os.environ.get("MITA_USERS_STATE", "")
+if mita_users and os.path.isfile(mita_users):
+    try:
+        state = json.load(open(mita_users, encoding="utf-8"))
+        protocol = str(state.get("protocol") or "TCP").upper()
+        for user in state.get("users") or []:
+            port = int(user.get("port"))
+            owner = "mieru:" + str(user.get("instance_id") or user.get("name") or port)
+            if protocol == "BOTH":
+                emit(owner, "TCP", port, user.get("advertise_host"), user.get("advertise_port"))
+                advertised = int(user.get("advertise_port") or port)
+                emit(owner, "UDP", port + 1, user.get("advertise_host"), advertised + 1)
+            else:
+                emit(owner, protocol, port, user.get("advertise_host"), user.get("advertise_port"))
+    except Exception:
+        pass
+PY
+  # v1.x 单实例安装可能还没有 users.json。只在原 Mieru 安全检查通过后，
+  # 于子 shell 中 source allowlisted 字段，避免污染 NoBrand 当前 globals。
+  if [ ! -s "$MITA_USERS_STATE" ] && [ -s "$MITA_STATE" ] \
+     && state_file_is_secure "$MITA_STATE"; then
+    (
+      PORT="" PROTOCOL="TCP" ADVERTISE_HOST="" ADVERTISE_PORT=""
+      # shellcheck disable=SC1090
+      source "$MITA_STATE" 2>/dev/null || exit 0
+      nb_valid_port "${PORT:-}" || exit 0
+      case "${PROTOCOL:-TCP}" in
+        TCP|UDP)
+          printf 'mieru:legacy|%s|%s|%s|%s\n' \
+            "$PROTOCOL" "$PORT" "${ADVERTISE_HOST:-}" "${ADVERTISE_PORT:-}"
+          ;;
+        BOTH)
+          [ "$PORT" -le 65534 ] || exit 0
+          printf 'mieru:legacy|TCP|%s|%s|%s\n' \
+            "$PORT" "${ADVERTISE_HOST:-}" "${ADVERTISE_PORT:-}"
+          local_udp_advertise=""
+          [ -z "${ADVERTISE_PORT:-}" ] || local_udp_advertise=$((ADVERTISE_PORT + 1))
+          printf 'mieru:legacy|UDP|%s|%s|%s\n' \
+            "$((PORT + 1))" "${ADVERTISE_HOST:-}" "$local_udp_advertise"
+          ;;
+      esac
+    )
+  fi
+}
+
+nb_registry_port_owner() {
+  local transport port ignore_owner="${3:-}" owner row_transport row_port _rest
+  transport="$(nb_normalize_transport "$1")" || return 1
+  port="$(normalize_uint "$2")" || return 1
+  while IFS='|' read -r owner row_transport row_port _rest; do
+    [ -n "$owner" ] || continue
+    [ "$owner" = "$ignore_owner" ] && continue
+    if [ "$row_transport" = "$transport" ] && [ "$row_port" = "$port" ]; then
+      printf '%s' "$owner"
+      return 0
+    fi
+  done < <(nb_registry_rows)
+  return 1
+}
+
+nb_port_available_for_transport() {
+  local port="$1" transport="$2" ignore_owner="${3:-}"
+  nb_valid_port "$port" || return 1
+  transport="$(nb_normalize_transport "$transport")" || return 1
+  nb_port_is_tail_base_reserved "$port" && return 1
+  nb_registry_port_owner "$transport" "$port" "$ignore_owner" >/dev/null 2>&1 && return 1
+  nb_port_is_listening "$transport" "$port" && return 1
+  return 0
+}
+
+nb_select_available_port() {
+  local transport ip bounds lo hi selected attempt random_value
+  transport="$(nb_normalize_transport "$1")" || return 1
+  ip="$(nb_detect_local_ipv4 2>/dev/null || true)"
+  if bounds="$(nb_tail_port_bounds "$ip" 2>/dev/null)"; then
+    lo="${bounds%%|*}"
+    hi="${bounds#*|}"
+    if selected="$(nb_scan_port_span "$lo" "$hi" nb_port_available_for_transport "$transport")"; then
+      printf '%s' "$selected"
+      return 0
+    fi
+  fi
+  attempt=0
+  while [ "$attempt" -lt 512 ]; do
+    if command -v openssl >/dev/null 2>&1; then
+      random_value="$(openssl rand -hex 2 2>/dev/null || true)"
+      if [[ "$random_value" =~ ^[0-9a-fA-F]{4}$ ]]; then
+        selected=$((1025 + 16#$random_value % (65535 - 1025 + 1)))
+      else
+        selected=$((1025 + RANDOM % (65535 - 1025 + 1)))
+      fi
+    else
+      selected=$((1025 + RANDOM % (65535 - 1025 + 1)))
+    fi
+    if nb_port_available_for_transport "$selected" "$transport"; then
+      printf '%s' "$selected"
+      return 0
+    fi
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+
+nb_warn_if_outside_recommended_range() {
+  local port="$1" ip bounds lo hi
+  ip="$(nb_detect_local_ipv4 2>/dev/null || true)"
+  bounds="$(nb_tail_port_bounds "$ip" 2>/dev/null || true)"
+  [ -n "$bounds" ] || return 0
+  lo="${bounds%%|*}"
+  hi="${bounds#*|}"
+  if nb_port_is_tail_base_reserved "$port"; then
+    warn "$(t "指定端口 ${port} 是本机尾号段的保留基准端口，不允许代理绑定" \
+      "Port ${port} is the reserved base of this host's tail-port range and cannot be used by a proxy")"
+    return 0
+  fi
+  if [ "$port" -lt "$lo" ] || [ "$port" -gt "$hi" ]; then
+    warn "$(t "指定端口 ${port} 不在本机 ${ip} 的推荐段 ${lo}-${hi}；确认空闲后仍允许使用" \
+      "Port ${port} is outside the recommended ${lo}-${hi} range for ${ip}; it is still allowed when free")"
+  fi
+}
+
+nb_describe_port_conflict() {
+  local transport="$1" port="$2" owner reservation details
+  reservation="$(nb_tail_base_reservation_owner "$port" 2>/dev/null || true)"
+  [ -z "$reservation" ] || msg "  reserved owner: ${reservation} (tail-port base; external NAT/SSH ownership may be invisible inside the guest)"
+  owner="$(nb_registry_port_owner "$transport" "$port" 2>/dev/null || true)"
+  [ -z "$owner" ] || msg "  state owner: ${owner}"
+  details="$(nb_port_listener_details "$transport" "$port" 2>/dev/null || true)"
+  [ -z "$details" ] || printf '%s\n' "$details" | sed 's/^/  listener: /'
+}
+
+# ---------- NoBrand Common Core: state、Endpoint、firewall/service adapters ----------
+
+nb_init_state_layout() {
+  local tmp
+  if [ "${DRY_RUN:-0}" -eq 1 ]; then
+    msg "[dry-run] initialize NoBrand state: $NOBRAND_STATE_DIR"
+    return 0
+  fi
+  mkdir -p "$NOBRAND_STATE_DIR" "$NOBRAND_BACKUP_DIR" "$NOBRAND_LOCK_DIR" \
+    "$NOBRAND_SNELL_STATE_DIR" "$NOBRAND_HY2_STATE_DIR" \
+    "$NOBRAND_VLESS_STATE_DIR" \
+    "$NOBRAND_CONFIG_DIR" "$NOBRAND_SNELL_CONFIG_DIR" "$NOBRAND_HY2_CONFIG_DIR" \
+    "$NOBRAND_VLESS_CONFIG_DIR" \
+    "$NOBRAND_BIN_DIR" "$NOBRAND_SNELL_RUNTIME_DIR" "$NOBRAND_LIB_DIR" \
+    || return 1
+  chmod 0700 "$NOBRAND_STATE_DIR" "$NOBRAND_BACKUP_DIR" "$NOBRAND_LOCK_DIR" \
+    "$NOBRAND_SNELL_STATE_DIR" "$NOBRAND_HY2_STATE_DIR" \
+    "$NOBRAND_VLESS_STATE_DIR" \
+    "$NOBRAND_CONFIG_DIR" "$NOBRAND_SNELL_CONFIG_DIR" "$NOBRAND_HY2_CONFIG_DIR" \
+    "$NOBRAND_VLESS_CONFIG_DIR" \
+    "$NOBRAND_LIB_DIR" "$NOBRAND_BIN_DIR" "$NOBRAND_SNELL_RUNTIME_DIR" || return 1
+  if [ ! -f "$NOBRAND_REGISTRY_FILE" ]; then
+    tmp="$(mktemp "${NOBRAND_REGISTRY_FILE}.tmp.XXXXXX")" || return 1
+    printf '%s\n' '{"version":1,"project":"NoBrand-OneClick","author":"ike"}' >"$tmp" \
+      && chmod 0600 "$tmp" && mv -f "$tmp" "$NOBRAND_REGISTRY_FILE" \
+      || { rm -f "$tmp"; return 1; }
+  fi
+  chmod 0600 "$NOBRAND_REGISTRY_FILE" 2>/dev/null || return 1
+}
+
+nb_atomic_install_file() {
+  local source="$1" destination="$2" mode="${3:-0600}" tmp
+  [ -f "$source" ] || return 1
+  if [ "${DRY_RUN:-0}" -eq 1 ]; then
+    msg "[dry-run] install -m ${mode} ${source} ${destination}"
+    return 0
+  fi
+  mkdir -p "$(dirname "$destination")" || return 1
+  tmp="$(mktemp "${destination}.tmp.XXXXXX")" || return 1
+  if ! install -m "$mode" "$source" "$tmp" || ! mv -f "$tmp" "$destination"; then
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
+nb_normalize_endpoint_host() {
+  local host="${1:-}"
+  command -v python3 >/dev/null 2>&1 || {
+    printf '%s' "$(printf '%s' "${host%.}" | tr '[:upper:]' '[:lower:]')"
+    return 0
+  }
+  python3 - "$host" <<'PY'
+import ipaddress
+import sys
+value=sys.argv[1].strip()
+try:
+    print(ipaddress.ip_address(value))
+except ValueError:
+    print(value.rstrip('.').lower())
+PY
+}
+
+nb_validate_advertise_endpoint() {
+  local host="${1:-}" port="${2:-}" transport="${3:-TCP}"
+  transport="$(printf '%s' "$transport" | tr '[:lower:]' '[:upper:]')"
+  case "$transport" in TCP|UDP|BOTH) ;; *) return 1 ;; esac
+  if [ -z "$host" ] && [ -z "$port" ]; then
+    return 0
+  fi
+  [ -n "$host" ] && [ -n "$port" ] || return 1
+  valid_advertise_host "$host" || return 1
+  valid_advertise_port "$port" || return 1
+  [ "$transport" != BOTH ] || [ "$(normalize_uint "$port")" -le 65534 ]
+}
+
+nb_endpoint_conflict_owner() {
+  local transport host port ignore_owner="${4:-}" auto_host owner row_transport listen_port advertise_host advertise_port
+  local normalized expected_host effective_host effective_port
+  transport="$(nb_normalize_transport "$1")" || return 1
+  host="$2"
+  port="$(normalize_uint "$3")" || return 1
+  expected_host="$(nb_normalize_endpoint_host "$host")"
+  auto_host="$(public_ip 2>/dev/null || true)"
+  while IFS='|' read -r owner row_transport listen_port advertise_host advertise_port; do
+    [ -n "$owner" ] || continue
+    [ "$owner" = "$ignore_owner" ] && continue
+    [ "$row_transport" = "$transport" ] || continue
+    effective_host="${advertise_host:-$auto_host}"
+    effective_port="${advertise_port:-$listen_port}"
+    [ -n "$effective_host" ] || continue
+    normalized="$(nb_normalize_endpoint_host "$effective_host")"
+    if [ "$normalized" = "$expected_host" ] && [ "$effective_port" = "$port" ]; then
+      printf '%s' "$owner"
+      return 0
+    fi
+  done < <(nb_registry_rows)
+  return 1
+}
+
+nb_require_explicit_endpoint_noninteractive() {
+  [ "${YES:-0}" -eq 1 ] || return 0
+  if [ "${ADVERTISE_AUTO_REQUESTED:-0}" -eq 1 ]; then
+    return 0
+  fi
+  if [ "${ADVERTISE_CLI:-0}" -eq 1 ] && [ -n "${ADVERTISE_HOST:-}" ] && [ -n "${ADVERTISE_PORT:-}" ]; then
+    return 0
+  fi
+  die "$(t '非交互模式必须同时提供 --advertise-host/--advertise-port，或明确使用 --advertise-auto' \
+    'Non-interactive mode requires --advertise-host with --advertise-port, or explicit --advertise-auto')"
+}
+
+nb_collect_advertise_endpoint_interactive() {
+  local protocol_name="$1" listen_port="$2" detected="" choice="" host="" port=""
+  detected="$(public_ip 2>/dev/null || true)"
+  msg ""
+  t "${protocol_name} 真实监听端口: ${listen_port}" "${protocol_name} real listen port: ${listen_port}"
+  if [ -n "$detected" ]; then
+    t "自动检测到客户端入口建议: ${detected}:${listen_port}" \
+      "Detected client entry suggestion: ${detected}:${listen_port}"
+  else
+    warn "$(t '未检测到公网入口；IPLC/NAT 环境请填写实际前置入口' \
+      'No public entry detected; enter the actual IPLC/NAT frontend endpoint')"
+  fi
+  t '  1) 使用自动入口（以后查看节点时重新探测 host；端口等于真实监听）' \
+    '  1) Use auto endpoint (host is detected when viewing; port equals listener)'
+  t '  2) 自定义客户端入口（IPLC / NAT / DNAT）' \
+    '  2) Custom client endpoint (IPLC / NAT / DNAT)'
+  read_tty choice "$(t '请选择 [1-2，默认 1]: ' 'Choose [1-2, default 1]: ')" || choice=""
+  case "${choice:-1}" in
+    2)
+      while true; do
+        read_tty host "$(t "客户端入口 Host [${detected:-example.com}]: " \
+          "Client entry host [${detected:-example.com}]: ")" || host=""
+        host="${host:-$detected}"
+        read_tty port "$(t "客户端入口 Port [${listen_port}]: " \
+          "Client entry port [${listen_port}]: ")" || port=""
+        port="${port:-$listen_port}"
+        if nb_validate_advertise_endpoint "$host" "$port"; then
+          ADVERTISE_HOST="$host"
+          ADVERTISE_PORT="$(normalize_uint "$port")"
+          ADVERTISE_CLI=1
+          ADVERTISE_AUTO_REQUESTED=0
+          return 0
+        fi
+        warn "$(t '入口必须是有效 IPv4/IPv6/域名与 1-65535 端口' \
+          'Endpoint must be a valid IPv4/IPv6/domain and port 1-65535')"
+      done
+      ;;
+    *)
+      ADVERTISE_HOST=""
+      ADVERTISE_PORT=""
+      ADVERTISE_CLI=1
+      ADVERTISE_AUTO_REQUESTED=1
+      ;;
+  esac
+}
+
+nb_effective_advertise_host() {
+  local mode="${1:-auto}" host="${2:-}"
+  if [ "$mode" = custom ] && [ -n "$host" ]; then
+    printf '%s' "$host"
+  else
+    public_ip 2>/dev/null || printf 'YOUR_SERVER_IP'
+  fi
+}
+
+nb_effective_advertise_port() {
+  local mode="${1:-auto}" advertise_port="${2:-}" listen_port="${3:-}"
+  if [ "$mode" = custom ] && [ -n "$advertise_port" ]; then
+    printf '%s' "$advertise_port"
+  else
+    printf '%s' "$listen_port"
+  fi
+}
+
+nb_endpoint_mode_from_values() {
+  [ -n "${1:-}" ] && printf 'custom' || printf 'auto'
+}
+
+nb_firewall_open_pairs() {
+  local pairs="$1"
+  local MITA_FIREWALL_OWNED_STATE="$NOBRAND_FIREWALL_OWNED_STATE"
+  local MITA_FIREWALL_COMMENT="$NOBRAND_FIREWALL_COMMENT"
+  open_firewall_for_pairs "$pairs"
+}
+
+nb_firewall_close_pairs() {
+  local pairs="$1"
+  local MITA_FIREWALL_OWNED_STATE="$NOBRAND_FIREWALL_OWNED_STATE"
+  local MITA_FIREWALL_COMMENT="$NOBRAND_FIREWALL_COMMENT"
+  close_firewall_for_bindings "$pairs"
+}
+
+nb_firewall_binding_owned() {
+  local transport="$1" port="$2" proto tool
+  proto="$(printf '%s' "$transport" | tr '[:upper:]' '[:lower:]')"
+  [ -f "$NOBRAND_FIREWALL_OWNED_STATE" ] || return 1
+  while IFS='|' read -r tool row_proto row_port; do
+    [ "$row_proto" = "$proto" ] && [ "$row_port" = "$port" ] && return 0
+  done <"$NOBRAND_FIREWALL_OWNED_STATE"
+  return 1
+}
+
+nb_service_manager() {
+  service_manager
+}
+
+nb_service_is_active() {
+  local systemd_unit="$1" openrc_service="$2" manager
+  manager="$(nb_service_manager)"
+  case "$manager" in
+    systemd) systemctl is-active --quiet "$systemd_unit" 2>/dev/null ;;
+    openrc) rc-service "$openrc_service" status 2>/dev/null | grep -qiE 'started|running' ;;
+    *) return 1 ;;
+  esac
+}
+
+nb_wait_for_listener() {
+  local transport="$1" port="$2" timeout="${3:-20}" elapsed=0
+  while [ "$elapsed" -lt "$timeout" ]; do
+    nb_port_is_listening "$transport" "$port" && return 0
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+  return 1
+}
+
+# ---------- NoBrand Common Core: 入口、节点聚合、状态、Doctor、备份 ----------
+
+nobrand_print_banner() {
+  msg ""
+  msg '========================================'
+  printf '          %s v%s\n' "$SCRIPT_NAME" "$SCRIPT_VERSION"
+  msg '========================================'
+  t "Author: ${SCRIPT_AUTHOR}" "Author: ${SCRIPT_AUTHOR}"
+}
+
+nobrand_version() {
+  printf '%s %s\nAuthor: %s\n' "$SCRIPT_NAME" "$SCRIPT_VERSION" "$SCRIPT_AUTHOR"
+}
+
+nobrand_usage() {
+  cat <<'EOF'
+NoBrand-OneClick — Mieru / Snell v4-v5 / Hysteria2 / VLESS + FinalMask + Sudoku (TCP)
+
+用法:
+  nobrand                         打开统一菜单
+  nobrand --version               显示产品版本与作者
+  nobrand status                  综合状态
+  nobrand nodes [--protocol P]    查看全部或指定协议节点
+  nobrand doctor                  综合诊断（默认不输出 secret）
+  nobrand backup create [FILE]    备份 NoBrand Snell/HY2/VLESS state 与配置
+  nobrand backup restore FILE     恢复 NoBrand 备份
+  nobrand uninstall [-y]          只删除 NoBrand 的 Snell/HY2/VLESS/Common 内容
+
+  nobrand mieru <原 mita 子命令与参数>
+  nobrand snell install --name NAME [--version 5|4] [--port PORT] [--quic on|off]
+      [--advertise-host HOST --advertise-port PORT | --advertise-auto] [-y]
+  nobrand snell show|status|doctor|start|stop|restart|remove [--name NAME]
+  nobrand snell set-quic --name NAME --quic on|off [-y]
+  nobrand snell set-endpoint --name NAME
+      [--advertise-host HOST --advertise-port PORT | --advertise-auto]
+
+  nobrand hy2 install [--port PORT] [--sni SNI]
+      [--advertise-host HOST --advertise-port PORT | --advertise-auto] [-y]
+  nobrand hy2 show|status|doctor|start|stop|restart|remove
+  nobrand hy2 set-endpoint
+      [--advertise-host HOST --advertise-port PORT | --advertise-auto]
+
+  nobrand vless-sudoku install [--port PORT]
+      [--advertise-host HOST --advertise-port PORT | --advertise-auto] [-y]
+  nobrand vless-sudoku show|status|doctor|smoke|start|stop|restart|remove
+  nobrand vless-sudoku set-endpoint
+      [--advertise-host HOST --advertise-port PORT | --advertise-auto]
+
+说明:
+  - Snell 只支持 v5（默认/推荐）与 v4（兼容）。
+  - Snell v5 QUIC 默认关闭；--quic on 才让 NoBrand 管理同号 UDP firewall ownership。
+  - 官方 v5 runtime 即使 QUIC 关闭也可能监听同号 UDP；本地 socket 不等于公网 QUIC 已启用。
+  - Display Endpoint 只影响客户端输出，不创建 DNAT/IPLC 转发，也不改 listener。
+  - 非交互 -y 必须明确给出完整 Display Endpoint 或 --advertise-auto。
+  - VLESS Sudoku = plain VLESS + FinalMask(sudoku) + TCP。
+  - VLESS Encryption: NOT USED；不调用密钥生成子命令，不保存加密密钥。
+EOF
+}
+
+nobrand_install_manager_script() {
+  local source_path="" source_real="" destination_real=""
+  if [ "${DRY_RUN:-0}" -eq 1 ]; then
+    msg "[dry-run] install NoBrand manager and nobrand/nb commands"
+    return 0
+  fi
+  if [ -n "${BASH_SOURCE[0]:-}" ] && [ -r "${BASH_SOURCE[0]}" ] \
+     && grep -qxF "SCRIPT_NAME=\"NoBrand-OneClick\"" "${BASH_SOURCE[0]}" 2>/dev/null; then
+    source_path="${BASH_SOURCE[0]}"
+  elif [ -r "$INSTALL_SCRIPT_PATH" ] \
+       && grep -qxF "SCRIPT_NAME=\"NoBrand-OneClick\"" "$INSTALL_SCRIPT_PATH" 2>/dev/null; then
+    source_path="$INSTALL_SCRIPT_PATH"
+  elif [ -r "$NOBRAND_INSTALL_SCRIPT_PATH" ]; then
+    source_path="$NOBRAND_INSTALL_SCRIPT_PATH"
+  fi
+  [ -n "$source_path" ] || {
+    warn "$(t '找不到当前 NoBrand 单文件安装器，未安装统一快捷命令' \
+      'Current NoBrand single-file installer not found; unified shortcuts were not installed')"
+    return 1
+  }
+  source_real="$(readlink -f "$source_path" 2>/dev/null || realpath "$source_path" 2>/dev/null || printf '%s' "$source_path")"
+  destination_real="$(readlink -f "$NOBRAND_INSTALL_SCRIPT_PATH" 2>/dev/null \
+    || realpath "$NOBRAND_INSTALL_SCRIPT_PATH" 2>/dev/null || printf '%s' "$NOBRAND_INSTALL_SCRIPT_PATH")"
+  if [ "$source_real" != "$destination_real" ]; then
+    install -m 0755 "$source_path" "$NOBRAND_INSTALL_SCRIPT_PATH" || return 1
+  else
+    chmod 0755 "$NOBRAND_INSTALL_SCRIPT_PATH" || return 1
+  fi
+  local wrapper
+  wrapper="$(mktemp_file .sh)" || return 1
+  cat >"$wrapper" <<EOF
+#!/usr/bin/env bash
+exec ${NOBRAND_INSTALL_SCRIPT_PATH} "\$@"
+EOF
+  chmod 0755 "$wrapper" || { rm -f "$wrapper"; return 1; }
+  install -m 0755 "$wrapper" "$NOBRAND_COMMAND_PATH" || { rm -f "$wrapper"; return 1; }
+  install -m 0755 "$wrapper" "$NOBRAND_SHORT_COMMAND_PATH" || { rm -f "$wrapper"; return 1; }
+  rm -f "$wrapper"
+}
+
+nb_mieru_instance_running() {
+  local instance_id="$1" transport="$2" port="$3" unit service
+  unit="mita-oneclick@${instance_id}.service"
+  service="mita-oneclick-${instance_id}"
+  nb_service_is_active "$unit" "$service" || return 1
+  case "$transport" in
+    BOTH) nb_port_is_listening TCP "$port" && nb_port_is_listening UDP "$((port + 1))" ;;
+    *) nb_port_is_listening "$transport" "$port" ;;
+  esac
+}
+
+# protocol|name|display endpoint|status|transport
+nb_mieru_legacy_node_rows() {
+  local values name port protocol advertise_host advertise_port auto_host effective_host effective_port status
+  [ -s "$MITA_STATE" ] && state_file_is_secure "$MITA_STATE" || return 0
+  values="$(
+    PORT="" PROTOCOL="TCP" ADVERTISE_HOST="" ADVERTISE_PORT="" USERNAME="legacy"
+    # shellcheck disable=SC1090
+    source "$MITA_STATE" 2>/dev/null || exit 0
+    nb_valid_port "${PORT:-}" || exit 0
+    case "${PROTOCOL:-TCP}" in TCP|UDP|BOTH) ;; *) exit 0 ;; esac
+    printf '%s\t%s\t%s\t%s\t%s' "${USERNAME:-legacy}" "$PORT" "$PROTOCOL" \
+      "${ADVERTISE_HOST:-}" "${ADVERTISE_PORT:-}"
+  )"
+  [ -n "$values" ] || return 0
+  IFS=$'\t' read -r name port protocol advertise_host advertise_port <<<"$values"
+  auto_host="$(public_ip 2>/dev/null || printf 'YOUR_SERVER_IP')"
+  effective_host="${advertise_host:-$auto_host}"
+  effective_port="${advertise_port:-$port}"
+  status=Stopped
+  if nb_service_is_active mita.service mita; then
+    case "$protocol" in
+      TCP|UDP) nb_port_is_listening "$protocol" "$port" && status=Running ;;
+      BOTH) nb_port_is_listening TCP "$port" && nb_port_is_listening UDP "$((port + 1))" && status=Running ;;
+    esac
+  fi
+  if [ "$protocol" = BOTH ]; then
+    printf 'Mieru/BOTH|%s|%s:%s (TCP), %s:%s (UDP)|%s|BOTH\n' \
+      "$name" "$effective_host" "$effective_port" "$effective_host" "$((effective_port + 1))" "$status"
+  else
+    printf 'Mieru/%s|%s|%s:%s|%s|%s\n' \
+      "$protocol" "$name" "$effective_host" "$effective_port" "$status" "$protocol"
+  fi
+}
+
+nb_mieru_node_rows() {
+  local auto_host instance_id name port protocol advertise_host advertise_port effective_host effective_port status
+  if [ ! -s "$MITA_USERS_STATE" ]; then
+    nb_mieru_legacy_node_rows
+    return 0
+  fi
+  command -v python3 >/dev/null 2>&1 || return 0
+  auto_host="$(public_ip 2>/dev/null || printf 'YOUR_SERVER_IP')"
+  while IFS=$'\t' read -r instance_id name port protocol advertise_host advertise_port; do
+    [ -n "$name" ] || continue
+    effective_host="${advertise_host:-$auto_host}"
+    effective_port="${advertise_port:-$port}"
+    status=Stopped
+    nb_mieru_instance_running "$instance_id" "$protocol" "$port" && status=Running
+    if [ "$protocol" = BOTH ]; then
+      printf 'Mieru/BOTH|%s|%s:%s (TCP), %s:%s (UDP)|%s|BOTH\n' \
+        "$name" "$effective_host" "$effective_port" "$effective_host" "$((effective_port + 1))" "$status"
+    else
+      printf 'Mieru/%s|%s|%s:%s|%s|%s\n' \
+        "$protocol" "$name" "$effective_host" "$effective_port" "$status" "$protocol"
+    fi
+  done < <(python3 - "$MITA_USERS_STATE" <<'PY'
+import json,sys
+try:
+    state=json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    raise SystemExit(0)
+protocol=str(state.get("protocol") or "TCP").upper()
+for user in state.get("users") or []:
+    print("\t".join(str(v or "") for v in (
+        user.get("instance_id"), user.get("name"), user.get("port"), protocol,
+        user.get("advertise_host"), user.get("advertise_port"))))
+PY
+  )
+}
+
+nb_all_node_rows() {
+  local filter
+  filter="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
+  case "$filter" in
+    ""|all)
+      nb_mieru_node_rows
+      snell_node_rows
+      hysteria2_node_rows
+      vless_sudoku_node_rows
+      ;;
+    mieru) nb_mieru_node_rows ;;
+    snell) snell_node_rows ;;
+    hy2|hysteria2) hysteria2_node_rows ;;
+    vless-sudoku|sudoku|vless) vless_sudoku_node_rows ;;
+    *) die "--protocol 只支持 mieru、snell、hy2、vless-sudoku" ;;
+  esac
+}
+
+nobrand_nodes() {
+  local rows protocol name endpoint status transport
+  rows="$(nb_all_node_rows "${NOBRAND_PROTOCOL_FILTER:-}")"
+  nobrand_print_banner
+  msg ""
+  t '协议              节点              客户端入口                              状态' \
+    'Protocol          Node              Client endpoint                         Status'
+  msg '--------------------------------------------------------------------------------------'
+  if [ -z "$rows" ]; then
+    t '暂无持久化节点。' 'No persistent nodes.'
+    return 0
+  fi
+  while IFS='|' read -r protocol name endpoint status transport; do
+    [ -n "$protocol" ] || continue
+    printf '%-17s %-17s %-40s %s\n' "$protocol" "$name" "$endpoint" "$status"
+  done <<<"$rows"
+}
+
+nobrand_status() {
+  local rows protocol _name _endpoint status _transport
+  local mieru_total=0 mieru_running=0 snell_total=0 snell_running=0 hy2_total=0 hy2_running=0
+  local vless_total=0 vless_running=0 vless_port=""
+  rows="$(nb_all_node_rows)"
+  while IFS='|' read -r protocol _name _endpoint status _transport; do
+    case "$protocol" in
+      Mieru/*) mieru_total=$((mieru_total + 1)); [ "$status" != Running ] || mieru_running=$((mieru_running + 1)) ;;
+      Snell*) snell_total=$((snell_total + 1)); [ "$status" != Running ] || snell_running=$((snell_running + 1)) ;;
+      Hysteria2) hy2_total=$((hy2_total + 1)); [ "$status" != Running ] || hy2_running=$((hy2_running + 1)) ;;
+      VLESS/Sudoku)
+        vless_total=$((vless_total + 1))
+        [ "$status" != Running ] || vless_running=$((vless_running + 1))
+        vless_port="$(vless_sudoku_state_field listen_port 2>/dev/null || true)"
+        ;;
+    esac
+  done <<<"$rows"
+  nobrand_print_banner
+  msg ""
+  printf 'Mieru\n  Installed: %s\n  Users: %s\n  Running: %s/%s\n' \
+    "$([ "$mieru_total" -gt 0 ] && printf yes || printf no)" "$mieru_total" "$mieru_running" "$mieru_total"
+  printf 'Snell\n  Instances: %s\n  Running: %s/%s\n' "$snell_total" "$snell_running" "$snell_total"
+  printf 'Hysteria2\n  Installed: %s\n  Running: %s\n' \
+    "$([ "$hy2_total" -gt 0 ] && printf yes || printf no)" \
+    "$([ "$hy2_running" -gt 0 ] && printf yes || printf no)"
+  printf 'VLESS/Sudoku\n  Installed: %s\n  Running: %s\n  Port: %s\n' \
+    "$([ "$vless_total" -gt 0 ] && printf yes || printf no)" \
+    "$([ "$vless_running" -gt 0 ] && printf yes || printf no)" \
+    "${vless_port:--}"
+}
+
+nb_doctor_line() {
+  local level="$1"
+  shift
+  printf '[%s] %s\n' "$level" "$*"
+}
+
+nobrand_doctor_common() {
+  local failed=0 manager arch_value
+  [ "$(id -u 2>/dev/null || printf 1)" -eq 0 ] \
+    && nb_doctor_line PASS 'root' || { nb_doctor_line FAIL '需要 root'; failed=1; }
+  [ "$(uname -s 2>/dev/null || true)" = Linux ] \
+    && nb_doctor_line PASS 'Linux' || { nb_doctor_line FAIL '仅支持 Linux'; failed=1; }
+  arch_value="$(uname -m 2>/dev/null || printf unknown)"
+  case "$arch_value" in
+    x86_64|amd64|aarch64|arm64) nb_doctor_line PASS "arch=${arch_value}" ;;
+    *) nb_doctor_line WARN "arch=${arch_value}（Snell 可能不支持）" ;;
+  esac
+  [ -d "$NOBRAND_STATE_DIR" ] && [ -w "$NOBRAND_STATE_DIR" ] \
+    && nb_doctor_line PASS "state writable: $NOBRAND_STATE_DIR" \
+    || nb_doctor_line WARN "state 尚未初始化或不可写: $NOBRAND_STATE_DIR"
+  command -v ss >/dev/null 2>&1 || command -v netstat >/dev/null 2>&1 \
+    && nb_doctor_line PASS 'port tool' || nb_doctor_line WARN '无 ss/netstat，将使用 bind probe'
+  if command -v ufw >/dev/null 2>&1; then
+    nb_doctor_line PASS 'firewall=ufw'
+  elif command -v firewall-cmd >/dev/null 2>&1; then
+    nb_doctor_line PASS 'firewall=firewalld'
+  elif command -v iptables >/dev/null 2>&1; then
+    nb_doctor_line PASS 'firewall=iptables'
+  else
+    nb_doctor_line WARN '未检测到本地 firewall backend'
+  fi
+  manager="$(nb_service_manager)"
+  [ "$manager" != none ] && nb_doctor_line PASS "service-manager=${manager}" \
+    || { nb_doctor_line FAIL '未检测到 systemd/OpenRC'; failed=1; }
+  if bbr_fq_active 2>/dev/null; then
+    nb_doctor_line PASS 'BBR/FQ active'
+  else
+    nb_doctor_line INFO 'BBR/FQ not active（可选）'
+  fi
+  return "$failed"
+}
+
+nobrand_doctor() {
+  local failed=0
+  nobrand_print_banner
+  msg ''
+  msg 'Common Core'
+  nobrand_doctor_common || failed=1
+  if mita_installed 2>/dev/null || [ -s "$MITA_USERS_STATE" ]; then
+    msg ''
+    msg 'Mieru'
+    do_doctor || failed=1
+  fi
+  msg ''
+  msg 'Snell'
+  snell_doctor_all || failed=1
+  msg ''
+  msg 'Hysteria2'
+  hysteria2_doctor || failed=1
+  msg ''
+  msg 'VLESS + FinalMask + Sudoku (TCP)'
+  vless_sudoku_doctor || failed=1
+  [ "$failed" -eq 0 ] || return 1
+}
+
+nb_backup_default_path() {
+  printf '%s/nobrand-backup-%s.tar.gz' "$NOBRAND_BACKUP_DIR" "$(date +%Y%m%d_%H%M%S)"
+}
+
+nb_assert_safe_nobrand_root() {
+  local value="${1:-}" label="${2:-path}" normalized
+  [ -n "$value" ] || die "${label} 为空，拒绝破坏性操作"
+  case "$value" in
+    *'..'*) die "${label} 含有 ..，拒绝破坏性操作: $value" ;;
+  esac
+  normalized="$(readlink -m -- "$value" 2>/dev/null \
+    || realpath -m -- "$value" 2>/dev/null || printf '%s' "$value")"
+  case "$normalized" in
+    /|/etc|/var|/usr|/usr/local) die "${label} 过宽，拒绝破坏性操作: $normalized" ;;
+  esac
+  case "$normalized" in
+    */nobrand-oneclick|*/nobrand-oneclick/*|*/nobrand-oneclick-*) ;;
+    *) die "${label} 不在明确的 NoBrand namespace 中: $normalized" ;;
+  esac
+  printf '%s' "$normalized"
+}
+
+nobrand_backup_create() {
+  local destination="${1:-}" stage archive_tmp
+  nb_init_state_layout || return 1
+  [ -n "$destination" ] || destination="$(nb_backup_default_path)"
+  stage="$(mktemp_dir)" || return 1
+  mkdir -p "$stage/state" "$stage/config" || { rm -rf -- "$stage"; return 1; }
+  cp -a "$NOBRAND_STATE_DIR/." "$stage/state/" || { rm -rf -- "$stage"; return 1; }
+  cp -a "$NOBRAND_CONFIG_DIR/." "$stage/config/" || { rm -rf -- "$stage"; return 1; }
+  cat >"$stage/manifest.txt" <<EOF
+project=NoBrand-OneClick
+version=${SCRIPT_VERSION}
+created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+contents=state,config
+EOF
+  archive_tmp="$(mktemp_file .tar.gz)" || { rm -rf -- "$stage"; return 1; }
+  if ! tar -C "$stage" -czf "$archive_tmp" manifest.txt state config; then
+    rm -f "$archive_tmp"
+    rm -rf -- "$stage"
+    return 1
+  fi
+  mkdir -p "$(dirname "$destination")" || { rm -f "$archive_tmp"; rm -rf -- "$stage"; return 1; }
+  chmod 0600 "$archive_tmp" || { rm -f "$archive_tmp"; rm -rf -- "$stage"; return 1; }
+  mv -f "$archive_tmp" "$destination" || { rm -f "$archive_tmp"; rm -rf -- "$stage"; return 1; }
+  rm -rf -- "$stage"
+  t "NoBrand 备份已保存: ${destination}" "NoBrand backup saved: ${destination}"
+}
+
+nobrand_backup_list() {
+  find "$NOBRAND_BACKUP_DIR" -maxdepth 1 -type f -name 'nobrand-backup-*.tar.gz' \
+    -print 2>/dev/null | LC_ALL=C sort -r
+}
+
+nobrand_backup_restore() {
+  local source="$1" stage snapshot safe_state safe_config
+  [ -f "$source" ] || die "备份不存在: $source"
+  safe_state="$(nb_assert_safe_nobrand_root "$NOBRAND_STATE_DIR" NOBRAND_STATE_DIR)" || return 1
+  safe_config="$(nb_assert_safe_nobrand_root "$NOBRAND_CONFIG_DIR" NOBRAND_CONFIG_DIR)" || return 1
+  tar -tzf "$source" 2>/dev/null | awk '
+    /^\// || /(^|\/)\.\.($|\/)/ { bad=1 }
+    END { exit bad ? 1 : 0 }
+  ' || die '备份包含不安全路径，拒绝恢复'
+  stage="$(mktemp_dir)" || return 1
+  tar -C "$stage" -xzf "$source" || { rm -rf -- "$stage"; return 1; }
+  grep -qx 'project=NoBrand-OneClick' "$stage/manifest.txt" 2>/dev/null \
+    || { rm -rf -- "$stage"; die '不是 NoBrand-OneClick 备份'; }
+  find "$stage/state" "$stage/config" -type f -name '*.json' -print0 2>/dev/null \
+    | while IFS= read -r -d '' file; do jq empty "$file" >/dev/null || exit 1; done \
+    || { rm -rf -- "$stage"; die '备份中存在无效 JSON'; }
+  snapshot="$(mktemp_dir)" || { rm -rf -- "$stage"; return 1; }
+  mkdir -p "$snapshot/state" "$snapshot/config"
+  cp -a "$safe_state/." "$snapshot/state/" 2>/dev/null || true
+  cp -a "$safe_config/." "$snapshot/config/" 2>/dev/null || true
+  nobrand_stop_all_services 2>/dev/null || true
+  if ! find "$safe_state" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + \
+     || ! find "$safe_config" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + \
+     || ! cp -a "$stage/state/." "$safe_state/" \
+     || ! cp -a "$stage/config/." "$safe_config/"; then
+    find "$safe_state" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + 2>/dev/null || true
+    find "$safe_config" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + 2>/dev/null || true
+    cp -a "$snapshot/state/." "$safe_state/" 2>/dev/null || true
+    cp -a "$snapshot/config/." "$safe_config/" 2>/dev/null || true
+    rm -rf -- "$stage" "$snapshot"
+    die '恢复失败，已回滚原 NoBrand state/config'
+  fi
+  nb_init_state_layout
+  if ! snell_migrate_removed_v6; then
+    find "$safe_state" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + 2>/dev/null || true
+    find "$safe_config" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + 2>/dev/null || true
+    cp -a "$snapshot/state/." "$safe_state/" 2>/dev/null || true
+    cp -a "$snapshot/config/." "$safe_config/" 2>/dev/null || true
+    rm -rf -- "$stage" "$snapshot"
+    die '备份包含无法安全迁移的已移除 Snell v6 state；已回滚原 NoBrand state/config'
+  fi
+  nobrand_start_enabled_services || {
+    warn '配置已恢复，但部分服务未能启动；请运行 nobrand doctor'
+  }
+  rm -rf -- "$stage" "$snapshot"
+  t 'NoBrand 备份恢复完成' 'NoBrand backup restored'
+}
+
+nobrand_backup_action() {
+  case "${NOBRAND_BACKUP_ACTION:-create}" in
+    create) nobrand_backup_create "${NOBRAND_BACKUP_PATH:-}" ;;
+    list) nobrand_backup_list ;;
+    restore)
+      [ -n "${NOBRAND_BACKUP_PATH:-}" ] || die 'backup restore 需要文件路径'
+      nobrand_backup_restore "$NOBRAND_BACKUP_PATH"
+      ;;
+  esac
+}
+
+nobrand_remove_owned_command() {
+  local path="$1"
+  [ -f "$path" ] && [ ! -L "$path" ] || return 0
+  case "$path" in
+    /usr/local/bin/install-nobrand|/usr/local/bin/nobrand|/usr/local/bin/nb|*/nobrand-oneclick/*|*/nobrand-oneclick-*/*) ;;
+    *) warn "拒绝删除 NoBrand command allowlist 以外的路径: $path"; return 1 ;;
+  esac
+  if grep -qF 'NoBrand-OneClick' "$path" 2>/dev/null \
+     || grep -qF "$NOBRAND_INSTALL_SCRIPT_PATH" "$path" 2>/dev/null; then
+    rm -f "$path"
+  else
+    warn "拒绝删除内容不属于 NoBrand 的命令: $path"
+    return 1
+  fi
+}
+
+nobrand_uninstall() {
+  local id port safe_state safe_config safe_lib pairs="" snell_pairs failed=0
+  require_root
+  if [ "${YES:-0}" -ne 1 ]; then
+    confirm '确认删除 NoBrand 管理的 Snell/HY2/VLESS/Common state？Mieru 数据会保留。[y/N]: ' \
+      'Remove NoBrand-managed Snell/HY2/VLESS/Common state? Mieru data is preserved. [y/N]: ' \
+      n \
+      || { t '已取消' 'Cancelled'; return 0; }
+  fi
+  safe_state="$(nb_assert_safe_nobrand_root "$NOBRAND_STATE_DIR" NOBRAND_STATE_DIR)" || return 1
+  safe_config="$(nb_assert_safe_nobrand_root "$NOBRAND_CONFIG_DIR" NOBRAND_CONFIG_DIR)" || return 1
+  safe_lib="$(nb_assert_safe_nobrand_root "$NOBRAND_LIB_DIR" NOBRAND_LIB_DIR)" || return 1
+  admin_lock_acquire || return 1
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    port="$(snell_state_field "$id" listen_port 2>/dev/null || true)"
+    snell_pairs="$(snell_firewall_pairs "$id" 2>/dev/null || true)"
+    snell_remove_service "$id" || failed=1
+    [ -z "$snell_pairs" ] || nb_firewall_close_pairs "$snell_pairs" || failed=1
+  done < <(snell_instance_ids)
+  if hysteria2_state_exists; then
+    port="$(hysteria2_state_field listen_port 2>/dev/null || true)"
+    nobrand_remove_hy2_service || failed=1
+    [ -z "$port" ] || nb_firewall_close_pairs "UDP|${port}" || failed=1
+  fi
+  if vless_sudoku_state_exists; then
+    port="$(vless_sudoku_state_field listen_port 2>/dev/null || true)"
+    nobrand_remove_vless_sudoku_service || failed=1
+    [ -z "$port" ] || nb_firewall_close_pairs "TCP|${port}" || failed=1
+  fi
+  # 清理可能由失败事务留下、但仍明确记录为 NoBrand-owned 的 firewall rows。
+  if [ -s "$NOBRAND_FIREWALL_OWNED_STATE" ]; then
+    while IFS='|' read -r _tool proto row_port; do
+      case "$proto" in
+        tcp|udp) printf -v pairs '%s%s|%s\n' "$pairs" "$(printf '%s' "$proto" | tr '[:lower:]' '[:upper:]')" "$row_port" ;;
+      esac
+    done <"$NOBRAND_FIREWALL_OWNED_STATE"
+    [ -z "$pairs" ] || nb_firewall_close_pairs "$pairs" || failed=1
+  fi
+  if [ "$failed" -ne 0 ]; then
+    admin_lock_release
+    warn 'NoBrand service/firewall 清理未完整完成；保留 state 以便重试'
+    return 1
+  fi
+  case "$NOBRAND_SNELL_SYSTEMD_TEMPLATE" in
+    /etc/systemd/system/nobrand-snell@.service) rm -f "$NOBRAND_SNELL_SYSTEMD_TEMPLATE" ;;
+  esac
+  [ "$(nb_service_manager)" != systemd ] || systemctl daemon-reload 2>/dev/null || true
+  find "$safe_state" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+  find "$safe_config" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+  find "$safe_lib" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+  rmdir "$safe_state" "$safe_config" "$safe_lib" 2>/dev/null || true
+  nobrand_remove_owned_command "$NOBRAND_COMMAND_PATH" || failed=1
+  nobrand_remove_owned_command "$NOBRAND_SHORT_COMMAND_PATH" || failed=1
+  nobrand_remove_owned_command "$NOBRAND_INSTALL_SCRIPT_PATH" || failed=1
+  admin_lock_release
+  [ "$failed" -eq 0 ] || return 1
+  t 'NoBrand Snell/HY2/VLESS/Common 内容已删除；Mieru、/etc/xray、xray.service、ike 均未触碰' \
+    'NoBrand Snell/HY2/VLESS/Common content removed; Mieru, /etc/xray, xray.service, and ike were untouched'
+}
+
+nobrand_stop_all_services() {
+  local id
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    snell_service_action "$id" stop >/dev/null 2>&1 || true
+  done < <(snell_instance_ids)
+  hysteria2_state_exists && nobrand_hy2_service_action stop >/dev/null 2>&1 || true
+  vless_sudoku_state_exists \
+    && nobrand_vless_sudoku_service_action stop >/dev/null 2>&1 || true
+}
+
+nobrand_start_enabled_services() {
+  local id enabled port pairs failed=0
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    enabled="$(snell_state_field "$id" enabled 2>/dev/null || printf false)"
+    [ "$enabled" = true ] || continue
+    port="$(snell_state_field "$id" listen_port)"
+    pairs="$(snell_firewall_pairs "$id")"
+    nb_firewall_open_pairs "$pairs" >/dev/null 2>&1 \
+      && snell_service_action "$id" start >/dev/null 2>&1 \
+      && snell_wait_for_required_listeners "$id" 25 || failed=1
+  done < <(snell_instance_ids)
+  if hysteria2_state_exists \
+     && [ "$(hysteria2_state_field enabled 2>/dev/null || printf false)" = true ]; then
+    port="$(hysteria2_state_field listen_port)"
+    nobrand_hy2_service_action start >/dev/null 2>&1 \
+      && nb_wait_for_listener UDP "$port" 25 || failed=1
+  fi
+  if vless_sudoku_state_exists \
+     && [ "$(vless_sudoku_state_field enabled 2>/dev/null || printf false)" = true ]; then
+    port="$(vless_sudoku_state_field listen_port)"
+    nobrand_vless_sudoku_service_action start >/dev/null 2>&1 \
+      && nb_wait_for_listener TCP "$port" 25 || failed=1
+  fi
+  return "$failed"
+}
+
 install_self_script() {
   STAGE="安装管理脚本"
-  local main_url="https://raw.githubusercontent.com/ike-sh/mieru-OneClick/main/install-mita.sh"
+  local main_url="https://raw.githubusercontent.com/ike-sh/NoBrand-OneClick/main/install-nobrand.sh"
   local tmp src_real="" dest_real="" installed=0
   tmp="$(mktemp_file .sh)"
   # 已发布版本优先；下载到临时文件且版本必须精确匹配，避免截断现有脚本或被 main 降级。
@@ -1308,6 +2828,8 @@ install_self_script() {
   install_mita_wrapper_force
   migrate_mita_binary_layout
   install_mita_shortcuts
+  # NoBrand 的统一入口与 Mieru 兼容入口使用同一份生成脚本；保留 install-mita/mita。
+  nobrand_install_manager_script || true
 }
 
 install_mita_wrapper_force() {
@@ -1350,7 +2872,7 @@ if [ $# -eq 0 ]; then
     exec "$INSTALL_MITA"
   fi
   echo "[错误] 未找到 install-mita，请先运行一键安装脚本" >&2
-  echo "  curl -fsSL https://raw.githubusercontent.com/ike-sh/mieru-OneClick/main/install-mita.sh | bash" >&2
+  echo "  curl -fsSL https://raw.githubusercontent.com/ike-sh/NoBrand-OneClick/main/install-mita.sh | bash" >&2
   exit 1
 fi
 
@@ -1371,7 +2893,7 @@ fi
 
 if [ -z "$MITA_REAL" ]; then
   echo "[错误] 未找到 mita 二进制；请重新运行安装脚本并选择「升级」自动重装：" >&2
-  echo "  curl -fsSL https://raw.githubusercontent.com/ike-sh/mieru-OneClick/main/install-mita.sh | sudo bash -s -- upgrade -y" >&2
+  echo "  curl -fsSL https://raw.githubusercontent.com/ike-sh/NoBrand-OneClick/main/install-mita.sh | sudo bash -s -- upgrade -y" >&2
   exit 127
 fi
 exec "$MITA_REAL" "$@"
@@ -2034,6 +3556,913 @@ install_package() {
   esac
 }
 
+# ---------- NoBrand isolated Xray-core runtime / Hysteria2 service ----------
+
+nobrand_prepare_common() {
+  local pm
+  require_root
+  require_linux
+  pm="$(detect_pkg_manager)"
+  STAGE="安装 NoBrand 公共依赖"
+  case "$pm" in
+    deb)
+      if ! command -v curl >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1 \
+         || ! command -v unzip >/dev/null 2>&1 || ! command -v openssl >/dev/null 2>&1 \
+         || ! command -v python3 >/dev/null 2>&1; then
+        run apt-get update
+        run apt-get install -y curl ca-certificates jq unzip openssl python3 iproute2 util-linux tar
+      fi
+      ;;
+    rpm)
+      if command -v dnf >/dev/null 2>&1; then
+        run dnf install -y curl ca-certificates jq unzip openssl python3 iproute util-linux tar
+      else
+        run yum install -y curl ca-certificates jq unzip openssl python3 iproute util-linux tar
+      fi
+      ;;
+    alpine)
+      run apk add --no-cache bash curl ca-certificates jq unzip openssl python3 iproute2 util-linux tar libstdc++
+      ;;
+  esac
+  nb_init_state_layout
+}
+
+nobrand_xray_arch_asset() {
+  case "${NOBRAND_TEST_ARCH:-$(uname -m)}" in
+    x86_64|amd64) printf 'Xray-linux-64.zip' ;;
+    aarch64|arm64) printf 'Xray-linux-arm64-v8a.zip' ;;
+    *) return 1 ;;
+  esac
+}
+
+nobrand_xray_version() {
+  [ -x "$NOBRAND_XRAY_BIN" ] || return 1
+  "$NOBRAND_XRAY_BIN" version 2>/dev/null \
+    | sed -nE 's/^Xray[[:space:]]+([^[:space:]]+).*/\1/p' | head -n1
+}
+
+nobrand_xray_release_info() {
+  local asset metadata
+  asset="$(nobrand_xray_arch_asset)" || {
+    warn "$(t 'NoBrand HY2 的 Xray runtime 仅测试 amd64/arm64' \
+      'NoBrand HY2 Xray runtime is tested only on amd64/arm64')"
+    return 1
+  }
+  metadata="$(mktemp_file .json)" || return 1
+  if ! curl -fsSL --connect-timeout 15 --max-time 90 \
+      --retry 3 --retry-delay 2 --retry-all-errors \
+      -H 'Accept: application/vnd.github+json' \
+      -H 'User-Agent: NoBrand-OneClick' "$NOBRAND_XRAY_RELEASE_API" -o "$metadata"; then
+    rm -f "$metadata"
+    return 1
+  fi
+  jq -r --arg asset "$asset" '
+    .tag_name as $version |
+    first(.assets[]? | select(.name == $asset)) as $matched |
+    select($matched != null) |
+    [$version, $matched.browser_download_url, ($matched.digest // "")] | @tsv
+  ' "$metadata"
+  local rc=$?
+  rm -f "$metadata"
+  return "$rc"
+}
+
+nobrand_sha256_file() {
+  local file="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$file" | awk '{print tolower($1)}'
+  else
+    openssl dgst -sha256 "$file" 2>/dev/null | awk '{print tolower($NF)}'
+  fi
+}
+
+nobrand_verify_release_digest() {
+  local file="$1" digest="${2:-}" expected actual
+  [ -n "$digest" ] || {
+    info "$(t '上游 release API 未提供资产 hash；已继续执行 archive/ELF/runtime 校验' \
+      'Upstream release API has no asset hash; archive/ELF/runtime validation will still run')"
+    return 0
+  }
+  case "$digest" in
+    sha256:*) expected="${digest#sha256:}" ;;
+    *) warn "不支持的上游 digest: $digest"; return 1 ;;
+  esac
+  [[ "$expected" =~ ^[0-9A-Fa-f]{64}$ ]] || return 1
+  actual="$(nobrand_sha256_file "$file")" || return 1
+  [ "$(printf '%s' "$actual" | tr '[:upper:]' '[:lower:]')" = \
+    "$(printf '%s' "$expected" | tr '[:upper:]' '[:lower:]')" ]
+}
+
+nobrand_download_xray_candidate() {
+  local output="$1" info_line version url digest archive_dir candidate
+  info_line="$(nobrand_xray_release_info)" || return 1
+  IFS=$'\t' read -r version url digest <<<"$info_line"
+  [[ "$url" = https://github.com/XTLS/Xray-core/releases/download/* ]] || {
+    warn "拒绝非 XTLS 官方 HTTPS 资产: $url"
+    return 1
+  }
+  archive_dir="$(mktemp_dir)" || return 1
+  if ! curl -fL --connect-timeout 15 --max-time 180 \
+      --retry 3 --retry-delay 2 --retry-all-errors \
+      -H 'User-Agent: NoBrand-OneClick' "$url" -o "$archive_dir/xray.zip" \
+     || ! nobrand_verify_release_digest "$archive_dir/xray.zip" "$digest" \
+     || ! unzip -t "$archive_dir/xray.zip" >/dev/null \
+     || ! unzip -qo "$archive_dir/xray.zip" -d "$archive_dir/unpacked"; then
+    rm -rf -- "$archive_dir"
+    return 1
+  fi
+  candidate="$archive_dir/unpacked/xray"
+  [ -f "$candidate" ] || candidate="$(find "$archive_dir/unpacked" -type f -name xray | head -n1)"
+  [ -n "$candidate" ] && [ -f "$candidate" ] || { rm -rf -- "$archive_dir"; return 1; }
+  chmod 0755 "$candidate" || { rm -rf -- "$archive_dir"; return 1; }
+  "$candidate" version >/dev/null 2>&1 || { rm -rf -- "$archive_dir"; return 1; }
+  install -m 0755 "$candidate" "$output" || { rm -rf -- "$archive_dir"; return 1; }
+  info "NoBrand isolated Xray-core asset resolved: ${version}"
+  rm -rf -- "$archive_dir"
+}
+
+nobrand_install_xray_runtime() {
+  local force="${1:-0}" candidate backup="" had_old=0
+  if [ -x "$NOBRAND_XRAY_BIN" ] && [ "$force" -ne 1 ]; then
+    return 0
+  fi
+  candidate="$(mktemp_file .xray)" || return 1
+  if ! nobrand_download_xray_candidate "$candidate"; then
+    rm -f "$candidate"
+    warn "$(t 'NoBrand 独立 Xray-core 下载或校验失败' \
+      'NoBrand isolated Xray-core download or validation failed')"
+    return 1
+  fi
+  mkdir -p "$(dirname "$NOBRAND_XRAY_BIN")" || { rm -f "$candidate"; return 1; }
+  if [ -e "$NOBRAND_XRAY_BIN" ]; then
+    backup="$(mktemp "${NOBRAND_XRAY_BIN}.rollback.XXXXXX")" || { rm -f "$candidate"; return 1; }
+    rm -f "$backup"
+    mv "$NOBRAND_XRAY_BIN" "$backup" || { rm -f "$candidate"; return 1; }
+    had_old=1
+  fi
+  if ! install -m 0755 "$candidate" "${NOBRAND_XRAY_BIN}.new" \
+     || ! mv -f "${NOBRAND_XRAY_BIN}.new" "$NOBRAND_XRAY_BIN" \
+     || ! nobrand_xray_version >/dev/null; then
+    rm -f "$candidate" "${NOBRAND_XRAY_BIN}.new" "$NOBRAND_XRAY_BIN"
+    [ "$had_old" -eq 0 ] || mv "$backup" "$NOBRAND_XRAY_BIN" 2>/dev/null || true
+    return 1
+  fi
+  rm -f "$candidate"
+  if ! nobrand_xray_validate_managed_configs "$NOBRAND_XRAY_BIN"; then
+    rm -f "$NOBRAND_XRAY_BIN"
+    [ "$had_old" -eq 0 ] || mv "$backup" "$NOBRAND_XRAY_BIN" 2>/dev/null || true
+    return 1
+  fi
+  rm -f "$backup"
+}
+
+nobrand_xray_test_config() {
+  local config="$1" binary="${2:-$NOBRAND_XRAY_BIN}" log
+  [ -x "$binary" ] && jq empty "$config" >/dev/null 2>&1 || return 1
+  log="$(mktemp_file .log)" || return 1
+  if ! "$binary" run -test -c "$config" >"$log" 2>&1; then
+    warn "$(t 'NoBrand Xray 配置校验失败（已脱敏）:' \
+      'NoBrand Xray config validation failed (redacted):')"
+    sed -E 's/(auth|password)(["=: ]+)[^," ]+/\1\2***REDACTED***/Ig' "$log" >&2 || true
+    rm -f "$log"
+    return 1
+  fi
+  rm -f "$log"
+}
+
+nobrand_xray_validate_managed_configs() {
+  local binary="${1:-$NOBRAND_XRAY_BIN}" config
+  for config in "$NOBRAND_HY2_CONFIG_FILE" "$NOBRAND_VLESS_CONFIG_FILE"; do
+    [ -f "$config" ] || continue
+    nobrand_xray_test_config "$config" "$binary" || return 1
+  done
+}
+
+nobrand_restore_xray_upgrade_snapshot() {
+  local snapshot="$1" had_runtime="$2" hy2_had_state="$3" vless_had_state="$4"
+  local hy2_was_active="$5" vless_was_active="$6"
+  if [ "$had_runtime" -eq 1 ]; then
+    install -m 0755 "$snapshot/xray" "$NOBRAND_XRAY_BIN" || return 1
+  else
+    rm -f "$NOBRAND_XRAY_BIN"
+  fi
+  if [ "$hy2_had_state" -eq 1 ]; then
+    cp -a "$snapshot/hy2-state" "$NOBRAND_HY2_STATE_FILE" || return 1
+  fi
+  if [ "$vless_had_state" -eq 1 ]; then
+    cp -a "$snapshot/vless-state" "$NOBRAND_VLESS_STATE_FILE" || return 1
+  fi
+  if [ "$had_runtime" -eq 1 ]; then
+    [ "$hy2_was_active" -eq 0 ] \
+      || nobrand_hy2_service_action restart >/dev/null 2>&1 || true
+    [ "$vless_was_active" -eq 0 ] \
+      || nobrand_vless_sudoku_service_action restart >/dev/null 2>&1 || true
+  else
+    [ "$hy2_was_active" -eq 0 ] \
+      || nobrand_hy2_service_action stop >/dev/null 2>&1 || true
+    [ "$vless_was_active" -eq 0 ] \
+      || nobrand_vless_sudoku_service_action stop >/dev/null 2>&1 || true
+  fi
+}
+
+nobrand_upgrade_xray_runtime() {
+  local snapshot had_runtime=0 hy2_had_state=0 vless_had_state=0
+  local hy2_was_active=0 vless_was_active=0 hy2_port="" vless_port=""
+  local failed=0
+  nobrand_prepare_common
+  admin_lock_acquire || return 1
+  snapshot="$(mktemp_dir)" || { admin_lock_release; return 1; }
+  if [ -e "$NOBRAND_XRAY_BIN" ]; then
+    cp -a "$NOBRAND_XRAY_BIN" "$snapshot/xray" \
+      || { rm -rf -- "$snapshot"; admin_lock_release; return 1; }
+    had_runtime=1
+  fi
+  if hysteria2_state_exists; then
+    cp -a "$NOBRAND_HY2_STATE_FILE" "$snapshot/hy2-state" \
+      || { rm -rf -- "$snapshot"; admin_lock_release; return 1; }
+    hy2_had_state=1
+    hy2_port="$(hysteria2_state_field listen_port)"
+  fi
+  if vless_sudoku_state_exists; then
+    cp -a "$NOBRAND_VLESS_STATE_FILE" "$snapshot/vless-state" \
+      || { rm -rf -- "$snapshot"; admin_lock_release; return 1; }
+    vless_had_state=1
+    vless_port="$(vless_sudoku_state_field listen_port)"
+  fi
+  nobrand_hy2_service_active && hy2_was_active=1
+  nobrand_vless_sudoku_service_active && vless_was_active=1
+
+  if ! nobrand_install_xray_runtime 1; then
+    failed=1
+  elif [ "$hy2_was_active" -eq 1 ] \
+       && { ! nobrand_hy2_service_action restart \
+         || ! nb_wait_for_listener UDP "$hy2_port" 25; }; then
+    failed=1
+  elif [ "$vless_was_active" -eq 1 ] \
+       && { ! nobrand_vless_sudoku_service_action restart \
+         || ! nb_wait_for_listener TCP "$vless_port" 25; }; then
+    failed=1
+  elif ! hysteria2_refresh_runtime_metadata \
+       || ! vless_sudoku_refresh_runtime_metadata; then
+    failed=1
+  fi
+  if [ "$failed" -eq 1 ]; then
+    nobrand_restore_xray_upgrade_snapshot "$snapshot" "$had_runtime" \
+      "$hy2_had_state" "$vless_had_state" "$hy2_was_active" "$vless_was_active" \
+      || warn '共享 Xray runtime 回滚不完整；请立即运行 nobrand doctor'
+    rm -rf -- "$snapshot"
+    admin_lock_release
+    warn '共享 Xray 升级或双服务验收失败，已恢复升级前 runtime/state'
+    return 1
+  fi
+
+  rm -rf -- "$snapshot"
+  admin_lock_release
+  t 'NoBrand 共享 Xray-core 升级完成；活动 HY2/VLESS 服务均已验收' \
+    'NoBrand shared Xray-core upgraded; active HY2/VLESS services passed acceptance'
+}
+
+nobrand_write_hy2_service() {
+  local manager tmp
+  manager="$(nb_service_manager)"
+  case "$manager" in
+    systemd)
+      tmp="$(mktemp_file .service)" || return 1
+      cat >"$tmp" <<EOF
+# Managed by NoBrand-OneClick
+[Unit]
+Description=NoBrand Hysteria2 (Xray-core)
+Documentation=https://github.com/ike-sh/NoBrand-OneClick
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=${NOBRAND_HY2_CONFIG_DIR}
+ExecStart=${NOBRAND_XRAY_BIN} run -c ${NOBRAND_HY2_CONFIG_FILE}
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=1048576
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=${NOBRAND_HY2_CONFIG_DIR} ${NOBRAND_HY2_STATE_DIR}
+
+[Install]
+WantedBy=multi-user.target
+EOF
+      grep -qF "ExecStart=${NOBRAND_XRAY_BIN} run -c ${NOBRAND_HY2_CONFIG_FILE}" "$tmp" \
+        || { rm -f "$tmp"; return 1; }
+      install -m 0644 "$tmp" "${NOBRAND_HY2_SYSTEMD_SERVICE}.new" \
+        && mv -f "${NOBRAND_HY2_SYSTEMD_SERVICE}.new" "$NOBRAND_HY2_SYSTEMD_SERVICE" \
+        || { rm -f "$tmp" "${NOBRAND_HY2_SYSTEMD_SERVICE}.new"; return 1; }
+      rm -f "$tmp"
+      systemctl daemon-reload
+      systemctl enable "$NOBRAND_HY2_SERVICE_NAME" >/dev/null 2>&1
+      ;;
+    openrc)
+      tmp="$(mktemp_file .openrc)" || return 1
+      cat >"$tmp" <<EOF
+#!/sbin/openrc-run
+# Managed by NoBrand-OneClick
+name="NoBrand Hysteria2"
+description="NoBrand Hysteria2 (Xray-core)"
+command="${NOBRAND_XRAY_BIN}"
+command_args="run -c ${NOBRAND_HY2_CONFIG_FILE}"
+command_background=true
+pidfile="/run/nobrand-hysteria2.pid"
+output_log="/var/log/nobrand-hysteria2.log"
+error_log="/var/log/nobrand-hysteria2.err"
+depend() { use net; after firewall; }
+EOF
+      install -m 0755 "$tmp" "${NOBRAND_HY2_OPENRC_SERVICE}.new" \
+        && mv -f "${NOBRAND_HY2_OPENRC_SERVICE}.new" "$NOBRAND_HY2_OPENRC_SERVICE" \
+        || { rm -f "$tmp" "${NOBRAND_HY2_OPENRC_SERVICE}.new"; return 1; }
+      rm -f "$tmp"
+      rc-update add "$NOBRAND_HY2_SERVICE_NAME" default >/dev/null 2>&1
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+nobrand_hy2_service_action() {
+  local action="$1" manager
+  manager="$(nb_service_manager)"
+  case "$manager" in
+    systemd)
+      [ "$action" != restart ] || systemctl daemon-reload
+      systemctl "$action" "$NOBRAND_HY2_SERVICE_NAME"
+      ;;
+    openrc) rc-service "$NOBRAND_HY2_SERVICE_NAME" "$action" ;;
+    *) return 1 ;;
+  esac
+}
+
+nobrand_hy2_service_active() {
+  nb_service_is_active "$NOBRAND_HY2_SERVICE_NAME" "$NOBRAND_HY2_SERVICE_NAME"
+}
+
+nobrand_remove_hy2_service() {
+  local manager
+  manager="$(nb_service_manager)"
+  nobrand_hy2_service_action stop >/dev/null 2>&1 || true
+  case "$manager" in
+    systemd)
+      systemctl disable "$NOBRAND_HY2_SERVICE_NAME" >/dev/null 2>&1 || true
+      rm -f "$NOBRAND_HY2_SYSTEMD_SERVICE"
+      systemctl daemon-reload 2>/dev/null || true
+      ;;
+    openrc)
+      rc-update del "$NOBRAND_HY2_SERVICE_NAME" default >/dev/null 2>&1 || true
+      rm -f "$NOBRAND_HY2_OPENRC_SERVICE"
+      ;;
+  esac
+}
+
+# ---------- Surge official Snell runtime resolver / download / service ----------
+
+snell_arch_asset_name() {
+  case "${NOBRAND_TEST_ARCH:-$(uname -m)}" in
+    x86_64|amd64) printf 'amd64' ;;
+    aarch64|arm64) printf 'aarch64' ;;
+    *) return 1 ;;
+  esac
+}
+
+snell_platform_supported() {
+  local major="$1" arch
+  case "$major" in 4|5) ;; *) return 1 ;; esac
+  arch="$(snell_arch_asset_name)" || return 1
+  case "$arch" in amd64|aarch64) return 0 ;; esac
+}
+
+# 从 Surge 官方 Markdown 中解析对应 major/arch 的最新 asset。排序支持
+# beta -> RC -> GA，避免将 runtime 版本写死在产品源码中。
+snell_select_release_from_text() {
+  local major="$1" arch="$2" input rc
+  case "$major" in 4|5) ;; *) return 1 ;; esac
+  input="$(mktemp_file .md)" || return 1
+  cat >"$input" || { rm -f "$input"; return 1; }
+  python3 - "$major" "$arch" "$input" <<'PY'
+import re
+import sys
+
+major=int(sys.argv[1])
+arch=sys.argv[2]
+with open(sys.argv[3], encoding="utf-8") as source:
+    text=source.read()
+pattern=re.compile(r"https://dl\.nssurge\.com/snell/snell-server-v([^/\s]+)-linux-([A-Za-z0-9_]+)\.zip")
+
+def key(version):
+    match=re.fullmatch(r"(\d+(?:\.\d+)*)(.*)", version, re.I)
+    if not match:
+        return ((0,), 0, 0, version.lower())
+    numbers=tuple(int(part) for part in match.group(1).split('.'))
+    suffix=match.group(2).lower()
+    if not suffix:
+        stage, stage_no = 4, 0
+    elif suffix.startswith('rc'):
+        stage=3
+        found=re.search(r"\d+", suffix)
+        stage_no=int(found.group()) if found else 1
+    elif suffix.startswith('beta') or suffix.startswith('b'):
+        stage=2
+        found=re.search(r"\d+", suffix)
+        stage_no=int(found.group()) if found else 1
+    elif suffix.startswith('alpha') or suffix.startswith('a'):
+        stage=1
+        found=re.search(r"\d+", suffix)
+        stage_no=int(found.group()) if found else 1
+    else:
+        stage, stage_no = 0, 0
+    return (numbers, stage, stage_no, suffix)
+
+candidates=[]
+for match in pattern.finditer(text):
+    version, asset_arch = match.groups()
+    if asset_arch != arch:
+        continue
+    if not re.match(r"^%d(?:\.|$)" % major, version):
+        continue
+    url="https://dl.nssurge.com/snell/snell-server-v%s-linux-%s.zip" % (version, arch)
+    line_start=text.rfind("\n", 0, match.start()) + 1
+    line_end=text.find("\n", match.end())
+    if line_end < 0:
+        line_end=len(text)
+    same_line=text[line_start:line_end]
+    digest_match=re.search(r"(?i)(?<![0-9a-f])[0-9a-f]{64}(?![0-9a-f])", same_line)
+    digest=digest_match.group(0).lower() if digest_match else ""
+    candidates.append((key(version), version, url, digest))
+if not candidates:
+    raise SystemExit(1)
+_, version, url, digest=max(candidates)
+suffix=re.fullmatch(r"\d+(?:\.\d+)*(.*)", version, re.I).group(1).lower()
+if not suffix:
+    status="Stable"
+elif suffix.startswith("rc"):
+    status="RC"
+elif suffix.startswith("beta") or suffix.startswith("b"):
+    status="Beta"
+else:
+    status="Experimental"
+fields=[version, url, status]
+if digest:
+    fields.append(digest)
+print("\t".join(fields))
+PY
+  rc=$?
+  rm -f "$input"
+  return "$rc"
+}
+
+snell_resolve_release() {
+  local major="$1" arch page
+  case "$major" in 4|5) ;; *) return 1 ;; esac
+  arch="$(snell_arch_asset_name)" || return 1
+  page="$(mktemp_file .md)" || return 1
+  if ! curl -fsSL --connect-timeout 15 --max-time 90 \
+      --retry 3 --retry-delay 2 --retry-all-errors \
+      -H 'User-Agent: NoBrand-OneClick' "$SNELL_RELEASE_PAGE" -o "$page"; then
+    rm -f "$page"
+    return 1
+  fi
+  snell_select_release_from_text "$major" "$arch" <"$page"
+  local rc=$?
+  rm -f "$page"
+  return "$rc"
+}
+
+snell_runtime_path() {
+  case "$1" in 4|5) ;; *) return 1 ;; esac
+  printf '%s/snell-v%s' "$NOBRAND_SNELL_RUNTIME_DIR" "$1"
+}
+
+snell_runtime_metadata_path() {
+  case "$1" in 4|5) ;; *) return 1 ;; esac
+  printf '%s/snell-v%s.runtime.json' "$NOBRAND_SNELL_RUNTIME_DIR" "$1"
+}
+
+snell_runtime_reported_version() {
+  local binary="$1"
+  [ -x "$binary" ] || return 1
+  "$binary" --version 2>&1 \
+    | sed -nE 's/.*snell-server[[:space:]]+v([^[:space:]]+).*/\1/p' | head -n1
+}
+
+snell_runtime_release_version() {
+  local major="$1" metadata
+  metadata="$(snell_runtime_metadata_path "$major")"
+  if [ -s "$metadata" ] && jq -e '.release_version|type=="string" and length>0' "$metadata" >/dev/null 2>&1; then
+    jq -r .release_version "$metadata"
+  else
+    snell_runtime_reported_version "$(snell_runtime_path "$major")"
+  fi
+}
+
+snell_runtime_release_status() {
+  local major="$1" metadata
+  metadata="$(snell_runtime_metadata_path "$major")"
+  if [ -s "$metadata" ] && jq -e '.status|type=="string" and length>0' "$metadata" >/dev/null 2>&1; then
+    jq -r .status "$metadata"
+  else
+    printf Stable
+  fi
+}
+
+snell_generate_server_config() {
+  local output="$1" major="$2" listen_host="$3" listen_port="$4" psk="$5"
+  case "$major" in
+    4|5)
+      cat >"$output" <<EOF
+[snell-server]
+listen = ${listen_host}:${listen_port}
+psk = ${psk}
+ipv6 = false
+EOF
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+snell_validate_runtime_config() {
+  local binary="$1" major="$2" psk="$3" port config log pid ready=0
+  port="$(nb_select_available_port TCP)" || return 1
+  config="$(mktemp_file .conf)" || return 1
+  log="$(mktemp_file .log)" || { rm -f "$config"; return 1; }
+  snell_generate_server_config "$config" "$major" 127.0.0.1 "$port" "$psk" \
+    || { rm -f "$config" "$log"; return 1; }
+  "$binary" -c "$config" >"$log" 2>&1 &
+  pid=$!
+  local i=0
+  while [ "$i" -lt 10 ]; do
+    if nb_port_is_listening TCP "$port"; then ready=1; break; fi
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 1
+    i=$((i + 1))
+  done
+  kill "$pid" >/dev/null 2>&1 || true
+  wait "$pid" >/dev/null 2>&1 || true
+  if [ "$ready" -ne 1 ]; then
+    sed -E 's/(psk[[:space:]]*=[[:space:]]*).*/\1***REDACTED***/I' "$log" >&2 || true
+    rm -f "$config" "$log"
+    return 1
+  fi
+  rm -f "$config" "$log"
+}
+
+snell_download_candidate() {
+  local major="$1" output="$2" release version url status upstream_sha256 temp candidate reported actual_archive_sha256
+  case "$major" in 4|5) ;; *) return 1 ;; esac
+  snell_platform_supported "$major" || {
+    warn "Snell v${major} on this platform unsupported"
+    return 1
+  }
+  release="$(snell_resolve_release "$major")" || return 1
+  IFS=$'\t' read -r version url status upstream_sha256 <<<"$release"
+  [[ "$url" = https://dl.nssurge.com/snell/snell-server-v*-linux-*.zip ]] || {
+    warn "拒绝非 Surge 官方 HTTPS Snell asset: $url"
+    return 1
+  }
+  temp="$(mktemp_dir)" || return 1
+  if ! curl -fL --connect-timeout 15 --max-time 180 \
+      --retry 3 --retry-delay 2 --retry-all-errors \
+      -H 'User-Agent: NoBrand-OneClick' "$url" -o "$temp/snell.zip"; then
+    rm -rf -- "$temp"
+    return 1
+  fi
+  if [ -n "$upstream_sha256" ]; then
+    [[ "$upstream_sha256" =~ ^[0-9a-fA-F]{64}$ ]] || { rm -rf -- "$temp"; return 1; }
+    actual_archive_sha256="$(nobrand_sha256_file "$temp/snell.zip")" || { rm -rf -- "$temp"; return 1; }
+    [ "$actual_archive_sha256" = "$(printf '%s' "$upstream_sha256" | tr '[:upper:]' '[:lower:]')" ] \
+      || { warn "Surge Snell upstream SHA-256 mismatch"; rm -rf -- "$temp"; return 1; }
+  fi
+  if ! unzip -t "$temp/snell.zip" >/dev/null \
+     || ! unzip -qo "$temp/snell.zip" -d "$temp/unpacked"; then
+    rm -rf -- "$temp"
+    return 1
+  fi
+  candidate="$(find "$temp/unpacked" -type f -name snell-server | head -n1)"
+  [ -n "$candidate" ] && [ "$(head -c 4 "$candidate" 2>/dev/null || true)" = $'\x7fELF' ] \
+    || { rm -rf -- "$temp"; return 1; }
+  chmod 0755 "$candidate" || { rm -rf -- "$temp"; return 1; }
+  reported="$(snell_runtime_reported_version "$candidate" 2>/dev/null || true)"
+  [[ "$reported" = "$major".* ]] || { rm -rf -- "$temp"; return 1; }
+  install -m 0755 "$candidate" "$output" || { rm -rf -- "$temp"; return 1; }
+  SNELL_RESOLVED_VERSION="$version"
+  SNELL_RESOLVED_URL="$url"
+  SNELL_RESOLVED_STATUS="$status"
+  SNELL_RESOLVED_SHA256="$(nobrand_sha256_file "$candidate" 2>/dev/null || true)"
+  info "Surge official Snell v${version} (${status}) verified; sha256=${SNELL_RESOLVED_SHA256:-unavailable}"
+  rm -rf -- "$temp"
+}
+
+snell_install_runtime() {
+  local major="$1" force="${2:-0}" destination metadata candidate backup="" metadata_backup=""
+  local had_old=0 had_metadata=0 test_psk metadata_tmp=""
+  case "$major" in 4|5) ;; *) return 1 ;; esac
+  destination="$(snell_runtime_path "$major")"
+  metadata="$(snell_runtime_metadata_path "$major")"
+  if [ -x "$destination" ] && [ "$force" -ne 1 ]; then
+    return 0
+  fi
+  candidate="$(mktemp_file .snell)" || return 1
+  if ! snell_download_candidate "$major" "$candidate"; then
+    rm -f "$candidate"
+    return 1
+  fi
+  test_psk="$(openssl rand -hex 16 2>/dev/null || printf '0123456789abcdef0123456789abcdef')"
+  if ! snell_validate_runtime_config "$candidate" "$major" "$test_psk"; then
+    rm -f "$candidate"
+    warn "Snell v${major} official runtime validation failed"
+    return 1
+  fi
+  mkdir -p "$NOBRAND_SNELL_RUNTIME_DIR" || { rm -f "$candidate"; return 1; }
+  if [ -e "$destination" ]; then
+    backup="$(mktemp "${destination}.rollback.XXXXXX")" || { rm -f "$candidate"; return 1; }
+    rm -f "$backup"
+    mv "$destination" "$backup" || { rm -f "$candidate"; return 1; }
+    had_old=1
+  fi
+  if [ -e "$metadata" ]; then
+    metadata_backup="$(mktemp "${metadata}.rollback.XXXXXX")" || {
+      rm -f "$candidate"
+      [ "$had_old" -eq 0 ] || mv "$backup" "$destination" 2>/dev/null || true
+      return 1
+    }
+    cp -a "$metadata" "$metadata_backup" || {
+      rm -f "$candidate" "$metadata_backup"
+      [ "$had_old" -eq 0 ] || mv "$backup" "$destination" 2>/dev/null || true
+      return 1
+    }
+    had_metadata=1
+  fi
+  if ! install -m 0755 "$candidate" "${destination}.new" \
+     || ! mv -f "${destination}.new" "$destination" \
+     || ! snell_runtime_reported_version "$destination" >/dev/null; then
+    rm -f "$candidate" "${destination}.new" "$destination"
+    [ "$had_old" -eq 0 ] || mv "$backup" "$destination" 2>/dev/null || true
+    rm -f "$metadata_backup"
+    return 1
+  fi
+  metadata_tmp="$(mktemp_file .json)" || true
+  if [ -z "$metadata_tmp" ] \
+     || ! jq -n --arg major "$major" --arg release_version "$SNELL_RESOLVED_VERSION" \
+          --arg reported_version "$(snell_runtime_reported_version "$destination")" \
+          --arg status "$SNELL_RESOLVED_STATUS" --arg source_url "$SNELL_RESOLVED_URL" \
+          --arg sha256 "$SNELL_RESOLVED_SHA256" --arg installed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+            {
+              major:($major|tonumber), release_version:$release_version,
+              reported_version:$reported_version, status:$status,
+              source_url:$source_url, sha256:$sha256, installed_at:$installed_at
+            }
+          ' >"$metadata_tmp" \
+     || ! nb_atomic_install_file "$metadata_tmp" "$metadata" 0600; then
+    rm -f "$candidate" "$metadata_tmp" "$destination"
+    [ "$had_old" -eq 0 ] || mv "$backup" "$destination" 2>/dev/null || true
+    if [ "$had_metadata" -eq 1 ]; then
+      mv -f "$metadata_backup" "$metadata" 2>/dev/null || true
+    else
+      rm -f "$metadata"
+    fi
+    return 1
+  fi
+  rm -f "$candidate" "$metadata_tmp" "$backup" "$metadata_backup"
+}
+
+snell_install_service_runtime() {
+  local manager tmp
+  manager="$(nb_service_manager)"
+  mkdir -p "$(dirname "$NOBRAND_SNELL_RUNNER")" || return 1
+  tmp="$(mktemp_file .runner)" || return 1
+  cat >"$tmp" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+id="\${1:-}"
+[[ "\$id" =~ ^s[0-9a-f]{16}\$ ]] || exit 64
+state="${NOBRAND_SNELL_STATE_DIR}/\${id}.json"
+config="${NOBRAND_SNELL_CONFIG_DIR}/\${id}.conf"
+[ -r "\$state" ] && [ -r "\$config" ] || exit 66
+version="\$(jq -r '.version // empty' "\$state")"
+case "\$version" in 4|5) ;; *) exit 65 ;; esac
+exec "${NOBRAND_SNELL_RUNTIME_DIR}/snell-v\${version}" -c "\$config"
+EOF
+  install -m 0755 "$tmp" "${NOBRAND_SNELL_RUNNER}.new" \
+    && mv -f "${NOBRAND_SNELL_RUNNER}.new" "$NOBRAND_SNELL_RUNNER" \
+    || { rm -f "$tmp" "${NOBRAND_SNELL_RUNNER}.new"; return 1; }
+  rm -f "$tmp"
+  case "$manager" in
+    systemd)
+      tmp="$(mktemp_file .service)" || return 1
+      cat >"$tmp" <<EOF
+# Managed by NoBrand-OneClick
+[Unit]
+Description=NoBrand Snell instance %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=${NOBRAND_SNELL_RUNNER} %i
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=1048576
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadOnlyPaths=${NOBRAND_SNELL_CONFIG_DIR} ${NOBRAND_SNELL_STATE_DIR} ${NOBRAND_SNELL_RUNTIME_DIR}
+
+[Install]
+WantedBy=multi-user.target
+EOF
+      install -m 0644 "$tmp" "${NOBRAND_SNELL_SYSTEMD_TEMPLATE}.new" \
+        && mv -f "${NOBRAND_SNELL_SYSTEMD_TEMPLATE}.new" "$NOBRAND_SNELL_SYSTEMD_TEMPLATE" \
+        || { rm -f "$tmp" "${NOBRAND_SNELL_SYSTEMD_TEMPLATE}.new"; return 1; }
+      rm -f "$tmp"
+      systemctl daemon-reload
+      ;;
+    openrc) ;;
+    *) return 1 ;;
+  esac
+}
+
+snell_systemd_unit() { printf 'nobrand-snell@%s.service' "$1"; }
+snell_openrc_service() { printf 'nobrand-snell-%s' "$1"; }
+
+snell_ensure_openrc_service() {
+  local id="$1" path tmp
+  [ "$(nb_service_manager)" = openrc ] || return 0
+  [[ "$id" =~ ^s[0-9a-f]{16}$ ]] || return 1
+  path="${NOBRAND_SNELL_OPENRC_PREFIX}${id}"
+  tmp="$(mktemp_file .openrc)" || return 1
+  cat >"$tmp" <<EOF
+#!/sbin/openrc-run
+# Managed by NoBrand-OneClick
+name="NoBrand Snell ${id}"
+command="${NOBRAND_SNELL_RUNNER}"
+command_args="${id}"
+command_background=true
+pidfile="/run/nobrand-snell-${id}.pid"
+output_log="/var/log/nobrand-snell-${id}.log"
+error_log="/var/log/nobrand-snell-${id}.err"
+depend() { use net; after firewall; }
+EOF
+  install -m 0755 "$tmp" "${path}.new" && mv -f "${path}.new" "$path" \
+    || { rm -f "$tmp" "${path}.new"; return 1; }
+  rm -f "$tmp"
+}
+
+snell_service_action() {
+  local id="$1" action="$2" manager unit service
+  manager="$(nb_service_manager)"
+  unit="$(snell_systemd_unit "$id")"
+  service="$(snell_openrc_service "$id")"
+  case "$manager" in
+    systemd)
+      [ "$action" != restart ] || systemctl daemon-reload
+      [ "$action" != start ] && [ "$action" != restart ] \
+        || systemctl enable "$unit" >/dev/null 2>&1
+      systemctl "$action" "$unit"
+      ;;
+    openrc)
+      snell_ensure_openrc_service "$id" || return 1
+      [ "$action" != start ] && [ "$action" != restart ] \
+        || rc-update add "$service" default >/dev/null 2>&1
+      rc-service "$service" "$action"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+snell_service_active() {
+  local id="$1"
+  nb_service_is_active "$(snell_systemd_unit "$id")" "$(snell_openrc_service "$id")"
+}
+
+snell_remove_service() {
+  local id="$1" manager unit service
+  manager="$(nb_service_manager)"
+  unit="$(snell_systemd_unit "$id")"; service="$(snell_openrc_service "$id")"
+  snell_service_action "$id" stop >/dev/null 2>&1 || true
+  case "$manager" in
+    systemd) systemctl disable "$unit" >/dev/null 2>&1 || true ;;
+    openrc)
+      rc-update del "$service" default >/dev/null 2>&1 || true
+      rm -f "${NOBRAND_SNELL_OPENRC_PREFIX}${id}"
+      ;;
+  esac
+}
+
+# ---------- NoBrand VLESS Sudoku isolated Xray service ----------
+
+nobrand_write_vless_sudoku_service() {
+  local manager tmp
+  manager="$(nb_service_manager)"
+  case "$manager" in
+    systemd)
+      tmp="$(mktemp_file .service)" || return 1
+      cat >"$tmp" <<EOF
+# Managed by NoBrand-OneClick
+[Unit]
+Description=NoBrand Plain VLESS FinalMask Sudoku (Xray-core)
+Documentation=https://github.com/ike-sh/NoBrand-OneClick
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=${NOBRAND_VLESS_CONFIG_DIR}
+ExecStart=${NOBRAND_XRAY_BIN} run -c ${NOBRAND_VLESS_CONFIG_FILE}
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=1048576
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=${NOBRAND_VLESS_CONFIG_DIR} ${NOBRAND_VLESS_STATE_DIR}
+
+[Install]
+WantedBy=multi-user.target
+EOF
+      grep -qF "ExecStart=${NOBRAND_XRAY_BIN} run -c ${NOBRAND_VLESS_CONFIG_FILE}" "$tmp" \
+        || { rm -f "$tmp"; return 1; }
+      install -m 0644 "$tmp" "${NOBRAND_VLESS_SYSTEMD_SERVICE}.new" \
+        && mv -f "${NOBRAND_VLESS_SYSTEMD_SERVICE}.new" "$NOBRAND_VLESS_SYSTEMD_SERVICE" \
+        || { rm -f "$tmp" "${NOBRAND_VLESS_SYSTEMD_SERVICE}.new"; return 1; }
+      rm -f "$tmp"
+      systemctl daemon-reload || return 1
+      systemctl enable "$NOBRAND_VLESS_SERVICE_NAME" >/dev/null 2>&1
+      ;;
+    openrc)
+      tmp="$(mktemp_file .openrc)" || return 1
+      cat >"$tmp" <<EOF
+#!/sbin/openrc-run
+# Managed by NoBrand-OneClick
+name="NoBrand Plain VLESS FinalMask Sudoku"
+description="NoBrand Plain VLESS FinalMask Sudoku (Xray-core)"
+command="${NOBRAND_XRAY_BIN}"
+command_args="run -c ${NOBRAND_VLESS_CONFIG_FILE}"
+command_background=true
+pidfile="/run/nobrand-vless-sudoku.pid"
+output_log="/var/log/nobrand-vless-sudoku.log"
+error_log="/var/log/nobrand-vless-sudoku.err"
+depend() { use net; after firewall; }
+EOF
+      install -m 0755 "$tmp" "${NOBRAND_VLESS_OPENRC_SERVICE}.new" \
+        && mv -f "${NOBRAND_VLESS_OPENRC_SERVICE}.new" "$NOBRAND_VLESS_OPENRC_SERVICE" \
+        || { rm -f "$tmp" "${NOBRAND_VLESS_OPENRC_SERVICE}.new"; return 1; }
+      rm -f "$tmp"
+      rc-update add "$NOBRAND_VLESS_SERVICE_NAME" default >/dev/null 2>&1
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+nobrand_vless_sudoku_service_action() {
+  local action="$1" manager
+  manager="$(nb_service_manager)"
+  case "$manager" in
+    systemd)
+      [ "$action" != restart ] || systemctl daemon-reload
+      systemctl "$action" "$NOBRAND_VLESS_SERVICE_NAME"
+      ;;
+    openrc) rc-service "$NOBRAND_VLESS_SERVICE_NAME" "$action" ;;
+    *) return 1 ;;
+  esac
+}
+
+nobrand_vless_sudoku_service_active() {
+  nb_service_is_active "$NOBRAND_VLESS_SERVICE_NAME" "$NOBRAND_VLESS_SERVICE_NAME"
+}
+
+nobrand_remove_vless_sudoku_service() {
+  local manager
+  manager="$(nb_service_manager)"
+  nobrand_vless_sudoku_service_action stop >/dev/null 2>&1 || true
+  case "$manager" in
+    systemd)
+      systemctl disable "$NOBRAND_VLESS_SERVICE_NAME" >/dev/null 2>&1 || true
+      rm -f "$NOBRAND_VLESS_SYSTEMD_SERVICE"
+      systemctl daemon-reload 2>/dev/null || true
+      ;;
+    openrc)
+      rc-update del "$NOBRAND_VLESS_SERVICE_NAME" default >/dev/null 2>&1 || true
+      rm -f "$NOBRAND_VLESS_OPENRC_SERVICE"
+      ;;
+  esac
+}
+
 random_token() {
   if command -v openssl >/dev/null 2>&1; then
     openssl rand -base64 12 | tr -dc 'a-zA-Z0-9' | head -c 10
@@ -2080,48 +4509,24 @@ normalize_uint() {
 # 取本机主用 IPv4：优先默认路由出口地址（ip route get 不发包，仅查路由表，
 # 内网无外网也可用），回退首个非回环地址。
 detect_local_ip() {
-  local ip=""
-  if command -v ip >/dev/null 2>&1; then
-    ip="$(ip route get 1.1.1.1 2>/dev/null | sed -n 's/.*src \([0-9.]*\).*/\1/p' | head -n1)" || true
-  fi
-  if [ -z "$ip" ]; then
-    ip="$(hostname -I 2>/dev/null | tr ' ' '\n' \
-      | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | grep -vE '^127\.' | head -n1)" || true
-  fi
-  printf '%s' "$ip"
+  nb_detect_local_ipv4
 }
 
 # 由本机 IP 末位八位组推导端口基数 N*100（要求 N=1-254 且基数≥1025）；不可用返回非0
 derive_port_base() {
-  local ip n base
+  local ip
   ip="$(detect_local_ip)"
-  n="${ip##*.}"
-  [[ "$n" =~ ^[0-9]+$ ]] || return 1
-  [ "$n" -ge 1 ] && [ "$n" -le 254 ] || return 1
-  base=$((n * 100))
-  [ "$base" -ge 1025 ] || return 1   # 小尾号兜底：基数落入特权端口段则放弃
-  printf '%s' "$base"
+  nb_port_base_for_ip "$ip"
 }
 
 # 在 IP 尾号端口段内随机取一个可用端口：xx01-xx99（xx00 留给 SSH）；不可用返回非0。
 # BOTH 双协议时末两位上限取 98，避免 UDP=主端口+1 溢出到 xx00 或下一机器段。
 derive_port_from_ip() {
-  local base hi start i off p
+  local base hi
   base="$(derive_port_base)" || return 1
   hi=99
   [ "$PROTOCOL" = "BOTH" ] && hi=98
-  start=$(( (RANDOM % hi) + 1 ))
-  i=0
-  while [ "$i" -lt "$hi" ]; do
-    off=$(( ((start - 1 + i) % hi) + 1 ))
-    p=$((base + off))
-    if port_available_for_mode "$p"; then
-      printf '%s' "$p"
-      return 0
-    fi
-    i=$((i + 1))
-  done
-  return 1
+  nb_scan_port_span "$((base + 1))" "$((base + hi))" port_available_for_mode
 }
 
 valid_port() {
@@ -2146,19 +4551,9 @@ validate_advertise_endpoint_values() {
       'Custom client entry requires both a host and a port')"
     return 1
   }
-  valid_advertise_host "$host" || {
-    warn "$(t '客户端入口地址无效；请输入 IPv4、IPv6 或域名' \
-      'Invalid client entry host; enter an IPv4 address, IPv6 address, or domain name')"
-    return 1
-  }
-  valid_advertise_port "$port" || {
-    warn "$(t '自定义客户端入口端口必须是 1-65535' \
-      'Custom client entry port must be between 1 and 65535')"
-    return 1
-  }
-  if [ "$protocol" = "BOTH" ] && [ "$port" -ge 65535 ]; then
-    warn "$(t '双协议的客户端入口主端口必须 ≤65534（UDP 使用入口端口+1）' \
-      'Dual protocol requires client entry port <=65534 (UDP uses entry port + 1)')"
+  if ! nb_validate_advertise_endpoint "$host" "$port" "$protocol"; then
+    warn "$(t '客户端入口无效；请输入有效 IPv4、IPv6 或域名及 1-65535 端口（双协议主端口 ≤65534）' \
+      'Invalid client endpoint; use a valid IPv4, IPv6, or domain and port 1-65535 (dual main port <=65534)')"
     return 1
   fi
 }
@@ -3250,85 +5645,11 @@ for u in d.get("users") or []:
 }
 
 port_is_listening() {
-  local p="$1" proto="${2:-ANY}" flags
+  local p="$1" proto="${2:-ANY}"
   case "$proto" in
-    TCP) flags="-Hlnt" ;;
-    UDP) flags="-Hlnu" ;;
-    *) flags="-Hlntu" ;;
+    TCP|UDP) nb_port_is_listening "$proto" "$p" ;;
+    *) nb_port_is_listening TCP "$p" || nb_port_is_listening UDP "$p" ;;
   esac
-  if command -v ss >/dev/null 2>&1; then
-    if ss "$flags" 2>/dev/null | awk -v port="$p" '
-      {
-        for (i = 1; i <= NF; i++) {
-          if ($i ~ (":" port "$")) {
-            found = 1
-            exit
-          }
-        }
-      }
-      END { exit(found ? 0 : 1) }
-    '; then
-      return 0
-    fi
-    return 1
-  fi
-  if command -v netstat >/dev/null 2>&1; then
-    case "$proto" in
-      TCP) flags="-lnt" ;;
-      UDP) flags="-lnu" ;;
-      *) flags="-lntu" ;;
-    esac
-    if netstat "$flags" 2>/dev/null | awk -v port="$p" '
-      {
-        for (i = 1; i <= NF; i++) {
-          if ($i ~ (":" port "$")) {
-            found = 1
-            exit
-          }
-        }
-      }
-      END { exit(found ? 0 : 1) }
-    '; then
-      return 0
-    fi
-    return 1
-  fi
-  if command -v python3 >/dev/null 2>&1; then
-    python3 - "$p" "$proto" <<'PY'
-import errno
-import socket
-import sys
-
-port = int(sys.argv[1])
-proto = sys.argv[2]
-protocols = ("TCP", "UDP") if proto == "ANY" else (proto,)
-for current_proto in protocols:
-    sock_type = socket.SOCK_DGRAM if current_proto == "UDP" else socket.SOCK_STREAM
-    for family in (socket.AF_INET6, socket.AF_INET):
-        try:
-            sock = socket.socket(family, sock_type)
-        except OSError:
-            continue
-        try:
-            if family == socket.AF_INET6:
-                try:
-                    sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
-                except OSError:
-                    pass
-                sock.bind(("::", port))
-            else:
-                sock.bind(("0.0.0.0", port))
-        except OSError as exc:
-            sock.close()
-            if exc.errno in (errno.EADDRINUSE, errno.EACCES):
-                raise SystemExit(0)
-            continue
-        sock.close()
-raise SystemExit(1)
-PY
-    return $?
-  fi
-  return 1
 }
 
 port_required_bindings() {
@@ -3352,6 +5673,7 @@ port_available_for_mode() {
   fi
   while IFS='|' read -r proto bind_port; do
     [ -n "$proto" ] && [ -n "$bind_port" ] || continue
+    nb_port_is_tail_base_reserved "$bind_port" && return 1
     port_is_listening "$bind_port" "$proto" && return 1
   done < <(port_required_bindings "$p")
   return 0
@@ -3367,6 +5689,10 @@ port_listener_details() {
   fi
   while IFS='|' read -r proto bind_port; do
     [ -n "$proto" ] && [ -n "$bind_port" ] || continue
+    if nb_port_is_tail_base_reserved "$bind_port"; then
+      nb_describe_port_conflict "$proto" "$bind_port"
+      continue
+    fi
     case "$proto" in
       TCP) flags="-Hlntp" ;;
       UDP) flags="-Hlnup" ;;
@@ -6363,6 +8689,8 @@ normalize_profile() {
   esac
 }
 
+# Optional argument is part of the public helper API.
+# shellcheck disable=SC2120
 profile_label() {
   case "$(normalize_profile "${1:-${PROFILE:-custom}}" 2>/dev/null || printf custom)" in
     iplc) t 'IPLC / 专线性能' 'IPLC / Dedicated-line Performance' ;;
@@ -7430,6 +9758,2325 @@ ${bindings}
 }
 EOF
   printf '%s' "$cfg"
+}
+
+# ---------- Snell v4/v5 multi-instance engine ----------
+
+snell_state_path() {
+  local id="${1:-}"
+  [[ "$id" =~ ^s[0-9a-f]{16}$ ]] || return 1
+  printf '%s/%s.json' "$NOBRAND_SNELL_STATE_DIR" "$id"
+}
+
+snell_config_path() {
+  local id="${1:-}"
+  [[ "$id" =~ ^s[0-9a-f]{16}$ ]] || return 1
+  printf '%s/%s.conf' "$NOBRAND_SNELL_CONFIG_DIR" "$id"
+}
+
+snell_state_exists() {
+  local path
+  path="$(snell_state_path "$1")" || return 1
+  [ -s "$path" ] && jq empty "$path" >/dev/null 2>&1
+}
+
+snell_state_field() {
+  local id="$1" field="$2" path
+  path="$(snell_state_path "$id")" || return 1
+  snell_state_exists "$id" || return 1
+  jq -r --arg field "$field" \
+    'if has($field) and .[$field] != null then .[$field] else empty end' "$path"
+}
+
+snell_instance_ids() {
+  local path id
+  for path in "$NOBRAND_SNELL_STATE_DIR"/*.json; do
+    [ -f "$path" ] || continue
+    id="$(basename "$path" .json)"
+    [[ "$id" =~ ^s[0-9a-f]{16}$ ]] || continue
+    jq -e --arg id "$id" '.instance_id == $id and (.version == 4 or .version == 5)' \
+      "$path" >/dev/null 2>&1 || continue
+    printf '%s\n' "$id"
+  done
+}
+
+snell_find_id_by_name() {
+  local expected="${1:-}" id
+  [ -n "$expected" ] || return 1
+  while IFS= read -r id; do
+    [ "$(snell_state_field "$id" name 2>/dev/null || true)" = "$expected" ] || continue
+    printf '%s' "$id"
+    return 0
+  done < <(snell_instance_ids)
+  return 1
+}
+
+snell_resolve_target_id() {
+  local target="${1:-}" ids count major
+  if [[ "$target" =~ ^s[0-9a-f]{16}$ ]] && snell_state_exists "$target"; then
+    major="$(snell_state_field "$target" version 2>/dev/null || true)"
+    case "$major" in 4|5) ;; *) return 1 ;; esac
+    printf '%s' "$target"
+    return 0
+  fi
+  if [ -n "$target" ]; then
+    snell_find_id_by_name "$target"
+    return $?
+  fi
+  ids="$(snell_instance_ids)"
+  count="$(printf '%s\n' "$ids" | sed '/^$/d' | wc -l | tr -d '[:space:]')"
+  [ "$count" -eq 1 ] || return 1
+  printf '%s' "$ids"
+}
+
+snell_valid_name() {
+  local value="${1:-}"
+  valid_proxy_identity_part "$value" || return 1
+  case "$value" in *'|'*|*$'\t'*|*$'\n'*|*$'\r'*) return 1 ;; esac
+}
+
+snell_valid_psk() {
+  local value="${1:-}"
+  [ "${#value}" -ge 8 ] && [ "${#value}" -le 128 ] || return 1
+  [[ "$value" =~ ^[A-Za-z0-9._~+/@:=,-]+$ ]]
+}
+
+snell_generate_psk() {
+  local value
+  value="$(openssl rand -base64 24 2>/dev/null | tr -d '\r\n')"
+  snell_valid_psk "$value" || value="$(openssl rand -hex 24 2>/dev/null || random_token)"
+  snell_valid_psk "$value" || return 1
+  printf '%s' "$value"
+}
+
+snell_generate_instance_id() {
+  local id attempt=0
+  while [ "$attempt" -lt 64 ]; do
+    id="s$(openssl rand -hex 8 2>/dev/null || true)"
+    [[ "$id" =~ ^s[0-9a-f]{16}$ ]] || {
+      id="s$(printf '%016x' "$((RANDOM * 32768 + RANDOM))")"
+    }
+    if ! snell_state_exists "$id"; then
+      printf '%s' "$id"
+      return 0
+    fi
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+
+snell_release_status_for_version() {
+  local version
+  version="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
+  case "$version" in
+    *rc*) printf RC ;;
+    *beta*|v*b[0-9]*|*.*.*b[0-9]*) printf Beta ;;
+    *alpha*|v*a[0-9]*|*.*.*a[0-9]*) printf Experimental ;;
+    *[!0-9.v]*) printf Experimental ;;
+    *) printf Stable ;;
+  esac
+}
+
+snell_generate_state() {
+  local output="$1" id="$2" name="$3" major="$4" psk="$5" listen_host="$6" listen_port="$7"
+  local advertise_mode="$8" advertise_host="$9" advertise_port="${10}" created_at="${11:-}"
+  local quic_proxy_enabled="${12:-false}"
+  local runtime_version runtime_status updated_at
+  case "$major" in 4|5) ;; *) return 1 ;; esac
+  runtime_version="$(snell_runtime_release_version "$major" 2>/dev/null || printf unknown)"
+  runtime_status="$(snell_runtime_release_status "$major" 2>/dev/null || snell_release_status_for_version "$runtime_version")"
+  [ -n "$created_at" ] || created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  updated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  jq -n --arg id "$id" --arg name "$name" --arg version "$major" --arg psk "$psk" \
+    --arg listen_host "$listen_host" --arg listen_port "$listen_port" \
+    --arg advertise_mode "$advertise_mode" --arg advertise_host "$advertise_host" \
+    --arg advertise_port "$advertise_port" --arg runtime_version "$runtime_version" \
+    --arg runtime_status "$runtime_status" --arg created_at "$created_at" --arg updated_at "$updated_at" \
+    --argjson quic_proxy_enabled "$quic_proxy_enabled" '
+      {
+        protocol:"snell",
+        instance_id:$id,
+        name:$name,
+        version:($version|tonumber),
+        psk:$psk,
+        listen_host:$listen_host,
+        listen_port:($listen_port|tonumber),
+        transport:"tcp",
+        advertise_mode:$advertise_mode,
+        advertise_host:$advertise_host,
+        advertise_port:(if $advertise_port=="" then "" else ($advertise_port|tonumber) end),
+        enabled:true,
+        quic_proxy_enabled:$quic_proxy_enabled,
+        managed_udp:$quic_proxy_enabled,
+        runtime_version:$runtime_version,
+        runtime_status:$runtime_status,
+        created_at:$created_at,
+        updated_at:$updated_at
+      }
+    ' >"$output"
+}
+
+snell_config_matches_state() {
+  local id="$1" state config
+  state="$(snell_state_path "$id")" || return 1
+  config="$(snell_config_path "$id")" || return 1
+  [ -s "$state" ] && [ -s "$config" ] || return 1
+  python3 - "$state" "$config" <<'PY'
+import json
+import sys
+
+state=json.load(open(sys.argv[1], encoding="utf-8"))
+values={}
+section=""
+for raw in open(sys.argv[2], encoding="utf-8"):
+    line=raw.strip()
+    if not line or line.startswith("#") or line.startswith(";"):
+        continue
+    if line.startswith("[") and line.endswith("]"):
+        section=line[1:-1]
+        continue
+    if "=" not in line:
+        raise SystemExit(1)
+    key,value=(part.strip() for part in line.split("=",1))
+    values[(section,key)]=value
+expected="%s:%s" % (state.get("listen_host"), state.get("listen_port"))
+if values.get(("snell-server","listen")) != expected:
+    raise SystemExit(1)
+if values.get(("snell-server","psk")) != state.get("psk"):
+    raise SystemExit(1)
+version=int(state.get("version"))
+if version in (4,5):
+    if values.get(("snell-server","ipv6")) != "false":
+        raise SystemExit(1)
+else:
+    raise SystemExit(1)
+PY
+}
+
+snell_quic_proxy_enabled() {
+  local id="$1"
+  [ "$(snell_state_field "$id" version 2>/dev/null || true)" = 5 ] || return 1
+  [ "$(snell_state_field "$id" quic_proxy_enabled 2>/dev/null || printf false)" = true ]
+}
+
+snell_managed_udp_enabled() {
+  local id="$1"
+  [ "$(snell_state_field "$id" version 2>/dev/null || true)" = 5 ] || return 1
+  [ "$(snell_state_field "$id" managed_udp 2>/dev/null || printf false)" = true ]
+}
+
+snell_quic_state_consistent() {
+  local id="$1" quic managed
+  quic="$(snell_state_field "$id" quic_proxy_enabled 2>/dev/null || printf false)"
+  managed="$(snell_state_field "$id" managed_udp 2>/dev/null || printf false)"
+  case "$quic:$managed" in false:false|true:true) return 0 ;; *) return 1 ;; esac
+}
+
+snell_firewall_pairs() {
+  local id="$1" port
+  port="$(snell_state_field "$id" listen_port)" || return 1
+  printf 'TCP|%s\n' "$port"
+  snell_managed_udp_enabled "$id" && printf 'UDP|%s\n' "$port"
+  return 0
+}
+
+snell_install_port_available() {
+  local port="$1"
+  nb_port_available_for_transport "$port" TCP || return 1
+  [ "${SNELL_QUIC_PROXY:-off}" != on ] || nb_port_available_for_transport "$port" UDP
+}
+
+snell_select_available_install_port() {
+  local ip bounds lo hi selected attempt=0 random_value
+  [ "${SNELL_QUIC_PROXY:-off}" = on ] || { nb_select_available_port TCP; return; }
+  ip="$(nb_detect_local_ipv4 2>/dev/null || true)"
+  if bounds="$(nb_tail_port_bounds "$ip" 2>/dev/null)"; then
+    lo="${bounds%%|*}"; hi="${bounds#*|}"
+    if selected="$(nb_scan_port_span "$lo" "$hi" snell_install_port_available)"; then
+      printf '%s' "$selected"
+      return 0
+    fi
+  fi
+  while [ "$attempt" -lt 512 ]; do
+    random_value="$(openssl rand -hex 2 2>/dev/null || true)"
+    if [[ "$random_value" =~ ^[0-9a-fA-F]{4}$ ]]; then
+      selected=$((1025 + 16#$random_value % (65535 - 1025 + 1)))
+    else
+      selected=$((1025 + RANDOM % (65535 - 1025 + 1)))
+    fi
+    snell_install_port_available "$selected" && { printf '%s' "$selected"; return 0; }
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+
+snell_effective_endpoint() {
+  local id="$1" mode host advertise_port listen_port effective_host effective_port
+  mode="$(snell_state_field "$id" advertise_mode)"
+  host="$(snell_state_field "$id" advertise_host)"
+  advertise_port="$(snell_state_field "$id" advertise_port)"
+  listen_port="$(snell_state_field "$id" listen_port)"
+  effective_host="$(nb_effective_advertise_host "$mode" "$host")"
+  effective_port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port")"
+  printf '%s|%s' "$effective_host" "$effective_port"
+}
+
+snell_state_set_enabled() {
+  local id="$1" enabled="$2" path tmp
+  path="$(snell_state_path "$id")" || return 1
+  tmp="$(mktemp_file .json)" || return 1
+  if ! jq --argjson enabled "$enabled" --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      '.enabled=$enabled | .updated_at=$updated' "$path" >"$tmp" \
+     || ! nb_atomic_install_file "$tmp" "$path" 0600; then
+    rm -f "$tmp"
+    return 1
+  fi
+  rm -f "$tmp"
+}
+
+snell_collect_install_requests() {
+  local interactive="$1" detected="" owner quic_choice=""
+  case "${SNELL_VERSION:-5}" in 4|5) ;; *) die 'Snell 只支持 v4、v5' ;; esac
+  snell_platform_supported "$SNELL_VERSION" \
+    || die "当前 OS/arch 不支持官方 Snell v${SNELL_VERSION} runtime"
+  if [ -z "${SNELL_NAME:-}" ]; then
+    if [ "$interactive" -eq 1 ]; then
+      read_tty SNELL_NAME "$(t "节点名 [snell-v${SNELL_VERSION}]: " "Node name [snell-v${SNELL_VERSION}]: ")" || SNELL_NAME=""
+    fi
+    SNELL_NAME="${SNELL_NAME:-snell-v${SNELL_VERSION}}"
+  fi
+  snell_valid_name "$SNELL_NAME" || die 'Snell 节点名无效（1-64 字符且不能含控制字符或 |）'
+  [ -z "$(snell_find_id_by_name "$SNELL_NAME" 2>/dev/null || true)" ] || die "Snell 节点名已存在: $SNELL_NAME"
+  if [ -z "${PORT:-}" ]; then
+    PORT="$(nb_select_available_port TCP)" || die '未找到可用 Snell TCP 端口'
+    PORT_AUTO_SELECTED=1
+  else
+    nb_valid_port "$PORT" || die 'Snell 端口必须是 1-65535'
+    PORT="$(normalize_uint "$PORT")"
+    nb_warn_if_outside_recommended_range "$PORT"
+    if ! nb_port_available_for_transport "$PORT" TCP; then
+      warn "Snell TCP/${PORT} 已占用"
+      nb_describe_port_conflict TCP "$PORT"
+      return 1
+    fi
+  fi
+  if [ -z "${SNELL_PSK:-}" ]; then
+    SNELL_PSK="$(snell_generate_psk)" || die '无法生成 Snell PSK'
+  fi
+  snell_valid_psk "$SNELL_PSK" \
+    || die 'Snell PSK 必须为 8-128 位安全 ASCII（字母、数字或 ._~+/@:=,-）'
+  if [ "$SNELL_VERSION" = 5 ]; then
+    if [ "$interactive" -eq 1 ] && [ "${SNELL_QUIC_CLI:-0}" -eq 0 ]; then
+      msg ''
+      msg '是否启用 Snell v5 QUIC Proxy Mode？'
+      msg '  1) 否 [默认 / 推荐兼容]'
+      msg '  2) 是 [同时开放 UDP，同端口]'
+      read_tty quic_choice "$(t '请选择 [1]: ' 'Choose [1]: ')" || quic_choice=""
+      case "$quic_choice" in
+        ""|1) SNELL_QUIC_PROXY=off ;;
+        2) SNELL_QUIC_PROXY=on ;;
+        *) die 'QUIC Proxy Mode 选择无效' ;;
+      esac
+    else
+      SNELL_QUIC_PROXY="${SNELL_QUIC_PROXY:-off}"
+    fi
+  else
+    [ "${SNELL_QUIC_PROXY:-off}" != on ] || die 'Snell v4 不支持 QUIC Proxy Mode'
+    SNELL_QUIC_PROXY=off
+  fi
+  case "$SNELL_QUIC_PROXY" in on|off) ;; *) die 'QUIC Proxy Mode 只支持 on 或 off' ;; esac
+  if [ "$SNELL_QUIC_PROXY" = on ] && ! nb_port_available_for_transport "$PORT" UDP; then
+    if [ "${PORT_AUTO_SELECTED:-0}" -eq 1 ]; then
+      PORT="$(snell_select_available_install_port)" || die '未找到同时可用的 Snell v5 TCP/UDP 同号端口'
+    else
+      warn "Snell v5 QUIC 需要同号 UDP/${PORT}，但该端口已占用"
+      nb_describe_port_conflict UDP "$PORT"
+      return 1
+    fi
+  fi
+  detected="$(public_ip 2>/dev/null || true)"
+  if [ "$interactive" -eq 1 ] && [ "${ADVERTISE_CLI:-0}" -eq 0 ]; then
+    nb_collect_advertise_endpoint_interactive "Snell v${SNELL_VERSION}" "$PORT"
+  else
+    nb_require_explicit_endpoint_noninteractive
+  fi
+  nb_validate_advertise_endpoint "$ADVERTISE_HOST" "$ADVERTISE_PORT" TCP \
+    || die 'Snell Display Endpoint 无效'
+  if [ -n "$ADVERTISE_HOST" ]; then
+    owner="$(nb_endpoint_conflict_owner TCP "$ADVERTISE_HOST" "$ADVERTISE_PORT" '' 2>/dev/null || true)"
+    [ -z "$owner" ] || die "Snell Display Endpoint 与 ${owner} 冲突"
+    if [ "$SNELL_QUIC_PROXY" = on ]; then
+      owner="$(nb_endpoint_conflict_owner UDP "$ADVERTISE_HOST" "$ADVERTISE_PORT" '' 2>/dev/null || true)"
+      [ -z "$owner" ] || die "Snell QUIC Display Endpoint 与 ${owner} 冲突"
+    fi
+  fi
+  [ -z "$detected" ] || :
+}
+
+snell_install_rollback() {
+  local id="$1" close_pairs="${2:-}"
+  snell_remove_service "$id" >/dev/null 2>&1 || true
+  [ -z "$close_pairs" ] || nb_firewall_close_pairs "$close_pairs" >/dev/null 2>&1 || true
+  rm -f "$(snell_state_path "$id" 2>/dev/null || true)" \
+    "$(snell_config_path "$id" 2>/dev/null || true)"
+}
+
+install_snell() {
+  local interactive=0 id config_tmp state_tmp mode firewall_pairs new_pairs=""
+  local tcp_was_owned=0 udp_was_owned=0
+  [ "${YES:-0}" -eq 1 ] || interactive=1
+  nobrand_prepare_common
+  snell_collect_install_requests "$interactive"
+  snell_install_runtime "$SNELL_VERSION" 0 || return 1
+  admin_lock_acquire || return 1
+  id="$(snell_generate_instance_id)" || { admin_lock_release; return 1; }
+  if ! snell_install_port_available "$PORT"; then
+    warn "提交前发现 TCP/${PORT} 已被其它实例或进程占用"
+    nb_describe_port_conflict TCP "$PORT"
+    admin_lock_release
+    return 1
+  fi
+  config_tmp="$(mktemp_file .conf)" || { admin_lock_release; return 1; }
+  state_tmp="$(mktemp_file .json)" || { rm -f "$config_tmp"; admin_lock_release; return 1; }
+  mode="$(nb_endpoint_mode_from_values "$ADVERTISE_HOST")"
+  firewall_pairs="TCP|${PORT}"
+  [ "$SNELL_QUIC_PROXY" != on ] || firewall_pairs="${firewall_pairs}"$'\n'"UDP|${PORT}"
+  if ! snell_generate_server_config "$config_tmp" "$SNELL_VERSION" 0.0.0.0 "$PORT" "$SNELL_PSK" \
+     || ! snell_generate_state "$state_tmp" "$id" "$SNELL_NAME" "$SNELL_VERSION" "$SNELL_PSK" \
+          0.0.0.0 "$PORT" "$mode" "$ADVERTISE_HOST" "$ADVERTISE_PORT" "" \
+          "$([ "$SNELL_QUIC_PROXY" = on ] && printf true || printf false)" \
+     || ! snell_config_matches_state_files "$state_tmp" "$config_tmp"; then
+    rm -f "$config_tmp" "$state_tmp"
+    admin_lock_release
+    return 1
+  fi
+  nb_firewall_binding_owned TCP "$PORT" && tcp_was_owned=1
+  nb_firewall_binding_owned UDP "$PORT" && udp_was_owned=1
+  if ! nb_atomic_install_file "$config_tmp" "$(snell_config_path "$id")" 0600 \
+     || ! nb_atomic_install_file "$state_tmp" "$(snell_state_path "$id")" 0600 \
+     || ! snell_install_service_runtime \
+     || ! snell_ensure_openrc_service "$id" \
+     || ! nb_firewall_open_pairs "$firewall_pairs"; then
+    rm -f "$config_tmp" "$state_tmp"
+    nb_firewall_binding_owned TCP "$PORT" && [ "$tcp_was_owned" -eq 0 ] \
+      && new_pairs="TCP|${PORT}"
+    nb_firewall_binding_owned UDP "$PORT" && [ "$udp_was_owned" -eq 0 ] \
+      && new_pairs="${new_pairs}${new_pairs:+$'\n'}UDP|${PORT}"
+    snell_install_rollback "$id" "$new_pairs"
+    admin_lock_release
+    return 1
+  fi
+  rm -f "$config_tmp" "$state_tmp"
+  nb_firewall_binding_owned TCP "$PORT" && [ "$tcp_was_owned" -eq 0 ] \
+    && new_pairs="TCP|${PORT}"
+  nb_firewall_binding_owned UDP "$PORT" && [ "$udp_was_owned" -eq 0 ] \
+    && new_pairs="${new_pairs}${new_pairs:+$'\n'}UDP|${PORT}"
+  if ! snell_service_action "$id" start \
+     || ! snell_service_active "$id" \
+     || ! nb_wait_for_listener TCP "$PORT" 25 \
+     || ! { [ "$SNELL_QUIC_PROXY" != on ] || snell_wait_for_quic_listener "$PORT" 25; }; then
+    snell_install_rollback "$id" "$new_pairs"
+    admin_lock_release
+    warn "Snell v${SNELL_VERSION} 启动或 TCP listener 验收失败，已回滚"
+    return 1
+  fi
+  nobrand_install_manager_script || true
+  admin_lock_release
+  snell_print_result "$id" install
+}
+
+# 与 snell_config_matches_state 相同，但用于尚未提交的事务文件。
+snell_config_matches_state_files() {
+  local state="$1" config="$2"
+  python3 - "$state" "$config" <<'PY'
+import json
+import sys
+state=json.load(open(sys.argv[1], encoding="utf-8"))
+values={}
+section=""
+for raw in open(sys.argv[2], encoding="utf-8"):
+    line=raw.strip()
+    if not line or line.startswith(("#",";")):
+        continue
+    if line.startswith("[") and line.endswith("]"):
+        section=line[1:-1]
+    elif "=" in line:
+        key,value=(x.strip() for x in line.split("=",1))
+        values[(section,key)]=value
+    else:
+        raise SystemExit(1)
+if values.get(("snell-server","listen")) != "%s:%s" % (state["listen_host"],state["listen_port"]):
+    raise SystemExit(1)
+if values.get(("snell-server","psk")) != state["psk"]:
+    raise SystemExit(1)
+if state["version"] in (4,5) and values.get(("snell-server","ipv6")) != "false":
+    raise SystemExit(1)
+PY
+}
+
+snell_set_endpoint() {
+  local id interactive=0 owner path tmp mode
+  require_root
+  id="$(snell_resolve_target_id "${SNELL_NAME:-}")" \
+    || die '请用 --name 指定唯一存在的 Snell 节点'
+  [ "${YES:-0}" -eq 1 ] || interactive=1
+  PORT="$(snell_state_field "$id" listen_port)"
+  if [ "$interactive" -eq 1 ] && [ "${ADVERTISE_CLI:-0}" -eq 0 ]; then
+    nb_collect_advertise_endpoint_interactive "Snell $(snell_state_field "$id" name)" "$PORT"
+  else
+    nb_require_explicit_endpoint_noninteractive
+  fi
+  nb_validate_advertise_endpoint "$ADVERTISE_HOST" "$ADVERTISE_PORT" TCP || die 'Display Endpoint 无效'
+  if [ -n "$ADVERTISE_HOST" ]; then
+    owner="$(nb_endpoint_conflict_owner TCP "$ADVERTISE_HOST" "$ADVERTISE_PORT" "snell:${id}" 2>/dev/null || true)"
+    [ -z "$owner" ] || die "Display Endpoint 与 ${owner} 冲突"
+    if snell_managed_udp_enabled "$id"; then
+      owner="$(nb_endpoint_conflict_owner UDP "$ADVERTISE_HOST" "$ADVERTISE_PORT" "snell:${id}" 2>/dev/null || true)"
+      [ -z "$owner" ] || die "QUIC Display Endpoint 与 ${owner} 冲突"
+    fi
+  fi
+  admin_lock_acquire || return 1
+  path="$(snell_state_path "$id")"
+  tmp="$(mktemp_file .json)" || { admin_lock_release; return 1; }
+  mode="$(nb_endpoint_mode_from_values "$ADVERTISE_HOST")"
+  if ! jq --arg mode "$mode" --arg host "$ADVERTISE_HOST" --arg port "$ADVERTISE_PORT" \
+      --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+        .advertise_mode=$mode |
+        .advertise_host=$host |
+        .advertise_port=(if $port=="" then "" else ($port|tonumber) end) |
+        .updated_at=$updated
+      ' "$path" >"$tmp" \
+     || ! nb_atomic_install_file "$tmp" "$path" 0600; then
+    rm -f "$tmp"
+    admin_lock_release
+    return 1
+  fi
+  rm -f "$tmp"
+  # Display Endpoint 红线：不触碰 config、unit、listener、firewall、tc 或 quota。
+  admin_lock_release
+  t 'Snell 客户端展示入口已更新；server config/listener/service/firewall 均未改变' \
+    'Snell display endpoint updated; server config/listener/service/firewall are unchanged'
+  snell_print_result "$id" show
+}
+
+snell_state_set_quic() {
+  local id="$1" enabled="$2" path tmp
+  path="$(snell_state_path "$id")" || return 1
+  tmp="$(mktemp_file .json)" || return 1
+  if ! jq --argjson enabled "$enabled" --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+      .quic_proxy_enabled=$enabled |
+      .managed_udp=$enabled |
+      .updated_at=$updated
+    ' "$path" >"$tmp" \
+     || ! nb_atomic_install_file "$tmp" "$path" 0600; then
+    rm -f "$tmp"
+    return 1
+  fi
+  rm -f "$tmp"
+}
+
+snell_set_quic() {
+  local id port desired current udp_was_owned=0 state_consistent=0
+  require_root
+  id="$(snell_resolve_target_id "${SNELL_NAME:-}")" \
+    || die '请用 --name 指定唯一存在的 Snell v5 节点'
+  [ "$(snell_state_field "$id" version)" = 5 ] || die 'QUIC Proxy Mode 只适用于 Snell v5'
+  desired="${SNELL_QUIC_PROXY:-}"
+  if [ -z "$desired" ] && [ "${YES:-0}" -ne 1 ]; then
+    read_tty desired "$(t 'QUIC Proxy Mode [on/off]: ' 'QUIC Proxy Mode [on/off]: ')" || desired=""
+  fi
+  case "$desired" in on|off) ;; *) die '请用 --quic on 或 --quic off 明确选择' ;; esac
+  current=off; snell_quic_proxy_enabled "$id" && current=on
+  snell_quic_state_consistent "$id" && state_consistent=1
+  if [ "$current" = "$desired" ] && [ "$state_consistent" -eq 1 ]; then
+    t "Snell v5 QUIC Proxy Mode 已是 ${desired}" "Snell v5 QUIC Proxy Mode is already ${desired}"
+    return 0
+  fi
+  port="$(snell_state_field "$id" listen_port)"
+  admin_lock_acquire || return 1
+  if [ "$desired" = on ]; then
+    if snell_service_active "$id" \
+       && ! snell_v5_auxiliary_udp_same_process "$port"; then
+      admin_lock_release
+      die "Snell v5 同进程 UDP/${port} listener 未通过验收，拒绝开放 QUIC"
+    fi
+    if ! snell_service_active "$id" \
+       && ! nb_port_available_for_transport "$port" UDP; then
+      admin_lock_release
+      warn "Snell v5 QUIC 需要同号 UDP/${port}，但该端口已占用"
+      nb_describe_port_conflict UDP "$port"
+      return 1
+    fi
+    nb_firewall_binding_owned UDP "$port" && udp_was_owned=1
+    if ! nb_firewall_open_pairs "UDP|${port}" \
+       || ! snell_state_set_quic "$id" true; then
+      [ "$udp_was_owned" -eq 1 ] || nb_firewall_close_pairs "UDP|${port}" >/dev/null 2>&1 || true
+      admin_lock_release
+      return 1
+    fi
+  else
+    if ! nb_firewall_close_pairs "UDP|${port}" \
+       || ! snell_state_set_quic "$id" false; then
+      nb_firewall_open_pairs "UDP|${port}" >/dev/null 2>&1 || true
+      admin_lock_release
+      return 1
+    fi
+  fi
+  admin_lock_release
+  t "Snell v5 QUIC Proxy Mode: ${desired}；server config/service/PSK 未改变" \
+    "Snell v5 QUIC Proxy Mode: ${desired}; server config/service/PSK unchanged"
+  snell_print_result "$id" show
+}
+
+snell_running() {
+  local id="$1" port
+  snell_state_exists "$id" || return 1
+  port="$(snell_state_field "$id" listen_port)"
+  snell_service_active "$id" && nb_port_is_listening TCP "$port"
+}
+
+snell_v5_auxiliary_udp_same_process() {
+  local port="$1" tcp_pids udp_pids tcp_pid udp_pid
+  tcp_pids="$(nb_port_listener_pids TCP "$port")"
+  udp_pids="$(nb_port_listener_pids UDP "$port")"
+  [ -n "$tcp_pids" ] && [ -n "$udp_pids" ] || return 1
+  for udp_pid in $udp_pids; do
+    for tcp_pid in $tcp_pids; do
+      [ "$udp_pid" != "$tcp_pid" ] || return 0
+    done
+  done
+  return 1
+}
+
+snell_wait_for_quic_listener() {
+  local port="$1" timeout="${2:-25}" elapsed=0
+  while [ "$elapsed" -lt "$timeout" ]; do
+    snell_v5_auxiliary_udp_same_process "$port" && return 0
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+  return 1
+}
+
+snell_wait_for_required_listeners() {
+  local id="$1" timeout="${2:-25}" port
+  port="$(snell_state_field "$id" listen_port)" || return 1
+  nb_wait_for_listener TCP "$port" "$timeout" || return 1
+  snell_quic_proxy_enabled "$id" || return 0
+  snell_wait_for_quic_listener "$port" "$timeout"
+}
+
+snell_node_rows() {
+  local id name major endpoint host port status quic endpoint_text transport
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    name="$(snell_state_field "$id" name)"
+    major="$(snell_state_field "$id" version)"
+    endpoint="$(snell_effective_endpoint "$id")"
+    host="${endpoint%%|*}"; port="${endpoint#*|}"
+    status=Stopped; snell_running "$id" && status=Running
+    quic=off; snell_quic_proxy_enabled "$id" && quic=on
+    endpoint_text="$(url_host "$host"):${port}/TCP; QUIC Off"
+    transport=TCP
+    if [ "$quic" = on ]; then
+      endpoint_text="$(url_host "$host"):${port}/TCP; QUIC On (UDP same port)"
+      transport=TCP+UDP
+    fi
+    printf 'Snell/v%s|%s|%s|%s|%s\n' "$major" "$name" "$endpoint_text" "$status" "$transport"
+  done < <(snell_instance_ids)
+}
+
+snell_print_result() {
+  local id="$1" context="${2:-show}" name major psk listen_host listen_port endpoint host port status runtime quic
+  snell_state_exists "$id" || { t 'Snell 节点不存在' 'Snell node does not exist'; return 1; }
+  name="$(snell_state_field "$id" name)"; major="$(snell_state_field "$id" version)"
+  psk="$(snell_state_field "$id" psk)"; listen_host="$(snell_state_field "$id" listen_host)"
+  listen_port="$(snell_state_field "$id" listen_port)"; runtime="$(snell_state_field "$id" runtime_version)"
+  endpoint="$(snell_effective_endpoint "$id")"; host="${endpoint%%|*}"; port="${endpoint#*|}"
+  status=Stopped; snell_running "$id" && status=Running
+  quic=Disabled; snell_quic_proxy_enabled "$id" && quic=Enabled
+  nobrand_print_banner
+  msg "$([ "$context" = install ] && printf '部署完成' || printf '节点配置')"
+  msg ''
+  printf '协议        Snell v%s\n节点        %s\nInstance    %s\n状态        %s\nRuntime     %s\n' \
+    "$major" "$name" "$id" "$status" "$runtime"
+  msg ''
+  printf '真实监听\n  Address   %s\n  Port      %s\n  Transport TCP\n' "$listen_host" "$listen_port"
+  printf '  QUIC Proxy %s\n' "$quic"
+  [ "$quic" != Enabled ] || printf '  QUIC Transport UDP/%s (same port)\n' "$listen_port"
+  msg ''
+  printf '客户端入口\n  Host      %s\n  Port      %s\n' "$host" "$port"
+  msg ''
+  printf '认证\n  PSK       %s\n' "$psk"
+  msg ''
+  snell_print_client_exports "$id"
+}
+
+snell_show() {
+  local id found=0
+  if [ -n "${SNELL_NAME:-}" ]; then
+    id="$(snell_resolve_target_id "$SNELL_NAME")" || die "Snell 节点不存在: $SNELL_NAME"
+    snell_print_result "$id" show
+    return
+  fi
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    [ "$found" -eq 0 ] || msg ''
+    snell_print_result "$id" show
+    found=1
+  done < <(snell_instance_ids)
+  [ "$found" -eq 1 ] || t 'Snell 未安装任何节点' 'No Snell nodes are installed'
+}
+
+snell_service_command() {
+  local action="$1" id port was_enabled firewall_pairs
+  id="$(snell_resolve_target_id "${SNELL_NAME:-}")" || die '请用 --name 指定唯一存在的 Snell 节点'
+  port="$(snell_state_field "$id" listen_port)"
+  was_enabled="$(snell_state_field "$id" enabled)"
+  firewall_pairs="$(snell_firewall_pairs "$id")"
+  case "$action" in
+    start)
+      nb_firewall_open_pairs "$firewall_pairs" || return 1
+      if ! snell_service_action "$id" start || ! snell_wait_for_required_listeners "$id" 25 \
+         || ! snell_state_set_enabled "$id" true; then
+        snell_service_action "$id" stop >/dev/null 2>&1 || true
+        [ "$was_enabled" = true ] || snell_state_set_enabled "$id" false >/dev/null 2>&1 || true
+        return 1
+      fi
+      ;;
+    stop)
+      snell_service_action "$id" stop || return 1
+      if ! snell_state_set_enabled "$id" false; then
+        [ "$was_enabled" != true ] || snell_service_action "$id" start >/dev/null 2>&1 || true
+        return 1
+      fi
+      ;;
+    restart)
+      snell_service_action "$id" restart && snell_wait_for_required_listeners "$id" 25
+      ;;
+    status)
+      if snell_running "$id"; then msg "Snell $(snell_state_field "$id" name): Running"; else msg "Snell $(snell_state_field "$id" name): Stopped"; return 1; fi
+      ;;
+  esac
+}
+
+remove_snell_instance() {
+  local id firewall_pairs
+  require_root
+  id="$(snell_resolve_target_id "${SNELL_NAME:-}")" || die '请用 --name 指定唯一存在的 Snell 节点'
+  firewall_pairs="$(snell_firewall_pairs "$id")"
+  admin_lock_acquire || return 1
+  snell_remove_service "$id" || { admin_lock_release; return 1; }
+  nb_firewall_close_pairs "$firewall_pairs" || { admin_lock_release; return 1; }
+  rm -f "$(snell_config_path "$id")" "$(snell_state_path "$id")"
+  admin_lock_release
+  t "Snell 节点已删除: ${SNELL_NAME:-$id}" "Snell node removed: ${SNELL_NAME:-$id}"
+}
+
+snell_doctor_instance() {
+  local id="$1" failed=0 name major port endpoint host advertise_port mode runtime actual_runtime quic
+  snell_state_exists "$id" || return 1
+  case "$(snell_state_field "$id" version 2>/dev/null || true)" in 4|5) ;; *) return 1 ;; esac
+  name="$(snell_state_field "$id" name)"; major="$(snell_state_field "$id" version)"
+  port="$(snell_state_field "$id" listen_port)"; runtime="$(snell_state_field "$id" runtime_version)"
+  printf 'Instance %s (%s, v%s)\n' "$name" "$id" "$major"
+  if [ -x "$(snell_runtime_path "$major")" ]; then
+    actual_runtime="$(snell_runtime_reported_version "$(snell_runtime_path "$major")" 2>/dev/null || true)"
+    [[ "$actual_runtime" = "$major".* ]] \
+      && nb_doctor_line PASS "official runtime v${actual_runtime}" \
+      || { nb_doctor_line FAIL "runtime major mismatch: ${actual_runtime:-unknown}"; failed=1; }
+    [ "$actual_runtime" = "$runtime" ] || nb_doctor_line INFO "state runtime=${runtime}, installed=${actual_runtime}"
+  else
+    nb_doctor_line FAIL "runtime missing: $(snell_runtime_path "$major")"; failed=1
+  fi
+  snell_config_matches_state "$id" && nb_doctor_line PASS 'config/state consistency' \
+    || { nb_doctor_line FAIL 'config/state consistency'; failed=1; }
+  snell_quic_state_consistent "$id" \
+    && nb_doctor_line PASS 'QUIC state/managed UDP consistency' \
+    || { nb_doctor_line FAIL 'QUIC state/managed UDP consistency'; failed=1; }
+  snell_running "$id" && nb_doctor_line PASS "service + TCP/${port}" \
+    || { nb_doctor_line FAIL "service/listener TCP/${port}"; failed=1; }
+  quic=off; snell_quic_proxy_enabled "$id" && quic=on
+  if [ "$major" = 5 ] && [ "$quic" = on ]; then
+    snell_v5_auxiliary_udp_same_process "$port" \
+      && nb_doctor_line PASS "QUIC Proxy Enabled; same-process UDP/${port} listener" \
+      || { nb_doctor_line FAIL "QUIC Proxy Enabled but same-process UDP/${port} listener missing"; failed=1; }
+    nb_firewall_binding_owned UDP "$port" \
+      && nb_doctor_line PASS "QUIC firewall ownership UDP/${port}" \
+      || { nb_doctor_line FAIL "QUIC Proxy Enabled but UDP/${port} firewall ownership missing"; failed=1; }
+  elif [ "$major" = 5 ]; then
+    nb_doctor_line PASS 'QUIC Proxy Disabled; UDP public ownership OFF'
+    if nb_firewall_binding_owned UDP "$port"; then
+      nb_doctor_line FAIL "QUIC Proxy Disabled but UDP/${port} is still NoBrand-owned"
+      failed=1
+    elif nb_port_is_listening UDP "$port"; then
+      if snell_v5_auxiliary_udp_same_process "$port"; then
+        nb_doctor_line INFO \
+          "runtime auxiliary listener UDP/${port} detected; owner=snell-server; public ownership=OFF; canonical ownership=TCP/${port}"
+      else
+        nb_doctor_line WARN \
+          "same-port UDP/${port} listener detected, but ownership could not be matched to the primary Snell process"
+      fi
+    fi
+  fi
+  nb_firewall_binding_owned TCP "$port" && nb_doctor_line PASS "firewall ownership TCP/${port}" \
+    || nb_doctor_line INFO "firewall rule not owned (pre-existing/no local firewall): TCP/${port}"
+  mode="$(snell_state_field "$id" advertise_mode)"; host="$(snell_state_field "$id" advertise_host)"
+  advertise_port="$(snell_state_field "$id" advertise_port)"
+  nb_validate_advertise_endpoint "$host" "$advertise_port" TCP \
+    && nb_doctor_line PASS "display endpoint mode=${mode}" \
+    || { nb_doctor_line FAIL 'display endpoint state'; failed=1; }
+  endpoint="$(snell_effective_endpoint "$id" 2>/dev/null || true)"
+  [ -n "$endpoint" ] || { nb_doctor_line FAIL 'effective endpoint'; failed=1; }
+  return "$failed"
+}
+
+snell_doctor_all() {
+  local id found=0 failed=0
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    snell_doctor_instance "$id" || failed=1
+    found=1
+  done < <(snell_instance_ids)
+  [ "$found" -eq 1 ] || nb_doctor_line INFO 'not installed'
+  return "$failed"
+}
+
+snell_upgrade_runtime() {
+  local major id ids backup="" metadata_backup="" runtime metadata active_ids="" failed=0 port
+  nobrand_prepare_common
+  if [ -n "${SNELL_NAME:-}" ]; then
+    id="$(snell_resolve_target_id "$SNELL_NAME")" || die "Snell 节点不存在: $SNELL_NAME"
+    major="$(snell_state_field "$id" version)"
+  elif [ "${SNELL_VERSION_CLI:-0}" -eq 1 ]; then
+    major="${SNELL_VERSION:-5}"
+  else
+    major=5
+  fi
+  case "$major" in 4|5) ;; *) die 'Snell 只支持 v4、v5' ;; esac
+  runtime="$(snell_runtime_path "$major")"
+  metadata="$(snell_runtime_metadata_path "$major")"
+  if [ -e "$runtime" ]; then
+    backup="$(mktemp_file .snell-runtime)" || return 1
+    cp -a "$runtime" "$backup" || { rm -f "$backup"; return 1; }
+  fi
+  if [ -e "$metadata" ]; then
+    metadata_backup="$(mktemp_file .snell-metadata)" || { rm -f "$backup"; return 1; }
+    cp -a "$metadata" "$metadata_backup" || { rm -f "$backup" "$metadata_backup"; return 1; }
+  fi
+  while IFS= read -r id; do
+    [ "$(snell_state_field "$id" version)" = "$major" ] || continue
+    snell_service_active "$id" && active_ids="${active_ids}${id}"$'\n'
+  done < <(snell_instance_ids)
+  admin_lock_acquire || { rm -f "$backup"; return 1; }
+  if ! snell_install_runtime "$major" 1; then
+    rm -f "$backup"
+    admin_lock_release
+    return 1
+  fi
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    port="$(snell_state_field "$id" listen_port)"
+    snell_service_action "$id" restart >/dev/null 2>&1 \
+      && snell_wait_for_required_listeners "$id" 25 || { failed=1; break; }
+  done <<<"$active_ids"
+  if [ "$failed" -eq 1 ]; then
+    [ -n "$backup" ] && install -m 0755 "$backup" "$runtime"
+    if [ -n "$metadata_backup" ]; then
+      install -m 0600 "$metadata_backup" "$metadata"
+    else
+      rm -f "$metadata"
+    fi
+    while IFS= read -r id; do [ -z "$id" ] || snell_service_action "$id" restart >/dev/null 2>&1 || true; done <<<"$active_ids"
+    rm -f "$backup" "$metadata_backup"
+    admin_lock_release
+    warn "Snell v${major} 升级后实例验收失败，已恢复旧 runtime"
+    return 1
+  fi
+  ids="$(snell_instance_ids)"
+  while IFS= read -r id; do
+    [ "$(snell_state_field "$id" version 2>/dev/null || true)" = "$major" ] || continue
+    snell_refresh_runtime_metadata "$id" || true
+  done <<<"$ids"
+  rm -f "$backup" "$metadata_backup"
+  admin_lock_release
+  t "Snell v${major} runtime 升级完成" "Snell v${major} runtime upgraded"
+}
+
+snell_refresh_runtime_metadata() {
+  local id="$1" path tmp major runtime status
+  path="$(snell_state_path "$id")"; major="$(snell_state_field "$id" version)"
+  runtime="$(snell_runtime_release_version "$major")" || return 1
+  status="$(snell_runtime_release_status "$major")"
+  tmp="$(mktemp_file .json)" || return 1
+  jq --arg runtime "$runtime" --arg status "$status" --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '.runtime_version=$runtime | .runtime_status=$status | .updated_at=$updated' "$path" >"$tmp" \
+    && nb_atomic_install_file "$tmp" "$path" 0600
+  local rc=$?
+  rm -f "$tmp"
+  return "$rc"
+}
+
+# One-time 1.3.0 migration: v6 was removed after its final public-path
+# qualification failed. Historical state is stopped and removed before any
+# normal NoBrand action can expose it again. This is migration cleanup only;
+# there is no v6 install, resolver, runner, exporter, or lifecycle path.
+snell_migrate_quic_state_fields() {
+  local id path tmp enabled
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    path="$(snell_state_path "$id")" || return 1
+    if ! jq -e '
+        .protocol == "snell" and (.version == 4 or .version == 5) and
+        ((has("quic_proxy_enabled") | not) or (.quic_proxy_enabled | type == "boolean")) and
+        ((has("managed_udp") | not) or (.managed_udp | type == "boolean")) and
+        (if .version == 4 then
+           ((.quic_proxy_enabled // false) == false and (.managed_udp // false) == false)
+         elif has("quic_proxy_enabled") and has("managed_udp") then
+           .quic_proxy_enabled == .managed_udp
+         else true end)
+      ' "$path" >/dev/null 2>&1; then
+      return 1
+    fi
+    if jq -e 'has("quic_proxy_enabled") and has("managed_udp")' "$path" >/dev/null 2>&1; then
+      continue
+    fi
+    enabled="$(jq -r '
+      if .version == 4 then false
+      elif has("quic_proxy_enabled") then .quic_proxy_enabled
+      elif has("managed_udp") then .managed_udp
+      else false end
+    ' "$path")" || return 1
+    tmp="$(mktemp_file .json)" || return 1
+    if ! jq --argjson enabled "$enabled" --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+        .quic_proxy_enabled=$enabled |
+        .managed_udp=$enabled |
+        .updated_at=$updated
+      ' "$path" >"$tmp" \
+       || ! nb_atomic_install_file "$tmp" "$path" 0600; then
+      rm -f "$tmp"
+      return 1
+    fi
+    rm -f "$tmp"
+  done < <(snell_instance_ids)
+}
+
+snell_migrate_removed_v6() {
+  local path id file_id port removed=0 failed=0
+  [ -d "$NOBRAND_SNELL_STATE_DIR" ] || {
+    rm -f "$NOBRAND_SNELL_RUNTIME_DIR/snell-v6" \
+      "$NOBRAND_SNELL_RUNTIME_DIR/snell-v6.runtime.json"
+    return 0
+  }
+  for path in "$NOBRAND_SNELL_STATE_DIR"/*.json; do
+    [ -f "$path" ] || continue
+    jq -e '.protocol == "snell" and .version == 6' "$path" >/dev/null 2>&1 || continue
+    id="$(jq -r '.instance_id // empty' "$path")"
+    file_id="$(basename "$path" .json)"
+    [[ "$id" =~ ^s[0-9a-f]{16}$ ]] && [ "$file_id" = "$id" ] \
+      || { failed=1; continue; }
+    port="$(jq -r '.listen_port // empty' "$path")"
+    snell_remove_service "$id" || { failed=1; continue; }
+    if nb_valid_port "$port"; then
+      # Historical NoBrand v6 had TCP-only canonical ownership. Never infer
+      # UDP ownership from a same-number rule that may belong to HY2.
+      nb_firewall_close_pairs "TCP|${port}" || { failed=1; continue; }
+    fi
+    rm -f "$(snell_config_path "$id")" "$path" || { failed=1; continue; }
+    removed=$((removed + 1))
+  done
+  [ "$failed" -eq 0 ] || return 1
+  snell_migrate_quic_state_fields || return 1
+  rm -f "$NOBRAND_SNELL_RUNTIME_DIR/snell-v6" \
+    "$NOBRAND_SNELL_RUNTIME_DIR/snell-v6.runtime.json"
+  [ "$removed" -eq 0 ] || info "Removed ${removed} deprecated Snell v6 instance(s) during 1.3.0 migration"
+}
+
+nobrand_run_snell_action() {
+  case "${SNELL_ACTION:-menu}" in
+    menu) snell_menu_loop ;;
+    install) install_snell ;;
+    show) snell_show ;;
+    set-endpoint) snell_set_endpoint ;;
+    set-quic) snell_set_quic ;;
+    remove) remove_snell_instance ;;
+    start|stop|restart|status) snell_service_command "$SNELL_ACTION" ;;
+    doctor) snell_doctor_all ;;
+    upgrade) snell_upgrade_runtime ;;
+    help) nobrand_usage ;;
+  esac
+}
+
+# ---------- Hysteria2 engine: Xray-core v2 inbound parity ----------
+
+hysteria2_state_exists() {
+  [ -s "$NOBRAND_HY2_STATE_FILE" ] && jq empty "$NOBRAND_HY2_STATE_FILE" >/dev/null 2>&1
+}
+
+hysteria2_state_field() {
+  local field="$1"
+  hysteria2_state_exists || return 1
+  jq -r --arg field "$field" \
+    'if has($field) and .[$field] != null then .[$field] else empty end' "$NOBRAND_HY2_STATE_FILE"
+}
+
+hysteria2_valid_sni() {
+  local value="${1:-}"
+  valid_domain_name "$value" || {
+    [[ "$value" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && valid_ip_literal "$value"
+  }
+}
+
+# 保持 Xray-OneClick lib/57-hysteria2.sh 的 prime256v1、3650 days、CN、
+# 0600/0644 与 key-first atomic rollback 语义。
+generate_hysteria2_cert() {
+  local cert="$NOBRAND_HY2_CERT_FILE" key="$NOBRAND_HY2_KEY_FILE"
+  local tmp_cert tmp_key old_key=""
+  command -v openssl >/dev/null 2>&1 || {
+    warn '[Hysteria2] 需要 openssl 生成自签证书。'
+    return 1
+  }
+  mkdir -p "$NOBRAND_HY2_CONFIG_DIR" || return 1
+  chmod 0700 "$NOBRAND_HY2_CONFIG_DIR" || return 1
+  tmp_key="$(mktemp "${key}.tmp.XXXXXX")" || return 1
+  tmp_cert="$(mktemp "${cert}.tmp.XXXXXX")" || { rm -f "$tmp_key"; return 1; }
+  if ! openssl ecparam -genkey -name prime256v1 -out "$tmp_key" 2>/dev/null; then
+    rm -f "$tmp_key" "$tmp_cert"
+    warn '[Hysteria2] 生成 P-256 私钥失败。'
+    return 1
+  fi
+  if ! openssl req -new -x509 -days 3650 -key "$tmp_key" -out "$tmp_cert" \
+      -subj "/CN=${HY2_SNI:-bing.com}" 2>/dev/null; then
+    rm -f "$tmp_key" "$tmp_cert"
+    warn '[Hysteria2] 生成自签证书失败。'
+    return 1
+  fi
+  chmod 0600 "$tmp_key" && chmod 0644 "$tmp_cert" \
+    || { rm -f "$tmp_key" "$tmp_cert"; return 1; }
+  if [ -f "$key" ]; then
+    old_key="$(mktemp "${key}.rollback.XXXXXX")" \
+      || { rm -f "$tmp_key" "$tmp_cert"; return 1; }
+    cp -a "$key" "$old_key" \
+      || { rm -f "$tmp_key" "$tmp_cert" "$old_key"; return 1; }
+  fi
+  mv "$tmp_key" "$key" \
+    || { rm -f "$tmp_key" "$tmp_cert" "$old_key"; return 1; }
+  if ! mv "$tmp_cert" "$cert"; then
+    rm -f "$tmp_cert"
+    if [ -n "$old_key" ]; then cp -a "$old_key" "$key" || true; else rm -f "$key"; fi
+    rm -f "$old_key"
+    return 1
+  fi
+  rm -f "$old_key"
+}
+
+hysteria2_generate_config() {
+  local output="$1" listen="$2" port="$3" auth="$4" sni="$5" obfs="$6"
+  local cert="${7:-$NOBRAND_HY2_CERT_FILE}" key="${8:-$NOBRAND_HY2_KEY_FILE}"
+  jq -n --arg tag "$NOBRAND_HY2_TAG" --arg listen "$listen" --arg port "$port" \
+    --arg auth "$auth" --arg cert "$cert" --arg key "$key" --arg obfs "$obfs" '
+    {
+      "log": {"loglevel":"warning"},
+      "inbounds": [{
+        "tag": $tag,
+        "listen": $listen,
+        "port": ($port|tonumber),
+        "protocol": "hysteria",
+        "settings": {
+          "version": 2,
+          "clients": [{"auth":$auth,"email":"hysteria2@xray"}]
+        },
+        "streamSettings": {
+          "network": "hysteria",
+          "security": "tls",
+          "tlsSettings": {
+            "alpn": ["h3"],
+            "certificates": [{"certificateFile":$cert,"keyFile":$key}]
+          },
+          "hysteriaSettings": {"version":2},
+          "finalmask": {
+            "udp": [{"type":"salamander","settings":{"password":$obfs}}]
+          }
+        }
+      }],
+      "outbounds": [{"tag":"direct","protocol":"freedom"}],
+      "routing": {"rules":[]}
+    }
+  ' >"$output"
+}
+
+hysteria2_build_share_link() {
+  local auth="${1:-}" host="${2:-}" port="${3:-}" sni="${4:-}" obfs="${5:-}"
+  local name="${6:-NoBrand-Hysteria2}" auth_uri host_uri sni_uri obfs_uri name_uri
+  [ -n "$auth" ] && [ -n "$host" ] && nb_valid_port "$port" && [ -n "$sni" ] || return 1
+  auth_uri="$(urlencode "$auth")" || return 1
+  host_uri="$(url_host "$host")"
+  sni_uri="$(urlencode "$sni")" || return 1
+  obfs_uri="$(urlencode "$obfs")" || return 1
+  name_uri="$(urlencode "$name")" || return 1
+  printf 'hysteria2://%s@%s:%s?sni=%s&alpn=h3&insecure=1&obfs=salamander&obfs-password=%s#%s' \
+    "$auth_uri" "$host_uri" "$port" "$sni_uri" "$obfs_uri" "$name_uri"
+}
+
+hysteria2_current_share_link() {
+  local auth sni obfs listen_port mode advertise_host advertise_port host port
+  hysteria2_state_exists || return 1
+  auth="$(hysteria2_state_field auth)"
+  sni="$(hysteria2_state_field sni)"
+  obfs="$(hysteria2_state_field obfs)"
+  listen_port="$(hysteria2_state_field listen_port)"
+  mode="$(hysteria2_state_field advertise_mode)"
+  advertise_host="$(hysteria2_state_field advertise_host)"
+  advertise_port="$(hysteria2_state_field advertise_port)"
+  host="$(nb_effective_advertise_host "$mode" "$advertise_host")"
+  port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port")"
+  hysteria2_build_share_link "$auth" "$host" "$port" "$sni" "$obfs"
+}
+
+hysteria2_export_values() {
+  local auth sni obfs listen_port mode advertise_host advertise_port host port
+  hysteria2_state_exists || return 1
+  auth="$(hysteria2_state_field auth)"
+  sni="$(hysteria2_state_field sni)"
+  obfs="$(hysteria2_state_field obfs)"
+  listen_port="$(hysteria2_state_field listen_port)"
+  mode="$(hysteria2_state_field advertise_mode)"
+  advertise_host="$(hysteria2_state_field advertise_host)"
+  advertise_port="$(hysteria2_state_field advertise_port)"
+  host="$(nb_effective_advertise_host "$mode" "$advertise_host")"
+  port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port")"
+  printf '%s\t%s\t%s\t%s\t%s\n' "$auth" "$sni" "$obfs" "$host" "$port"
+}
+
+hysteria2_export_mihomo() {
+  local auth sni obfs host port values
+  values="$(hysteria2_export_values)" || return 1
+  IFS=$'\t' read -r auth sni obfs host port <<<"$values"
+  jq -n --arg server "$host" --arg port "$port" --arg password "$auth" \
+    --arg sni "$sni" --arg obfs "$obfs" -r '
+      "- name: NoBrand-Hysteria2\n" +
+      "  type: hysteria2\n" +
+      "  server: " + ($server|tojson) + "\n" +
+      "  port: " + $port + "\n" +
+      "  password: " + ($password|tojson) + "\n" +
+      "  sni: " + ($sni|tojson) + "\n" +
+      "  skip-cert-verify: true\n" +
+      "  obfs: salamander\n" +
+      "  obfs-password: " + ($obfs|tojson)
+    '
+}
+
+hysteria2_export_singbox() {
+  local auth sni obfs host port values
+  values="$(hysteria2_export_values)" || return 1
+  IFS=$'\t' read -r auth sni obfs host port <<<"$values"
+  jq -n --arg server "$host" --arg port "$port" --arg password "$auth" \
+    --arg sni "$sni" --arg obfs "$obfs" '
+      {
+        type:"hysteria2",
+        tag:"NoBrand-Hysteria2",
+        server:$server,
+        server_port:($port|tonumber),
+        password:$password,
+        obfs:{type:"salamander",password:$obfs},
+        tls:{enabled:true,server_name:$sni,insecure:true,alpn:["h3"]}
+      }
+    '
+}
+
+hysteria2_generate_state() {
+  local output="$1" listen="$2" port="$3" auth="$4" sni="$5" obfs="$6"
+  local advertise_mode="$7" advertise_host="$8" advertise_port="$9"
+  local created_at="${10:-}" updated_at link effective_host effective_port runtime_version
+  [ -n "$created_at" ] || created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  updated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  effective_host="$(nb_effective_advertise_host "$advertise_mode" "$advertise_host")"
+  effective_port="$(nb_effective_advertise_port "$advertise_mode" "$advertise_port" "$port")"
+  link="$(hysteria2_build_share_link "$auth" "$effective_host" "$effective_port" "$sni" "$obfs")" || return 1
+  runtime_version="$(nobrand_xray_version 2>/dev/null || printf unknown)"
+  jq -n --arg auth "$auth" --arg sni "$sni" --arg obfs "$obfs" \
+    --arg listen "$listen" --arg port "$port" --arg mode "$advertise_mode" \
+    --arg advertise_host "$advertise_host" --arg advertise_port "$advertise_port" \
+    --arg tag "$NOBRAND_HY2_TAG" --arg link "$link" --arg runtime "$runtime_version" \
+    --arg created "$created_at" --arg updated "$updated_at" '
+    {
+      "protocol":"hysteria2",
+      "auth":$auth,
+      "sni":$sni,
+      "obfs":$obfs,
+      "listen_host":$listen,
+      "listen_port":($port|tonumber),
+      "transport":"udp",
+      "advertise_mode":$mode,
+      "advertise_host":$advertise_host,
+      "advertise_port":(if $advertise_port=="" then "" else ($advertise_port|tonumber) end),
+      "tag":$tag,
+      "runtime_version":$runtime,
+      "link":$link,
+      "enabled":true,
+      "created_at":$created,
+      "updated_at":$updated
+    }
+  ' >"$output"
+}
+
+hysteria2_snapshot_file() {
+  local source="$1" destination="$2"
+  if [ -e "$source" ]; then cp -a "$source" "$destination"; else printf absent >"${destination}.absent"; fi
+}
+
+hysteria2_restore_snapshot_file() {
+  local snapshot="$1" destination="$2"
+  if [ -f "${snapshot}.absent" ]; then
+    rm -f "$destination"
+  elif [ -e "$snapshot" ]; then
+    mkdir -p "$(dirname "$destination")"
+    cp -a "$snapshot" "$destination"
+  fi
+}
+
+hysteria2_configure_requests() {
+  local interactive="${1:-0}" old_port="" conflict_owner=""
+  HY2_LISTEN="0.0.0.0"
+  hysteria2_state_exists && old_port="$(hysteria2_state_field listen_port 2>/dev/null || true)"
+  if [ -z "${PORT:-}" ]; then
+    PORT="$(nb_select_available_port UDP)" || die '未找到可用 Hysteria2 UDP 端口'
+    PORT_AUTO_SELECTED=1
+  else
+    nb_valid_port "$PORT" || die 'Hysteria2 端口必须是 1-65535'
+    PORT="$(normalize_uint "$PORT")"
+    nb_warn_if_outside_recommended_range "$PORT"
+    if [ "$PORT" != "$old_port" ] && ! nb_port_available_for_transport "$PORT" UDP 'hy2:default'; then
+      warn "Hysteria2 UDP/${PORT} 已占用"
+      nb_describe_port_conflict UDP "$PORT"
+      return 1
+    fi
+  fi
+  if [ "$interactive" -eq 1 ] && [ "${ADVERTISE_CLI:-0}" -eq 0 ]; then
+    nb_collect_advertise_endpoint_interactive Hysteria2 "$PORT"
+  else
+    nb_require_explicit_endpoint_noninteractive
+  fi
+  nb_validate_advertise_endpoint "$ADVERTISE_HOST" "$ADVERTISE_PORT" UDP \
+    || die 'Hysteria2 Display Endpoint 无效'
+  if [ -n "$ADVERTISE_HOST" ]; then
+    conflict_owner="$(nb_endpoint_conflict_owner UDP "$ADVERTISE_HOST" "$ADVERTISE_PORT" 'hy2:default' 2>/dev/null || true)"
+    [ -z "$conflict_owner" ] || die "Hysteria2 Display Endpoint 与 ${conflict_owner} 冲突"
+  fi
+  if [ -z "${HY2_SNI:-}" ]; then
+    if [ "$interactive" -eq 1 ]; then
+      read_tty HY2_SNI "$(t 'Hysteria2 伪装 SNI（回车随机）: ' 'Hysteria2 camouflage SNI (Enter=random): ')" || HY2_SNI=""
+      [ -n "$HY2_SNI" ] || HY2_SNI="${NOBRAND_HY2_SNI_CANDIDATES[$((RANDOM % ${#NOBRAND_HY2_SNI_CANDIDATES[@]}))]}"
+    else
+      HY2_SNI="${NOBRAND_HY2_SNI_CANDIDATES[0]}"
+    fi
+  fi
+  hysteria2_valid_sni "$HY2_SNI" || die 'Hysteria2 SNI 必须是有效域名或 IPv4 地址'
+  HY2_AUTH="$(openssl rand -hex 16 2>/dev/null || true)"
+  [ -n "$HY2_AUTH" ] || HY2_AUTH="$(random_token)$(random_token)$(random_token)"
+  HY2_OBFS="$(openssl rand -hex 16 2>/dev/null || true)"
+  [ -n "$HY2_OBFS" ] || HY2_OBFS="$(random_token)$(random_token)$(random_token)"
+}
+
+hysteria2_install_rollback() {
+  local snapshot="$1" was_active="$2" new_binding_owned="$3"
+  nobrand_hy2_service_action stop >/dev/null 2>&1 || true
+  [ "$new_binding_owned" -eq 0 ] || nb_firewall_close_pairs "UDP|${PORT}" >/dev/null 2>&1 || true
+  hysteria2_restore_snapshot_file "$snapshot/config" "$NOBRAND_HY2_CONFIG_FILE"
+  hysteria2_restore_snapshot_file "$snapshot/state" "$NOBRAND_HY2_STATE_FILE"
+  hysteria2_restore_snapshot_file "$snapshot/cert" "$NOBRAND_HY2_CERT_FILE"
+  hysteria2_restore_snapshot_file "$snapshot/key" "$NOBRAND_HY2_KEY_FILE"
+  hysteria2_restore_snapshot_file "$snapshot/service-systemd" "$NOBRAND_HY2_SYSTEMD_SERVICE"
+  hysteria2_restore_snapshot_file "$snapshot/service-openrc" "$NOBRAND_HY2_OPENRC_SERVICE"
+  hysteria2_restore_snapshot_file "$snapshot/xray" "$NOBRAND_XRAY_BIN"
+  [ "$(nb_service_manager)" != systemd ] || systemctl daemon-reload >/dev/null 2>&1 || true
+  [ "$was_active" -eq 0 ] || nobrand_hy2_service_action start >/dev/null 2>&1 || true
+}
+
+install_hysteria2() {
+  local interactive=0 snapshot config_tmp state_tmp advertise_mode old_port="" old_created=""
+  local was_active=0 binding_was_owned=0 binding_now_owned=0
+  [ "${YES:-0}" -eq 1 ] || interactive=1
+  nobrand_prepare_common
+  admin_lock_acquire || return 1
+  snapshot="$(mktemp_dir)" || { admin_lock_release; return 1; }
+  hysteria2_snapshot_file "$NOBRAND_HY2_CONFIG_FILE" "$snapshot/config"
+  hysteria2_snapshot_file "$NOBRAND_HY2_STATE_FILE" "$snapshot/state"
+  hysteria2_snapshot_file "$NOBRAND_HY2_CERT_FILE" "$snapshot/cert"
+  hysteria2_snapshot_file "$NOBRAND_HY2_KEY_FILE" "$snapshot/key"
+  hysteria2_snapshot_file "$NOBRAND_HY2_SYSTEMD_SERVICE" "$snapshot/service-systemd"
+  hysteria2_snapshot_file "$NOBRAND_HY2_OPENRC_SERVICE" "$snapshot/service-openrc"
+  hysteria2_snapshot_file "$NOBRAND_XRAY_BIN" "$snapshot/xray"
+  nobrand_hy2_service_active && was_active=1
+  if hysteria2_state_exists; then
+    old_port="$(hysteria2_state_field listen_port 2>/dev/null || true)"
+    old_created="$(hysteria2_state_field created_at 2>/dev/null || true)"
+  fi
+  if ! nobrand_install_xray_runtime 0 || ! hysteria2_configure_requests "$interactive"; then
+    hysteria2_install_rollback "$snapshot" "$was_active" 0
+    rm -rf -- "$snapshot"
+    admin_lock_release
+    return 1
+  fi
+  nb_firewall_binding_owned UDP "$PORT" && binding_was_owned=1
+  if [ "$was_active" -eq 1 ]; then
+    nobrand_hy2_service_action stop || {
+      hysteria2_install_rollback "$snapshot" "$was_active" 0
+      rm -rf -- "$snapshot"; admin_lock_release; return 1;
+    }
+  fi
+  # TOCTOU 二次检测：旧实例同端口需先停止自身 listener。
+  if ! nb_port_available_for_transport "$PORT" UDP 'hy2:default'; then
+    warn "提交前发现 UDP/${PORT} 已被其它进程占用"
+    nb_describe_port_conflict UDP "$PORT"
+    hysteria2_install_rollback "$snapshot" "$was_active" 0
+    rm -rf -- "$snapshot"; admin_lock_release; return 1
+  fi
+  if ! generate_hysteria2_cert; then
+    hysteria2_install_rollback "$snapshot" "$was_active" 0
+    rm -rf -- "$snapshot"; admin_lock_release; return 1
+  fi
+  config_tmp="$(mktemp_file .json)" || {
+    hysteria2_install_rollback "$snapshot" "$was_active" 0
+    rm -rf -- "$snapshot"; admin_lock_release; return 1;
+  }
+  state_tmp="$(mktemp_file .json)" || {
+    rm -f "$config_tmp"; hysteria2_install_rollback "$snapshot" "$was_active" 0
+    rm -rf -- "$snapshot"; admin_lock_release; return 1;
+  }
+  advertise_mode="$(nb_endpoint_mode_from_values "$ADVERTISE_HOST")"
+  if ! hysteria2_generate_config "$config_tmp" "$HY2_LISTEN" "$PORT" "$HY2_AUTH" "$HY2_SNI" "$HY2_OBFS" \
+     || ! nobrand_xray_test_config "$config_tmp" \
+     || ! hysteria2_generate_state "$state_tmp" "$HY2_LISTEN" "$PORT" "$HY2_AUTH" "$HY2_SNI" "$HY2_OBFS" \
+          "$advertise_mode" "$ADVERTISE_HOST" "$ADVERTISE_PORT" "$old_created" \
+     || ! nb_atomic_install_file "$config_tmp" "$NOBRAND_HY2_CONFIG_FILE" 0600 \
+     || ! nb_atomic_install_file "$state_tmp" "$NOBRAND_HY2_STATE_FILE" 0600 \
+     || ! nobrand_write_hy2_service \
+     || ! nb_firewall_open_pairs "UDP|${PORT}"; then
+    rm -f "$config_tmp" "$state_tmp"
+    nb_firewall_binding_owned UDP "$PORT" && [ "$binding_was_owned" -eq 0 ] && binding_now_owned=1
+    hysteria2_install_rollback "$snapshot" "$was_active" "$binding_now_owned"
+    rm -rf -- "$snapshot"; admin_lock_release; return 1
+  fi
+  rm -f "$config_tmp" "$state_tmp"
+  nb_firewall_binding_owned UDP "$PORT" && [ "$binding_was_owned" -eq 0 ] && binding_now_owned=1
+  if ! nobrand_hy2_service_action restart \
+     || ! nobrand_hy2_service_active \
+     || ! nb_wait_for_listener UDP "$PORT" 25; then
+    hysteria2_install_rollback "$snapshot" "$was_active" "$binding_now_owned"
+    rm -rf -- "$snapshot"; admin_lock_release
+    warn 'Hysteria2 服务启动或 UDP listener 验收失败，已回滚'
+    return 1
+  fi
+  if [ -n "$old_port" ] && [ "$old_port" != "$PORT" ]; then
+    nb_firewall_close_pairs "UDP|${old_port}" || true
+  fi
+  nobrand_install_manager_script || true
+  rm -rf -- "$snapshot"
+  admin_lock_release
+  print_hysteria2_result install
+}
+
+hysteria2_set_endpoint() {
+  local interactive=0 tmp mode owner auth sni obfs host port link
+  require_root
+  hysteria2_state_exists || die 'Hysteria2 未安装'
+  [ "${YES:-0}" -eq 1 ] || interactive=1
+  PORT="$(hysteria2_state_field listen_port)"
+  if [ "$interactive" -eq 1 ] && [ "${ADVERTISE_CLI:-0}" -eq 0 ]; then
+    nb_collect_advertise_endpoint_interactive Hysteria2 "$PORT"
+  else
+    nb_require_explicit_endpoint_noninteractive
+  fi
+  nb_validate_advertise_endpoint "$ADVERTISE_HOST" "$ADVERTISE_PORT" UDP || die 'Display Endpoint 无效'
+  if [ -n "$ADVERTISE_HOST" ]; then
+    owner="$(nb_endpoint_conflict_owner UDP "$ADVERTISE_HOST" "$ADVERTISE_PORT" 'hy2:default' 2>/dev/null || true)"
+    [ -z "$owner" ] || die "Display Endpoint 与 ${owner} 冲突"
+  fi
+  admin_lock_acquire || return 1
+  tmp="$(mktemp_file .json)" || { admin_lock_release; return 1; }
+  mode="$(nb_endpoint_mode_from_values "$ADVERTISE_HOST")"
+  auth="$(hysteria2_state_field auth)"
+  sni="$(hysteria2_state_field sni)"
+  obfs="$(hysteria2_state_field obfs)"
+  host="$(nb_effective_advertise_host "$mode" "$ADVERTISE_HOST")"
+  port="$(nb_effective_advertise_port "$mode" "$ADVERTISE_PORT" "$PORT")"
+  link="$(hysteria2_build_share_link "$auth" "$host" "$port" "$sni" "$obfs")" \
+    || { rm -f "$tmp"; admin_lock_release; return 1; }
+  if ! jq --arg mode "$mode" --arg host "$ADVERTISE_HOST" --arg port "$ADVERTISE_PORT" \
+      --arg link "$link" --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+        .advertise_mode=$mode |
+        .advertise_host=$host |
+        .advertise_port=(if $port=="" then "" else ($port|tonumber) end) |
+        .link=$link |
+        .updated_at=$updated
+      ' "$NOBRAND_HY2_STATE_FILE" >"$tmp" \
+     || ! nb_atomic_install_file "$tmp" "$NOBRAND_HY2_STATE_FILE" 0600; then
+    rm -f "$tmp"; admin_lock_release; return 1
+  fi
+  rm -f "$tmp"
+  # 红线：本函数不调用 service、firewall、config、tc 或 quota。
+  admin_lock_release
+  t 'Hysteria2 客户端展示入口已更新；server config/listener/service/firewall 均未改变' \
+    'Hysteria2 display endpoint updated; server config/listener/service/firewall are unchanged'
+  print_hysteria2_result show
+}
+
+hysteria2_running() {
+  local port
+  hysteria2_state_exists || return 1
+  port="$(hysteria2_state_field listen_port)"
+  nobrand_hy2_service_active && nb_port_is_listening UDP "$port"
+}
+
+hysteria2_state_set_enabled() {
+  local enabled="$1" tmp
+  tmp="$(mktemp_file .json)" || return 1
+  if ! jq --argjson enabled "$enabled" --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      '.enabled=$enabled | .updated_at=$updated' "$NOBRAND_HY2_STATE_FILE" >"$tmp" \
+     || ! nb_atomic_install_file "$tmp" "$NOBRAND_HY2_STATE_FILE" 0600; then
+    rm -f "$tmp"
+    return 1
+  fi
+  rm -f "$tmp"
+}
+
+hysteria2_node_rows() {
+  local mode advertise_host advertise_port listen_port host port status
+  hysteria2_state_exists || return 0
+  mode="$(hysteria2_state_field advertise_mode)"
+  advertise_host="$(hysteria2_state_field advertise_host)"
+  advertise_port="$(hysteria2_state_field advertise_port)"
+  listen_port="$(hysteria2_state_field listen_port)"
+  host="$(nb_effective_advertise_host "$mode" "$advertise_host")"
+  port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port")"
+  status=Stopped; hysteria2_running && status=Running
+  printf 'Hysteria2|default|%s:%s/UDP|%s|UDP\n' "$host" "$port" "$status"
+}
+
+print_hysteria2_result() {
+  local context="${1:-show}" auth sni obfs listen_host listen_port mode advertise_host advertise_port host port status link
+  hysteria2_state_exists || { t 'Hysteria2 未安装' 'Hysteria2 is not installed'; return 0; }
+  auth="$(hysteria2_state_field auth)"; sni="$(hysteria2_state_field sni)"; obfs="$(hysteria2_state_field obfs)"
+  listen_host="$(hysteria2_state_field listen_host)"; listen_port="$(hysteria2_state_field listen_port)"
+  mode="$(hysteria2_state_field advertise_mode)"; advertise_host="$(hysteria2_state_field advertise_host)"
+  advertise_port="$(hysteria2_state_field advertise_port)"
+  host="$(nb_effective_advertise_host "$mode" "$advertise_host")"
+  port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port")"
+  status=Stopped; hysteria2_running && status=Running
+  link="$(hysteria2_build_share_link "$auth" "$host" "$port" "$sni" "$obfs")"
+  nobrand_print_banner
+  msg "$( [ "$context" = install ] && printf '部署完成' || printf '节点配置' )"
+  msg ''
+  printf '协议        Hysteria2\n节点        default\n状态        %s\n' "$status"
+  msg ''
+  printf '真实监听\n  Address   %s\n  Port      %s\n  Transport UDP\n' "$listen_host" "$listen_port"
+  msg ''
+  printf '客户端入口\n  Host      %s\n  Port      %s\n  Mode      %s\n' "$host" "$port" "$mode"
+  msg ''
+  printf '认证\n  Auth      %s\n  SNI       %s\n  Salamander password  %s\n' "$auth" "$sni" "$obfs"
+  msg ''
+  msg '========================================'
+  msg 'Mihomo'
+  msg '========================================'
+  hysteria2_export_mihomo
+  msg ''
+  msg '========================================'
+  msg 'sing-box'
+  msg '========================================'
+  hysteria2_export_singbox
+  msg '  Certificate: self-signed P-256 / 3650 days; client must use insecure=1.'
+  msg ''
+  msg '========================================'
+  msg '客户端配置'
+  msg '========================================'
+  msg "$link"
+}
+
+hysteria2_service_command() {
+  local action="$1" port was_enabled
+  hysteria2_state_exists || die 'Hysteria2 未安装'
+  port="$(hysteria2_state_field listen_port)"
+  was_enabled="$(hysteria2_state_field enabled)"
+  case "$action" in
+    start)
+      nb_firewall_open_pairs "UDP|${port}" || return 1
+      if ! nobrand_hy2_service_action start || ! nb_wait_for_listener UDP "$port" 25 \
+         || ! hysteria2_state_set_enabled true; then
+        nobrand_hy2_service_action stop >/dev/null 2>&1 || true
+        [ "$was_enabled" = true ] || hysteria2_state_set_enabled false >/dev/null 2>&1 || true
+        return 1
+      fi
+      ;;
+    stop)
+      nobrand_hy2_service_action stop || return 1
+      if ! hysteria2_state_set_enabled false; then
+        [ "$was_enabled" != true ] || nobrand_hy2_service_action start >/dev/null 2>&1 || true
+        return 1
+      fi
+      ;;
+    restart) nobrand_hy2_service_action restart && nb_wait_for_listener UDP "$port" 25 ;;
+    status)
+      if hysteria2_running; then msg 'Hysteria2: Running'; else msg 'Hysteria2: Stopped'; return 1; fi
+      ;;
+  esac
+}
+
+remove_hysteria2_config() {
+  local port
+  require_root
+  hysteria2_state_exists || { t 'Hysteria2 未安装' 'Hysteria2 is not installed'; return 0; }
+  port="$(hysteria2_state_field listen_port)"
+  admin_lock_acquire || return 1
+  nobrand_remove_hy2_service || { admin_lock_release; return 1; }
+  nb_firewall_close_pairs "UDP|${port}" || { admin_lock_release; return 1; }
+  rm -f "$NOBRAND_HY2_CONFIG_FILE" "$NOBRAND_HY2_STATE_FILE" \
+    "$NOBRAND_HY2_CERT_FILE" "$NOBRAND_HY2_KEY_FILE"
+  admin_lock_release
+  t '已删除 NoBrand 管理的 Hysteria2；未触碰 /etc/xray、xray.service、ike 或 Xray-OneClick' \
+    'Removed NoBrand-managed Hysteria2; /etc/xray, xray.service, ike, and Xray-OneClick were untouched'
+}
+
+hysteria2_doctor() {
+  local failed=0 port mode host advertise_port key_mode cert_cn expected_sni
+  if ! hysteria2_state_exists; then
+    nb_doctor_line INFO 'not installed'
+    return 0
+  fi
+  port="$(hysteria2_state_field listen_port)"
+  [ -x "$NOBRAND_XRAY_BIN" ] && nb_doctor_line PASS "Xray $(nobrand_xray_version 2>/dev/null || printf unknown)" \
+    || { nb_doctor_line FAIL 'NoBrand Xray binary'; failed=1; }
+  nobrand_xray_test_config "$NOBRAND_HY2_CONFIG_FILE" \
+    && nb_doctor_line PASS 'Xray config test' || { nb_doctor_line FAIL 'Xray config test'; failed=1; }
+  if openssl ec -in "$NOBRAND_HY2_KEY_FILE" -noout -text 2>/dev/null | grep -q 'ASN1 OID: prime256v1'; then
+    key_mode="$(stat -c '%a' "$NOBRAND_HY2_KEY_FILE" 2>/dev/null || true)"
+    [ "$key_mode" = 600 ] && nb_doctor_line PASS 'P-256 private key mode=0600' \
+      || { nb_doctor_line FAIL "private key mode=${key_mode}"; failed=1; }
+  else
+    nb_doctor_line FAIL 'P-256 private key'; failed=1
+  fi
+  if openssl x509 -in "$NOBRAND_HY2_CERT_FILE" -noout >/dev/null 2>&1; then
+    cert_cn="$(openssl x509 -in "$NOBRAND_HY2_CERT_FILE" -noout -subject -nameopt RFC2253 2>/dev/null \
+      | sed -nE 's/^subject=.*CN=([^,]+).*$/\1/p')"
+    expected_sni="$(hysteria2_state_field sni)"
+    if [ "$cert_cn" = "$expected_sni" ]; then
+      nb_doctor_line PASS "certificate CN=${cert_cn}"
+    else
+      nb_doctor_line FAIL "certificate CN=${cert_cn:-missing}, state SNI=${expected_sni}"
+      failed=1
+    fi
+  else
+    nb_doctor_line FAIL 'certificate'; failed=1
+  fi
+  hysteria2_running && nb_doctor_line PASS "service + UDP/${port}" \
+    || { nb_doctor_line FAIL "service/listener UDP/${port}"; failed=1; }
+  nb_firewall_binding_owned UDP "$port" && nb_doctor_line PASS "firewall ownership UDP/${port}" \
+    || nb_doctor_line INFO "firewall rule not owned (pre-existing/no local firewall): UDP/${port}"
+  mode="$(hysteria2_state_field advertise_mode)"; host="$(hysteria2_state_field advertise_host)"
+  advertise_port="$(hysteria2_state_field advertise_port)"
+  nb_validate_advertise_endpoint "$host" "$advertise_port" UDP \
+    && nb_doctor_line PASS "display endpoint mode=${mode}" \
+    || { nb_doctor_line FAIL 'display endpoint state'; failed=1; }
+  hysteria2_current_share_link >/dev/null \
+    && nb_doctor_line PASS 'hysteria2 URI generation' || { nb_doctor_line FAIL 'URI generation'; failed=1; }
+  return "$failed"
+}
+
+hysteria2_refresh_runtime_metadata() {
+  local tmp runtime
+  hysteria2_state_exists || return 0
+  runtime="$(nobrand_xray_version)" || return 1
+  tmp="$(mktemp_file .json)" || return 1
+  jq --arg runtime "$runtime" --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '.runtime_version=$runtime | .updated_at=$updated' "$NOBRAND_HY2_STATE_FILE" >"$tmp" \
+    && nb_atomic_install_file "$tmp" "$NOBRAND_HY2_STATE_FILE" 0600
+  local rc=$?
+  rm -f "$tmp"
+  return "$rc"
+}
+
+hysteria2_upgrade_runtime() {
+  nobrand_upgrade_xray_runtime
+}
+
+nobrand_run_hy2_action() {
+  case "${HY2_ACTION:-menu}" in
+    menu) hysteria2_menu_loop ;;
+    install) install_hysteria2 ;;
+    show) print_hysteria2_result show ;;
+    set-endpoint) hysteria2_set_endpoint ;;
+    remove) remove_hysteria2_config ;;
+    start|stop|restart|status) hysteria2_service_command "$HY2_ACTION" ;;
+    doctor) hysteria2_doctor ;;
+    upgrade) hysteria2_upgrade_runtime ;;
+    help) nobrand_usage ;;
+  esac
+}
+
+# ---------- Plain VLESS + FinalMask Sudoku over TCP ----------
+
+vless_sudoku_state_exists() {
+  [ -s "$NOBRAND_VLESS_STATE_FILE" ] && jq empty "$NOBRAND_VLESS_STATE_FILE" >/dev/null 2>&1
+}
+
+vless_sudoku_state_field() {
+  local field="$1"
+  vless_sudoku_state_exists || return 1
+  jq -r --arg field "$field" \
+    'if has($field) and .[$field] != null then .[$field] else empty end' "$NOBRAND_VLESS_STATE_FILE"
+}
+
+vless_sudoku_finalmask_json() {
+  local password="$1"
+  [[ "$password" =~ ^[0-9A-Fa-f]{32}$ ]] || return 1
+  jq -cn --arg password "$password" '{
+    tcp: [{
+      type: "sudoku",
+      settings: {
+        password: $password,
+        ascii: "prefer_ascii",
+        paddingMin: 0,
+        paddingMax: 3
+      }
+    }]
+  }'
+}
+
+vless_sudoku_valid_uuid() {
+  [[ "${1:-}" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]]
+}
+
+vless_sudoku_generate_uuid() {
+  local value=""
+  if [ -x "$NOBRAND_XRAY_BIN" ]; then
+    value="$("$NOBRAND_XRAY_BIN" uuid 2>/dev/null | tr -d '\r\n' || true)"
+  fi
+  if ! vless_sudoku_valid_uuid "$value" && command -v uuidgen >/dev/null 2>&1; then
+    value="$(uuidgen 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr -d '\r\n' || true)"
+  fi
+  if ! vless_sudoku_valid_uuid "$value" && [ -r /proc/sys/kernel/random/uuid ]; then
+    value="$(tr -d '\r\n' </proc/sys/kernel/random/uuid)"
+  fi
+  if ! vless_sudoku_valid_uuid "$value" && command -v openssl >/dev/null 2>&1; then
+    value="$(openssl rand -hex 16 2>/dev/null \
+      | sed -E 's/(.{8})(.{4})(.{4})(.{4})(.{12})/\1-\2-\3-\4-\5/')"
+  fi
+  vless_sudoku_valid_uuid "$value" || return 1
+  printf '%s' "$value"
+}
+
+vless_sudoku_generate_server_config() {
+  local output="$1" listen="$2" port="$3" uuid="$4" password="$5" finalmask
+  finalmask="$(vless_sudoku_finalmask_json "$password")" || return 1
+  jq -n --arg tag "$NOBRAND_VLESS_TAG" --arg listen "$listen" --arg port "$port" \
+    --arg uuid "$uuid" --argjson finalmask "$finalmask" '
+    {
+      "log": {"loglevel":"warning"},
+      "inbounds": [{
+        "tag": $tag,
+        "listen": $listen,
+        "port": ($port|tonumber),
+        "protocol": "vless",
+        "settings": {
+          "clients": [{"id":$uuid,"email":"vless-sudoku@nobrand"}],
+          "decryption": "none"
+        },
+        "streamSettings": {
+          "network": "tcp",
+          "security": "none",
+          "finalmask": $finalmask
+        },
+        "sniffing": {
+          "enabled": true,
+          "destOverride": ["http","tls"]
+        }
+      }],
+      "outbounds": [{"tag":"direct","protocol":"freedom"}],
+      "routing": {"rules":[]}
+    }
+  ' >"$output"
+}
+
+vless_sudoku_build_share_link() {
+  local uuid="$1" host="$2" port="$3" finalmask_json="$4"
+  local host_uri fm_uri name_uri
+  vless_sudoku_valid_uuid "$uuid" && [ -n "$host" ] && nb_valid_port "$port" || return 1
+  jq -e '.tcp[0].type == "sudoku"' <<<"$finalmask_json" >/dev/null 2>&1 || return 1
+  host_uri="$(url_host "$host")"
+  fm_uri="$(urlencode "$finalmask_json")" || return 1
+  name_uri="$(urlencode 'NoBrand-VLESS-Sudoku')" || return 1
+  printf 'vless://%s@%s:%s?type=tcp&security=none&encryption=none&fm=%s#%s' \
+    "$uuid" "$host_uri" "$port" "$fm_uri" "$name_uri"
+}
+
+vless_sudoku_generate_client_config() {
+  local output="$1" host="$2" port="$3" uuid="$4" password="$5"
+  local socks_port="${6:-$VLESS_SUDOKU_CLIENT_SOCKS_PORT}" finalmask
+  finalmask="$(vless_sudoku_finalmask_json "$password")" || return 1
+  { valid_advertise_host "$host" || [ "$host" = YOUR_SERVER_IP ]; } \
+    && nb_valid_port "$port" && nb_valid_port "$socks_port" \
+    && vless_sudoku_valid_uuid "$uuid" || return 1
+  jq -n --arg host "$host" --arg port "$port" --arg uuid "$uuid" \
+    --arg socks_port "$socks_port" --argjson finalmask "$finalmask" '
+    {
+      "log": {"loglevel":"warning"},
+      "inbounds": [{
+        "tag":"local-socks",
+        "listen":"127.0.0.1",
+        "port":($socks_port|tonumber),
+        "protocol":"socks",
+        "settings":{"udp":true}
+      }],
+      "outbounds": [{
+        "tag":"vless-sudoku-out",
+        "protocol":"vless",
+        "settings": {
+          "vnext": [{
+            "address":$host,
+            "port":($port|tonumber),
+            "users":[{"id":$uuid,"encryption":"none"}]
+          }]
+        },
+        "streamSettings": {
+          "network":"tcp",
+          "security":"none",
+          "finalmask":$finalmask
+        }
+      }]
+    }
+  ' >"$output"
+}
+
+vless_sudoku_forbidden_absent() {
+  local file
+  for file in "$@"; do
+    [ -f "$file" ] || return 1
+    if grep -Eqi 'vlessenc|mlkem|xorpub|server_ticket|enc_method|client_rtt|vless_encryption|vless_decryption' "$file"; then
+      return 1
+    fi
+    jq -e '
+      ([.. | objects | to_entries[] |
+        select((.key | ascii_downcase) |
+          test("^(vlessenc|mlkem|xorpub|server_ticket|enc_method|client_rtt|vless_encryption|vless_decryption|decryption_secret|encryption_secret)$"))]
+       | length) == 0 and
+      ([.. | objects | to_entries[] |
+        select(((.key | ascii_downcase) == "encryption" or
+                (.key | ascii_downcase) == "decryption") and
+               .value != "none")]
+       | length) == 0
+    ' "$file" >/dev/null 2>&1 || return 1
+  done
+}
+
+vless_sudoku_state_matches() {
+  local state="${1:-$NOBRAND_VLESS_STATE_FILE}"
+  jq -e --arg tag "$NOBRAND_VLESS_TAG" '
+    .protocol == "vless-sudoku" and
+    (.uuid | type == "string" and test("^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$")) and
+    (.listen_host | type == "string" and length > 0) and
+    (.listen_port | type == "number" and . >= 1 and . <= 65535 and floor == .) and
+    .transport == "tcp" and
+    ((.advertise_mode == "auto" and .advertise_host == "" and .advertise_port == "") or
+     (.advertise_mode == "custom" and (.advertise_host | type == "string" and length > 0) and
+      (.advertise_port | type == "number" and . >= 1 and . <= 65535 and floor == .))) and
+    .finalmask_mode == "sudoku" and
+    (.finalmask_json.tcp | length) == 1 and
+    .finalmask_json.tcp[0].type == "sudoku" and
+    (.finalmask_json.tcp[0].settings.password | type == "string" and test("^[0-9A-Fa-f]{32}$")) and
+    .finalmask_json.tcp[0].settings.ascii == "prefer_ascii" and
+    .finalmask_json.tcp[0].settings.paddingMin == 0 and
+    .finalmask_json.tcp[0].settings.paddingMax == 3 and
+    .tag == $tag and
+    (.runtime_version | type == "string" and length > 0) and
+    (.link | type == "string" and startswith("vless://") and contains("type=tcp") and
+      contains("security=none") and contains("encryption=none") and contains("fm=")) and
+    .client_config == "client.json" and
+    (.enabled | type) == "boolean" and
+    (.created_at | type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")) and
+    (.updated_at | type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))
+  ' "$state" >/dev/null 2>&1 && vless_sudoku_forbidden_absent "$state"
+}
+
+vless_sudoku_server_config_matches() {
+  local config="${1:-$NOBRAND_VLESS_CONFIG_FILE}" uuid="${2:-}" port="${3:-}" password="${4:-}"
+  local listen="${5:-}"
+  [ -n "$uuid" ] || uuid="$(vless_sudoku_state_field uuid)" || return 1
+  [ -n "$port" ] || port="$(vless_sudoku_state_field listen_port)" || return 1
+  [ -n "$password" ] || password="$(jq -r '.finalmask_json.tcp[0].settings.password // empty' "$NOBRAND_VLESS_STATE_FILE")"
+  [ -n "$listen" ] || listen="$(vless_sudoku_state_field listen_host)" || return 1
+  jq -e --arg tag "$NOBRAND_VLESS_TAG" --arg uuid "$uuid" --arg port "$port" \
+    --arg password "$password" --arg listen "$listen" '
+    (.inbounds | length) == 1 and
+    .inbounds[0].tag == $tag and
+    .inbounds[0].listen == $listen and
+    .inbounds[0].protocol == "vless" and
+    .inbounds[0].port == ($port|tonumber) and
+    .inbounds[0].settings.clients == [{"id":$uuid,"email":"vless-sudoku@nobrand"}] and
+    .inbounds[0].settings.decryption == "none" and
+    .inbounds[0].streamSettings.network == "tcp" and
+    .inbounds[0].streamSettings.security == "none" and
+    .inbounds[0].streamSettings.finalmask.tcp == [{
+      "type":"sudoku",
+      "settings":{
+        "password":$password,
+        "ascii":"prefer_ascii",
+        "paddingMin":0,
+        "paddingMax":3
+      }
+    }]
+  ' "$config" >/dev/null 2>&1 && vless_sudoku_forbidden_absent "$config"
+}
+
+vless_sudoku_client_config_matches() {
+  local config="${1:-$NOBRAND_VLESS_CLIENT_FILE}" host="${2:-}" port="${3:-}"
+  local uuid="${4:-}" password="${5:-}"
+  [ -n "$host" ] || {
+    local mode advertise_host
+    mode="$(vless_sudoku_state_field advertise_mode)" || return 1
+    advertise_host="$(vless_sudoku_state_field advertise_host)"
+    host="$(nb_effective_advertise_host "$mode" "$advertise_host")"
+  }
+  [ -n "$port" ] || {
+    local mode advertise_port listen_port
+    mode="$(vless_sudoku_state_field advertise_mode)" || return 1
+    advertise_port="$(vless_sudoku_state_field advertise_port)"
+    listen_port="$(vless_sudoku_state_field listen_port)"
+    port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port")"
+  }
+  [ -n "$uuid" ] || uuid="$(vless_sudoku_state_field uuid)" || return 1
+  [ -n "$password" ] \
+    || password="$(jq -r '.finalmask_json.tcp[0].settings.password // empty' "$NOBRAND_VLESS_STATE_FILE")"
+  jq -e --arg host "$host" --arg port "$port" --arg uuid "$uuid" --arg password "$password" '
+    .outbounds[0].protocol == "vless" and
+    .outbounds[0].settings.vnext[0].address == $host and
+    .outbounds[0].settings.vnext[0].port == ($port|tonumber) and
+    .outbounds[0].settings.vnext[0].users == [{"id":$uuid,"encryption":"none"}] and
+    .outbounds[0].streamSettings.network == "tcp" and
+    .outbounds[0].streamSettings.security == "none" and
+    .outbounds[0].streamSettings.finalmask.tcp == [{
+      "type":"sudoku",
+      "settings":{
+        "password":$password,
+        "ascii":"prefer_ascii",
+        "paddingMin":0,
+        "paddingMax":3
+      }
+    }]
+  ' "$config" >/dev/null 2>&1 && vless_sudoku_forbidden_absent "$config"
+}
+
+vless_sudoku_current_share_link() {
+  local uuid listen_port mode advertise_host advertise_port host port finalmask
+  vless_sudoku_state_exists || return 1
+  uuid="$(vless_sudoku_state_field uuid)"
+  listen_port="$(vless_sudoku_state_field listen_port)"
+  mode="$(vless_sudoku_state_field advertise_mode)"
+  advertise_host="$(vless_sudoku_state_field advertise_host)"
+  advertise_port="$(vless_sudoku_state_field advertise_port)"
+  host="$(nb_effective_advertise_host "$mode" "$advertise_host")"
+  port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port")"
+  finalmask="$(jq -c '.finalmask_json' "$NOBRAND_VLESS_STATE_FILE")" || return 1
+  vless_sudoku_build_share_link "$uuid" "$host" "$port" "$finalmask"
+}
+
+vless_sudoku_generate_state() {
+  local output="$1" listen="$2" port="$3" uuid="$4" password="$5"
+  local advertise_mode="$6" advertise_host="$7" advertise_port="$8" created_at="${9:-}"
+  local updated_at runtime_version finalmask effective_host effective_port link
+  [ -n "$created_at" ] || created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  updated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  runtime_version="$(nobrand_xray_version 2>/dev/null || printf unknown)"
+  finalmask="$(vless_sudoku_finalmask_json "$password")" || return 1
+  effective_host="$(nb_effective_advertise_host "$advertise_mode" "$advertise_host")"
+  effective_port="$(nb_effective_advertise_port "$advertise_mode" "$advertise_port" "$port")"
+  link="$(vless_sudoku_build_share_link "$uuid" "$effective_host" "$effective_port" "$finalmask")" || return 1
+  jq -n --arg uuid "$uuid" --arg listen "$listen" --arg port "$port" \
+    --arg mode "$advertise_mode" --arg advertise_host "$advertise_host" \
+    --arg advertise_port "$advertise_port" --arg tag "$NOBRAND_VLESS_TAG" \
+    --arg runtime "$runtime_version" --arg link "$link" --arg created "$created_at" \
+    --arg updated "$updated_at" --argjson finalmask "$finalmask" '
+    {
+      "protocol":"vless-sudoku",
+      "uuid":$uuid,
+      "listen_host":$listen,
+      "listen_port":($port|tonumber),
+      "transport":"tcp",
+      "advertise_mode":$mode,
+      "advertise_host":$advertise_host,
+      "advertise_port":(if $advertise_port=="" then "" else ($advertise_port|tonumber) end),
+      "finalmask_mode":"sudoku",
+      "finalmask_json":$finalmask,
+      "tag":$tag,
+      "runtime_version":$runtime,
+      "link":$link,
+      "client_config":"client.json",
+      "enabled":true,
+      "created_at":$created,
+      "updated_at":$updated
+    }
+  ' >"$output"
+}
+
+vless_sudoku_snapshot_file() {
+  local source="$1" destination="$2"
+  if [ -e "$source" ]; then cp -a "$source" "$destination"; else printf absent >"${destination}.absent"; fi
+}
+
+vless_sudoku_restore_snapshot_file() {
+  local snapshot="$1" destination="$2"
+  if [ -f "${snapshot}.absent" ]; then
+    rm -f "$destination"
+  elif [ -e "$snapshot" ]; then
+    mkdir -p "$(dirname "$destination")"
+    cp -a "$snapshot" "$destination"
+  fi
+}
+
+vless_sudoku_configure_requests() {
+  local interactive="${1:-0}" old_port="" old_password="" conflict_owner=""
+  VLESS_SUDOKU_LISTEN="0.0.0.0"
+  if vless_sudoku_state_exists; then
+    old_port="$(vless_sudoku_state_field listen_port 2>/dev/null || true)"
+    VLESS_SUDOKU_UUID="$(vless_sudoku_state_field uuid 2>/dev/null || true)"
+    old_password="$(jq -r '.finalmask_json.tcp[0].settings.password // empty' "$NOBRAND_VLESS_STATE_FILE" 2>/dev/null)"
+  fi
+  if [ -z "${PORT:-}" ]; then
+    PORT="$(nb_select_available_port TCP)" || die '未找到可用 VLESS Sudoku TCP 端口'
+    PORT_AUTO_SELECTED=1
+  else
+    nb_valid_port "$PORT" || die 'VLESS Sudoku 端口必须是 1-65535'
+    PORT="$(normalize_uint "$PORT")"
+    nb_warn_if_outside_recommended_range "$PORT"
+    if [ "$PORT" != "$old_port" ] \
+       && ! nb_port_available_for_transport "$PORT" TCP 'vless-sudoku:default'; then
+      warn "VLESS Sudoku TCP/${PORT} 已占用"
+      nb_describe_port_conflict TCP "$PORT"
+      return 1
+    fi
+  fi
+  if [ "$interactive" -eq 1 ] && [ "${ADVERTISE_CLI:-0}" -eq 0 ]; then
+    nb_collect_advertise_endpoint_interactive 'VLESS Sudoku' "$PORT"
+  else
+    nb_require_explicit_endpoint_noninteractive
+  fi
+  nb_validate_advertise_endpoint "$ADVERTISE_HOST" "$ADVERTISE_PORT" TCP \
+    || die 'VLESS Sudoku Display Endpoint 无效'
+  if [ -n "$ADVERTISE_HOST" ]; then
+    conflict_owner="$(nb_endpoint_conflict_owner TCP "$ADVERTISE_HOST" "$ADVERTISE_PORT" \
+      'vless-sudoku:default' 2>/dev/null || true)"
+    [ -z "$conflict_owner" ] || die "VLESS Sudoku Display Endpoint 与 ${conflict_owner} 冲突"
+  fi
+  vless_sudoku_valid_uuid "$VLESS_SUDOKU_UUID" \
+    || VLESS_SUDOKU_UUID="$(vless_sudoku_generate_uuid)" \
+    || die '无法生成 VLESS UUID'
+  if [[ "$old_password" =~ ^[0-9A-Fa-f]{32}$ ]]; then
+    VLESS_SUDOKU_PASSWORD="$old_password"
+  else
+    VLESS_SUDOKU_PASSWORD="$(openssl rand -hex 16 2>/dev/null || true)"
+    [[ "$VLESS_SUDOKU_PASSWORD" =~ ^[0-9A-Fa-f]{32}$ ]] \
+      || die '无法生成 FinalMask Sudoku password'
+  fi
+}
+
+vless_sudoku_install_rollback() {
+  local snapshot="$1" was_active="$2" new_binding_owned="$3"
+  nobrand_vless_sudoku_service_action stop >/dev/null 2>&1 || true
+  [ "$new_binding_owned" -eq 0 ] \
+    || nb_firewall_close_pairs "TCP|${PORT}" >/dev/null 2>&1 || true
+  vless_sudoku_restore_snapshot_file "$snapshot/config" "$NOBRAND_VLESS_CONFIG_FILE"
+  vless_sudoku_restore_snapshot_file "$snapshot/state" "$NOBRAND_VLESS_STATE_FILE"
+  vless_sudoku_restore_snapshot_file "$snapshot/client" "$NOBRAND_VLESS_CLIENT_FILE"
+  vless_sudoku_restore_snapshot_file "$snapshot/service-systemd" "$NOBRAND_VLESS_SYSTEMD_SERVICE"
+  vless_sudoku_restore_snapshot_file "$snapshot/service-openrc" "$NOBRAND_VLESS_OPENRC_SERVICE"
+  vless_sudoku_restore_snapshot_file "$snapshot/xray" "$NOBRAND_XRAY_BIN"
+  [ "$(nb_service_manager)" != systemd ] || systemctl daemon-reload >/dev/null 2>&1 || true
+  [ "$was_active" -eq 0 ] \
+    || nobrand_vless_sudoku_service_action start >/dev/null 2>&1 || true
+}
+
+install_vless_sudoku() {
+  local interactive=0 snapshot config_tmp state_tmp client_tmp advertise_mode
+  local old_port="" old_created="" was_active=0 binding_was_owned=0 binding_now_owned=0
+  [ "${YES:-0}" -eq 1 ] || interactive=1
+  nobrand_prepare_common
+  admin_lock_acquire || return 1
+  snapshot="$(mktemp_dir)" || { admin_lock_release; return 1; }
+  vless_sudoku_snapshot_file "$NOBRAND_VLESS_CONFIG_FILE" "$snapshot/config"
+  vless_sudoku_snapshot_file "$NOBRAND_VLESS_STATE_FILE" "$snapshot/state"
+  vless_sudoku_snapshot_file "$NOBRAND_VLESS_CLIENT_FILE" "$snapshot/client"
+  vless_sudoku_snapshot_file "$NOBRAND_VLESS_SYSTEMD_SERVICE" "$snapshot/service-systemd"
+  vless_sudoku_snapshot_file "$NOBRAND_VLESS_OPENRC_SERVICE" "$snapshot/service-openrc"
+  vless_sudoku_snapshot_file "$NOBRAND_XRAY_BIN" "$snapshot/xray"
+  nobrand_vless_sudoku_service_active && was_active=1
+  if vless_sudoku_state_exists; then
+    old_port="$(vless_sudoku_state_field listen_port 2>/dev/null || true)"
+    old_created="$(vless_sudoku_state_field created_at 2>/dev/null || true)"
+  fi
+  if ! nobrand_install_xray_runtime 0 || ! vless_sudoku_configure_requests "$interactive"; then
+    vless_sudoku_install_rollback "$snapshot" "$was_active" 0
+    rm -rf -- "$snapshot"
+    admin_lock_release
+    return 1
+  fi
+  nb_firewall_binding_owned TCP "$PORT" && binding_was_owned=1
+  if [ "$was_active" -eq 1 ]; then
+    nobrand_vless_sudoku_service_action stop || {
+      vless_sudoku_install_rollback "$snapshot" "$was_active" 0
+      rm -rf -- "$snapshot"; admin_lock_release; return 1;
+    }
+  fi
+  if ! nb_port_available_for_transport "$PORT" TCP 'vless-sudoku:default'; then
+    warn "提交前发现 TCP/${PORT} 已被其它进程占用"
+    nb_describe_port_conflict TCP "$PORT"
+    vless_sudoku_install_rollback "$snapshot" "$was_active" 0
+    rm -rf -- "$snapshot"; admin_lock_release; return 1
+  fi
+  config_tmp="$(mktemp_file .json)" || {
+    vless_sudoku_install_rollback "$snapshot" "$was_active" 0
+    rm -rf -- "$snapshot"; admin_lock_release; return 1;
+  }
+  state_tmp="$(mktemp_file .json)" || {
+    rm -f "$config_tmp"; vless_sudoku_install_rollback "$snapshot" "$was_active" 0
+    rm -rf -- "$snapshot"; admin_lock_release; return 1;
+  }
+  client_tmp="$(mktemp_file .json)" || {
+    rm -f "$config_tmp" "$state_tmp"; vless_sudoku_install_rollback "$snapshot" "$was_active" 0
+    rm -rf -- "$snapshot"; admin_lock_release; return 1;
+  }
+  advertise_mode="$(nb_endpoint_mode_from_values "$ADVERTISE_HOST")"
+  local effective_host effective_port
+  effective_host="$(nb_effective_advertise_host "$advertise_mode" "$ADVERTISE_HOST")"
+  effective_port="$(nb_effective_advertise_port "$advertise_mode" "$ADVERTISE_PORT" "$PORT")"
+  if ! vless_sudoku_generate_server_config "$config_tmp" "$VLESS_SUDOKU_LISTEN" "$PORT" \
+       "$VLESS_SUDOKU_UUID" "$VLESS_SUDOKU_PASSWORD" \
+     || ! nobrand_xray_test_config "$config_tmp" \
+     || ! vless_sudoku_server_config_matches "$config_tmp" "$VLESS_SUDOKU_UUID" "$PORT" \
+       "$VLESS_SUDOKU_PASSWORD" "$VLESS_SUDOKU_LISTEN" \
+     || ! vless_sudoku_generate_state "$state_tmp" "$VLESS_SUDOKU_LISTEN" "$PORT" \
+       "$VLESS_SUDOKU_UUID" "$VLESS_SUDOKU_PASSWORD" "$advertise_mode" \
+       "$ADVERTISE_HOST" "$ADVERTISE_PORT" "$old_created" \
+     || ! vless_sudoku_generate_client_config "$client_tmp" "$effective_host" "$effective_port" \
+       "$VLESS_SUDOKU_UUID" "$VLESS_SUDOKU_PASSWORD" \
+     || ! vless_sudoku_client_config_matches "$client_tmp" "$effective_host" "$effective_port" \
+       "$VLESS_SUDOKU_UUID" "$VLESS_SUDOKU_PASSWORD" \
+     || ! vless_sudoku_state_matches "$state_tmp" \
+     || ! nb_atomic_install_file "$config_tmp" "$NOBRAND_VLESS_CONFIG_FILE" 0600 \
+     || ! nobrand_write_vless_sudoku_service \
+     || ! nb_firewall_open_pairs "TCP|${PORT}"; then
+    rm -f "$config_tmp" "$state_tmp" "$client_tmp"
+    nb_firewall_binding_owned TCP "$PORT" \
+      && [ "$binding_was_owned" -eq 0 ] && binding_now_owned=1
+    vless_sudoku_install_rollback "$snapshot" "$was_active" "$binding_now_owned"
+    rm -rf -- "$snapshot"; admin_lock_release; return 1
+  fi
+  rm -f "$config_tmp"
+  nb_firewall_binding_owned TCP "$PORT" \
+    && [ "$binding_was_owned" -eq 0 ] && binding_now_owned=1
+  local service_action=start
+  [ "$was_active" -eq 0 ] || service_action=restart
+  if ! nobrand_vless_sudoku_service_action "$service_action" \
+     || ! nobrand_vless_sudoku_service_active \
+     || ! nb_wait_for_listener TCP "$PORT" 25 \
+     || ! nb_atomic_install_file "$client_tmp" "$NOBRAND_VLESS_CLIENT_FILE" 0600 \
+     || ! nb_atomic_install_file "$state_tmp" "$NOBRAND_VLESS_STATE_FILE" 0600; then
+    rm -f "$state_tmp" "$client_tmp"
+    vless_sudoku_install_rollback "$snapshot" "$was_active" "$binding_now_owned"
+    rm -rf -- "$snapshot"; admin_lock_release
+    warn 'VLESS Sudoku 服务、listener 或 state 验收失败，已回滚'
+    return 1
+  fi
+  rm -f "$state_tmp" "$client_tmp"
+  if [ -n "$old_port" ] && [ "$old_port" != "$PORT" ]; then
+    nb_firewall_close_pairs "TCP|${old_port}" || true
+  fi
+  nobrand_install_manager_script || true
+  rm -rf -- "$snapshot"
+  admin_lock_release
+  print_vless_sudoku_result install
+}
+
+vless_sudoku_set_endpoint() {
+  local interactive=0 state_tmp client_tmp snapshot mode owner uuid password host port link finalmask
+  require_root
+  vless_sudoku_state_exists || die 'VLESS Sudoku 未安装'
+  [ "${YES:-0}" -eq 1 ] || interactive=1
+  PORT="$(vless_sudoku_state_field listen_port)"
+  if [ "$interactive" -eq 1 ] && [ "${ADVERTISE_CLI:-0}" -eq 0 ]; then
+    nb_collect_advertise_endpoint_interactive 'VLESS Sudoku' "$PORT"
+  else
+    nb_require_explicit_endpoint_noninteractive
+  fi
+  nb_validate_advertise_endpoint "$ADVERTISE_HOST" "$ADVERTISE_PORT" TCP \
+    || die 'Display Endpoint 无效'
+  if [ -n "$ADVERTISE_HOST" ]; then
+    owner="$(nb_endpoint_conflict_owner TCP "$ADVERTISE_HOST" "$ADVERTISE_PORT" \
+      'vless-sudoku:default' 2>/dev/null || true)"
+    [ -z "$owner" ] || die "Display Endpoint 与 ${owner} 冲突"
+  fi
+  admin_lock_acquire || return 1
+  snapshot="$(mktemp_dir)" || { admin_lock_release; return 1; }
+  vless_sudoku_snapshot_file "$NOBRAND_VLESS_STATE_FILE" "$snapshot/state"
+  vless_sudoku_snapshot_file "$NOBRAND_VLESS_CLIENT_FILE" "$snapshot/client"
+  state_tmp="$(mktemp_file .json)" || { rm -rf -- "$snapshot"; admin_lock_release; return 1; }
+  client_tmp="$(mktemp_file .json)" || {
+    rm -f "$state_tmp"; rm -rf -- "$snapshot"; admin_lock_release; return 1;
+  }
+  mode="$(nb_endpoint_mode_from_values "$ADVERTISE_HOST")"
+  uuid="$(vless_sudoku_state_field uuid)"
+  password="$(jq -r '.finalmask_json.tcp[0].settings.password' "$NOBRAND_VLESS_STATE_FILE")"
+  finalmask="$(vless_sudoku_finalmask_json "$password")" || {
+    rm -f "$state_tmp" "$client_tmp"; rm -rf -- "$snapshot"; admin_lock_release; return 1;
+  }
+  host="$(nb_effective_advertise_host "$mode" "$ADVERTISE_HOST")"
+  port="$(nb_effective_advertise_port "$mode" "$ADVERTISE_PORT" "$PORT")"
+  link="$(vless_sudoku_build_share_link "$uuid" "$host" "$port" "$finalmask")" || {
+    rm -f "$state_tmp" "$client_tmp"; rm -rf -- "$snapshot"; admin_lock_release; return 1;
+  }
+  if ! jq --arg mode "$mode" --arg host "$ADVERTISE_HOST" --arg port "$ADVERTISE_PORT" \
+      --arg link "$link" --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+        .advertise_mode=$mode |
+        .advertise_host=$host |
+        .advertise_port=(if $port=="" then "" else ($port|tonumber) end) |
+        .link=$link |
+        .updated_at=$updated
+      ' "$NOBRAND_VLESS_STATE_FILE" >"$state_tmp" \
+     || ! vless_sudoku_generate_client_config "$client_tmp" "$host" "$port" "$uuid" "$password" \
+     || ! vless_sudoku_client_config_matches "$client_tmp" "$host" "$port" \
+     || ! nb_atomic_install_file "$client_tmp" "$NOBRAND_VLESS_CLIENT_FILE" 0600 \
+     || ! nb_atomic_install_file "$state_tmp" "$NOBRAND_VLESS_STATE_FILE" 0600; then
+    vless_sudoku_restore_snapshot_file "$snapshot/state" "$NOBRAND_VLESS_STATE_FILE"
+    vless_sudoku_restore_snapshot_file "$snapshot/client" "$NOBRAND_VLESS_CLIENT_FILE"
+    rm -f "$state_tmp" "$client_tmp"; rm -rf -- "$snapshot"; admin_lock_release
+    return 1
+  fi
+  rm -f "$state_tmp" "$client_tmp"; rm -rf -- "$snapshot"
+  # 本函数禁止调用 service、firewall 或 server config writer。
+  admin_lock_release
+  t 'VLESS Sudoku 客户端展示入口已更新；server config/listener/PID/service/firewall 均未改变' \
+    'VLESS Sudoku display endpoint updated; server config/listener/PID/service/firewall are unchanged'
+  print_vless_sudoku_result show
+}
+
+vless_sudoku_running() {
+  local port
+  vless_sudoku_state_exists || return 1
+  port="$(vless_sudoku_state_field listen_port)"
+  nobrand_vless_sudoku_service_active && nb_port_is_listening TCP "$port"
+}
+
+vless_sudoku_state_set_enabled() {
+  local enabled="$1" tmp
+  tmp="$(mktemp_file .json)" || return 1
+  if ! jq --argjson enabled "$enabled" --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      '.enabled=$enabled | .updated_at=$updated' "$NOBRAND_VLESS_STATE_FILE" >"$tmp" \
+     || ! nb_atomic_install_file "$tmp" "$NOBRAND_VLESS_STATE_FILE" 0600; then
+    rm -f "$tmp"
+    return 1
+  fi
+  rm -f "$tmp"
+}
+
+vless_sudoku_node_rows() {
+  local mode advertise_host advertise_port listen_port host port status
+  vless_sudoku_state_exists || return 0
+  mode="$(vless_sudoku_state_field advertise_mode)"
+  advertise_host="$(vless_sudoku_state_field advertise_host)"
+  advertise_port="$(vless_sudoku_state_field advertise_port)"
+  listen_port="$(vless_sudoku_state_field listen_port)"
+  host="$(nb_effective_advertise_host "$mode" "$advertise_host")"
+  port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port")"
+  status=Stopped; vless_sudoku_running && status=Running
+  printf 'VLESS/Sudoku|sudoku|%s:%s/TCP|%s|TCP\n' "$host" "$port" "$status"
+}
+
+print_vless_sudoku_result() {
+  local context="${1:-show}" uuid listen_host listen_port mode advertise_host advertise_port
+  local host port status link finalmask password
+  vless_sudoku_state_exists || { t 'VLESS Sudoku 未安装' 'VLESS Sudoku is not installed'; return 0; }
+  uuid="$(vless_sudoku_state_field uuid)"
+  listen_host="$(vless_sudoku_state_field listen_host)"
+  listen_port="$(vless_sudoku_state_field listen_port)"
+  mode="$(vless_sudoku_state_field advertise_mode)"
+  advertise_host="$(vless_sudoku_state_field advertise_host)"
+  advertise_port="$(vless_sudoku_state_field advertise_port)"
+  host="$(nb_effective_advertise_host "$mode" "$advertise_host")"
+  port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port")"
+  finalmask="$(jq -c '.finalmask_json' "$NOBRAND_VLESS_STATE_FILE")"
+  password="$(jq -r '.finalmask_json.tcp[0].settings.password' "$NOBRAND_VLESS_STATE_FILE")"
+  link="$(vless_sudoku_current_share_link)"
+  status=Stopped; vless_sudoku_running && status=Running
+  nobrand_print_banner
+  msg ''
+  [ "$context" != install ] || t '部署完成' 'Deployment complete'
+  msg '协议        Plain VLESS + FinalMask + Sudoku'
+  msg '传输        TCP'
+  msg 'VLESS Encryption: NOT USED'
+  msg "状态        ${status}"
+  msg ''
+  msg '真实监听'
+  msg "  Address   ${listen_host}"
+  msg "  Port      ${listen_port}"
+  msg ''
+  msg '客户端入口'
+  msg "  Host      ${host}"
+  msg "  Port      ${port}"
+  msg "  Mode      ${mode}"
+  msg ''
+  msg '认证与 FinalMask'
+  msg "  UUID      ${uuid}"
+  msg "  Mode      sudoku"
+  msg "  Password  ${password}"
+  msg "  JSON      ${finalmask}"
+  msg ''
+  msg "Xray client JSON: ${NOBRAND_VLESS_CLIENT_FILE}"
+  msg '========================================'
+  msg "$link"
+}
+
+vless_sudoku_service_command() {
+  local action="$1" port was_enabled
+  vless_sudoku_state_exists || die 'VLESS Sudoku 未安装'
+  port="$(vless_sudoku_state_field listen_port)"
+  was_enabled="$(vless_sudoku_state_field enabled)"
+  case "$action" in
+    start|restart)
+      nobrand_xray_test_config "$NOBRAND_VLESS_CONFIG_FILE" || return 1
+      nb_firewall_open_pairs "TCP|${port}" || return 1
+      if ! nobrand_vless_sudoku_service_action "$action" \
+         || ! nb_wait_for_listener TCP "$port" 25 \
+         || ! vless_sudoku_state_set_enabled true; then
+        nobrand_vless_sudoku_service_action stop >/dev/null 2>&1 || true
+        [ "$was_enabled" = true ] || vless_sudoku_state_set_enabled false >/dev/null 2>&1 || true
+        return 1
+      fi
+      ;;
+    stop)
+      nobrand_vless_sudoku_service_action stop || return 1
+      if ! vless_sudoku_state_set_enabled false; then
+        [ "$was_enabled" != true ] \
+          || nobrand_vless_sudoku_service_action start >/dev/null 2>&1 || true
+        return 1
+      fi
+      ;;
+    status)
+      if vless_sudoku_running; then msg 'VLESS Sudoku: Running'; else msg 'VLESS Sudoku: Stopped'; return 1; fi
+      ;;
+  esac
+}
+
+remove_vless_sudoku_config() {
+  local port
+  require_root
+  vless_sudoku_state_exists \
+    || { t 'VLESS Sudoku 未安装' 'VLESS Sudoku is not installed'; return 0; }
+  port="$(vless_sudoku_state_field listen_port)"
+  admin_lock_acquire || return 1
+  nobrand_remove_vless_sudoku_service || { admin_lock_release; return 1; }
+  nb_firewall_close_pairs "TCP|${port}" || { admin_lock_release; return 1; }
+  rm -f "$NOBRAND_VLESS_CONFIG_FILE" "$NOBRAND_VLESS_STATE_FILE" "$NOBRAND_VLESS_CLIENT_FILE"
+  rmdir "$NOBRAND_VLESS_CONFIG_DIR" "$NOBRAND_VLESS_STATE_DIR" 2>/dev/null || true
+  admin_lock_release
+  t '已删除 NoBrand VLESS Sudoku；共享 Xray、HY2、Mieru、Snell 与外部 Xray 均保留' \
+    'Removed NoBrand VLESS Sudoku; shared Xray, HY2, Mieru, Snell, and external Xray are preserved'
+}
+
+vless_sudoku_doctor() {
+  local failed=0 port mode host advertise_port uuid password cached_link current_link
+  if ! vless_sudoku_state_exists; then
+    nb_doctor_line INFO 'not installed'
+    return 0
+  fi
+  port="$(vless_sudoku_state_field listen_port)"
+  uuid="$(vless_sudoku_state_field uuid)"
+  password="$(jq -r '.finalmask_json.tcp[0].settings.password // empty' "$NOBRAND_VLESS_STATE_FILE")"
+  [ -x "$NOBRAND_XRAY_BIN" ] \
+    && nb_doctor_line PASS "Xray $(nobrand_xray_version 2>/dev/null || printf unknown)" \
+    || { nb_doctor_line FAIL 'NoBrand Xray binary'; failed=1; }
+  vless_sudoku_state_matches \
+    && nb_doctor_line PASS 'state schema + plain VLESS metadata' \
+    || { nb_doctor_line FAIL 'state schema/metadata'; failed=1; }
+  vless_sudoku_server_config_matches "$NOBRAND_VLESS_CONFIG_FILE" "$uuid" "$port" "$password" \
+    && nb_doctor_line PASS 'plain VLESS + TCP + FinalMask Sudoku config' \
+    || { nb_doctor_line FAIL 'server config semantics'; failed=1; }
+  nobrand_xray_test_config "$NOBRAND_VLESS_CONFIG_FILE" \
+    && nb_doctor_line PASS 'Xray config test' \
+    || { nb_doctor_line FAIL 'Xray config test'; failed=1; }
+  vless_sudoku_forbidden_absent "$NOBRAND_VLESS_CONFIG_FILE" \
+    "$NOBRAND_VLESS_STATE_FILE" "$NOBRAND_VLESS_CLIENT_FILE" \
+    && nb_doctor_line PASS 'VLESS Encryption absent' \
+    || { nb_doctor_line FAIL 'forbidden encryption dependency/field detected'; failed=1; }
+  vless_sudoku_client_config_matches \
+    && nb_doctor_line PASS 'Xray client JSON' \
+    || { nb_doctor_line FAIL 'Xray client JSON'; failed=1; }
+  vless_sudoku_running \
+    && nb_doctor_line PASS "service + TCP/${port}" \
+    || { nb_doctor_line FAIL "service/listener TCP/${port}"; failed=1; }
+  nb_firewall_binding_owned TCP "$port" \
+    && nb_doctor_line PASS "firewall ownership TCP/${port}" \
+    || nb_doctor_line INFO "firewall rule not owned (pre-existing/no local firewall): TCP/${port}"
+  mode="$(vless_sudoku_state_field advertise_mode)"
+  host="$(vless_sudoku_state_field advertise_host)"
+  advertise_port="$(vless_sudoku_state_field advertise_port)"
+  nb_validate_advertise_endpoint "$host" "$advertise_port" TCP \
+    && nb_doctor_line PASS "display endpoint mode=${mode}" \
+    || { nb_doctor_line FAIL 'display endpoint state'; failed=1; }
+  vless_sudoku_current_share_link >/dev/null \
+    && nb_doctor_line PASS 'VLESS URL generation' \
+    || { nb_doctor_line FAIL 'VLESS URL generation'; failed=1; }
+  cached_link="$(vless_sudoku_state_field link 2>/dev/null || true)"
+  current_link="$(vless_sudoku_current_share_link 2>/dev/null || true)"
+  [ -n "$current_link" ] && [ "$cached_link" = "$current_link" ] \
+    && nb_doctor_line PASS 'cached VLESS URL matches state' \
+    || { nb_doctor_line FAIL 'cached VLESS URL mismatch'; failed=1; }
+  return "$failed"
+}
+
+vless_sudoku_smoke() {
+  local failed=0
+  vless_sudoku_state_exists || { nb_doctor_line INFO 'VLESS Sudoku not installed'; return 0; }
+  vless_sudoku_state_matches \
+    && nb_doctor_line PASS 'state schema' || { nb_doctor_line FAIL 'state schema'; failed=1; }
+  nobrand_xray_test_config "$NOBRAND_VLESS_CONFIG_FILE" \
+    && nb_doctor_line PASS 'xray run -test' || { nb_doctor_line FAIL 'xray run -test'; failed=1; }
+  vless_sudoku_forbidden_absent "$NOBRAND_VLESS_CONFIG_FILE" \
+    "$NOBRAND_VLESS_STATE_FILE" "$NOBRAND_VLESS_CLIENT_FILE" \
+    && nb_doctor_line PASS 'VLESS_ENCRYPTION_ENABLED=false' \
+    || { nb_doctor_line FAIL 'VLESS Encryption material detected'; failed=1; }
+  vless_sudoku_running \
+    && nb_doctor_line PASS 'service/listener' || { nb_doctor_line FAIL 'service/listener'; failed=1; }
+  return "$failed"
+}
+
+vless_sudoku_refresh_runtime_metadata() {
+  local tmp runtime
+  vless_sudoku_state_exists || return 0
+  runtime="$(nobrand_xray_version)" || return 1
+  tmp="$(mktemp_file .json)" || return 1
+  jq --arg runtime "$runtime" --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '.runtime_version=$runtime | .updated_at=$updated' "$NOBRAND_VLESS_STATE_FILE" >"$tmp" \
+    && nb_atomic_install_file "$tmp" "$NOBRAND_VLESS_STATE_FILE" 0600
+  local rc=$?
+  rm -f "$tmp"
+  return "$rc"
+}
+
+vless_sudoku_upgrade_runtime() {
+  nobrand_upgrade_xray_runtime
+}
+
+nobrand_run_vless_sudoku_action() {
+  case "${VLESS_SUDOKU_ACTION:-menu}" in
+    menu) vless_sudoku_menu_loop ;;
+    install) install_vless_sudoku ;;
+    show) print_vless_sudoku_result show ;;
+    set-endpoint) vless_sudoku_set_endpoint ;;
+    remove) remove_vless_sudoku_config ;;
+    start|stop|restart|status) vless_sudoku_service_command "$VLESS_SUDOKU_ACTION" ;;
+    doctor) vless_sudoku_doctor ;;
+    smoke) vless_sudoku_smoke ;;
+    upgrade) vless_sudoku_upgrade_runtime ;;
+    help) nobrand_usage ;;
+  esac
 }
 
 mita_socket_paths() {
@@ -8915,6 +13562,96 @@ mita_preservable_config_exists() {
   users_state_exists && [ "$(users_count)" -gt 0 ]
 }
 
+# ---------- Snell client exports (Surge / Mihomo / sing-box) ----------
+
+snell_client_values() {
+  local id="$1" name major psk endpoint host port
+  name="$(snell_state_field "$id" name)"
+  major="$(snell_state_field "$id" version)"
+  case "$major" in 4|5) ;; *) return 1 ;; esac
+  psk="$(snell_state_field "$id" psk)"
+  endpoint="$(snell_effective_endpoint "$id")"
+  host="${endpoint%%|*}"; port="${endpoint#*|}"
+  printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$major" "$psk" "$host" "$port"
+}
+
+snell_export_surge() {
+  local id="$1" name major psk host port values
+  values="$(snell_client_values "$id")" || return 1
+  IFS=$'\t' read -r name major psk host port <<<"$values"
+  printf '%s = snell, %s, %s, psk = %s, version = %s' "$name" "$host" "$port" "$psk" "$major"
+  printf '\n'
+}
+
+snell_export_mihomo() {
+  local id="$1" name major psk host port values
+  values="$(snell_client_values "$id")" || return 1
+  IFS=$'\t' read -r name major psk host port <<<"$values"
+  case "$major" in
+    4|5) ;;
+    *) return 1 ;;
+  esac
+  jq -n --arg name "$name" --arg server "$host" --arg port "$port" --arg psk "$psk" --arg version "$major" -r '
+    "- name: " + ($name|tojson) + "\n" +
+    "  type: snell\n" +
+    "  server: " + ($server|tojson) + "\n" +
+    "  port: " + $port + "\n" +
+    "  psk: " + ($psk|tojson) + "\n" +
+    "  version: " + $version + "\n" +
+    "  udp: true"
+  '
+}
+
+snell_export_singbox() {
+  local id="$1" name major psk host port singbox_version values
+  values="$(snell_client_values "$id")" || return 1
+  IFS=$'\t' read -r name major psk host port <<<"$values"
+  case "$major" in
+    4) singbox_version=4 ;;
+    # 官方 v5 未启用 QUIC Proxy Mode 时与 v4 client wire protocol 兼容；
+    # sing-box >=1.14 当前 outbound 用 version=4 表达该兼容语义。
+    5) singbox_version=4 ;;
+    *) return 1 ;;
+  esac
+  jq -n --arg tag "$name" --arg server "$host" --arg port "$port" --arg psk "$psk" \
+    --arg version "$singbox_version" --arg major "$major" '
+      {
+        type:"snell",
+        tag:$tag,
+        server:$server,
+        server_port:($port|tonumber),
+        version:($version|tonumber),
+        psk:$psk
+      }
+    '
+}
+
+snell_print_client_exports() {
+  local id="$1" major
+  major="$(snell_state_field "$id" version)"
+  msg '========================================'
+  msg 'Surge'
+  msg '========================================'
+  snell_export_surge "$id"
+  msg ''
+  msg '========================================'
+  msg 'Mihomo'
+  msg '========================================'
+  snell_export_mihomo "$id"
+  if [ "$major" = 5 ]; then
+    msg '说明：udp: true 是 Mihomo 普通 Snell UDP relay 能力；官方 v5 QUIC Proxy Mode 为 NOT VERIFIED。'
+  fi
+  msg ''
+  msg '========================================'
+  msg 'sing-box'
+  msg '========================================'
+  snell_export_singbox "$id"
+  if [ "$major" = 5 ]; then
+    msg '说明：sing-box version=4 对应 Snell v5 未启用 QUIC Proxy Mode 时的上游兼容语义。'
+    msg '说明：sing-box 不支持官方 Snell v5 QUIC Proxy Mode（CLIENT_UNSUPPORTED）。'
+  fi
+}
+
 do_install() {
   require_root
   require_linux
@@ -10381,16 +15118,329 @@ show_menu() {
   return 0
 }
 
+# ---------- NoBrand unified interactive presentation ----------
+
+nobrand_menu_run() {
+  local rc=0
+  set +e
+  (
+    set -Eeuo pipefail
+    trap 'rc=$?; on_error' ERR
+    "$@"
+  )
+  rc=$?
+  set -e
+  if [ "$rc" -ne 0 ]; then
+    warn "$(t '操作未完成；请重试或运行 nobrand doctor' \
+      'Action did not complete; retry or run nobrand doctor')"
+  fi
+  return 0
+}
+
+snell_menu_select_instance() {
+  local id name major found=0 choice=""
+  msg ''
+  msg 'Snell 节点:'
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    name="$(snell_state_field "$id" name)"
+    major="$(snell_state_field "$id" version)"
+    printf '  - %s (v%s, %s)\n' "$name" "$major" "$id"
+    found=1
+  done < <(snell_instance_ids)
+  [ "$found" -eq 1 ] || { warn 'Snell 尚无节点'; return 1; }
+  read_tty choice "$(t '输入节点名: ' 'Enter node name: ')" || choice=""
+  [ -n "$choice" ] && snell_find_id_by_name "$choice" >/dev/null 2>&1 \
+    || { warn '节点名不存在'; return 1; }
+  SNELL_NAME="$choice"
+}
+
+snell_menu_install_version() {
+  local version="$1"
+  SNELL_VERSION="$version" SNELL_VERSION_CLI=1 SNELL_NAME="" SNELL_PSK=""
+  SNELL_QUIC_PROXY="" SNELL_QUIC_CLI=0
+  PORT="" PORT_CLI=0 ADVERTISE_HOST="" ADVERTISE_PORT="" ADVERTISE_CLI=0 ADVERTISE_AUTO_REQUESTED=0
+  YES=0 SNELL_ACTION=install
+  nobrand_menu_run nobrand_run_snell_action
+}
+
+snell_menu_set_quic() {
+  local choice=""
+  snell_menu_select_instance || return 0
+  msg '  1) 关闭 QUIC Proxy Mode [默认 / 推荐兼容]'
+  msg '  2) 启用 QUIC Proxy Mode [开放同号 UDP]'
+  read_tty choice "$(t '请选择 [1-2]: ' 'Choose [1-2]: ')" || choice=""
+  case "$choice" in
+    1) SNELL_QUIC_PROXY=off ;;
+    2) SNELL_QUIC_PROXY=on ;;
+    *) warn '无效选择'; return 0 ;;
+  esac
+  SNELL_QUIC_CLI=1 YES=0 SNELL_ACTION=set-quic
+  nobrand_menu_run nobrand_run_snell_action
+}
+
+snell_menu_service() {
+  local choice=""
+  snell_menu_select_instance || return 0
+  msg '  1) 状态'
+  msg '  2) 启动'
+  msg '  3) 停止'
+  msg '  4) 重启'
+  read_tty choice "$(t '请选择 [1-4]: ' 'Choose [1-4]: ')" || choice=""
+  case "$choice" in
+    1) SNELL_ACTION=status ;;
+    2) SNELL_ACTION=start ;;
+    3) SNELL_ACTION=stop ;;
+    4) SNELL_ACTION=restart ;;
+    *) warn '无效选择'; return 0 ;;
+  esac
+  nobrand_menu_run nobrand_run_snell_action
+}
+
+snell_menu_loop() {
+  local choice="" confirm=""
+  trap - ERR
+  while true; do
+    msg ''
+    msg '========== Snell =========='
+    msg '  1) 安装 Snell v5 [推荐]'
+    msg '  2) 安装 Snell v4 [兼容]'
+    msg '  3) 查看 Snell 节点'
+    msg '  4) QUIC 设置'
+    msg '  5) 修改 Display Endpoint'
+    msg '  6) 服务管理'
+    msg '  7) 升级官方 runtime'
+    msg '  8) Doctor'
+    msg '  9) 删除节点'
+    msg '  0) 返回'
+    read_tty choice "$(t '请选择 [0-9]: ' 'Choose [0-9]: ')" || choice=""
+    case "$choice" in
+      1) snell_menu_install_version 5 ;;
+      2) snell_menu_install_version 4 ;;
+      3) SNELL_NAME=""; SNELL_ACTION=show; nobrand_menu_run nobrand_run_snell_action ;;
+      4) snell_menu_set_quic ;;
+      5)
+        snell_menu_select_instance || continue
+        ADVERTISE_CLI=0 ADVERTISE_AUTO_REQUESTED=0 YES=0 SNELL_ACTION=set-endpoint
+        nobrand_menu_run nobrand_run_snell_action
+        ;;
+      6) snell_menu_service ;;
+      7)
+        msg '升级版本: 1) v5  2) v4'
+        read_tty confirm '请选择 [1-2]: ' || confirm=""
+        case "$confirm" in 1) SNELL_VERSION=5 ;; 2) SNELL_VERSION=4 ;; *) warn '无效选择'; continue ;; esac
+        SNELL_NAME="" SNELL_ACTION=upgrade
+        nobrand_menu_run nobrand_run_snell_action
+        ;;
+      8) SNELL_ACTION=doctor; nobrand_menu_run nobrand_run_snell_action ;;
+      9)
+        snell_menu_select_instance || continue
+        read_tty confirm "确认删除 ${SNELL_NAME}？输入 yes: " || confirm=""
+        [ "$confirm" = yes ] || { warn '已取消'; continue; }
+        SNELL_ACTION=remove
+        nobrand_menu_run nobrand_run_snell_action
+        ;;
+      0) return 0 ;;
+      *) warn '无效选择' ;;
+    esac
+    menu_pause
+  done
+}
+
+hysteria2_menu_loop() {
+  local choice="" confirm=""
+  trap - ERR
+  while true; do
+    msg ''
+    msg '========== Hysteria2 / Xray-core =========='
+    msg '  1) 安装 / 重新部署'
+    msg '  2) 查看节点'
+    msg '  3) 修改 Display Endpoint'
+    msg '  4) 状态'
+    msg '  5) 启动'
+    msg '  6) 停止'
+    msg '  7) 重启'
+    msg '  8) 升级 NoBrand 独立 Xray-core'
+    msg '  9) Doctor'
+    msg ' 10) 删除 Hysteria2'
+    msg '  0) 返回'
+    read_tty choice "$(t '请选择 [0-10]: ' 'Choose [0-10]: ')" || choice=""
+    case "$choice" in
+      1)
+        PORT="" PORT_CLI=0 HY2_SNI="" ADVERTISE_HOST="" ADVERTISE_PORT=""
+        ADVERTISE_CLI=0 ADVERTISE_AUTO_REQUESTED=0 YES=0 HY2_ACTION=install
+        nobrand_menu_run nobrand_run_hy2_action
+        ;;
+      2) HY2_ACTION=show; nobrand_menu_run nobrand_run_hy2_action ;;
+      3)
+        ADVERTISE_CLI=0 ADVERTISE_AUTO_REQUESTED=0 YES=0 HY2_ACTION=set-endpoint
+        nobrand_menu_run nobrand_run_hy2_action
+        ;;
+      4) HY2_ACTION=status; nobrand_menu_run nobrand_run_hy2_action ;;
+      5) HY2_ACTION=start; nobrand_menu_run nobrand_run_hy2_action ;;
+      6) HY2_ACTION=stop; nobrand_menu_run nobrand_run_hy2_action ;;
+      7) HY2_ACTION=restart; nobrand_menu_run nobrand_run_hy2_action ;;
+      8) HY2_ACTION=upgrade; nobrand_menu_run nobrand_run_hy2_action ;;
+      9) HY2_ACTION=doctor; nobrand_menu_run nobrand_run_hy2_action ;;
+      10)
+        read_tty confirm '确认只删除 NoBrand Hysteria2？输入 yes: ' || confirm=""
+        [ "$confirm" = yes ] || { warn '已取消'; continue; }
+        HY2_ACTION=remove
+        nobrand_menu_run nobrand_run_hy2_action
+        ;;
+      0) return 0 ;;
+      *) warn '无效选择' ;;
+    esac
+    menu_pause
+  done
+}
+
+vless_sudoku_menu_loop() {
+  local choice="" confirm=""
+  trap - ERR
+  while true; do
+    msg ''
+    msg '========== Plain VLESS + FinalMask + Sudoku / TCP =========='
+    msg 'VLESS Encryption: NOT USED'
+    msg '  1) 安装 / 重新配置'
+    msg '  2) 查看节点'
+    msg '  3) 修改客户端展示入口'
+    msg '  4) 状态'
+    msg '  5) 启动'
+    msg '  6) 停止'
+    msg '  7) 重启'
+    msg '  8) Doctor'
+    msg '  9) Smoke / 配置验证'
+    msg ' 10) 升级共享 Xray runtime'
+    msg ' 11) 删除'
+    msg '  0) 返回'
+    read_tty choice "$(t '请选择 [0-11]: ' 'Choose [0-11]: ')" || choice=""
+    case "$choice" in
+      1)
+        PORT="" PORT_CLI=0 VLESS_SUDOKU_UUID="" VLESS_SUDOKU_PASSWORD=""
+        ADVERTISE_HOST="" ADVERTISE_PORT="" ADVERTISE_CLI=0 ADVERTISE_AUTO_REQUESTED=0
+        YES=0 VLESS_SUDOKU_ACTION=install
+        nobrand_menu_run nobrand_run_vless_sudoku_action
+        ;;
+      2) VLESS_SUDOKU_ACTION=show; nobrand_menu_run nobrand_run_vless_sudoku_action ;;
+      3)
+        ADVERTISE_HOST="" ADVERTISE_PORT="" ADVERTISE_CLI=0 ADVERTISE_AUTO_REQUESTED=0
+        YES=0 VLESS_SUDOKU_ACTION=set-endpoint
+        nobrand_menu_run nobrand_run_vless_sudoku_action
+        ;;
+      4) VLESS_SUDOKU_ACTION=status; nobrand_menu_run nobrand_run_vless_sudoku_action ;;
+      5) VLESS_SUDOKU_ACTION=start; nobrand_menu_run nobrand_run_vless_sudoku_action ;;
+      6) VLESS_SUDOKU_ACTION=stop; nobrand_menu_run nobrand_run_vless_sudoku_action ;;
+      7) VLESS_SUDOKU_ACTION=restart; nobrand_menu_run nobrand_run_vless_sudoku_action ;;
+      8) VLESS_SUDOKU_ACTION=doctor; nobrand_menu_run nobrand_run_vless_sudoku_action ;;
+      9) VLESS_SUDOKU_ACTION=smoke; nobrand_menu_run nobrand_run_vless_sudoku_action ;;
+      10) VLESS_SUDOKU_ACTION=upgrade; nobrand_menu_run nobrand_run_vless_sudoku_action ;;
+      11)
+        read_tty confirm '确认只删除 NoBrand VLESS Sudoku？输入 yes: ' || confirm=""
+        [ "$confirm" = yes ] || { warn '已取消'; continue; }
+        VLESS_SUDOKU_ACTION=remove
+        nobrand_menu_run nobrand_run_vless_sudoku_action
+        ;;
+      0) return 0 ;;
+      *) warn '无效选择' ;;
+    esac
+    menu_pause
+  done
+}
+
+nobrand_backup_menu_loop() {
+  local choice="" path=""
+  trap - ERR
+  while true; do
+    msg ''
+    msg '========== NoBrand 备份 / 恢复 =========='
+    msg '  1) 创建备份'
+    msg '  2) 列出备份'
+    msg '  3) 从备份恢复'
+    msg '  0) 返回'
+    read_tty choice "$(t '请选择 [0-3]: ' 'Choose [0-3]: ')" || choice=""
+    case "$choice" in
+      1)
+        NOBRAND_BACKUP_ACTION=create NOBRAND_BACKUP_PATH=""
+        nobrand_menu_run nobrand_backup_action
+        ;;
+      2)
+        NOBRAND_BACKUP_ACTION=list NOBRAND_BACKUP_PATH=""
+        nobrand_menu_run nobrand_backup_action
+        ;;
+      3)
+        read_tty path "$(t '备份文件绝对路径: ' 'Absolute backup path: ')" || path=""
+        [ -n "$path" ] || { warn '备份路径不能为空'; continue; }
+        NOBRAND_BACKUP_ACTION=restore NOBRAND_BACKUP_PATH="$path"
+        nobrand_menu_run nobrand_backup_action
+        ;;
+      0) return 0 ;;
+      *) warn '无效选择' ;;
+    esac
+    menu_pause
+  done
+}
+
+nobrand_menu_loop() {
+  local choice=""
+  MENU_MODE=1
+  trap - ERR
+  while true; do
+    nobrand_print_banner
+    msg ''
+    msg '  1) Mieru'
+    msg '  2) Snell v4 / v5'
+    msg '  3) Hysteria2 (Xray-core)'
+    msg '  4) VLESS + FinalMask + Sudoku (TCP)'
+    msg '  5) 查看全部节点'
+    msg '  6) 综合状态'
+    msg '  7) Doctor'
+    msg '  8) 性能 / BBR / FQ（Mieru 公共网络工具）'
+    msg '  9) 备份 / 恢复'
+    msg ' 10) 帮助 / CLI'
+    msg ' 11) 卸载 NoBrand Snell/HY2/VLESS/Common（保留 Mieru）'
+    msg '  0) 退出'
+    read_tty choice "$(t '请选择 [0-11]: ' 'Choose [0-11]: ')" || choice=""
+    case "$choice" in
+      1) menu_loop ;;
+      2) snell_menu_loop ;;
+      3) hysteria2_menu_loop ;;
+      4) vless_sudoku_menu_loop ;;
+      5) NOBRAND_PROTOCOL_FILTER=""; nobrand_menu_run nobrand_nodes; menu_pause ;;
+      6) nobrand_menu_run nobrand_status; menu_pause ;;
+      7) nobrand_menu_run nobrand_doctor; menu_pause ;;
+      8) nobrand_menu_run do_perf; menu_pause ;;
+      9) nobrand_backup_menu_loop ;;
+      10) nobrand_usage; menu_pause ;;
+      11) YES=0; nobrand_menu_run nobrand_uninstall; menu_pause ;;
+      0) return 0 ;;
+      *) warn '无效选择' ;;
+    esac
+  done
+}
+
 main() {
   if [ "${DRY_RUN:-0}" -ne 1 ] \
      && [ "$(id -u 2>/dev/null || echo 1)" -eq 0 ]; then
     ensure_manager_state_layout
   fi
+  if [ "${NOBRAND_ENTRY:-0}" -eq 1 ] \
+     && [ "${DRY_RUN:-0}" -ne 1 ] \
+     && [ "$(id -u 2>/dev/null || echo 1)" -eq 0 ]; then
+    case "${ACTION:-menu}" in
+      nobrand-version|nobrand-help) ;;
+      *) snell_migrate_removed_v6 || die 'Snell v6 removal migration did not complete safely' ;;
+    esac
+  fi
   if [ -z "$ACTION" ]; then
-    menu_loop
+    if [ "${NOBRAND_ENTRY:-0}" -eq 1 ]; then
+      nobrand_menu_loop
+    else
+      menu_loop
+    fi
     exit 0
   fi
-  if [ "$ACTION" != "menu" ]; then
+  if [ "$ACTION" != "menu" ] && [[ "$ACTION" != nobrand-* ]]; then
     print_banner
   fi
   if dry_run_should_preview "$ACTION"; then
@@ -10448,6 +15498,18 @@ main() {
     low-entropy-config) do_tuning_config low-entropy ;;
     bbr-config) do_bbr_config ;;
     version-channel) do_version_channel_config ;;
+    nobrand-status) nobrand_status ;;
+    nobrand-nodes) nobrand_nodes ;;
+    nobrand-doctor) nobrand_doctor ;;
+    nobrand-backup) nobrand_backup_action ;;
+    nobrand-uninstall) nobrand_uninstall ;;
+    nobrand-network) do_perf ;;
+    nobrand-snell) nobrand_run_snell_action ;;
+    nobrand-hy2) nobrand_run_hy2_action ;;
+    nobrand-vless-sudoku) nobrand_run_vless_sudoku_action ;;
+    nobrand-mieru-menu) menu_loop ;;
+    nobrand-help) nobrand_usage ;;
+    nobrand-version) nobrand_version ;;
     help) usage; exit 0 ;;
     menu)
       menu_loop
