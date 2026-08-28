@@ -264,8 +264,8 @@ allocate_user_port() {
     "Port pool ${_pool_lo}-${_pool_hi} exhausted; pass --port or enlarge pool")" || return 1
 }
 
-users_migrate_from_primary() {
-  # 将当前 USERNAME/PASSWORD/PORT 写入 users.json（若空）
+users_initialize_primary() {
+  # Fresh schema-v3 install: materialize the first dedicated user.
   users_require_python
   [ -n "${USERNAME:-}" ] || return 0
   [ -n "${PORT:-}" ] || return 0
@@ -281,11 +281,11 @@ users_migrate_from_primary() {
   run mkdir -p "$(dirname "$MITA_USERS_STATE")"
   if ! python3 -c '
 import hashlib, json, sys, time
-path, name, pwd, port, proto, advertise_host, advertise_port = sys.argv[1:8]
+path, name, pwd, port, proto, advertise_host, advertise_port, deployment_model = sys.argv[1:9]
 port = int(port)
 advertise_port = int(advertise_port) if advertise_port else ""
 instance_id = "u" + hashlib.sha256(("%s\0%s" % (name, port)).encode()).hexdigest()[:16]
-d = {"version": 2, "protocol": proto, "users": [{
+d = {"version": 2, "deployment_model": deployment_model, "protocol": proto, "users": [{
     "instance_id": instance_id,
     "name": name,
     "password": pwd,
@@ -304,8 +304,8 @@ d = {"version": 2, "protocol": proto, "users": [{
     "updated_at": int(time.time()),
 }]}
 json.dump(d, open(path, "w"), indent=2)
-' "$MITA_USERS_STATE" "$USERNAME" "$PASSWORD" "$PORT" "${PROTOCOL:-TCP}" \
-    "${ADVERTISE_HOST:-}" "${ADVERTISE_PORT:-}"
+  ' "$MITA_USERS_STATE" "$USERNAME" "$PASSWORD" "$PORT" "${PROTOCOL:-TCP}" \
+    "${ADVERTISE_HOST:-}" "${ADVERTISE_PORT:-}" "$MITA_DEPLOYMENT_MODEL"
   then
     admin_lock_release
     return 1
@@ -345,10 +345,7 @@ users_ensure_loaded() {
     users_sync_primary_globals
     return 0
   fi
-  # 尝试从 mita / 安装状态迁移
-  if [ -n "${USERNAME:-}" ] && [ -n "${PORT:-}" ]; then
-    users_migrate_from_primary
-  fi
+  return 0
 }
 
 users_add() {
@@ -379,11 +376,7 @@ users_add() {
   fi
   load_install_state
   if ! users_state_exists || [ "$(users_count)" -eq 0 ]; then
-    if [ -n "${USERNAME:-}" ] && [ -n "${PORT:-}" ] && [ -n "${PASSWORD:-}" ]; then
-      users_migrate_from_primary
-    else
-      users_state_init_empty
-    fi
+    users_state_init_empty
   fi
   if users_name_exists "$name"; then
     warn "$(t "用户已存在: $name" "User already exists: $name")"
@@ -620,116 +613,6 @@ PY
     fi
   fi
   printf '%s' "$cfg"
-}
-
-users_enabled_names_from_state() {
-  users_require_python || return 1
-  users_state_exists || return 1
-  python3 -c '
-import json, sys
-d = json.load(open(sys.argv[1]))
-names = {
-    str(u.get("name") or "")
-    for u in (d.get("users") or [])
-    if u.get("enabled", True) and str(u.get("name") or "")
-}
-print("\n".join(sorted(names)))
-' "$MITA_USERS_STATE" 2>/dev/null
-}
-
-mita_actual_user_names() {
-  local bin desc
-  bin="$(mita_bin)" || return 1
-  [ -x "$bin" ] || return 1
-  desc="$("$bin" describe config 2>/dev/null)" || return 1
-  [ -n "$desc" ] || return 1
-  printf '%s' "$desc" | python3 -c '
-import json, sys
-d = json.load(sys.stdin)
-names = {
-    str(u.get("name") or "")
-    for u in (d.get("users") or [])
-    if str(u.get("name") or "")
-}
-print("\n".join(sorted(names)))
-' 2>/dev/null
-}
-
-mita_delete_user_exact() {
-  local name="$1" bin
-  [ -n "$name" ] || return 1
-  bin="$(mita_bin)" || return 1
-  if [ "${DRY_RUN:-0}" -eq 1 ]; then
-    msg "[dry-run] $(printf '%q ' "$bin" delete user "$name")"
-    return 0
-  fi
-  "$bin" delete user "$name" >/dev/null 2>&1
-}
-
-# mita apply config 会合并用户而不是替换用户。这里把脚本管理的用户集合
-# 显式同步成期望集合，确保删除、停用、到期和事务回滚真正撤销旧凭据。
-mita_sync_user_names() {
-  local desired_raw="${1:-}" desired actual stale after
-  users_require_python || return 1
-  desired="$(printf '%s\n' "$desired_raw" | sed '/^[[:space:]]*$/d' | LC_ALL=C sort -u)"
-  [ -n "$desired" ] || {
-    warn "$(t '拒绝同步空用户集合' 'Refusing to synchronize an empty user set')"
-    return 1
-  }
-  if ! actual="$(mita_actual_user_names)"; then
-    warn "$(t '无法读取 mita 实际用户集合，未执行删除' \
-      'Cannot read the actual mita user set; no deletion was attempted')"
-    return 1
-  fi
-  stale="$(DESIRED="$desired" ACTUAL="$actual" python3 -c '
-import os
-desired = set(filter(None, os.environ.get("DESIRED", "").splitlines()))
-actual = set(filter(None, os.environ.get("ACTUAL", "").splitlines()))
-print("\n".join(sorted(actual - desired)))
-' 2>/dev/null)" || return 1
-  if [ -n "$stale" ]; then
-    local name
-    while IFS= read -r name; do
-      [ -n "$name" ] || continue
-      if ! mita_delete_user_exact "$name"; then
-        warn "$(t "无法从 mita 删除旧用户: $name" \
-          "Failed to delete stale user from mita: $name")"
-        return 1
-      fi
-      users_log "mita user revoked: $name"
-    done <<< "$stale"
-  fi
-  if [ "${DRY_RUN:-0}" -eq 1 ]; then
-    return 0
-  fi
-  if ! after="$(mita_actual_user_names)"; then
-    warn "$(t '删除后无法重新读取 mita 用户集合' \
-      'Cannot read the mita user set after synchronization')"
-    return 1
-  fi
-  if ! DESIRED="$desired" ACTUAL="$after" python3 -c '
-import os, sys
-desired = set(filter(None, os.environ.get("DESIRED", "").splitlines()))
-actual = set(filter(None, os.environ.get("ACTUAL", "").splitlines()))
-sys.exit(0 if actual == desired else 1)
-' 2>/dev/null; then
-    warn "$(t 'mita 实际用户与 users.json 启用用户仍不一致' \
-      'The actual mita users still differ from enabled users in users.json')"
-    return 1
-  fi
-  return 0
-}
-
-mita_sync_users_to_state() {
-  local desired
-  desired="$(users_enabled_names_from_state)" || return 1
-  mita_sync_user_names "$desired"
-}
-
-mita_sync_single_user() {
-  local name="$1"
-  [ -n "$name" ] || return 1
-  mita_sync_user_names "$name"
 }
 
 multi_user_port_protocol_pairs() {

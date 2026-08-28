@@ -1,14 +1,11 @@
 install_self_script() {
   STAGE="安装管理脚本"
-  local main_url="https://raw.githubusercontent.com/ike-sh/NoBrand-OneClick/main/install-nobrand.sh"
   local tmp src_real="" dest_real="" installed=0
   tmp="$(mktemp_file .sh)"
-  # 已发布版本优先；下载到临时文件且版本必须精确匹配，避免截断现有脚本或被 main 降级。
-  if curl -fsSL --connect-timeout 15 --max-time 60 "$SCRIPT_REPO_RAW" -o "$tmp" 2>/dev/null \
-     && grep -qxF "SCRIPT_VERSION=\"${SCRIPT_VERSION}\"" "$tmp"; then
-    run install -m 0755 "$tmp" "$INSTALL_SCRIPT_PATH"
-    installed=1
-  elif [ -n "${BASH_SOURCE[0]:-}" ] && [ -r "${BASH_SOURCE[0]}" ] \
+  # An unpublished development build must install the exact local artifact
+  # that is being executed. Released builds may fall back only to the latest
+  # GitHub Release asset; raw main is deliberately not an installation source.
+  if [ -n "${BASH_SOURCE[0]:-}" ] && [ -r "${BASH_SOURCE[0]}" ] \
        && grep -qxF "SCRIPT_VERSION=\"${SCRIPT_VERSION}\"" "${BASH_SOURCE[0]}" 2>/dev/null; then
     src_real="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null \
       || realpath "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
@@ -20,7 +17,11 @@ install_self_script() {
       run chmod 0755 "$INSTALL_SCRIPT_PATH"
     fi
     installed=1
-  elif curl -fsSL --connect-timeout 15 --max-time 60 "$main_url" -o "$tmp" 2>/dev/null \
+  elif [ -r "$INSTALL_SCRIPT_PATH" ] \
+       && grep -qxF "SCRIPT_VERSION=\"${SCRIPT_VERSION}\"" "$INSTALL_SCRIPT_PATH" 2>/dev/null; then
+    run chmod 0755 "$INSTALL_SCRIPT_PATH"
+    installed=1
+  elif curl -fsSL --connect-timeout 15 --max-time 60 "$NOBRAND_RELEASE_INSTALLER_URL" -o "$tmp" 2>/dev/null \
        && grep -qxF "SCRIPT_VERSION=\"${SCRIPT_VERSION}\"" "$tmp"; then
     run install -m 0755 "$tmp" "$INSTALL_SCRIPT_PATH"
     installed=1
@@ -28,81 +29,13 @@ install_self_script() {
   rm -f "$tmp"
   [ "$installed" -eq 1 ] || die "$(t '无法取得与当前版本一致的管理脚本，拒绝用其它版本覆盖' \
     'Could not obtain the exact current manager version; refusing to overwrite with another version')"
-  install_mita_wrapper_force
-  migrate_mita_binary_layout
-  install_mita_shortcuts
-  # NoBrand 的统一入口与 Mieru 兼容入口使用同一份生成脚本；保留 install-mita/mita。
-  nobrand_install_manager_script || true
-}
-
-install_mita_wrapper_force() {
-  if is_mita_wrapper "$MITA_BIN"; then
-    return 0
-  fi
-  if mita_installed || [ -f "$MITA_MARKER" ] || [ -x "$INSTALL_SCRIPT_PATH" ]; then
-    install_mita_wrapper
-  fi
+  nobrand_install_manager_script
 }
 
 ensure_management_scripts() {
   STAGE="更新管理脚本"
   install_self_script
   repair_mita_binary_paths
-}
-
-install_mita_wrapper() {
-  STAGE="安装 mita 快捷入口"
-  cat >"$MITA_BIN" <<'EOF'
-#!/usr/bin/env bash
-# mieru-OneClick mita wrapper — 无参数打开菜单；管理子命令不区分大小写
-INSTALL_MITA="/usr/local/bin/install-mita"
-
-find_mita_real() {
-  local c
-  for c in /usr/local/bin/mita-real /usr/bin/mita; do
-    [ -x "$c" ] || continue
-    [ "$(head -c 4 "$c" 2>/dev/null || true)" = $'\x7fELF' ] || continue
-    printf '%s' "$c"
-    return 0
-  done
-  return 1
-}
-
-MITA_REAL="$(find_mita_real || true)"
-
-if [ $# -eq 0 ]; then
-  if [ -x "$INSTALL_MITA" ]; then
-    exec "$INSTALL_MITA"
-  fi
-  echo "[错误] 未找到 install-mita，请先运行一键安装脚本" >&2
-  echo "  curl -fsSL https://raw.githubusercontent.com/ike-sh/NoBrand-OneClick/main/install-mita.sh | bash" >&2
-  exit 1
-fi
-
-  if [ $# -gt 0 ] && [ -x "$INSTALL_MITA" ]; then
-    cmd="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
-    case "$cmd" in
-      menu|install|upgrade|uninstall|status|reconfigure|client-config|show|mtu|mtu-config|set-mtu|profile|profile-config|perf|start|stop|restart|配置|节点|help|\
-      users|user-list|user-add|user-del|user-delete|user-show|user-manage|user-set-endpoint|\
-      user-set-quota|user-set-expire|user-enable|user-disable|user-scan|user-quota-reset|\
-      user-set-rate|user-set-bandwidth|rate-status|rate-restore|tc-status|tc-restore|\
-      user-usage|usage|user-export-clients|user-backup|user-restore|user-export|user-import|\
-      doctor|verify)
-        shift
-        exec "$INSTALL_MITA" "$cmd" "$@"
-        ;;
-    esac
-  fi
-
-if [ -z "$MITA_REAL" ]; then
-  echo "[错误] 未找到 mita 二进制；请重新运行安装脚本并选择「升级」自动重装：" >&2
-  echo "  curl -fsSL https://raw.githubusercontent.com/ike-sh/NoBrand-OneClick/main/install-mita.sh | sudo bash -s -- upgrade -y" >&2
-  exit 127
-fi
-exec "$MITA_REAL" "$@"
-EOF
-  run chmod 0755 "$MITA_BIN"
-  hash -r 2>/dev/null || true
 }
 
 # 重新下载官方包并安装，修复缺失的 mita 二进制（deb/rpm）。
@@ -152,101 +85,37 @@ recover_deb_mita() {
   if [ -n "$deb_bin" ] && [ -x "$deb_bin" ] && [ ! -e /usr/bin/mita ]; then
     run ln -sf "$deb_bin" /usr/bin/mita 2>/dev/null || true
   fi
-  is_mita_elf_binary /usr/bin/mita && return 0
-  reinstall_mita_package
+  if is_mita_elf_binary "$MITA_PACKAGE_BIN"; then
+    refresh_managed_mita_runtime
+    return $?
+  fi
+  reinstall_mita_package && refresh_managed_mita_runtime
+}
+
+refresh_managed_mita_runtime() {
+  local package_bin="${1:-$MITA_PACKAGE_BIN}"
+  is_mita_elf_binary "$package_bin" || return 1
+  run install -d -o root -g root -m 0755 "$NOBRAND_LIB_DIR" "$NOBRAND_BIN_DIR"
+  run install -m 0755 "$package_bin" "$MITA_BIN"
+  is_mita_elf_binary "$MITA_BIN"
 }
 
 repair_mita_binary_paths() {
   STAGE="修复 mita 二进制路径"
-  local is_deb=0
-  if command -v dpkg >/dev/null 2>&1; then
-    is_deb=1
-  fi
-  if [ "$is_deb" -eq 1 ]; then
-    local deb_bin
-    deb_bin="$(dpkg -L mita 2>/dev/null | grep '/bin/mita$' | head -n1)"
-    if [ -n "$deb_bin" ] && [ -x "$deb_bin" ] && [ ! -e /usr/bin/mita ]; then
-      run ln -sf "$deb_bin" /usr/bin/mita 2>/dev/null || true
-    fi
-  fi
-  if ! is_mita_elf_binary "$(mita_real_bin 2>/dev/null || true)"; then
-    if [ "$is_deb" -eq 1 ]; then
+  if ! is_mita_elf_binary "$MITA_BIN"; then
+    if is_mita_elf_binary "$MITA_PACKAGE_BIN"; then
+      refresh_managed_mita_runtime || return 1
+    elif command -v dpkg >/dev/null 2>&1; then
       recover_deb_mita || warn "$(t 'mita 二进制自动修复未成功，请重新运行脚本并选择「升级」重新安装' \
         'auto-repair failed; re-run the script and choose Upgrade to reinstall')"
     else
-      warn "$(t 'mita 二进制不可用，请重新运行脚本并选择「升级」重新安装' \
-        'mita binary unavailable; re-run the script and choose Upgrade to reinstall')"
+      reinstall_mita_package && refresh_managed_mita_runtime || warn "$(t \
+        'mita 二进制不可用，请执行 nobrand mieru upgrade 重新安装' \
+        'mita binary unavailable; run nobrand mieru upgrade to reinstall')"
     fi
   fi
-  install_mita_wrapper_force
+  is_mita_elf_binary "$MITA_BIN"
   hash -r 2>/dev/null || true
-}
-
-migrate_mita_binary_layout() {
-  STAGE="迁移 mita 二进制布局"
-  if [ -f "$MITA_REAL_BIN" ] && ! is_mita_elf_binary "$MITA_REAL_BIN"; then
-    run rm -f "$MITA_REAL_BIN"
-  fi
-  if [ -f "$MITA_BIN" ] && [ ! -f "$MITA_REAL_BIN" ] && is_mita_elf_binary "$MITA_BIN"; then
-    run mv "$MITA_BIN" "$MITA_REAL_BIN"
-    if [ -L /usr/bin/mita ] && [ "$(readlink -f /usr/bin/mita 2>/dev/null || true)" = "$(readlink -f "$MITA_REAL_BIN" 2>/dev/null || true)" ]; then
-      run rm -f /usr/bin/mita
-    fi
-    run ln -sf "$MITA_REAL_BIN" /usr/bin/mita-real 2>/dev/null || true
-    if [ -f "$OPENRC_SVC" ]; then
-      install_mita_openrc
-    elif [ -f "$SYSTEMD_SVC" ]; then
-      install_mita_systemd
-    fi
-  fi
-  install_mita_wrapper_force
-}
-
-install_mita_shortcuts() {
-  STAGE="安装快捷命令"
-  cat >"$MITA_MENU_PATH" <<'EOF'
-#!/usr/bin/env bash
-# mieru-OneClick 管理快捷入口（子命令不区分大小写）
-IM="/usr/local/bin/install-mita"
-if [ ! -x "$IM" ]; then
-  echo "[错误] 未找到 install-mita，请先完成安装" >&2
-  exit 1
-fi
-if [ $# -eq 0 ]; then
-  exec "$IM"
-fi
-cmd="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
-case "$cmd" in
-  install|upgrade|uninstall|status|reconfigure|client-config|show|mtu|mtu-config|set-mtu|profile|profile-config|perf|menu|start|stop|restart|配置|节点|\
-  users|user-list|user-add|user-del|user-delete|user-show|user-manage|user-set-endpoint|\
-  user-set-quota|user-set-expire|user-enable|user-disable|user-scan|user-quota-reset|\
-  user-set-rate|user-set-bandwidth|rate-status|rate-restore|tc-status|tc-restore|\
-  user-usage|usage|user-export-clients|user-backup|user-restore|user-export|user-import|\
-  doctor|verify|help)
-    set -- "$cmd" "${@:2}"
-    ;;
-esac
-exec "$IM" "$@"
-EOF
-  run chmod 0755 "$MITA_MENU_PATH"
-  # /usr/local/bin/mita 包装器已完整处理菜单及大小写；profile 函数既重复，
-  # 又会在卸载后残留于当前父 shell，故升级时一并移除旧实现。
-  run rm -f "$MITA_PROFILE_D"
-}
-
-remove_mita_shortcuts() {
-  run rm -f "$MITA_MENU_PATH" "$MITA_PROFILE_D"
-}
-
-remove_self_script() {
-  remove_mita_shortcuts
-  if [ -f "$INSTALL_SCRIPT_PATH" ]; then
-    run rm -f "$INSTALL_SCRIPT_PATH"
-    t "已删除管理脚本 ${INSTALL_SCRIPT_PATH}" "Removed manager script ${INSTALL_SCRIPT_PATH}"
-  fi
-  if [ -f "$MITA_STATE" ]; then
-    run rm -f "$MITA_STATE"
-  fi
 }
 
 service_manager() {
@@ -257,42 +126,6 @@ service_manager() {
   else
     echo none
   fi
-}
-
-mita_restart_hint() {
-  case "$(service_manager)" in
-    systemd) printf '%s' 'systemctl restart mita' ;;
-    openrc) printf '%s' 'rc-service mita zap && rc-service mita start' ;;
-    *) printf '%s' "$(mita_bin) run &" ;;
-  esac
-}
-
-mita_log_hint() {
-  case "$(service_manager)" in
-    systemd) printf '%s' 'journalctl -e -u mita --no-pager' ;;
-    openrc) printf '%s' 'tail -n 30 /var/log/mita.err /var/log/mita.log' ;;
-    *) printf '%s' 'tail -n 30 /var/log/mita.err /var/log/mita.log' ;;
-  esac
-}
-
-openrc_mita_status_line() {
-  rc-service mita status 2>/dev/null || true
-}
-
-openrc_mita_is_crashed() {
-  openrc_mita_status_line | grep -qi crashed
-}
-
-openrc_mita_is_started() {
-  openrc_mita_status_line | grep -qE 'started|running'
-}
-
-openrc_mita_recover() {
-  if openrc_mita_is_crashed || ! openrc_mita_is_started; then
-    run rc-service mita zap 2>/dev/null || true
-  fi
-  run rc-service mita start 2>/dev/null || run rc-service mita restart 2>/dev/null || true
-  sleep 2
 }
 
 arch_tar_suffix() {
@@ -381,32 +214,17 @@ mita_installed() {
   command -v mita >/dev/null 2>&1
 }
 
-is_mita_wrapper() {
-  [ -f "$1" ] || return 1
-  head -c 320 "$1" 2>/dev/null | grep -q 'mieru-OneClick mita wrapper'
-}
-
 is_mita_elf_binary() {
   [ -f "$1" ] || return 1
   [ "$(head -c 4 "$1" 2>/dev/null || true)" = $'\x7fELF' ]
 }
 
 mita_real_bin() {
-  if [ -x "$MITA_REAL_BIN" ] && is_mita_elf_binary "$MITA_REAL_BIN"; then
-    printf '%s' "$MITA_REAL_BIN"
-  elif [ -x /usr/bin/mita ] && is_mita_elf_binary /usr/bin/mita; then
-    printf '%s' /usr/bin/mita
-  elif [ -x "$MITA_BIN" ] && is_mita_elf_binary "$MITA_BIN"; then
-    printf '%s' "$MITA_BIN"
-  elif command -v mita-real >/dev/null 2>&1 && is_mita_elf_binary "$(command -v mita-real)"; then
-    command -v mita-real
-  else
-    printf '%s' "$MITA_REAL_BIN"
-  fi
+  printf '%s' "$MITA_BIN"
 }
 
 mita_bin() {
-  mita_real_bin
+  printf '%s' "$MITA_BIN"
 }
 
 installed_version() {
@@ -536,75 +354,6 @@ ensure_mita_account() {
   run chmod 0755 /var/lib/mita /var/run/mita /run/mita
 }
 
-install_mita_systemd() {
-  STAGE="安装 systemd 服务"
-  local bin
-  bin="$(mita_real_bin)"
-  cat >"$SYSTEMD_SVC" <<EOF
-[Unit]
-Description=Mieru proxy server
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=exec
-User=mita
-Group=mita
-ExecStart=${bin} run
-Restart=on-failure
-RestartSec=2
-
-[Install]
-WantedBy=multi-user.target
-EOF
-  run systemctl daemon-reload
-}
-
-install_mita_openrc() {
-  STAGE="安装 OpenRC 服务"
-  local bin
-  bin="$(mita_real_bin)"
-  cat >"$OPENRC_SVC" <<EOF
-#!/sbin/openrc-run
-
-name="mita"
-description="Mieru proxy server"
-command="${bin}"
-command_args="run"
-command_user="mita"
-command_background="yes"
-pidfile="/run/\${RC_SVCNAME}.pid"
-output_log="/var/log/mita.log"
-error_log="/var/log/mita.err"
-directory="/var/lib/mita"
-respawn
-respawn_delay 5
-respawn_max 0
-
-depend() {
-    need net localmount
-    after firewall
-}
-
-start_pre() {
-    checkpath --directory --owner mita:mita --mode 0750 /etc/mita
-    checkpath --directory --owner mita:mita --mode 0755 /var/lib/mita /var/run/mita /run/mita
-    checkpath --file --owner mita:mita --mode 0644 /var/log/mita.log /var/log/mita.err
-}
-EOF
-  run chmod 0755 "$OPENRC_SVC"
-}
-
-install_mita_service() {
-  case "$(service_manager)" in
-    systemd) install_mita_systemd ;;
-    openrc) install_mita_openrc ;;
-    *)
-      warn "$(t '未检测到 systemd/OpenRC，将仅安装二进制' 'No systemd/OpenRC; binary only')"
-      ;;
-  esac
-}
-
 package_service_guard_begin() {
   local guard_dir
   PACKAGE_SERVICE_GUARD_DIR=""
@@ -711,10 +460,8 @@ extract_mita_tarball() {
   run tar -xzf "$tarball" -C "$tmpdir"
   bin="$(find "$tmpdir" -type f -name mita | head -n1)"
   [ -n "$bin" ] || die "$(t '压缩包中未找到 mita 二进制' 'mita binary not found in archive')"
-  run install -m 0755 "$bin" "$MITA_REAL_BIN"
-  run rm -f /usr/bin/mita /usr/bin/mita-real
-  run ln -sf "$MITA_REAL_BIN" /usr/bin/mita-real 2>/dev/null || true
-  install_mita_wrapper
+  run install -d -o root -g root -m 0755 "$NOBRAND_LIB_DIR" "$NOBRAND_BIN_DIR"
+  run install -m 0755 "$bin" "$MITA_BIN"
   rm -rf "$tmpdir"
   run touch "$MITA_MARKER"
 }
@@ -742,8 +489,7 @@ install_package() {
     alpine)
       if ! install_alpine_deps \
          || ! ensure_mita_account \
-         || ! extract_mita_tarball "$path" \
-         || ! install_mita_service; then
+         || ! extract_mita_tarball "$path"; then
         install_rc=1
       fi
       ;;
@@ -755,6 +501,11 @@ install_package() {
       'The mita package installation or previous service-state restoration failed')" || return 1
   fi
   case "$pm" in
-    deb|rpm) mark_oneclick_install ;;
+    deb|rpm)
+      refresh_managed_mita_runtime "$MITA_PACKAGE_BIN" \
+        || die "$(t '无法把官方 mita runtime 安装到 NoBrand 管理路径' \
+          'Could not install the official mita runtime into the NoBrand-managed path')"
+      mark_oneclick_install
+      ;;
   esac
 }

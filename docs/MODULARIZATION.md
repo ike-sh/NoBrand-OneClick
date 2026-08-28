@@ -1,46 +1,54 @@
-# NoBrand-OneClick Source Modularization
+# Modular build architecture
 
-`src/` 是唯一开发真源；最终安装器自包含，不在用户机器 source 仓库模块。
-
-```text
-00 bootstrap             05 constants            10 dual CLI parser
-15 Mieru state/lock      16 Common port          17 Common endpoint
-18 nodes/status/backup   20 Mieru platform       21 shared Xray/HY2 platform
-22 Snell platform        23 VLESS service        25-55 Mieru engines
-56 Snell engine          57 HY2 engine           58 VLESS Sudoku engine
-60-70 Mieru runtime      71 Snell exporters      80 lifecycle
-85 actions               90 unified/Mieru UI     99 main
-```
-
-构建一次写出字节一致的：
+NoBrand-OneClick 的单文件发布物由 `scripts/build.sh` 按固定顺序拼接 `src/*.sh`。
 
 ```text
-install-nobrand.sh
-dist/install-nobrand.sh
-install-mita.sh
-dist/install-mita.sh
+src/*.sh
+   │
+   └── scripts/build.sh
+         ├── install-nobrand.sh
+         └── dist/install-nobrand.sh
 ```
 
-同一内容根据 `$0` 选择 NoBrand 或 Mieru compatibility parser/menu。
+只有这两个生成物。构建不生成第二安装器，也不按 `$0` 选择另一套 parser。
 
-## 分层与边界
+## Public entry topology
 
 ```text
-bootstrap/constants/parser
-          ↓
-state + port + endpoint + nodes/backup Common Core
-          ↓
-Mieru / Snell / shared Xray / HY2 / VLESS-service platform
-          ↓
-protocol engines / exporters / lifecycle / UI / main
+/usr/local/bin/install-nobrand
+        ▲
+        │ symlink
+/usr/local/bin/nobrand
+        ▲
+        │ symlink
+/usr/local/bin/nb
 ```
 
-Mieru state/schema 不迁移。Common firewall adapter 通过 Bash dynamic scope 切换 ownership/comment 并复用成熟实现。所有协议共用原 Mieru admin lock。Display Endpoint setters 只写 state metadata/client output。
+顶层 parser 路由到 Mieru、Snell、Hysteria2、VLESS/Sudoku 与 Common Core。`nb` 不包含可执行逻辑。上游 Mieru runtime 位于 `/usr/local/lib/nobrand-oneclick/bin/mita`，不在 public management API 中。
 
-Snell engine 的产品 resolver 只接受 v4/v5。v5 QUIC exposure 由 `quic_proxy_enabled`/`managed_udp`、Common Port registry 和 NoBrand firewall adapter 共同表达；official server config/runtime path 不因 ON/OFF 分叉。唯一识别 historical v6 state 的生产路径是一轮 exact migration：state filename/instance identity 不匹配即 fail closed，只清理历史 TCP ownership，不推断同号 UDP。
+## Module responsibilities
 
-HY2 与 VLESS Sudoku 共用 `NOBRAND_XRAY_BIN`，但分别由 `57-hysteria2.sh` 与 `58-vless-sudoku.sh` 管理独立 config/state，并由 platform service functions 运行两个独立 process。`nobrand_upgrade_xray_runtime` 是共享 binary 的唯一事务入口：校验两个现存配置，重启两个此前 active 的服务，任一失败恢复 binary 与两个 state。
+- `00-bootstrap` / `05-constants` / `10-cli-prelude`：启动、常量与统一 parser
+- `15-18-core-*`：schema v3、port、Endpoint、nodes、backup/uninstall common core
+- `20-23-platform-*`：官方 runtime 下载、校验、安装与平台 service adapter
+- `25-network-mtu`：Mieru MTU 策略
+- `30-55`：Mieru isolated-v2、多用户、quota/tc、diagnostics、Profile 与 config builder
+- `56-58`：Snell、Hysteria2、VLESS/Sudoku 产品逻辑
+- `60-70`：Mieru daemon/firewall、BBR/FQ、client export 与 lifecycle
+- `71-snell-export`：Surge/Mihomo/sing-box exporter
+- `80-99`：lifecycle、status、UI 与统一 main dispatcher
 
-VLESS engine 只产生 plain VLESS/TCP + FinalMask Sudoku。`settings.decryption=none` 与 client `encryption=none` 是合法普通字段；engine 不包含 Encryption key generation/state。`vless_sudoku_forbidden_absent` 是 install、doctor、smoke 与测试共同的否定性边界。
+## State boundary
 
-构建器拒绝缺 module、module shebang、CR byte 或无结尾 LF；生成后执行 `bash -n` 再原子替换。`--check` 逐字节比较四个产物。
+`/var/lib/nobrand-oneclick/state.json` 是根 ownership marker。根目录存在但 marker 不是 exact schema v3，或检测到旧 Mieru state 时，除 help/version 外都 fail closed。模块不能添加 migration adapter、旧 client credential fallback 或 wrapper routing。
+
+Mieru production state 位于根目录下的 `mieru/`；`/etc/mita` 只用于上游 runtime 真正需要的 per-instance 配置和 metrics，不是 NoBrand 权威 state。
+
+## Build invariants
+
+- manifest 明确、完整、无重复
+- module 不带 shebang、CR 字节，并以 LF 结束
+- 生成物必须通过 `bash -n`
+- root/dist 内容必须 byte-identical
+- `--check` 不写文件，只验证生成物是否陈旧
+- 任何源码变化后都必须重新生成两个 artifact

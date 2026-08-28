@@ -24,6 +24,8 @@ done
 xray_candidate="$fixture/xray"
 nobrand_download_xray_candidate "$xray_candidate"
 chmod +x "$xray_candidate"
+# Read indirectly by nobrand_xray_version from the sourced installer.
+# shellcheck disable=SC2034
 NOBRAND_XRAY_BIN="$xray_candidate"
 xray_version="$(nobrand_xray_version)"
 [ -n "$xray_version" ] || fail 'real Xray version detection'

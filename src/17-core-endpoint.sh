@@ -1,12 +1,13 @@
 # ---------- NoBrand Common Core: state、Endpoint、firewall/service adapters ----------
 
 nb_init_state_layout() {
-  local tmp
   if [ "${DRY_RUN:-0}" -eq 1 ]; then
     msg "[dry-run] initialize NoBrand state: $NOBRAND_STATE_DIR"
     return 0
   fi
-  mkdir -p "$NOBRAND_STATE_DIR" "$NOBRAND_BACKUP_DIR" "$NOBRAND_LOCK_DIR" \
+  ensure_manager_state_layout 1 || return 1
+  mkdir -p "$NOBRAND_BACKUP_DIR" "$NOBRAND_LOCK_DIR" \
+    "$MITA_MANAGER_STATE_DIR" "$MITA_USERS_BACKUP_DIR" \
     "$NOBRAND_SNELL_STATE_DIR" "$NOBRAND_HY2_STATE_DIR" \
     "$NOBRAND_VLESS_STATE_DIR" \
     "$NOBRAND_CONFIG_DIR" "$NOBRAND_SNELL_CONFIG_DIR" "$NOBRAND_HY2_CONFIG_DIR" \
@@ -14,17 +15,17 @@ nb_init_state_layout() {
     "$NOBRAND_BIN_DIR" "$NOBRAND_SNELL_RUNTIME_DIR" "$NOBRAND_LIB_DIR" \
     || return 1
   chmod 0700 "$NOBRAND_STATE_DIR" "$NOBRAND_BACKUP_DIR" "$NOBRAND_LOCK_DIR" \
+    "$MITA_MANAGER_STATE_DIR" "$MITA_USERS_BACKUP_DIR" \
     "$NOBRAND_SNELL_STATE_DIR" "$NOBRAND_HY2_STATE_DIR" \
     "$NOBRAND_VLESS_STATE_DIR" \
     "$NOBRAND_CONFIG_DIR" "$NOBRAND_SNELL_CONFIG_DIR" "$NOBRAND_HY2_CONFIG_DIR" \
-    "$NOBRAND_VLESS_CONFIG_DIR" \
-    "$NOBRAND_LIB_DIR" "$NOBRAND_BIN_DIR" "$NOBRAND_SNELL_RUNTIME_DIR" || return 1
-  if [ ! -f "$NOBRAND_REGISTRY_FILE" ]; then
-    tmp="$(mktemp "${NOBRAND_REGISTRY_FILE}.tmp.XXXXXX")" || return 1
-    printf '%s\n' '{"version":1,"project":"NoBrand-OneClick","author":"ike"}' >"$tmp" \
-      && chmod 0600 "$tmp" && mv -f "$tmp" "$NOBRAND_REGISTRY_FILE" \
-      || { rm -f "$tmp"; return 1; }
-  fi
+    "$NOBRAND_VLESS_CONFIG_DIR" || return 1
+  # Protocol services can run as dedicated unprivileged users (Mieru uses the
+  # mita account). Runtime directories contain only managed executables/assets
+  # and must remain traversable; secrets stay in the 0700 state/config roots.
+  chmod 0755 "$NOBRAND_LIB_DIR" "$NOBRAND_BIN_DIR" "$NOBRAND_SNELL_RUNTIME_DIR" \
+    || return 1
+  nb_schema_v3_file_valid || return 1
   chmod 0600 "$NOBRAND_REGISTRY_FILE" 2>/dev/null || return 1
 }
 

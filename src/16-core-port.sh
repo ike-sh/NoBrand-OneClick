@@ -8,13 +8,6 @@ nb_normalize_transport() {
   esac
 }
 
-nb_normalized_port_key() {
-  local transport port
-  transport="$(nb_normalize_transport "${1:-}")" || return 1
-  port="$(normalize_uint "${2:-}")" || return 1
-  printf '%s:%s' "$(printf '%s' "$transport" | tr '[:upper:]' '[:lower:]')" "$port"
-}
-
 # 手工端口允许 1-65535；自动分配始终从 1025 起。Mieru 自身仍通过
 # valid_port 保持原有 1025 下限。
 nb_valid_port() {
@@ -207,14 +200,14 @@ nb_port_listener_pids() {
     | LC_ALL=C sort -u
 }
 
-# 输出 owner|transport|port|advertise_host|advertise_port。Mieru 仍从原
-# /var/lib/mita-oneclick adapter 读取，不复制、不迁移其 state。
+# 输出 owner|transport|port|advertise_host|advertise_port。Mieru only reads
+# schema-v3 users.json under the authoritative NoBrand state root.
 nb_registry_rows() {
   command -v python3 >/dev/null 2>&1 || return 0
   NOBRAND_SNELL_STATE_DIR="$NOBRAND_SNELL_STATE_DIR" \
   NOBRAND_HY2_STATE_FILE="$NOBRAND_HY2_STATE_FILE" \
   NOBRAND_VLESS_STATE_FILE="$NOBRAND_VLESS_STATE_FILE" \
-  MITA_USERS_STATE="$MITA_USERS_STATE" MITA_STATE="$MITA_STATE" \
+  MITA_USERS_STATE="$MITA_USERS_STATE" \
   python3 - <<'PY'
 import glob
 import json
@@ -278,32 +271,6 @@ if mita_users and os.path.isfile(mita_users):
     except Exception:
         pass
 PY
-  # v1.x 单实例安装可能还没有 users.json。只在原 Mieru 安全检查通过后，
-  # 于子 shell 中 source allowlisted 字段，避免污染 NoBrand 当前 globals。
-  if [ ! -s "$MITA_USERS_STATE" ] && [ -s "$MITA_STATE" ] \
-     && state_file_is_secure "$MITA_STATE"; then
-    (
-      PORT="" PROTOCOL="TCP" ADVERTISE_HOST="" ADVERTISE_PORT=""
-      # shellcheck disable=SC1090
-      source "$MITA_STATE" 2>/dev/null || exit 0
-      nb_valid_port "${PORT:-}" || exit 0
-      case "${PROTOCOL:-TCP}" in
-        TCP|UDP)
-          printf 'mieru:legacy|%s|%s|%s|%s\n' \
-            "$PROTOCOL" "$PORT" "${ADVERTISE_HOST:-}" "${ADVERTISE_PORT:-}"
-          ;;
-        BOTH)
-          [ "$PORT" -le 65534 ] || exit 0
-          printf 'mieru:legacy|TCP|%s|%s|%s\n' \
-            "$PORT" "${ADVERTISE_HOST:-}" "${ADVERTISE_PORT:-}"
-          local_udp_advertise=""
-          [ -z "${ADVERTISE_PORT:-}" ] || local_udp_advertise=$((ADVERTISE_PORT + 1))
-          printf 'mieru:legacy|UDP|%s|%s|%s\n' \
-            "$((PORT + 1))" "${ADVERTISE_HOST:-}" "$local_udp_advertise"
-          ;;
-      esac
-    )
-  fi
 }
 
 nb_registry_port_owner() {

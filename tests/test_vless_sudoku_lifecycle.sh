@@ -20,6 +20,8 @@ mkdir -p "$(dirname "$NOBRAND_VLESS_SYSTEMD_SERVICE")" \
   "$(dirname "$NOBRAND_VLESS_OPENRC_SERVICE")"
 nb_service_manager() { printf systemd; }
 systemctl() { :; }
+# Loaded by source_installer; a later definition is the lifecycle failure stub.
+# shellcheck disable=SC2218
 nobrand_write_vless_sudoku_service
 grep -qF "ExecStart=${NOBRAND_XRAY_BIN} run -c ${NOBRAND_VLESS_CONFIG_FILE}" \
   "$NOBRAND_VLESS_SYSTEMD_SERVICE" || fail 'VLESS systemd unit runtime/config isolation'
@@ -30,6 +32,8 @@ esac
 rm -f "$NOBRAND_VLESS_SYSTEMD_SERVICE"
 nb_service_manager() { printf openrc; }
 rc-update() { :; }
+# Loaded by source_installer; a later definition is the lifecycle failure stub.
+# shellcheck disable=SC2218
 nobrand_write_vless_sudoku_service
 grep -qF "command_args=\"run -c ${NOBRAND_VLESS_CONFIG_FILE}\"" \
   "$NOBRAND_VLESS_OPENRC_SERVICE" || fail 'VLESS OpenRC runtime/config isolation'
@@ -70,6 +74,8 @@ nb_firewall_close_pairs() { rm -f "$NOBRAND_FIREWALL_OWNED_STATE"; }
 nobrand_install_manager_script() { :; }
 public_ip() { printf '198.51.100.30'; }
 
+# Install request globals are consumed indirectly by install_vless_sudoku.
+# shellcheck disable=SC2034
 YES=1 PORT=3683 PORT_CLI=1 ADVERTISE_CLI=1 ADVERTISE_AUTO_REQUESTED=0
 ADVERTISE_HOST=entry.example.com ADVERTISE_PORT=443
 install_vless_sudoku >/dev/null
@@ -129,6 +135,8 @@ nb_atomic_install_file() {
   install -m "$mode" "$source" "$destination"
 }
 service_active=0
+# Rollback request globals are consumed indirectly by install_vless_sudoku.
+# shellcheck disable=SC2034
 ADVERTISE_HOST=rollback.example.com ADVERTISE_PORT=9443 PORT=3684
 if install_vless_sudoku >/dev/null 2>&1; then
   fail 'state-commit failure must fail the VLESS install transaction'

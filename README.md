@@ -1,92 +1,72 @@
 # NoBrand-OneClick
 
-多协议菜单式一键部署与管理脚本。
+NoBrand-OneClick 是一个面向 Linux 服务器的多协议部署与管理工具。3.0.0 是 clean-break 版本：一个安装器、一个正式管理命令、一套 ownership-aware 状态模型，统一管理 Mieru、Snell、Hysteria2 与 Plain VLESS + FinalMask/Sudoku。
 
-Author: **ike**
-Current Version: **1.3.0**
+- 作者：ike
+- 当前版本：3.0.0
+- 发布标签：`v3.0.0`
+- 正式安装器：`install-nobrand.sh`
+- 正式命令：`nobrand`
+- 短别名：`nb`
 
-NoBrand-OneClick 面向 VPS、IPLC、NAT、四层转发和特殊 TCP/UDP 网络环境，统一提供安装、服务管理、节点展示、客户端导出、Endpoint 管理、Doctor 与 Backup/Restore。
+## 协议支持
 
-## 支持协议
+| 协议 | 服务端实现 | 传输 | 状态 |
+|---|---|---:|---|
+| Mieru | 官方 Mita runtime | TCP / UDP / BOTH | 完整支持 |
+| Snell v5 | Surge 官方 `snell-server` | TCP；可选同端口 QUIC 公网暴露 | Stable / Recommended / Default |
+| Snell v4 | Surge 官方 `snell-server` | TCP | Compatibility |
+| Hysteria2 | Xray-core | UDP / TLS / h3 / Salamander | 完整支持 |
+| VLESS/Sudoku | Xray-core | TCP | Plain VLESS + FinalMask/Sudoku |
 
-| 协议 | 状态 | 说明 |
-|---|---|---|
-| Mieru | Supported | 多用户、每用户独立实例 |
-| Snell v5 | Recommended | Stable / Default；可选 QUIC 公网暴露 |
-| Snell v4 | Compatibility | 兼容用途 |
-| Hysteria2 | Supported | Xray-core Hysteria2 |
-| VLESS + FinalMask + Sudoku | Supported | TCP / Xray-core |
-
-> Snell v1、v2、v3、v6 不受支持，也没有隐藏兼容开关。
-
-Snell v6 曾进行实际兼容性验证，但没有达到本项目的稳定性要求，因此自 1.3.0 起移除。
-
-## 主要特性
-
-- 统一菜单与 CLI：安装、查看、启停、重启、升级、删除。
-- 统一节点视图、状态检查和 Doctor。
-- Real Endpoint 与 Display Endpoint 分离。
-- TCP 与 UDP 端口分别登记和管理 ownership。
-- 按项目边界执行配置、状态、防火墙和服务回滚。
-- 按客户端能力生成协议对应的分享链接或配置。
-
-Mieru 保留多用户、每用户独立实例、独立端口、TCP/UDP/BOTH、Profile、MTU、quota、tc、backup、client export 与 custom Display Endpoint。
-
-Hysteria2 使用 Xray-core，传输为 UDP，采用 self-signed TLS、ALPN h3 与 Salamander obfs。
-
-VLESS + FinalMask + Sudoku 使用 Xray-core 和 TCP，FinalMask mode 为 Sudoku；**VLESS Encryption is NOT used.**
-
-## 系统要求
-
-- Debian / Ubuntu、Rocky / RHEL 系或 Alpine Linux
-- amd64 或 arm64
-- root 权限
-- Bash、curl 和系统包管理器
-
-不同协议仍受上游 runtime 的系统与架构支持范围约束。安装后建议运行 `nobrand doctor`。
+Snell v1、v2、v3、v6 不受支持，也不存在隐藏安装开关。VLESS Encryption 明确关闭；本项目不会生成或保存 ML-KEM、xorpub、server ticket 或 VLESS Encryption keypair。
 
 ## 安装
 
-固定版本 URL：
+正式安装始终使用 GitHub Latest Release 中的发布资产，不以 raw main 或固定旧标签作为默认入口：
+
+```bash
+curl -fsSLO https://github.com/ike-sh/NoBrand-OneClick/releases/latest/download/install-nobrand.sh
+sudo bash install-nobrand.sh
+```
+
+也可以先做语法检查和哈希留档：
+
+```bash
+curl -fsSLO https://github.com/ike-sh/NoBrand-OneClick/releases/latest/download/install-nobrand.sh
+bash -n install-nobrand.sh
+sha256sum install-nobrand.sh
+sudo bash install-nobrand.sh
+```
+
+安装完成后：
 
 ```text
-https://raw.githubusercontent.com/ike-sh/NoBrand-OneClick/v1.3.0/install-nobrand.sh
+/usr/local/bin/install-nobrand
+/usr/local/bin/nobrand -> /usr/local/bin/install-nobrand
+/usr/local/bin/nb -> /usr/local/bin/nobrand
 ```
 
-进入 root shell 后直接运行：
+`nb` 没有独立 parser、state 或业务逻辑。
 
-```bash
-sudo -i
-bash <(curl -fsSL https://raw.githubusercontent.com/ike-sh/NoBrand-OneClick/v1.3.0/install-nobrand.sh)
-```
-
-也可以先下载：
-
-```bash
-curl -fL -o install-nobrand.sh \
-  https://raw.githubusercontent.com/ike-sh/NoBrand-OneClick/v1.3.0/install-nobrand.sh
-chmod +x install-nobrand.sh
-sudo ./install-nobrand.sh
-```
-
-安装后提供 `nobrand` 与 `nb`；Mieru compatibility 入口 `mita` 与 `install-mita` 继续保留。
-
-## 基本使用
-
-先查看当前真实帮助：
-
-```bash
-nobrand --help
-```
-
-常用命令：
+## 快速使用
 
 ```bash
 nobrand
-nb
+nobrand --help
+nobrand --version
 nobrand status
 nobrand nodes
 nobrand doctor
+nobrand backup create
+nobrand network
+```
+
+`nobrand --version` 与 `nb --version` 均输出：
+
+```text
+NoBrand-OneClick 3.0.0
+Author: ike
 ```
 
 协议入口：
@@ -98,192 +78,231 @@ nobrand hy2
 nobrand vless-sudoku
 ```
 
-非交互安装需要明确提供 Display Endpoint，或显式使用 `--advertise-auto`：
+## Mieru 完整能力
+
+3.0 保留成熟 Mieru 管理面的用户功能、默认值、参数语义、配置输出和 exporter。统一入口只是把公开命令收敛为 `nobrand mieru ...`，不会把 Mieru 简化成单用户协议。
+
+主要动作：
 
 ```bash
-nobrand snell install \
-  --name example-node \
-  --version 5 \
-  --port <SERVER_PORT> \
-  --quic off \
-  --advertise-host <CLIENT_ENTRY_HOST> \
-  --advertise-port <CLIENT_ENTRY_PORT> \
-  -y
+nobrand mieru install
+nobrand mieru reconfigure
+nobrand mieru upgrade
+nobrand mieru uninstall
+nobrand mieru start
+nobrand mieru stop
+nobrand mieru restart
+nobrand mieru status
+nobrand mieru doctor
+nobrand mieru perf
+nobrand mieru show
 ```
 
-## 客户端展示入口
-
-```text
-Real Endpoint                  Display Endpoint
-    ↓                              ↓
-服务端真实监听                  客户端看到的入口
-
-0.0.0.0:<SERVER_PORT>          <CLIENT_ENTRY_HOST>:<CLIENT_ENTRY_PORT>
-```
-
-修改 Display Endpoint 不会修改 listener、service、firewall listener port、tc 或 quota；它只影响节点展示、分享链接和客户端配置。
-
-Snell 示例：
+用户与实例：
 
 ```bash
-nobrand snell set-endpoint \
-  --name example-node \
-  --advertise-host <CLIENT_ENTRY_HOST> \
-  --advertise-port <CLIENT_ENTRY_PORT>
+nobrand mieru users
+nobrand mieru user-add --user alice --password 'replace-me'
+nobrand mieru user-show alice
+nobrand mieru user-del alice
+nobrand mieru user-enable alice
+nobrand mieru user-disable alice
+nobrand mieru user-set-endpoint --user alice --advertise-host entry.example.com
+nobrand mieru user-set-quota --user alice --quota-mb 102400 --quota-mode calendar
+nobrand mieru user-set-expire --user alice --expire +30d
+nobrand mieru user-set-rate --user alice --bandwidth 100
+nobrand mieru user-usage
+nobrand mieru user-export-clients
+nobrand mieru user-backup
+nobrand mieru user-restore /path/to/backup.json
 ```
 
-HY2 和 VLESS/Sudoku 分别使用 `nobrand hy2 set-endpoint` 与 `nobrand vless-sudoku set-endpoint`。
+每个启用用户拥有稳定的 `instance_id`、独立 Mita 实例、独占真实 listener、独立 metrics 与可选 tc 限速。配额、到期、calendar reset、scheduler、firewall 与 tc 都按 NoBrand ownership 记录和回滚。交互菜单的“性能与网络”同时可达 Profile、MTU、Multiplexing、Handshake、Traffic Pattern、Low Entropy、BBR/FQ、tc 状态/恢复与 Mieru 版本通道。
 
-## 端口分配
+### Mieru 参数与默认值
 
-默认路由 IPv4 尾号记为 `xx`：
+| 参数 | 值 / 语义 | 默认 |
+|---|---|---|
+| Profile | IPLC Performance / Balanced / Stealth / Custom | Balanced |
+| Transport | TCP / UDP / BOTH | TCP |
+| MTU | safe / auto / 1280–1500 | safe = 1400 |
+| Multiplexing | off / low / middle / high | off |
+| Handshake | no-wait / standard | no-wait |
+| Traffic Pattern | off / conservative / aggressive | conservative |
+| Low Entropy | off / 56 / 48 / 40 / 32 | off |
+| Version channel | stable / latest / pinned exact version | stable |
+| Client RPC | official client RPC port | 8964 |
+| SOCKS5 | official client SOCKS port | 1080 |
+| HTTP | official client HTTP port | 8080 |
+
+Profile 会一次性确定完整真实参数；Custom 保留用户选择的具体值。项目不会自行“优化”成熟默认值。完整对等清单见 [docs/MIERU-PARITY-3.0.md](docs/MIERU-PARITY-3.0.md)。
+
+### Mieru 输出
+
+每个用户可生成：
+
+- `mierus://` 分享链接
+- 官方 Mieru client JSON
+- Mihomo YAML
+- 人类可读连接摘要
+- 批量客户端导出目录
+
+展示 Endpoint 只影响节点与客户端产物，不会修改服务端配置、listener、PID、service、firewall、tc 或 quota metrics。
+
+## Display Endpoint 与真实 Endpoint
+
+NoBrand 严格分离两类地址：
 
 ```text
-xx00       保留
-xx01-xx99  自动端口池
+REAL ENDPOINT     = 服务端监听、服务健康、真实防火墙 ownership
+DISPLAY ENDPOINT  = 分享链接、客户端 JSON/YAML、nobrand nodes
 ```
 
-抽象示例：
+支持：
 
-```text
-尾号为 36
-→ 3600 保留
-→ 3601-3699 自动选择
-```
+- 自动探测
+- 仅修改展示 host（沿用当前有效 port）
+- 仅修改展示 port（沿用当前有效 host）
+- 同时修改 host 与 port
+- 恢复自动
+- IPv4、IPv6、域名
 
-`TCP/P` 与 `UDP/P` 独立判断。TCP 端口 `P` 被占用，不代表 `UDP/P` 一定被占用；协议启用哪一种 transport，就登记和管理对应 ownership。
-
-## 节点展示
-
-`nobrand nodes` 提供统一视图，形式类似：
-
-```text
-Protocol        Endpoint
-Mieru           <HOST>:<PORT>
-Snell v5        <HOST>:<PORT>
-Hysteria2       <HOST>:<PORT>
-VLESS/Sudoku    <HOST>:<PORT>
-```
-
-分享链接和客户端配置可能包含连接凭据，应按敏感文件管理。
-
-## 客户端导出
-
-| 协议 | 当前导出 |
-|---|---|
-| Mieru | `mierus://`、Mieru JSON、Mihomo 配置片段 |
-| Snell | Surge、Mihomo、sing-box |
-| Hysteria2 | `hysteria2://`、Mihomo、sing-box |
-| VLESS + FinalMask + Sudoku | VLESS URL、Xray client JSON |
-
-Snell 导出会按服务端版本与客户端能力生成。sing-box 对普通 Snell v5 使用其当前支持的兼容 wire 表达，不代表官方 QUIC Proxy Mode 支持。
+停止服务后，持久化节点仍会出现在 `nobrand nodes`，状态显示为 Stopped；凭据不会从进程或 listener 反推。
 
 ## Snell v5 QUIC
 
-Snell v5 是 Stable / Recommended / Default。QUIC exposure 可选 ON/OFF，默认 **OFF**。
+Snell v5 默认 QUIC 公网暴露为 OFF。
 
-开启后 NoBrand 会管理同号 UDP 公网暴露及对应防火墙 ownership。
-
-官方 Snell v5 server 本身可能存在同号 UDP socket；本地 UDP socket 的存在不等同于 NoBrand 已开放 QUIC 公网入口。
-
-- Mihomo：普通 Snell v5 已验证；官方 QUIC Proxy wire 尚未作为已验证能力声明。
-- sing-box：普通 Snell v5 已验证；不支持官方 Snell v5 QUIC Proxy Mode。
-
-## 客户端兼容性
-
-| 协议 | Mihomo | sing-box | Reference |
+| 模式 | TCP ownership | UDP public ownership | state |
 |---|---:|---:|---|
-| Mieru | ✅ | — | Mieru |
-| Snell v4 | ✅ | ✅ | — |
-| Snell v5 | ✅ | ✅ | — |
-| Hysteria2 | ✅ | ✅ | Xray-core |
-| VLESS/Sudoku | — | — | Xray-core |
+| OFF | ON | OFF | `quic_proxy_enabled=false`, `managed_udp=false` |
+| ON | ON | ON（同数值端口） | `quic_proxy_enabled=true`, `managed_udp=true` |
 
-`—` 表示当前未提供或未声明该客户端兼容性，不表示协议本身不可用。
+这个开关管理 UDP 公网暴露、firewall ownership、state 与 UI。它不会向官方 Snell 配置发明不存在的 `quic=true` 参数。
 
-## 文件与服务
+## 统一端口层
 
-```text
-/etc/nobrand-oneclick/          NoBrand 配置
-/var/lib/nobrand-oneclick/      NoBrand 状态与备份
-/usr/local/lib/nobrand-oneclick/ NoBrand runtime 与辅助文件
-/etc/mita/                      Mieru 配置
-/var/lib/mita-oneclick/         Mieru 管理状态
-```
+端口 registry 以 `transport:port` 为键。TCP 与 UDP 同数值端口可以由不同协议共存；相同 transport 上的端口不能冲突。
 
-systemd 服务名：
+默认路由 IPv4 尾号 `xx` 对应：
 
 ```text
-nobrand-snell@<INSTANCE_ID>.service
-nobrand-hysteria2.service
-nobrand-vless-sudoku.service
-mita-oneclick@<USER_ID>.service
+xx00       所有 transport 永久保留
+xx01-xx99 自动分配池
 ```
 
-Alpine 使用对应的 OpenRC service。
+手工指定与自动分配都会拒绝 `xx00`。allocator 还会检查现有 listener、NoBrand state、端口范围和 SSH 保留边界。
 
-## 更新
+## State、配置与 runtime
 
-进入 `nobrand` 菜单并选择 Upgrade，或运行：
+3.0 的唯一权威 state：
 
-```bash
-nobrand mieru upgrade
-nobrand snell upgrade
-nobrand hy2 upgrade
-nobrand vless-sudoku upgrade
+```text
+/var/lib/nobrand-oneclick/
+├── state.json              # schema_version = 3, ownership = nobrand-v3
+├── mieru/
+├── snell/
+├── hysteria2/
+├── vless-sudoku/
+├── backups/
+├── locks/
+└── firewall-owned.bindings
 ```
 
-从旧版本升级时，NoBrand 会清理身份匹配的旧 Snell v6 管理资源。
+NoBrand 配置根：
+
+```text
+/etc/nobrand-oneclick/
+├── snell/
+├── hysteria2/
+└── vless-sudoku/
+```
+
+NoBrand 管理的 runtime：
+
+```text
+/usr/local/lib/nobrand-oneclick/bin/
+├── mita
+├── xray
+└── snell/
+```
+
+上游 Mieru runtime 的真实二进制仍名为 `mita`，NoBrand 通过明确路径调用它。它是协议 runtime，不是管理命令。3.0 不安装名为 `mita`、`mita-menu` 的管理 wrapper，也不提供第二套管理 parser。
+
+目录默认 root-only：secret state 使用 0600，state/config ownership 目录使用 0700。
+
+## Clean-break 与旧状态
+
+3.0 不迁移、导入或转换旧 Mieru 用户、旧 NoBrand state 或旧管理 wrapper。检测到旧目录或不是明确 schema v3 的 NoBrand state 时会 fail closed：
+
+```text
+检测到旧版安装数据。
+NoBrand-OneClick 3.0.0 不提供旧用户自动迁移。
+请先备份并清理旧安装后重新部署。
+```
+
+检测过程不会读取、复制、删除或修改旧 state。`--help` 与 `--version` 不依赖 state，仍可用于确认版本和处理方式。
 
 ## 备份与恢复
 
 ```bash
 nobrand backup create
 nobrand backup list
-nobrand backup restore <BACKUP_FILE>
+nobrand backup restore /path/to/nobrand-backup.tar.gz
 ```
 
-NoBrand backup 覆盖 Common registry 以及 Snell、HY2、VLESS/Sudoku 的项目管理状态与配置。Mieru 用户和实例备份由 Mieru 子菜单管理。
+备份只包含 NoBrand schema v3 的 state/config，并带有项目、版本、schema 与 ownership manifest。恢复拒绝绝对路径、`..`、无效 JSON、旧 schema 和非 NoBrand 归档。
 
-## Doctor
+## 统一卸载
 
 ```bash
-nobrand doctor
+sudo nobrand uninstall -y
 ```
 
-Doctor 检查 runtime、service、listener、firewall 和 config/state，默认不输出连接凭据。
+统一卸载会删除 NoBrand 3 明确拥有的：
 
-## 已知限制
+- Mieru 实例、配置、服务、调度器、firewall/tc、runtime/package/account（遵循安装前 ownership 标记）
+- Snell v4/v5 实例、配置、服务与 runtime
+- Hysteria2 与 VLESS/Sudoku 服务、配置和 Xray runtime
+- NoBrand state、config、library roots
+- `nb`、`nobrand`、`install-nobrand`（最后删除）
 
-- Snell 仅支持 v4/v5；v1/v2/v3/v6 不受支持。
-- Snell v5 QUIC 默认关闭。
-- Mihomo 的官方 Snell v5 QUIC wire 未声明为已验证。
-- sing-box 不支持官方 Snell v5 QUIC Proxy Mode。
-- VLESS/Sudoku 当前以 Xray-core 作为参考客户端。
+它不会删除外部 Xray、sing-box、Mihomo、无 ownership 的 Mieru、无 ownership 的 Snell、无关 systemd/OpenRC unit、无关 firewall 规则、SSH 或基础网络配置。首次安装前已存在的 Mita package、账号、组和共享 runtime/config/service 路径会分别记录保护标记，Mieru 协议卸载不会按进程名批量终止或删除这些外部资源。
 
-项目经过本地、容器和真实客户端数据面验证。详细开发资料位于 `docs/`；历史实验结论不构成对所有网络环境的性能保证。
-
-## 卸载
+只卸载 Mieru 协议而保留管理器和其它协议：
 
 ```bash
-nobrand uninstall
+sudo nobrand mieru uninstall
 ```
 
-该命令只删除 NoBrand 管理的 Snell、Hysteria2、VLESS/Sudoku 与 Common 资源，不会顺带删除 Mieru。Mieru 可从 `nobrand mieru` 子菜单单独管理。
+## 支持平台
 
-## Project Structure
+- Debian / Ubuntu
+- RHEL / Rocky / Alma 系
+- Alpine
+- amd64 / arm64
+- systemd / OpenRC
 
-```text
-src/      模块化源码
-scripts/  构建与检查脚本
-tests/    自动化测试
-docs/     设计与历史文档
+Mieru 官方包支持 stable、latest 与 pinned 版本策略；Snell 使用 Surge 官方 runtime；Hysteria2 与 VLESS/Sudoku 使用 Xray-core。
+
+## 本地验证
+
+```bash
+bash scripts/build.sh
+bash scripts/build.sh --check
+bash scripts/test.sh
+bash scripts/test.sh --runtime
+bash scripts/platform-smoke.sh
+bash scripts/docker-smoke.sh
 ```
 
-模块关系见 `docs/MODULARIZATION.md` 与 `docs/MODULE-DEPENDENCIES.md`。
+测试覆盖 deterministic build、ShellCheck、Mieru golden parity、Profile/default/config/export、端口与 Endpoint、协议 golden config、Snell v5 QUIC、rollback、backup boundary、统一卸载 ownership、菜单路由和真实 upstream runtime integration。
 
-## License
+## 安全说明
 
-NoBrand-OneClick 以 GPL-3.0 发布，详见 `LICENSE`。
-
-Mieru MIT attribution、Xray-core、Xray-OneClick-derived logic 与 Surge Snell Server 等第三方说明见 `THIRD_PARTY_NOTICES.md`。
+- 不把密码、私钥或 SSH 凭据提交到仓库。
+- 不以关闭证书校验或固定未知 checksum 的方式“修复”下载。
+- 不 flush 用户 firewall。
+- 不接管预先存在的外部规则、软件包、系统账号或服务。
+- Display Endpoint 与真实 listener 永远分离。
+- VLESS/Sudoku 始终为 Plain VLESS + FinalMask/Sudoku；`VLESS_ENCRYPTION_ENABLED=false`。

@@ -94,7 +94,10 @@ printf 'snell-unit-unchanged\n' >"$NOBRAND_SNELL_SYSTEMD_TEMPLATE"
 snell_config_hash="$(sha256sum "$(snell_config_path "$sid")")"
 snell_unit_hash="$(sha256sum "$NOBRAND_SNELL_SYSTEMD_TEMPLATE")"
 snell_fw_hash="$(sha256sum "$NOBRAND_FIREWALL_OWNED_STATE")"
+# Request globals are consumed indirectly by the sourced Snell action.
+# shellcheck disable=SC2034
 SNELL_NAME=node-v5 YES=1 ADVERTISE_CLI=1 ADVERTISE_AUTO_REQUESTED=0
+# shellcheck disable=SC2034
 ADVERTISE_HOST=snell-entry.example.com ADVERTISE_PORT=8443
 snell_set_endpoint >/dev/null
 assert_eq "$snell_config_hash" "$(sha256sum "$(snell_config_path "$sid")")" 'Snell config isolation'

@@ -126,7 +126,8 @@ users_state_init_empty() {
     return 0
   fi
   run mkdir -p "$(dirname "$MITA_USERS_STATE")"
-  printf '%s\n' '{"version":2,"users":[]}' >"$MITA_USERS_STATE"
+  printf '{"version":2,"deployment_model":"%s","protocol":"%s","users":[]}\n' \
+    "$MITA_DEPLOYMENT_MODEL" "${PROTOCOL:-TCP}" >"$MITA_USERS_STATE"
   run chmod 0600 "$MITA_USERS_STATE" 2>/dev/null || true
 }
 
@@ -166,7 +167,7 @@ users_tx_restore() {
 }
 
 users_tx_rollback() {
-  local snapshot="${1:-}" reapply="${2:-0}" restored=0 restore_rc=0 cfg bin
+  local snapshot="${1:-}" reapply="${2:-0}" restored=0 restore_rc=0
   [ -n "$snapshot" ] || return 0
   # apply_users_config 失败时会自行消费快照；外层再次回滚应是安全空操作。
   [ -f "$snapshot" ] || return 0
@@ -185,30 +186,14 @@ users_tx_rollback() {
     MULTI_USER_MODE=1
     if [ "$restored" -eq 2 ]; then
       isolated_stop_all
-      default_mita_restore 2>/dev/null || warn "$(t '用户状态已恢复为空，但旧默认服务恢复失败，请立即运行 doctor' \
-        'Users state was restored to absent, but the old default service failed to recover; run doctor now')"
       apply_tc_limits 2>/dev/null || true
-    elif users_isolated_mode; then
+    else
       if ! reconcile_isolated_instances 2>/dev/null; then
         warn "$(t '用户状态已回滚，但专属实例配置重新应用失败，请立即运行 doctor' \
           'Users state was rolled back, but reapplying dedicated instances failed; run doctor now')"
       fi
       apply_tc_limits 2>/dev/null || warn "$(t '用户状态已回滚，但旧限速规则未能完全恢复' \
         'Users state was rolled back, but previous rate filters were not fully restored')"
-    else
-      # 本次操作可能刚从旧单实例迁移而来，先清理所有已生成的专属实例，
-      # 再恢复旧默认服务，避免两套运行时同时占用端口。
-      isolated_stop_all
-      if cfg="$(write_server_config_multi 2>/dev/null)" \
-         && apply_config "$cfg" \
-         && mita_sync_users_to_state; then
-          bin="$(mita_bin)"
-          "$bin" reload 2>/dev/null || start_mita 2>/dev/null || true
-          apply_tc_limits 2>/dev/null || true
-      else
-        warn "$(t '用户状态已回滚，但旧服务端配置重新应用失败，请立即运行 doctor' \
-          'Users state was rolled back, but reapplying the old server config failed; run doctor now')"
-      fi
     fi
   fi
   users_tx_commit "$snapshot"
@@ -242,25 +227,6 @@ users_deployment_model() {
 
 users_isolated_mode() {
   [ "$(users_deployment_model 2>/dev/null || true)" = "$MITA_DEPLOYMENT_MODEL" ]
-}
-
-users_set_deployment_model() {
-  local model="$1"
-  [ "${DRY_RUN:-0}" -eq 1 ] && {
-    msg "[dry-run] set deployment_model=$model in $MITA_USERS_STATE"
-    return 0
-  }
-  _U_DEPLOYMENT_MODEL="$model" users_py_locked '
-import json, os
-path = os.environ["MITA_USERS_STATE"]
-d = json.load(open(path))
-model = os.environ.get("_U_DEPLOYMENT_MODEL") or ""
-if model:
-    d["deployment_model"] = model
-else:
-    d.pop("deployment_model", None)
-json.dump(d, open(path, "w"), indent=2)
-'
 }
 
 users_enabled_instance_rows() {
@@ -299,8 +265,8 @@ instance_config_path() { printf '%s/%s/server.json' "$MITA_INSTANCES_DIR" "$1"; 
 instance_socket_path() { printf '%s/%s.sock' "$MITA_INSTANCE_RUN_DIR" "$1"; }
 instance_metrics_dir() { printf '%s/%s' "$MITA_INSTANCE_METRICS_DIR" "$1"; }
 instance_metrics_file() { printf '%s/%s/metrics.pb' "$MITA_INSTANCE_METRICS_DIR" "$1"; }
-instance_systemd_unit() { printf 'mita-oneclick@%s.service' "$1"; }
-instance_openrc_service() { printf 'mita-oneclick-%s' "$1"; }
+instance_systemd_unit() { printf 'nobrand-mieru@%s.service' "$1"; }
+instance_openrc_service() { printf 'nobrand-mieru-%s' "$1"; }
 
 instance_cmd() {
   local id="$1"
@@ -452,9 +418,9 @@ description="Mieru dedicated user instance ${id}"
 command="${MITA_INSTANCE_RUNNER}"
 command_args="${id}"
 command_background="yes"
-pidfile="/run/mita-oneclick-${id}.pid"
-output_log="/var/log/mita-oneclick-${id}.log"
-error_log="/var/log/mita-oneclick-${id}.err"
+pidfile="/run/nobrand-mieru-${id}.pid"
+output_log="/var/log/nobrand-mieru-${id}.log"
+error_log="/var/log/nobrand-mieru-${id}.err"
 respawn
 respawn_delay=5
 respawn_max=0
@@ -466,7 +432,7 @@ depend() {
 
 start_pre() {
   checkpath --directory --owner mita:mita --mode 0750 "${MITA_INSTANCE_RUN_DIR}" "${MITA_INSTANCE_METRICS_DIR}/${id}"
-  checkpath --file --owner mita:mita --mode 0640 "/var/log/mita-oneclick-${id}.log" "/var/log/mita-oneclick-${id}.err"
+  checkpath --file --owner mita:mita --mode 0640 "/var/log/nobrand-mieru-${id}.log" "/var/log/nobrand-mieru-${id}.err"
 }
 EOF
   run chmod 0755 "$svc"
@@ -576,8 +542,8 @@ instance_log_tail() {
       journalctl -u "$unit" -n 20 --no-pager 2>/dev/null >&2 || true
       ;;
     openrc)
-      tail -n 20 "/var/log/mita-oneclick-${id}.err" \
-        "/var/log/mita-oneclick-${id}.log" 2>/dev/null >&2 || true
+      tail -n 20 "/var/log/nobrand-mieru-${id}.err" \
+        "/var/log/nobrand-mieru-${id}.log" 2>/dev/null >&2 || true
       ;;
   esac
 }
@@ -599,41 +565,6 @@ instance_start_proxy() {
     return 1
   fi
   return 0
-}
-
-default_mita_stop() {
-  local sm bin
-  sm="$(service_manager)"
-  bin="$(mita_bin)"
-  "$bin" stop >/dev/null 2>&1 || true
-  case "$sm" in
-    systemd)
-      run systemctl stop mita >/dev/null 2>&1 || true
-      run systemctl disable mita >/dev/null 2>&1 || true
-      ;;
-    openrc)
-      run rc-service mita stop >/dev/null 2>&1 || true
-      run rc-update del mita default >/dev/null 2>&1 || true
-      ;;
-  esac
-}
-
-default_mita_restore() {
-  local sm bin
-  sm="$(service_manager)"
-  bin="$(mita_bin)"
-  case "$sm" in
-    systemd)
-      run systemctl enable mita >/dev/null 2>&1 || true
-      run systemctl start mita
-      ;;
-    openrc)
-      run rc-update add mita default >/dev/null 2>&1 || true
-      run rc-service mita start
-      ;;
-    *) return 1 ;;
-  esac
-  wait_mita_socket 30 && "$bin" start >/dev/null 2>&1
 }
 
 isolated_stop_all() {
@@ -716,49 +647,10 @@ reconcile_isolated_instances() {
 }
 
 ensure_isolated_deployment() {
-  local restore_default="${1:-1}" id name port migrated=0
-  users_isolated_mode && {
-    reconcile_isolated_instances
-    return
-  }
-  users_ensure_instance_ids || return 1
-  install_instance_runtime || return 1
-  while IFS=$'\t' read -r id name port; do
-    [ -n "$id" ] && [ -n "$name" ] && [ -n "$port" ] || continue
-    write_instance_config "$id" "$name" "$port" || return 1
-  done < <(users_enabled_instance_rows)
-
-  default_mita_stop
-  # 旧单实例停止后再复制最终落盘的 metrics，避免迁移窗口丢失最后一小段计数。
-  while IFS=$'\t' read -r id name port; do
-    [ -n "$id" ] && [ -n "$name" ] && [ -n "$port" ] || continue
-    if [ -s "$MITA_METRICS_FILE" ] && [ ! -s "$(instance_metrics_file "$id")" ]; then
-      if ! cp -f "$MITA_METRICS_FILE" "$(instance_metrics_file "$id")"; then
-        if [ "$restore_default" -eq 1 ]; then
-          default_mita_restore || true
-        fi
-        return 1
-      fi
-      chown mita:mita "$(instance_metrics_file "$id")" 2>/dev/null || true
-      chmod 0600 "$(instance_metrics_file "$id")" 2>/dev/null || true
-    fi
-  done < <(users_enabled_instance_rows)
-
-  if reconcile_isolated_instances; then
-    users_set_deployment_model "$MITA_DEPLOYMENT_MODEL" || {
-      isolated_stop_all
-      if [ "$restore_default" -eq 1 ]; then
-        default_mita_restore || true
-      fi
-      return 1
-    }
-    migrated=1
-  else
-    isolated_stop_all
-    if [ "$restore_default" -eq 1 ]; then
-      default_mita_restore || true
-    fi
+  users_isolated_mode || {
+    warn "$(t 'schema v3 Mieru 用户状态缺少 isolated-v2 标记，拒绝转换' \
+      'Schema-v3 Mieru user state lacks the isolated-v2 marker; refusing conversion')"
     return 1
-  fi
-  [ "$migrated" -eq 1 ] && users_log "deployment migrated to ${MITA_DEPLOYMENT_MODEL}"
+  }
+  reconcile_isolated_instances
 }

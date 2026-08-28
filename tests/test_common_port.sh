@@ -20,9 +20,6 @@ nb_port_is_tail_base_reserved 3601 && fail 'first allocatable tail port must not
 nb_port_base_for_ip 10.0.0.0 >/dev/null 2>&1 && fail 'octet 0 must fall back'
 nb_port_base_for_ip 10.0.0.255 >/dev/null 2>&1 && fail 'octet 255 must fall back'
 nb_port_base_for_ip 10.0.0.10 >/dev/null 2>&1 && fail 'privileged tail range must fall back'
-assert_eq tcp:3611 "$(nb_normalized_port_key TCP 3611)" 'normalized TCP key'
-assert_eq udp:3611 "$(nb_normalized_port_key udp 3611)" 'normalized UDP key'
-
 NOBRAND_TEST_RANDOM_START=10
 check_after_3613() { [ "$1" -eq 3613 ]; }
 assert_eq 3613 "$(nb_scan_port_span 3601 3699 check_after_3613)" 'random ring traversal'
@@ -35,6 +32,8 @@ nb_registry_port_owner UDP 3611 >/dev/null 2>&1 && fail 'TCP state must not occu
 nb_port_is_listening() { return 1; }
 nb_port_available_for_transport 3600 TCP && fail 'reserved tail base must reject TCP'
 nb_port_available_for_transport 3600 UDP && fail 'reserved tail base must reject UDP'
+# Read indirectly by port_available_for_mode from the sourced installer.
+# shellcheck disable=SC2034
 PROTOCOL=TCP
 port_available_for_mode 3600 && fail 'Mieru must reject the reserved tail base'
 nb_port_available_for_transport 3611 UDP || fail 'UDP 3611 must remain available when only TCP state owns 3611'
@@ -58,19 +57,15 @@ rm -f "$NOBRAND_SNELL_STATE_DIR/s0123456789abcdef.json" "$NOBRAND_VLESS_STATE_FI
   "$NOBRAND_HY2_STATE_FILE" "$MITA_USERS_STATE"
 mkdir -p "$(dirname "$MITA_STATE")"
 chmod 0700 "$(dirname "$MITA_STATE")"
-{
-  _state_kv PORT 3650
-  _state_kv PROTOCOL BOTH
-  _state_kv ADVERTISE_HOST legacy.example.com
-  _state_kv ADVERTISE_PORT 50000
-} >"$MITA_STATE"
+printf 'PORT=3650\nPROTOCOL=BOTH\n' >"$MITA_STATE"
 chmod 0600 "$MITA_STATE"
 legacy_rows="$(nb_registry_rows)"
-assert_contains "$legacy_rows" 'mieru:legacy|TCP|3650|legacy.example.com|50000' 'legacy single-instance TCP adapter'
-assert_contains "$legacy_rows" 'mieru:legacy|UDP|3651|legacy.example.com|50001' 'legacy single-instance UDP adapter'
+[ -z "$legacy_rows" ] || fail 'schema-v3 registry must not read a single-instance state adapter'
 
 unset NOBRAND_TEST_LOCAL_IPV4
 nb_detect_local_ipv4() { return 1; }
+# Read indirectly by nb_select_available_port from the sourced installer.
+# shellcheck disable=SC2034
 NOBRAND_TEST_RANDOM_START=0
 fallback="$(nb_select_available_port UDP)"
 nb_valid_port "$fallback" || fail 'no-IPv4 fallback must return valid port'

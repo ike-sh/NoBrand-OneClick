@@ -1,46 +1,22 @@
 start_mita() {
-  STAGE="启动服务"
+  STAGE="启动 Mieru 专属实例"
   if [ "${DRY_RUN:-0}" -eq 1 ]; then
-    msg "[dry-run] start mita proxy"
+    msg "[dry-run] start dedicated Mieru instances"
     return 0
   fi
-  if users_isolated_mode; then
-    local iid iname iport
-    while IFS=$'\t' read -r iid iname iport; do
-      [ -n "$iid" ] || continue
-      if ! instance_start_proxy "$iid"; then
-        warn "$(t "用户 ${iname} 的专属实例启动失败（${iid}）" \
-          "Dedicated instance for ${iname} failed to start (${iid})")"
-        return 1
-      fi
-    done < <(users_enabled_instance_rows)
-    return 0
-  fi
-  local sm bin _attempt
-  sm="$(service_manager)"
-  bin="$(mita_bin)"
-  if wait_mita_socket 1; then
-    "$bin" stop 2>/dev/null || true
-    sleep 1
-  fi
-  ensure_mita_daemon
-  if ! wait_mita_socket 45; then
-    warn "$(t 'mita 管理套接字未就绪，继续尝试 start...' \
-      'mita management socket not ready, retrying start...')"
-    mita_log_tail
-  fi
-  for _attempt in 1 2 3 4 5; do
-    if "$bin" start 2>/dev/null; then
-      sleep 1
-      return 0
+  users_isolated_mode || {
+    bail "$(t 'schema v3 Mieru 状态必须使用 isolated-v2' \
+      'Schema-v3 Mieru state must use isolated-v2')" || return 1
+  }
+  local iid iname iport
+  while IFS=$'\t' read -r iid iname iport; do
+    [ -n "$iid" ] || continue
+    if ! instance_start_proxy "$iid"; then
+      warn "$(t "用户 ${iname} 的专属实例启动失败（${iid}）" \
+        "Dedicated instance for ${iname} failed to start (${iid})")"
+      return 1
     fi
-    ensure_mita_daemon
-    wait_mita_socket 10 || true
-    sleep 2
-  done
-  warn "$(t "mita start 未成功，请手动执行: $(mita_restart_hint) && mita start" \
-    "mita start failed; run: $(mita_restart_hint) && mita start")"
-  return 1
+  done < <(users_enabled_instance_rows)
 }
 
 verify_mita_running() {
@@ -50,39 +26,24 @@ verify_mita_running() {
     msg "[dry-run] verify mita RUNNING"
     return 0
   fi
-  if users_isolated_mode; then
-    local iid iname iport istatus failed=0
-    while IFS=$'\t' read -r iid iname iport; do
-      [ -n "$iid" ] || continue
-      istatus="$(instance_cmd "$iid" status 2>/dev/null || true)"
-      if ! printf '%s' "$istatus" | grep -q 'status is "RUNNING"'; then
-        warn "$(t "用户 ${iname} 的专属实例未处于 RUNNING（${iid}）" \
-          "Dedicated instance for ${iname} is not RUNNING (${iid})")"
-        failed=1
-      fi
-    done < <(users_enabled_instance_rows)
-    [ "$failed" -eq 0 ] || return 1
-    [ "$quiet" -eq 1 ] || \
-      t '所有用户专属 mita 实例运行正常' 'All dedicated mita user instances are running'
-    return 0
-  fi
-  local bin status_out _attempt
-  bin="$(mita_bin)"
-  for _attempt in 1 2 3 4 5; do
-    sleep 2
-    status_out="$("$bin" status 2>/dev/null || true)"
-    if printf '%s' "$status_out" | grep -q 'status is "RUNNING"'; then
-      [ "$quiet" -eq 1 ] || t 'mita 服务运行正常' 'mita service is running'
-      return 0
+  users_isolated_mode || {
+    warn "$(t 'schema v3 Mieru 状态不是 isolated-v2' \
+      'Schema-v3 Mieru state is not isolated-v2')"
+    return 1
+  }
+  local iid iname iport istatus failed=0
+  while IFS=$'\t' read -r iid iname iport; do
+    [ -n "$iid" ] || continue
+    istatus="$(instance_cmd "$iid" status 2>/dev/null || true)"
+    if ! printf '%s' "$istatus" | grep -q 'status is "RUNNING"'; then
+      warn "$(t "用户 ${iname} 的专属实例未处于 RUNNING（${iid}）" \
+        "Dedicated instance for ${iname} is not RUNNING (${iid})")"
+      failed=1
     fi
-    ensure_mita_daemon
-    wait_mita_socket 10 || true
-    "$bin" start 2>/dev/null || true
-  done
-  warn "$(t "mita 未处于 RUNNING 状态，请执行: $(mita_restart_hint) && mita status && mita start" \
-    "mita is not RUNNING; run: $(mita_restart_hint) && mita status && mita start")"
-  [ -n "$status_out" ] && msg "$status_out"
-  return 1
+  done < <(users_enabled_instance_rows)
+  [ "$failed" -eq 0 ] || return 1
+  [ "$quiet" -eq 1 ] || \
+    t '所有用户专属 mita 实例运行正常' 'All dedicated mita user instances are running'
 }
 
 add_op_user() {

@@ -34,6 +34,8 @@ assert_eq $'5.0.1\thttps://dl.nssurge.com/snell/snell-server-v5.0.1-linux-amd64.
 NOBRAND_TEST_ARCH=arm64
 assert_eq aarch64 "$(snell_arch_asset_name)" 'arm64 official asset mapping'
 assert_eq Xray-linux-arm64-v8a.zip "$(nobrand_xray_arch_asset)" 'arm64 Xray asset mapping'
+# Keep subsequent runtime checks on the native test architecture.
+# shellcheck disable=SC2034
 NOBRAND_TEST_ARCH=amd64
 
 for major in 4 5; do

@@ -25,91 +25,79 @@ state_file_is_secure() {
   secure_stat_path "$parent" dir && secure_stat_path "$path" file
 }
 
-secure_migrate_root_file() {
-  local src="$1" dest="$2" mode="${3:-0600}"
-  [ -e "$dest" ] && return 0
-  [ -f "$src" ] && [ ! -L "$src" ] || return 0
-  command -v python3 >/dev/null 2>&1 || {
-    warn "$(t "无法安全迁移旧状态（缺少 python3）: ${src}" \
-      "Cannot securely migrate legacy state without python3: ${src}")"
-    return 1
-  }
-  python3 - "$src" "$dest" "$mode" <<'PY'
-import os, stat, sys, tempfile
-
-src, dest, mode_text = sys.argv[1:4]
-flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-fd = os.open(src, flags)
-try:
-    info = os.fstat(fd)
-    if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
-        raise PermissionError("legacy state is not a root-owned protected regular file")
-    chunks = []
-    while True:
-        chunk = os.read(fd, 1024 * 1024)
-        if not chunk:
-            break
-        chunks.append(chunk)
-        if sum(map(len, chunks)) > 64 * 1024 * 1024:
-            raise ValueError("legacy state is unexpectedly large")
-finally:
-    os.close(fd)
-
-parent = os.path.dirname(dest)
-os.makedirs(parent, mode=0o700, exist_ok=True)
-os.chown(parent, 0, 0)
-os.chmod(parent, 0o700)
-tmp_fd, tmp_path = tempfile.mkstemp(prefix=".migrate-", dir=parent)
-try:
-    os.fchmod(tmp_fd, int(mode_text, 8))
-    os.write(tmp_fd, b"".join(chunks))
-    os.fsync(tmp_fd)
-    os.close(tmp_fd)
-    tmp_fd = -1
-    os.replace(tmp_path, dest)
-finally:
-    if tmp_fd >= 0:
-        os.close(tmp_fd)
-    try:
-        os.unlink(tmp_path)
-    except FileNotFoundError:
-        pass
+nb_schema_v3_file_valid() {
+  local path="${1:-$NOBRAND_REGISTRY_FILE}"
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  if command -v jq >/dev/null 2>&1; then
+    jq -e --argjson schema "$NOBRAND_SCHEMA_VERSION" '
+      .schema_version == $schema
+      and .project == "NoBrand-OneClick"
+      and .ownership == "nobrand-v3"
+    ' "$path" >/dev/null 2>&1
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 - "$path" "$NOBRAND_SCHEMA_VERSION" <<'PY' >/dev/null 2>&1
+import json, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+raise SystemExit(0 if doc.get("schema_version") == int(sys.argv[2])
+                 and doc.get("project") == "NoBrand-OneClick"
+                 and doc.get("ownership") == "nobrand-v3" else 1)
 PY
+  else
+    grep -Eq '"schema_version"[[:space:]]*:[[:space:]]*3([,}])' "$path" \
+      && grep -Eq '"project"[[:space:]]*:[[:space:]]*"NoBrand-OneClick"' "$path" \
+      && grep -Eq '"ownership"[[:space:]]*:[[:space:]]*"nobrand-v3"' "$path"
+  fi
+}
+
+nb_legacy_state_detected() {
+  # Test sandboxes can override the old Mieru path. The production default is
+  # intentionally outside the v3 root and is never read or removed here.
+  [ -e "$NOBRAND_LEGACY_MIERU_STATE_DIR" ]
+}
+
+nb_fail_legacy_state() {
+  die "$(t \
+    '检测到旧版安装数据。NoBrand-OneClick 3.0.0 不提供旧用户自动迁移；请先备份并清理旧安装后重新部署。' \
+    'Legacy installation data was detected. NoBrand-OneClick 3.0.0 does not migrate old users; back it up, clean the old installation, then deploy fresh.')"
+}
+
+nb_write_schema_v3_file() {
+  local tmp
+  tmp="$(mktemp "${NOBRAND_REGISTRY_FILE}.tmp.XXXXXX")" || return 1
+  if ! printf '%s\n' \
+      "{\"schema_version\":${NOBRAND_SCHEMA_VERSION},\"project\":\"NoBrand-OneClick\",\"ownership\":\"nobrand-v3\",\"author\":\"ike\"}" \
+      >"$tmp" \
+    || ! chmod 0600 "$tmp" \
+    || ! mv -f "$tmp" "$NOBRAND_REGISTRY_FILE"; then
+    rm -f "$tmp"
+    return 1
+  fi
 }
 
 ensure_manager_state_layout() {
   local create="${1:-0}"
   [ "${DRY_RUN:-0}" -eq 1 ] && return 0
-  if [ "$create" -ne 1 ] && [ ! -d "$MITA_MANAGER_STATE_DIR" ] \
-     && [ ! -e "$MITA_LEGACY_STATE" ] && [ ! -e "$MITA_LEGACY_USERS_STATE" ] \
-     && [ ! -e "$MITA_LEGACY_FIREWALL_STATE" ] && [ ! -e "$MITA_LEGACY_TC_STATE" ] \
-     && [ ! -d "$MITA_LEGACY_USERS_BACKUP_DIR" ] && [ ! -e "$MITA_LEGACY_MARKER" ]; then
+  nb_legacy_state_detected && nb_fail_legacy_state
+
+  if [ -e "$NOBRAND_STATE_DIR" ]; then
+    [ -d "$NOBRAND_STATE_DIR" ] && [ ! -L "$NOBRAND_STATE_DIR" ] || nb_fail_legacy_state
+    nb_schema_v3_file_valid || nb_fail_legacy_state
+  elif [ "$create" -eq 1 ]; then
+    mkdir -p "$NOBRAND_STATE_DIR" || return 1
+    chmod 0700 "$NOBRAND_STATE_DIR" || return 1
+    chown root:root "$NOBRAND_STATE_DIR" 2>/dev/null || true
+    nb_write_schema_v3_file || return 1
+  else
     return 0
   fi
-  install -d -o root -g root -m 0700 "$MITA_MANAGER_STATE_DIR" "$MITA_USERS_BACKUP_DIR"
 
-  secure_migrate_root_file "$MITA_LEGACY_STATE" "$MITA_STATE" 0600
-  secure_migrate_root_file "$MITA_LEGACY_USERS_STATE" "$MITA_USERS_STATE" 0600
-  secure_migrate_root_file "$MITA_LEGACY_FIREWALL_STATE" "$MITA_FIREWALL_OWNED_STATE" 0600
-  secure_migrate_root_file "$MITA_LEGACY_TC_STATE" "$TC_OWNED_STATE" 0600
-
-  local legacy_backup dest
-  if [ -d "$MITA_LEGACY_USERS_BACKUP_DIR" ]; then
-    for legacy_backup in "$MITA_LEGACY_USERS_BACKUP_DIR"/users_*.json; do
-      [ -f "$legacy_backup" ] || continue
-      dest="${MITA_USERS_BACKUP_DIR}/$(basename "$legacy_backup")"
-      secure_migrate_root_file "$legacy_backup" "$dest" 0600
-    done
-  fi
-  if [ -e "$MITA_LEGACY_MARKER" ] && [ ! -e "$MITA_MARKER" ]; then
-    install -o root -g root -m 0600 /dev/null "$MITA_MARKER"
-  fi
-
-  [ ! -e "$MITA_STATE" ] || rm -f "$MITA_LEGACY_STATE"
-  [ ! -e "$MITA_USERS_STATE" ] || rm -f "$MITA_LEGACY_USERS_STATE"
-  [ ! -e "$MITA_FIREWALL_OWNED_STATE" ] || rm -f "$MITA_LEGACY_FIREWALL_STATE"
-  [ ! -e "$TC_OWNED_STATE" ] || rm -f "$MITA_LEGACY_TC_STATE"
-  rm -f "${MITA_LEGACY_STATE_DIR}/users.lock" "${MITA_LEGACY_STATE_DIR}/admin.lock" 2>/dev/null || true
+  mkdir -p "$MITA_MANAGER_STATE_DIR" "$MITA_USERS_BACKUP_DIR" \
+    "$NOBRAND_BACKUP_DIR" "$NOBRAND_LOCK_DIR" || return 1
+  chmod 0700 "$MITA_MANAGER_STATE_DIR" "$MITA_USERS_BACKUP_DIR" \
+    "$NOBRAND_BACKUP_DIR" "$NOBRAND_LOCK_DIR" || return 1
+  chown root:root "$MITA_MANAGER_STATE_DIR" "$MITA_USERS_BACKUP_DIR" \
+    "$NOBRAND_BACKUP_DIR" "$NOBRAND_LOCK_DIR" 2>/dev/null || true
+  chmod 0600 "$NOBRAND_REGISTRY_FILE" 2>/dev/null || return 1
 }
 
 dry_run_action_preview() {
@@ -458,7 +446,7 @@ ${MITA_USERS_LOG} {
     create 0640 root root
 }
 
-/var/log/mita-oneclick-*.log /var/log/mita-oneclick-*.err {
+/var/log/nobrand-mieru-*.log /var/log/nobrand-mieru-*.err {
     weekly
     rotate 8
     compress
@@ -516,6 +504,8 @@ save_install_state() {
   run mkdir -p "$(dirname "$MITA_STATE")"
   state_tmp="$(mktemp "${MITA_STATE}.XXXXXX" 2>/dev/null || mktemp_file .state)"
   if ! {
+    _state_kv SCHEMA_VERSION "$NOBRAND_SCHEMA_VERSION"
+    _state_kv OWNERSHIP "nobrand-v3"
     _state_kv PORT "$PORT"
     _state_kv PORT_RANGE "$PORT_RANGE"
     _state_kv PROTOCOL "$PROTOCOL"
@@ -534,7 +524,7 @@ save_install_state() {
     _state_kv MIERU_CHANNEL "$MIERU_CHANNEL"
     _state_kv MIERU_VERSION "$MIERU_VERSION"
     _state_kv INSTALL_SCRIPT "$INSTALL_SCRIPT_PATH"
-    printf 'INSTALL_METHOD=oneclick\n'
+    printf 'INSTALL_METHOD=nobrand-v3\n'
   } >"$state_tmp"; then
     rm -f "$state_tmp"
     return 1
@@ -551,6 +541,19 @@ save_install_state() {
   rm -f "$state_tmp"
   harden_mita_permissions
   run touch "$MITA_MARKER"
+}
+
+mita_v3_install_state_valid() {
+  local key
+  [ -f "$MITA_STATE" ] || return 1
+  grep -qx 'SCHEMA_VERSION=3' "$MITA_STATE" 2>/dev/null || return 1
+  grep -qx 'OWNERSHIP=nobrand-v3' "$MITA_STATE" 2>/dev/null || return 1
+  grep -qx 'INSTALL_METHOD=nobrand-v3' "$MITA_STATE" 2>/dev/null || return 1
+  for key in PORT PORT_RANGE PROTOCOL PROFILE ADVERTISE_HOST ADVERTISE_PORT MTU MTU_POLICY \
+    USERNAME PASSWORD TRAFFIC_PATTERN TRAFFIC_SEED LOW_ENTROPY_MODE MULTIPLEXING \
+    HANDSHAKE_MODE MIERU_CHANNEL MIERU_VERSION INSTALL_SCRIPT; do
+    grep -q "^${key}=" "$MITA_STATE" 2>/dev/null || return 1
+  done
 }
 
 mark_oneclick_install() {
@@ -575,24 +578,32 @@ mita_package_is_installed() {
 # 首次接管前已存在的包/账号不属于 OneClick。使用独立所有权标记，
 # 不改变 install-state.env、users.json 或任何运行配置的 schema。
 record_preexisting_mita_resources() {
-  local pm="${1:-}"
+  local pm="${1:-}" path
   installed_by_oneclick && return 0
   run mkdir -p "$MITA_MANAGER_STATE_DIR"
   mita_package_is_installed "$pm" && run touch "$MITA_PRESERVE_PACKAGE_MARKER"
   _has_user mita && run touch "$MITA_PRESERVE_USER_MARKER"
   _has_group mita && run touch "$MITA_PRESERVE_GROUP_MARKER"
+  for path in /etc/mita /var/lib/mita /run/mita /var/run/mita /usr/bin/mita \
+    /etc/systemd/system/mita.service /lib/systemd/system/mita.service \
+    /usr/lib/systemd/system/mita.service /etc/init.d/mita; do
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      run touch "$MITA_PRESERVE_SHARED_MARKER"
+      break
+    fi
+  done
   run chmod 0600 "$MITA_PRESERVE_PACKAGE_MARKER" "$MITA_PRESERVE_USER_MARKER" \
-    "$MITA_PRESERVE_GROUP_MARKER" 2>/dev/null || true
+    "$MITA_PRESERVE_GROUP_MARKER" "$MITA_PRESERVE_SHARED_MARKER" 2>/dev/null || true
 }
 
 preexisting_mita_resources_recorded() {
   [ -f "$MITA_PRESERVE_PACKAGE_MARKER" ] \
     || [ -f "$MITA_PRESERVE_USER_MARKER" ] \
-    || [ -f "$MITA_PRESERVE_GROUP_MARKER" ]
+    || [ -f "$MITA_PRESERVE_GROUP_MARKER" ] \
+    || [ -f "$MITA_PRESERVE_SHARED_MARKER" ]
 }
 
 load_install_state() {
-  local _live_bin="" _live_desc="" _live_mtu=""
   local _cli_port="$PORT"
   local _cli_port_range="$PORT_RANGE"
   local _cli_protocol="$PROTOCOL"
@@ -620,53 +631,19 @@ load_install_state() {
       "Refusing to read install state with unsafe ownership or permissions: ${MITA_STATE}")"
     return 1
   }
+  mita_v3_install_state_valid || {
+    warn "$(t "拒绝读取非 schema v3 的 Mieru 状态: ${MITA_STATE}" \
+      "Refusing to read non-schema-v3 Mieru state: ${MITA_STATE}")"
+    return 1
+  }
   local _cli_tp="$TRAFFIC_PATTERN"
   local _cli_le="$LOW_ENTROPY_MODE"
   local _cli_mux="$MULTIPLEXING"
   local _cli_hs="$HANDSHAKE_MODE"
   # shellcheck disable=SC1090
   source "$MITA_STATE" 2>/dev/null || true
-  # v2.1 及更早状态没有 Profile：只根据已保存的完整真实参数反推元数据，
-  # 绝不为了匹配预设去覆盖旧参数。字段不全时保守标记 custom。
-  if ! grep -q '^PROFILE=' "$MITA_STATE" 2>/dev/null; then
-    if grep -q '^PROTOCOL=' "$MITA_STATE" 2>/dev/null \
-       && grep -q '^MTU=' "$MITA_STATE" 2>/dev/null \
-       && grep -q '^MULTIPLEXING=' "$MITA_STATE" 2>/dev/null \
-       && grep -q '^HANDSHAKE_MODE=' "$MITA_STATE" 2>/dev/null \
-       && grep -q '^TRAFFIC_PATTERN=' "$MITA_STATE" 2>/dev/null \
-       && grep -q '^LOW_ENTROPY_MODE=' "$MITA_STATE" 2>/dev/null; then
-      PROFILE="$(infer_profile_from_values)"
-    else
-      PROFILE="custom"
-    fi
-  fi
   PROFILE="$(normalize_profile "${PROFILE:-custom}" 2>/dev/null || printf 'custom')"
-  # 旧版升级始终跟随 upstream latest；缺少通道时延续该行为，避免升级语义突变。
-  if ! grep -q '^MIERU_CHANNEL=' "$MITA_STATE" 2>/dev/null; then
-    MIERU_CHANNEL="latest"
-  fi
-  MIERU_CHANNEL="$(normalize_mieru_channel "${MIERU_CHANNEL:-latest}" 2>/dev/null || printf 'latest')"
-  if ! grep -q '^MIERU_VERSION=' "$MITA_STATE" 2>/dev/null; then
-    MIERU_VERSION="$(installed_version 2>/dev/null || true)"
-  fi
-  # 兼容旧状态文件：优先保留正在运行配置中的 MTU，避免后续用户管理重建配置时降回 1400。
-  if ! grep -q '^MTU=' "$MITA_STATE" 2>/dev/null; then
-    _live_bin="$(mita_bin 2>/dev/null || true)"
-    if [ -x "$_live_bin" ]; then
-      _live_desc="$("$_live_bin" describe config 2>/dev/null || true)"
-      _live_mtu="$(extract_mtu_from_describe "$_live_desc" 2>/dev/null || true)"
-      if valid_mtu "$_live_mtu"; then
-        MTU="$_live_mtu"
-      fi
-    fi
-  fi
-  if ! grep -q '^MTU_POLICY=' "$MITA_STATE" 2>/dev/null; then
-    if valid_mtu "${MTU:-}" && [ "$MTU" -ne 1400 ]; then
-      MTU_POLICY="custom"
-    else
-      MTU_POLICY="safe"
-    fi
-  fi
+  MIERU_CHANNEL="$(normalize_mieru_channel "${MIERU_CHANNEL:-stable}" 2>/dev/null || printf 'stable')"
   # 命令行显式指定 --traffic-pattern 时优先，不被已保存状态覆盖
   [ "${TRAFFIC_CLI:-0}" -eq 1 ] && TRAFFIC_PATTERN="$_cli_tp"
   [ "${LOW_ENTROPY_CLI:-0}" -eq 1 ] && LOW_ENTROPY_MODE="$_cli_le"

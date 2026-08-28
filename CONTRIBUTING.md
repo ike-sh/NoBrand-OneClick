@@ -1,45 +1,64 @@
-# Development Workflow
+# Contributing to NoBrand-OneClick
 
-## 范围
+NoBrand-OneClick 3.0.0 是 clean-break 架构。所有变更必须同时维护统一产品边界与 Mieru 功能对等。
 
-当前产品范围只接受 Mieru、Snell v4/v5、Xray-core Hysteria2 与 Plain VLESS + FinalMask + Sudoku/TCP 相关变更。Snell v1、v2、v3、v6 不受支持；v6 只允许维护精确历史状态清理、负向测试与历史文档。不要加入其它协议、Web panel 或自动迁移 Xray-OneClick 配置。
+## 不可破坏的产品契约
 
-Mieru 是成熟母体。除 Common Core adapter 外，不重写 isolated-v2、多用户、quota、tc、state、export 或卸载逻辑；`/var/lib/mita-oneclick` 继续是 Mieru 权威 state。
+- 唯一安装器：`install-nobrand.sh`
+- 正式命令：`nobrand`
+- 短别名：`nb -> nobrand`
+- 唯一权威 state：`/var/lib/nobrand-oneclick/`，且 `schema_version=3`
+- 旧 Mieru/NoBrand state 只检测并 fail closed，不读取、不导入、不转换、不删除
+- 真正上游 Mieru runtime 可以名为 `mita`，但不得成为管理 wrapper
+- Snell 只支持 v4/v5；v1/v2/v3/v6 不得有隐藏入口
+- Hysteria2 与 VLESS/Sudoku 的 wire 语义不得重新设计
+- 统一卸载只能删除 NoBrand 3 ownership 明确记录的资源
+
+Mieru 是成熟功能基线。Profile、TCP/UDP/BOTH、MTU、Multiplexing、Handshake、Traffic Pattern、Low Entropy、multi-user、isolated-v2、quota、tc、Endpoint、backup 与 exporter 的用户语义和默认值必须保持。任何相关修改都要同步更新 [docs/MIERU-PARITY-3.0.md](docs/MIERU-PARITY-3.0.md) 与 golden fixture。
 
 ## 源码与构建
 
-- 修改 `src/*.sh`；`src/` 是真源。
-- `scripts/build.sh` 的显式 module manifest 是权威顺序。
-- 不直接维护生成的四个 installer。
+`src/*.sh` 是权威源码，`install-nobrand.sh` 与 `dist/install-nobrand.sh` 是生成物。不要直接编辑生成物。
 
 ```bash
 bash scripts/build.sh
 bash scripts/build.sh --check
 ```
 
-## 必跑测试
+`scripts/build.sh` 使用显式有序 manifest；新增模块必须加入且只能加入一次。
+
+## 提交前测试
 
 ```bash
 bash scripts/test.sh
 bash scripts/test.sh --runtime
+bash scripts/platform-smoke.sh
 bash scripts/docker-smoke.sh
-bash scripts/compat-smoke.sh
 git diff --check
 ```
 
-`--runtime` 需要网络。不能运行时必须记录 `NOT RUN` 与原因，不能写成 PASS。Mieru smoke 只可更新项目 identity assertion，不能删除 isolated-v2、用户事务、quota、tc、export、firewall、migration 或卸载保护断言来“修绿”。
+测试至少需要覆盖：
 
-## 协议约束
+- Bash syntax 与 ShellCheck warning gate
+- Mieru parameter/default/Profile/config/export/Endpoint/port parity
+- schema v3 与 legacy fail-closed
+- transport-aware allocator 与 xx00 reservation
+- Display Endpoint runtime isolation
+- Snell v4/v5 与 v5 QUIC ownership
+- HY2/VLESS golden config 与真实 Xray 验证
+- rollback、backup boundary 与 unified uninstall ownership
+- deterministic two-build hash
 
-- Snell runtime 必须来自 Surge 官方 HTTPS；v6 resolver 不能硬编码；官方 release metadata 和 binary upgrade 一起回滚；v6 必须断言无 Mihomo。
-- HY2 以 `ike-sh/Xray-OneClick/lib/57-hysteria2.sh` 为协议第一事实来源，保持 Xray、v2、TLS/h3、P-256/3650/CN、16-byte auth/Salamander 与 URI。
-- VLESS Sudoku 以 `ike-sh/Xray-OneClick/lib/50-vless-enc.sh` 的 TCP FinalMask/Sudoku inbound 为结构事实来源，但必须解耦并排除 VLESS Encryption。服务端只允许 plain `decryption=none`，客户端只允许 `encryption=none`；禁止调用 key generator、保存 key pair、ML-KEM、xorpub、method、RTT 或 ticket。
-- VLESS 只允许 TCP + FinalMask/Sudoku；禁止扩展为 REALITY、Vision、XHTTP、FullStack 或其它 VLESS 组合。客户端只生成经真实 Xray 验证的 JSON 与分享链接，不伪造 Mihomo/sing-box 配置。
-- HY2 与 VLESS 共用 NoBrand-owned Xray binary，但 config/state/service/process 必须隔离。runtime upgrade 必须把两个 active 服务视为一个验收事务。
-- Endpoint setter 必须证明 config/unit/firewall hash 不变、没有 service action、客户端输出变化。
-- transport key 使用 `tcp:PORT` / `udp:PORT`；配置提交前二次验端口。
-- state/config 使用同目录临时文件和原子 rename；破坏性清空前验证 NoBrand namespace。
-- Doctor 不输出 secret；任何验收失败不得输出“完成”。
-- Golden test 必须固定 UUID/port/Sudoku password，使用 `jq -S` canonical diff，并用同一真实 Xray 校验 server/client config。Encryption-absence test 是强制闸门。
+`--runtime` 需要网络并下载真实 upstream runtime。无法运行时必须写 `NOT RUN` 和原因，不能标为 PASS。
 
-提交源码时同步提交 tests/scripts/CI/docs 与重新生成的 installer。不要 push、创建 release 或发布 package，除非维护者另行要求。
+## 安全要求
+
+- 不提交 credential、私钥、真实实验地址或 SSH 配置。
+- 不使用 raw main 作为正式安装默认 URL。
+- 不关闭 TLS/checksum 校验来绕过下载失败。
+- 不 flush firewall，不删除未知规则。
+- 不用通配符删除未解析的宽目录。
+- 外部 package/user/group/service 必须通过 preexisting ownership marker 保留。
+- Display Endpoint 操作不得触发服务重启或改动真实配置、listener、firewall、tc、quota。
+
+历史发布文档可以保留当时的命令与行为作为记录；活跃 README、源码、测试和 CI 必须描述当前 3.0 API。

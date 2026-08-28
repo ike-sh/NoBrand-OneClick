@@ -16,8 +16,8 @@ mkdir -p "$fixture/mita-oneclick" "$fixture/external-xray" "$(dirname "$NOBRAND_
 printf 'mita-authoritative\n' >"$fixture/mita-oneclick/users.json"
 printf 'external-xray\n' >"$fixture/external-xray/config.json"
 printf 'NoBrand-OneClick installer\n' >"$NOBRAND_INSTALL_SCRIPT_PATH"
-printf 'exec %s\n' "$NOBRAND_INSTALL_SCRIPT_PATH" >"$NOBRAND_COMMAND_PATH"
-printf 'exec %s\n' "$NOBRAND_INSTALL_SCRIPT_PATH" >"$NOBRAND_SHORT_COMMAND_PATH"
+ln -s "$NOBRAND_INSTALL_SCRIPT_PATH" "$NOBRAND_COMMAND_PATH"
+ln -s "$NOBRAND_COMMAND_PATH" "$NOBRAND_SHORT_COMMAND_PATH"
 printf '{"owned":true}\n' >"$NOBRAND_STATE_DIR/owned.json"
 printf 'owned-config\n' >"$NOBRAND_CONFIG_DIR/owned.conf"
 printf 'owned-runtime\n' >"$NOBRAND_LIB_DIR/owned.bin"
@@ -27,6 +27,10 @@ admin_lock_acquire() { :; }
 admin_lock_release() { :; }
 nb_service_manager() { printf none; }
 systemctl() { :; }
+mita_uninstall_target_present() { return 0; }
+do_uninstall() { printf 'called\n' >"$fixture/mieru-uninstall-called"; }
+# Confirmation is consumed indirectly by nobrand_uninstall.
+# shellcheck disable=SC2034
 YES=1
 nobrand_uninstall >/dev/null
 [ ! -e "$NOBRAND_STATE_DIR/owned.json" ] || fail 'NoBrand state must be removed'
@@ -35,7 +39,8 @@ nobrand_uninstall >/dev/null
 [ ! -e "$NOBRAND_INSTALL_SCRIPT_PATH" ] || fail 'owned NoBrand installer must be removed'
 [ ! -e "$NOBRAND_COMMAND_PATH" ] || fail 'owned nobrand command must be removed'
 [ ! -e "$NOBRAND_SHORT_COMMAND_PATH" ] || fail 'owned nb command must be removed'
-assert_eq mita-authoritative "$(tr -d '\r\n' <"$fixture/mita-oneclick/users.json")" 'Mieru preserved'
+assert_eq mita-authoritative "$(tr -d '\r\n' <"$fixture/mita-oneclick/users.json")" 'external Mieru preserved'
 assert_eq external-xray "$(tr -d '\r\n' <"$fixture/external-xray/config.json")" 'external Xray preserved'
+[ -s "$fixture/mieru-uninstall-called" ] || fail 'unified uninstall must invoke Mieru owned-resource cleanup'
 
-pass 'NoBrand uninstall ownership boundary preserves Mieru and external Xray'
+pass 'unified uninstall removes NoBrand protocols/commands and preserves external Mieru/Xray'

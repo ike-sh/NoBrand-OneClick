@@ -1,5 +1,30 @@
 # Changelog
 
+## 3.0.0 — 2026-08-28
+
+### Unified clean architecture
+
+- Reduced the public surface to one release asset (`install-nobrand.sh`), one canonical command (`nobrand`), and one short symlink (`nb -> nobrand`).
+- Removed the second installer, management wrappers named after the Mieru runtime, basename compatibility routing, raw-main installation fallback, and compatibility build artifacts.
+- Introduced the authoritative `/var/lib/nobrand-oneclick/` root with an exact `schema_version=3` / `ownership=nobrand-v3` marker and root-only permissions.
+- Legacy Mieru and previous NoBrand state now fail closed without being read, imported, converted, deleted, or modified. Help and version remain state-independent.
+- Unified backup/restore and uninstall now cover Mieru, Snell, Hysteria2, VLESS/Sudoku, and common owned resources while preserving pre-existing/external resources.
+
+### Full Mieru parity
+
+- Preserved the mature Mieru Profile, TCP/UDP/BOTH, MTU, Multiplexing, Handshake, Traffic Pattern, Low Entropy, version-channel, multi-user, isolated-v2, quota, expiry, tc/rate, BBR/FQ, firewall, exporter, diagnostics, backup, systemd, and OpenRC behavior.
+- Added an exhaustive parity inventory plus a frozen v2.2.1 authority fixture and golden tests for defaults, Profiles, Mita server JSON, official client JSON, `mierus://`, Mihomo YAML, Endpoint, and port semantics.
+- Moved the official upstream Mita binary to an explicit NoBrand-managed runtime path. The runtime keeps its upstream name but is not a management command.
+- Added host-only and port-only Mieru Display Endpoint updates by merging the unchanged effective half into a complete validated pair; Endpoint updates remain isolated from config, PID, listener, firewall, tc, and quota.
+
+### Protocol and safety hardening
+
+- Snell support is strictly v4/v5. Removed active v6 state/runtime/service migration and old QUIC-field migration code; no hidden v1/v2/v3/v6 install path exists.
+- Preserved Snell v5 QUIC exposure semantics: OFF by default, TCP always managed, same-number UDP ownership only when explicitly enabled.
+- Preserved Xray Hysteria2 semantics and Plain VLESS + FinalMask/Sudoku over TCP with `VLESS_ENCRYPTION_ENABLED=false`.
+- Added schema-v3, command-topology, missing-CLI-value, unified-uninstall ownership, and Mieru Endpoint isolation regressions.
+- Renamed distribution compatibility smoke entry points to platform smoke tests and updated CI to validate only the canonical artifacts.
+
 ## 1.3.0 — 2026-08-28
 
 ### Removed

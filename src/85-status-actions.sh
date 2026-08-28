@@ -8,8 +8,7 @@ status_binding_text() {
 }
 
 do_status() {
-  local bin sm status_out recovered=0 iid iname iport
-  bin="$(mita_bin)"
+  local sm status_out iid iname iport
   sm="$(service_manager)"
   if ! mita_installed; then
     t 'mita 未安装' 'mita is not installed'
@@ -27,73 +26,30 @@ do_status() {
     "  Tested/Stable Mieru: ${TESTED_MIERU_VERSION}"
   t "  Profile: $(profile_label)" "  Profile: $(profile_label)"
   msg ""
-  if users_isolated_mode; then
-    t '部署模型: 用户专属实例 isolated-v2' 'Deployment: dedicated user instances (isolated-v2)'
-    if [ -z "$(users_enabled_instance_rows 2>/dev/null || true)" ]; then
-      warn "$(t '当前没有启用中的用户；所有专属实例均应处于停止状态' \
-        'No users are enabled; all dedicated instances should be stopped')"
-    fi
-    while IFS=$'\t' read -r iid iname iport; do
-      [ -n "$iid" ] || continue
-      msg ""
-      t "【${iname} / ${iid}】" "[${iname} / ${iid}]"
-      t "  监听: $(status_binding_text "$iport")" \
-        "  Listen: $(status_binding_text "$iport")"
-      case "$sm" in
-        systemd) systemctl status "$(instance_systemd_unit "$iid")" --no-pager 2>/dev/null | head -n 12 || true ;;
-        openrc) rc-service "$(instance_openrc_service "$iid")" status 2>/dev/null || true ;;
-      esac
-      status_out="$(instance_cmd "$iid" status 2>/dev/null || true)"
-      msg "${status_out:-status unavailable}"
-    done < <(users_enabled_instance_rows)
+  users_isolated_mode || {
+    warn "$(t 'schema v3 Mieru 状态不是 isolated-v2' \
+      'Schema-v3 Mieru state is not isolated-v2')"
+    return 1
+  }
+  t '部署模型: 用户专属实例 isolated-v2' 'Deployment: dedicated user instances (isolated-v2)'
+  if [ -z "$(users_enabled_instance_rows 2>/dev/null || true)" ]; then
+    warn "$(t '当前没有启用中的用户；所有专属实例均应处于停止状态' \
+      'No users are enabled; all dedicated instances should be stopped')"
+  fi
+  while IFS=$'\t' read -r iid iname iport; do
+    [ -n "$iid" ] || continue
     msg ""
-    t '状态页已隐藏密码；查看或导出节点配置请使用主菜单「查看节点」' \
-      'Passwords are hidden on the status page; use View node in the main menu to view or export node configuration'
-    return 0
-  fi
-  case "$sm" in
-    systemd) systemctl status mita --no-pager 2>/dev/null || true ;;
-    openrc)
-      openrc_mita_status_line
-      if openrc_mita_is_crashed; then
-        warn "$(t 'mita 处于 crashed 状态，正在自动恢复...' 'mita is crashed; auto-recovering...')"
-        openrc_mita_recover
-        recovered=1
-        openrc_mita_status_line
-      elif ! openrc_mita_is_started; then
-        warn "$(t 'mita 未运行，正在尝试启动...' 'mita is not running; trying to start...')"
-        openrc_mita_recover
-        recovered=1
-        openrc_mita_status_line
-      fi
-      ;;
-    *) true ;;
-  esac
+    t "【${iname} / ${iid}】" "[${iname} / ${iid}]"
+    t "  监听: $(status_binding_text "$iport")" \
+      "  Listen: $(status_binding_text "$iport")"
+    case "$sm" in
+      systemd) systemctl status "$(instance_systemd_unit "$iid")" --no-pager 2>/dev/null | head -n 12 || true ;;
+      openrc) rc-service "$(instance_openrc_service "$iid")" status 2>/dev/null || true ;;
+    esac
+    status_out="$(instance_cmd "$iid" status 2>/dev/null || true)"
+    msg "${status_out:-status unavailable}"
+  done < <(users_enabled_instance_rows)
   msg ""
-  if ! wait_mita_socket 3; then
-    if [ "$recovered" -eq 0 ]; then
-      ensure_mita_daemon
-    fi
-    if ! wait_mita_socket 10; then
-      warn "$(t "mita 守护进程未就绪，请执行: $(mita_restart_hint)" \
-        "mita daemon not ready; run: $(mita_restart_hint)")"
-      warn "$(t "查看日志: $(mita_log_hint)" "Check logs: $(mita_log_hint)")"
-      mita_log_tail
-    fi
-  fi
-  status_out="$("$bin" status 2>/dev/null || true)"
-  if [ -n "$status_out" ]; then
-    msg "$status_out"
-  fi
-  if printf '%s' "$status_out" | grep -qi 'daemon is not running'; then
-    warn "$(t "请执行: $(mita_restart_hint)" "Run: $(mita_restart_hint)")"
-    warn "$(t "查看日志: $(mita_log_hint)" "Check logs: $(mita_log_hint)")"
-  fi
-  msg ""
-  if [ -n "${PORT:-}" ]; then
-    t "监听: $(status_binding_text "$PORT")" \
-      "Listen: $(status_binding_text "$PORT")"
-  fi
   t '状态页已隐藏密码；查看或导出节点配置请使用主菜单「查看节点」' \
     'Passwords are hidden on the status page; use View node in the main menu to view or export node configuration'
 }
@@ -102,27 +58,17 @@ do_client_config() {
   require_root
   mita_installed || bail "$(t 'mita 未安装' 'mita is not installed')" || return 1
   repair_mita_binary_paths 2>/dev/null || true
-  if ! users_isolated_mode; then
-    ensure_mita_daemon
-    wait_mita_socket 20 || warn "$(t 'mita 守护进程未就绪，正在尝试继续...' 'mita daemon not ready, trying anyway...')"
-  fi
   load_config_from_mita || return 1
   generate_client_config
 }
 
 rollback_mtu_change() {
-  local restore_mtu="$1" restore_policy="$2" restore_profile="${3:-custom}" rollback_cfg=""
+  local restore_mtu="$1" restore_policy="$2" restore_profile="${3:-custom}"
   MTU="$restore_mtu"
   MTU_POLICY="$restore_policy"
   PROFILE="$restore_profile"
-  if users_isolated_mode; then
-    reconcile_isolated_instances && verify_mita_running
-    return
-  fi
-  rollback_cfg="$(write_server_config 2>/dev/null)" || return 1
-  apply_config "$rollback_cfg" \
-    && start_mita \
-    && verify_mita_running
+  users_isolated_mode || return 1
+  reconcile_isolated_instances && verify_mita_running
 }
 
 do_mtu_config() {
@@ -132,7 +78,7 @@ do_mtu_config() {
   repair_mita_binary_paths 2>/dev/null || true
   load_config_from_mita || return 1
 
-  local old_mtu="$MTU" old_policy="$MTU_POLICY" old_profile="$PROFILE" cfg=""
+  local old_mtu="$MTU" old_policy="$MTU_POLICY" old_profile="$PROFILE"
   msg ""
   t "当前 MTU: ${old_mtu}（$(mtu_policy_label)）" \
     "Current MTU: ${old_mtu} ($(mtu_policy_label))"
@@ -155,25 +101,13 @@ do_mtu_config() {
   PROFILE=custom
 
   admin_lock_acquire || return 1
-  if users_state_exists && [ "$(users_count)" -gt 0 ]; then
-    MULTI_USER_MODE=1
-    if ! reconcile_isolated_instances || ! verify_mita_running; then
-      warn "$(t "新 MTU ${MTU} 未能正常启动，正在回滚到 ${old_mtu}" \
-        "New MTU ${MTU} failed to start; rolling back to ${old_mtu}")"
-      rollback_mtu_change "$old_mtu" "$old_policy" "$old_profile" || true
-      admin_lock_release
-      return 1
-    fi
-  else
-    MULTI_USER_MODE=0
-    if ! cfg="$(write_server_config)" || ! apply_config "$cfg" \
-        || ! start_mita || ! verify_mita_running; then
-      warn "$(t "新 MTU ${MTU} 未能正常启动，正在回滚到 ${old_mtu}" \
-        "New MTU ${MTU} failed to start; rolling back to ${old_mtu}")"
-      rollback_mtu_change "$old_mtu" "$old_policy" "$old_profile" || true
-      admin_lock_release
-      return 1
-    fi
+  MULTI_USER_MODE=1
+  if ! reconcile_isolated_instances || ! verify_mita_running; then
+    warn "$(t "新 MTU ${MTU} 未能正常启动，正在回滚到 ${old_mtu}" \
+      "New MTU ${MTU} failed to start; rolling back to ${old_mtu}")"
+    rollback_mtu_change "$old_mtu" "$old_policy" "$old_profile" || true
+    admin_lock_release
+    return 1
   fi
   if ! save_install_state; then
     warn "$(t '保存 MTU 状态失败，正在恢复原服务端配置' \
@@ -312,66 +246,36 @@ do_start() {
   repair_mita_binary_paths 2>/dev/null || true
   start_mita
   verify_mita_running 1
-  if users_isolated_mode; then
-    t '所有用户专属 mita 实例已启动' 'All dedicated mita user instances started'
-  else
-    t 'mita 服务已启动' 'mita service started'
-  fi
+  t '所有用户专属 mita 实例已启动' 'All dedicated mita user instances started'
 }
 
 do_stop() {
   require_root || return 1
   mita_installed || bail "$(t 'mita 未安装' 'mita is not installed')" || return 1
-  local bin sm iid iname iport
-  if users_isolated_mode; then
-    STAGE="停止专属实例"
-    while IFS=$'\t' read -r iid iname iport; do
-      [ -n "$iid" ] || continue
-      instance_daemon_stop "$iid" 0
-    done < <(users_enabled_instance_rows)
-    t '所有用户专属 mita 实例已停止' 'All dedicated mita user instances stopped'
-    return 0
-  fi
-  bin="$(mita_bin)"
-  sm="$(service_manager)"
-  STAGE="停止服务"
-  run "$bin" stop 2>/dev/null || true
-  case "$sm" in
-    systemd) run systemctl stop mita 2>/dev/null || true ;;
-    openrc) run rc-service mita stop 2>/dev/null || true ;;
-    *) true ;;
-  esac
-  sleep 1
-  t 'mita 服务已停止' 'mita service stopped'
+  users_isolated_mode || bail "$(t 'schema v3 Mieru 状态必须使用 isolated-v2' \
+    'Schema-v3 Mieru state must use isolated-v2')" || return 1
+  local iid iname iport
+  STAGE="停止专属实例"
+  while IFS=$'\t' read -r iid iname iport; do
+    [ -n "$iid" ] || continue
+    instance_daemon_stop "$iid" 0
+  done < <(users_enabled_instance_rows)
+  t '所有用户专属 mita 实例已停止' 'All dedicated mita user instances stopped'
 }
 
 do_restart() {
   require_root || return 1
   mita_installed || bail "$(t 'mita 未安装' 'mita is not installed')" || return 1
   repair_mita_binary_paths 2>/dev/null || true
-  local sm iid iname iport
-  if users_isolated_mode; then
-    STAGE="重启专属实例"
-    while IFS=$'\t' read -r iid iname iport; do
-      [ -n "$iid" ] || continue
-      instance_daemon_stop "$iid" 0
-      instance_start_proxy "$iid" || return 1
-    done < <(users_enabled_instance_rows)
-    verify_mita_running 1
-    t '所有用户专属 mita 实例已重启' 'All dedicated mita user instances restarted'
-    return 0
-  fi
-  sm="$(service_manager)"
-  STAGE="重启服务"
-  case "$sm" in
-    systemd) run systemctl restart mita 2>/dev/null || true ;;
-    openrc)
-      run rc-service mita zap 2>/dev/null || true
-      run rc-service mita restart 2>/dev/null || run rc-service mita start 2>/dev/null || true
-      ;;
-    *) true ;;
-  esac
-  start_mita
+  users_isolated_mode || bail "$(t 'schema v3 Mieru 状态必须使用 isolated-v2' \
+    'Schema-v3 Mieru state must use isolated-v2')" || return 1
+  local iid iname iport
+  STAGE="重启专属实例"
+  while IFS=$'\t' read -r iid iname iport; do
+    [ -n "$iid" ] || continue
+    instance_daemon_stop "$iid" 0
+    instance_start_proxy "$iid" || return 1
+  done < <(users_enabled_instance_rows)
   verify_mita_running 1
-  t 'mita 服务已重启' 'mita service restarted'
+  t '所有用户专属 mita 实例已重启' 'All dedicated mita user instances restarted'
 }

@@ -10,20 +10,6 @@ export NOBRAND_LIB_DIR="$fixture/nobrand-oneclick/lib"
 source_installer
 nb_init_state_layout
 
-# 1.1.0 states had no QUIC fields. The 1.3.0 migration materializes an
-# explicit OFF state instead of guessing from the runtime UDP socket.
-legacy_id=s0000000000000050
-jq -n --arg id "$legacy_id" '{
-  protocol:"snell",instance_id:$id,name:"legacy-v5",version:5,
-  psk:"legacy-psk-safe",listen_host:"0.0.0.0",listen_port:3650,
-  transport:"tcp",advertise_mode:"auto",advertise_host:"",advertise_port:"",
-  enabled:true,created_at:"2026-01-01T00:00:00Z",updated_at:"2026-01-01T00:00:00Z"
-}' >"$NOBRAND_SNELL_STATE_DIR/$legacy_id.json"
-snell_migrate_quic_state_fields
-assert_eq false "$(snell_state_field "$legacy_id" quic_proxy_enabled)" 'legacy v5 migrates to explicit QUIC OFF'
-assert_eq false "$(snell_state_field "$legacy_id" managed_udp)" 'legacy v5 migrates to explicit managed UDP OFF'
-rm -f "$NOBRAND_SNELL_STATE_DIR/$legacy_id.json"
-
 # Request collection: interactive OFF/ON, noninteractive default OFF, and
 # final endpoint collection after an auto-selected TCP/UDP port replacement.
 snell_platform_supported() { return 0; }
@@ -42,12 +28,16 @@ nb_collect_advertise_endpoint_interactive() {
 nb_port_available_for_transport() { return 0; }
 
 reset_request() {
+  # Request globals are consumed indirectly by snell_collect_install_requests.
+  # shellcheck disable=SC2034
   SNELL_VERSION=5
   SNELL_NAME="$1"
+  # shellcheck disable=SC2034
   SNELL_PSK=0123456789abcdef
   SNELL_QUIC_PROXY=""
   SNELL_QUIC_CLI=0
   PORT="$2"
+  # shellcheck disable=SC2034
   PORT_AUTO_SELECTED=0
   ADVERTISE_HOST=""
   ADVERTISE_PORT=""
@@ -85,6 +75,7 @@ assert_eq 3620 "$(tail -n1 "$fixture/endpoint-ports")" \
 
 if (
   reset_request invalid-v4 3634
+  # shellcheck disable=SC2034
   SNELL_VERSION=4 SNELL_QUIC_PROXY=on SNELL_QUIC_CLI=1
   ADVERTISE_HOST=entry.example.com ADVERTISE_PORT=3634 ADVERTISE_CLI=1
   snell_collect_install_requests 0
@@ -130,6 +121,8 @@ nb_firewall_close_pairs() {
   case "$1" in *'UDP|3640'*) udp_owned=0 ;; esac
 }
 
+# Toggle request globals are consumed indirectly by snell_set_quic.
+# shellcheck disable=SC2034
 SNELL_NAME=toggle-v5 SNELL_QUIC_PROXY=on SNELL_QUIC_CLI=1 YES=1
 snell_set_quic >/dev/null
 assert_eq true "$(snell_state_field "$id" quic_proxy_enabled)" 'toggle ON state'
@@ -143,7 +136,10 @@ assert_eq "$created_at" "$(snell_state_field "$id" created_at)" 'toggle ON creat
 
 # Endpoint-only update while QUIC is ON must not touch config/runtime/service/firewall.
 firewall_hash="$(sha256sum "$firewall_log")"
+# Endpoint request globals are consumed indirectly by snell_set_endpoint.
+# shellcheck disable=SC2034
 SNELL_NAME=toggle-v5 YES=1 ADVERTISE_CLI=1 ADVERTISE_AUTO_REQUESTED=0
+# shellcheck disable=SC2034
 ADVERTISE_HOST=new.example.com ADVERTISE_PORT=5640
 snell_set_endpoint >/dev/null
 assert_eq new.example.com "$(snell_state_field "$id" advertise_host)" 'QUIC ON endpoint host update'
@@ -183,7 +179,7 @@ assert_eq true "$(snell_state_field "$id" quic_proxy_enabled)" 'failed disable r
 eval "$original_state_set_quic"
 
 # Backups persist both QUIC booleans. Restore is exercised without running
-# real services; the production restore path still performs v6 migration.
+# real services.
 nobrand_stop_all_services() { :; }
 nobrand_start_enabled_services() { :; }
 archive="$fixture/quic-backup.tar.gz"
@@ -198,6 +194,8 @@ assert_eq true "$(snell_state_field "$id" managed_udp)" 'backup restores managed
 removed_pairs="$fixture/removed-pairs"
 snell_remove_service() { printf '%s\n' "$1" >"$fixture/removed-service"; }
 nb_firewall_close_pairs() { printf '%s\n' "$1" >"$removed_pairs"; }
+# Read indirectly by remove_snell_instance.
+# shellcheck disable=SC2034
 SNELL_NAME=toggle-v5
 remove_snell_instance >/dev/null
 assert_eq "$id" "$(<"$fixture/removed-service")" 'remove exact service id'

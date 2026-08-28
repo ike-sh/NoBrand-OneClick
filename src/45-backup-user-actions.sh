@@ -21,7 +21,7 @@ users_backup_now() {
   if command -v python3 >/dev/null 2>&1; then
     MITA_USERS_BACKUP_DIR="$MITA_USERS_BACKUP_DIR" python3 -c '
 import os, glob
-d=os.environ.get("MITA_USERS_BACKUP_DIR", "/var/lib/mita-oneclick/backups")
+d=os.environ.get("MITA_USERS_BACKUP_DIR", "/var/lib/nobrand-oneclick/mieru/backups")
 files=sorted(glob.glob(os.path.join(d, "users_*.json")), key=os.path.getmtime, reverse=True)
 for f in files[20:]:
     try: os.remove(f)
@@ -39,6 +39,8 @@ import datetime,ipaddress,json,re,sys
 d=json.load(open(sys.argv[1]))
 proto=(sys.argv[2] if len(sys.argv)>2 else "TCP").upper()
 auto_host=(sys.argv[3] if len(sys.argv)>3 else "").strip()
+if d.get("deployment_model") != "isolated-v2":
+    sys.exit(19)
 def normalize_endpoint_host(value):
     value=str(value or "").strip()
     try:
@@ -149,6 +151,7 @@ for u in users:
     u["package"]=package
     u["bandwidth_mbps"]=bw
 d["version"]=2
+d["deployment_model"]="isolated-v2"
 d["protocol"]=proto
 json.dump(d, open(sys.argv[1]+".norm","w"), indent=2)
 ' "$f" "$protocol" "$auto_host" 2>/dev/null || return 1
@@ -438,11 +441,7 @@ do_user_list() {
   load_install_state
   users_ensure_loaded
   if ! users_state_exists || [ "$(users_count)" -eq 0 ]; then
-    t '（无多用户记录；当前为单用户安装，添加用户后将自动迁移）' \
-      '(No multi-user state; single-user install. Adding a user migrates automatically.)'
-    if [ -n "${USERNAME:-}" ]; then
-      t "  主用户: ${USERNAME}  端口: ${PORT:-?}" "  Primary: ${USERNAME}  port: ${PORT:-?}"
-    fi
+    t '（schema v3 中没有 Mieru 用户）' '(No Mieru users in schema v3 state.)'
     return 0
   fi
   msg ""
@@ -513,14 +512,8 @@ do_user_add() {
   [ -z "$requested_advertise_port" ] \
     || requested_advertise_port="$(normalize_uint "$requested_advertise_port")"
   if ! users_state_exists || [ "$(users_count)" -eq 0 ]; then
-    load_config_from_mita || return 1
-    load_credentials_fallback 2>/dev/null || true
-    users_migrate_from_primary || return 1
-    users_state_exists || {
-      warn "$(t '无法迁移现有主用户，已取消新增以避免覆盖服务端账号' \
-        'Could not migrate the existing primary user; add cancelled to avoid overwriting server accounts')"
-      return 1
-    }
+    die "$(t 'schema v3 Mieru 用户状态缺失；请重新执行 fresh install' \
+      'Schema-v3 Mieru user state is missing; perform a fresh install')"
   fi
   if [ -z "$name" ]; then
     if [ "$YES" -eq 1 ]; then
@@ -841,28 +834,18 @@ do_user_scan() {
 do_user_usage() {
   require_root 2>/dev/null || true
   mita_installed || die "$(t 'mita 未安装' 'mita is not installed')"
-  local bin iid iname iport
-  bin="$(mita_bin)"
-  if users_isolated_mode; then
-    while IFS=$'\t' read -r iid iname iport; do
-      [ -n "$iid" ] || continue
-      msg ""
-      t "【${iname} / 专属实例 ${iid}】" "[${iname} / dedicated instance ${iid}]"
-      instance_cmd "$iid" get users 2>/dev/null \
-        || warn "$(t "${iname}: mita get users 不可用" "${iname}: mita get users unavailable")"
-      instance_cmd "$iid" get quotas 2>/dev/null \
-        || warn "$(t "${iname}: mita get quotas 不可用" "${iname}: mita get quotas unavailable")"
-    done < <(users_enabled_instance_rows)
-  else
-    ensure_mita_daemon 2>/dev/null || true
-    wait_mita_socket 10 2>/dev/null || true
+  users_isolated_mode || die "$(t 'schema v3 Mieru 状态必须使用 isolated-v2' \
+    'Schema-v3 Mieru state must use isolated-v2')"
+  local iid iname iport
+  while IFS=$'\t' read -r iid iname iport; do
+    [ -n "$iid" ] || continue
     msg ""
-    t '【用户流量】mita get users' '[User traffic] mita get users'
-    "$bin" get users 2>/dev/null || warn "$(t 'mita get users 不可用' 'mita get users unavailable')"
-    msg ""
-    t '【配额用量】mita get quotas' '[Quota usage] mita get quotas'
-    "$bin" get quotas 2>/dev/null || warn "$(t 'mita get quotas 不可用' 'mita get quotas unavailable')"
-  fi
+    t "【${iname} / 专属实例 ${iid}】" "[${iname} / dedicated instance ${iid}]"
+    instance_cmd "$iid" get users 2>/dev/null \
+      || warn "$(t "${iname}: mita get users 不可用" "${iname}: mita get users unavailable")"
+    instance_cmd "$iid" get quotas 2>/dev/null \
+      || warn "$(t "${iname}: mita get quotas 不可用" "${iname}: mita get quotas unavailable")"
+  done < <(users_enabled_instance_rows)
   msg ""
   t '【本地套餐配置】' '[Local package config]'
   if users_state_exists; then

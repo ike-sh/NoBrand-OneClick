@@ -553,255 +553,29 @@ collect_config_interactive() {
 }
 
 load_config_from_mita() {
-  local desc bin bindings live_mtu=""
   local cli_user="$USERNAME" cli_password="$PASSWORD"
   local cli_port="$PORT" cli_port_range="$PORT_RANGE" cli_protocol="$PROTOCOL"
   local cli_advertise_host="$ADVERTISE_HOST" cli_advertise_port="$ADVERTISE_PORT"
   local cli_mtu_request="$MTU_REQUEST"
-  load_install_state
-  local state_user="$USERNAME" state_password="$PASSWORD"
-  local state_port="$PORT" state_port_range="$PORT_RANGE" state_protocol="$PROTOCOL"
-  local state_mtu="$MTU" state_mtu_policy="$MTU_POLICY"
-  if users_isolated_mode; then
-    users_sync_primary_globals
-    PORT_RANGE=""
-    MTU="$state_mtu"
-    MTU_POLICY="$(normalize_mtu_policy "$state_mtu_policy" 2>/dev/null || printf 'safe')"
-    [ "${USERNAME_CLI:-0}" -eq 1 ] && USERNAME="$cli_user"
-    [ "${PASSWORD_CLI:-0}" -eq 1 ] && PASSWORD="$cli_password"
-    [ "${PORT_CLI:-0}" -eq 1 ] && PORT="$cli_port"
-    [ "${PORT_RANGE_CLI:-0}" -eq 1 ] && { PORT=""; PORT_RANGE="$cli_port_range"; }
-    [ "${PROTOCOL_CLI:-0}" -eq 1 ] && PROTOCOL="$cli_protocol"
-    if [ "${ADVERTISE_CLI:-0}" -eq 1 ]; then
-      ADVERTISE_HOST="$cli_advertise_host"
-      ADVERTISE_PORT="$cli_advertise_port"
-    fi
-    [ "${MTU_CLI:-0}" -eq 1 ] && MTU_REQUEST="$cli_mtu_request"
-    validate_proxy_credentials || return 1
-    return 0
-  fi
-  bin="$(mita_bin)"
-  if ! [ -x "$bin" ]; then
-    recover_deb_mita 2>/dev/null || true
-    bin="$(mita_bin)"
-  fi
-  if ! [ -x "$bin" ]; then
-    bail "$(t '未找到 mita 二进制，自动修复未成功；请重新运行脚本并选择「升级」重新安装' \
-      'mita binary not found and auto-repair failed; re-run the script and choose Upgrade')" || return 1
-  fi
-  desc="$("$bin" describe config 2>/dev/null || true)"
-  if [ -z "$desc" ]; then
-    bail "$(t '无法读取服务端配置。请先使用「服务管理 → 状态」检查；若守护进程未运行: systemctl restart mita' \
-      'Cannot read server config. Use 5) Status; if daemon is down: systemctl restart mita')" || return 1
-  fi
-
-  live_mtu="$(extract_mtu_from_describe "$desc" 2>/dev/null || true)"
-  MTU="$state_mtu"
-  MTU_POLICY="$(normalize_mtu_policy "$state_mtu_policy" 2>/dev/null || printf 'safe')"
-  if valid_mtu "$live_mtu"; then
-    MTU="$live_mtu"
-    if ! grep -q '^MTU_POLICY=' "$MITA_STATE" 2>/dev/null || [ "$state_mtu" != "$live_mtu" ]; then
-      if [ "$live_mtu" -eq 1400 ]; then
-        MTU_POLICY="safe"
-      else
-        MTU_POLICY="custom"
-      fi
-    fi
-  fi
-  if [ "${MTU_CLI:-0}" -eq 1 ]; then
-    MTU_REQUEST="$cli_mtu_request"
-  fi
-
-  USERNAME=""
-  PASSWORD=""
-  if ! command -v python3 >/dev/null 2>&1 \
-     && [ -n "$state_user" ] && [ -n "$state_password" ]; then
-    USERNAME="$state_user"
-    PASSWORD="$state_password"
-  else
-    parse_user_from_describe "$desc" || true
-  fi
-  [ -n "$USERNAME" ] || USERNAME="$state_user"
-  if [ -z "$PASSWORD" ] || [[ "$PASSWORD" == \** ]]; then
-    PASSWORD="$state_password"
-  fi
-  if [ -z "$USERNAME" ] || [ -z "$PASSWORD" ] || [[ "$PASSWORD" == \** ]]; then
-    load_credentials_fallback || true
-  fi
+  load_install_state || return 1
+  users_isolated_mode || {
+    bail "$(t 'schema v3 Mieru 状态必须使用 isolated-v2' \
+      'Schema-v3 Mieru state must use isolated-v2')" || return 1
+  }
+  users_sync_primary_globals
+  PORT_RANGE=""
+  MTU_POLICY="$(normalize_mtu_policy "$MTU_POLICY" 2>/dev/null || printf 'safe')"
   [ "${USERNAME_CLI:-0}" -eq 1 ] && USERNAME="$cli_user"
   [ "${PASSWORD_CLI:-0}" -eq 1 ] && PASSWORD="$cli_password"
-  if [ -z "$USERNAME" ]; then
-    bail "$(t '配置中缺少用户名' 'Missing username in config')" || return 1
-  fi
-  if [ -z "$PASSWORD" ]; then
-    bail "$(t '密码已哈希存储，无法生成节点链接。请使用「重新配置」设置新密码' \
-      'Password is hashed; use 2) Reconfigure to set a new password')" || return 1
-  fi
-  validate_proxy_credentials || return 1
-
-  bindings="$(extract_bindings_from_describe "$desc")"
-  PORT="$state_port"
-  PORT_RANGE="$state_port_range"
-  PROTOCOL="$state_protocol"
-  if [ -n "$bindings" ]; then
-    local pp proto p has_tcp=0 has_udp=0 tcp_port="" primary_port="" live_range=""
-    PORT=""
-    PORT_RANGE=""
-    while IFS= read -r pp; do
-      [ -n "$pp" ] || continue
-      proto="${pp%%|*}"
-      p="${pp#*|}"
-      case "$proto" in
-        TCP)
-          has_tcp=1
-          if [[ "$p" =~ ^[0-9]+$ ]]; then
-            [ -n "$tcp_port" ] || tcp_port="$p"
-            [ -n "$primary_port" ] || primary_port="$p"
-          elif [[ "$p" == *-* ]] && [ -z "$live_range" ]; then
-            live_range="$p"
-          fi
-          ;;
-        UDP)
-          has_udp=1
-          if [[ "$p" =~ ^[0-9]+$ ]] && [ -z "$primary_port" ]; then
-            primary_port="$p"
-          elif [[ "$p" == *-* ]] && [ -z "$live_range" ]; then
-            live_range="$p"
-          fi
-          ;;
-      esac
-    done <<< "$bindings"
-    PORT="${tcp_port:-$primary_port}"
-    PORT_RANGE="$live_range"
-    if [ "$has_tcp" -gt 0 ] && [ "$has_udp" -gt 0 ]; then
-      PROTOCOL="BOTH"
-    elif [ "$has_udp" -gt 0 ]; then
-      PROTOCOL="UDP"
-    else
-      PROTOCOL="TCP"
-    fi
-  fi
-  [ "${PORT_CLI:-0}" -eq 1 ] && { PORT="$cli_port"; PORT_RANGE=""; }
+  [ "${PORT_CLI:-0}" -eq 1 ] && PORT="$cli_port"
   [ "${PORT_RANGE_CLI:-0}" -eq 1 ] && { PORT=""; PORT_RANGE="$cli_port_range"; }
   [ "${PROTOCOL_CLI:-0}" -eq 1 ] && PROTOCOL="$cli_protocol"
-  if [ -n "$PORT_RANGE" ]; then
-    warn "$(t "检测到旧端口段 ${PORT_RANGE}；v2 专属实例将使用其首端口，请在本次重配中确认" \
-      "Legacy port range ${PORT_RANGE} detected; v2 dedicated mode will use its first port, confirm it during reconfigure")"
-    PORT="${PORT_RANGE%-*}"
-    PORT_RANGE=""
+  if [ "${ADVERTISE_CLI:-0}" -eq 1 ]; then
+    ADVERTISE_HOST="$cli_advertise_host"
+    ADVERTISE_PORT="$cli_advertise_port"
   fi
-  # 旧安装：状态无 TRAFFIC_PATTERN 记录、且服务端配置本身无 trafficPattern 时，
-  # 不在客户端配置/重配里凭空注入（保持与服务端一致）；显式 --traffic-pattern 优先
-  if [ "${TRAFFIC_CLI:-0}" -ne 1 ] \
-     && ! grep -q '^TRAFFIC_PATTERN=' "$MITA_STATE" 2>/dev/null \
-     && ! printf '%s' "$desc" | grep -q '"trafficPattern"'; then
-    TRAFFIC_PATTERN="off"
-  fi
-}
-
-parse_user_from_describe() {
-  local desc="$1" line
-  [ -n "$desc" ] || return 1
-  if command -v python3 >/dev/null 2>&1; then
-    line="$(printf '%s' "$desc" | python3 -c '
-import json, sys
-try:
-    data = json.load(sys.stdin)
-except Exception:
-    sys.exit(1)
-users = data.get("users") or []
-if not users:
-    sys.exit(1)
-u = users[0]
-name = u.get("name", "") or ""
-pwd = u.get("password", "") or ""
-print(f"{name}\t{pwd}")
-' 2>/dev/null)" || return 1
-    USERNAME="${line%%$'\t'*}"
-    PASSWORD="${line#*$'\t'}"
-    [ -n "$USERNAME" ] && return 0
-    return 1
-  fi
-  USERNAME="$(printf '%s' "$desc" | sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)"
-  PASSWORD="$(printf '%s' "$desc" | sed -n 's/.*"password"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)"
-  [ -n "$USERNAME" ] && [ -n "$PASSWORD" ]
-}
-
-# The state file intentionally sets USERNAME/PASSWORD inside a subshell; only the
-# serialized line is consumed in the parent.
-# shellcheck disable=SC2030,SC2031
-load_credentials_fallback() {
-  local line
-  if [ -f "$MITA_STATE" ]; then
-    state_file_is_secure "$MITA_STATE" || return 1
-    line="$(
-      (
-        local USERNAME="" PASSWORD=""
-        # shellcheck disable=SC1090
-        source "$MITA_STATE" 2>/dev/null || true
-        printf '%s\t%s' "${USERNAME:-}" "${PASSWORD:-}"
-      )
-    )"
-    [ -z "$USERNAME" ] && USERNAME="${line%%$'\t'*}"
-    if [ -z "$PASSWORD" ] || [[ "$PASSWORD" == \** ]]; then
-      PASSWORD="${line#*$'\t'}"
-    fi
-  fi
-  [ -n "$USERNAME" ] && [ -n "$PASSWORD" ] && [[ "$PASSWORD" != \** ]] && return 0
-  if ! command -v python3 >/dev/null 2>&1; then
-    return 1
-  fi
-  # users.json 是管理面的权威状态；安装状态损坏时也不应先从旧客户端导出恢复凭据。
-  if users_state_exists && state_file_is_secure "$MITA_USERS_STATE"; then
-    line="$(python3 -c '
-import json,sys
-d=json.load(open(sys.argv[1]))
-users=d.get("users") or []
-ordered=[u for u in users if u.get("enabled", True)] + [u for u in users if not u.get("enabled", True)]
-for u in ordered:
-    name=u.get("name") or ""
-    password=u.get("password") or ""
-    if name and password:
-        print(f"{name}\t{password}")
-        raise SystemExit(0)
-raise SystemExit(1)
-' "$MITA_USERS_STATE" 2>/dev/null || true)"
-    [ -z "$USERNAME" ] && USERNAME="${line%%$'\t'*}"
-    if [ -z "$PASSWORD" ] || [[ "$PASSWORD" == \** ]]; then
-      PASSWORD="${line#*$'\t'}"
-    fi
-    [ -n "$USERNAME" ] && [ -n "$PASSWORD" ] && [[ "$PASSWORD" != \** ]] && return 0
-  fi
-
-  # 最后兜底才读取客户端文件，并按 mtime 取最新有效文件，避免恢复到旧密码。
-  line="$(CLIENT_CURRENT_DIR="$(client_current_dir)" python3 - <<'PY' 2>/dev/null || true
-import glob, json, os
-
-paths = glob.glob(os.path.join(os.environ["CLIENT_CURRENT_DIR"], "*.json"))
-paths += glob.glob("/root/mieru_client_*.json")
-paths = sorted(set(paths), key=lambda p: os.path.getmtime(p), reverse=True)
-for path in paths:
-    try:
-        data = json.load(open(path))
-        if "profiles" in data:
-            user = (data.get("profiles") or [{}])[0].get("user") or {}
-        else:
-            user = (data.get("users") or [{}])[0]
-        name = user.get("name") or ""
-        password = user.get("password") or ""
-        if name and password:
-            print(f"{name}\t{password}")
-            raise SystemExit(0)
-    except Exception:
-        continue
-raise SystemExit(1)
-PY
-)"
-  [ -z "$USERNAME" ] && USERNAME="${line%%$'\t'*}"
-  if [ -z "$PASSWORD" ] || [[ "$PASSWORD" == \** ]]; then
-    PASSWORD="${line#*$'\t'}"
-  fi
-  [ -n "$USERNAME" ] && [ -n "$PASSWORD" ] && [[ "$PASSWORD" != \** ]]
+  [ "${MTU_CLI:-0}" -eq 1 ] && MTU_REQUEST="$cli_mtu_request"
+  validate_proxy_credentials
 }
 
 collect_reconfigure_interactive() {
@@ -1020,7 +794,8 @@ EOF
 }
 
 write_server_config() {
-  # 首次安装兼容路径；完成后立即迁移到每用户一个配置/实例。
+  # Single-user semantic builder is retained as the golden-parity primitive;
+  # production schema-v3 installs use the users.json multi-instance branch.
   if [ "${MULTI_USER_MODE:-0}" -eq 1 ] && users_state_exists && [ "$(users_count)" -gt 0 ]; then
     write_server_config_multi
     return

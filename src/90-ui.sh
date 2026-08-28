@@ -130,9 +130,11 @@ show_performance_menu() {
   msg '  6) Traffic Pattern'
   msg '  7) Low Entropy'
   msg '  8) 带宽限制状态'
+  msg '  9) Mieru 版本通道'
+  msg ' 10) 清理并恢复本项目 tc 规则'
   msg '  0) 返回'
   local choice=""
-  read_tty choice "$(t '请选择 [0-8]: ' 'Choose [0-8]: ')" || choice=""
+  read_tty choice "$(t '请选择 [0-10]: ' 'Choose [0-10]: ')" || choice=""
   case "$(printf '%s' "$choice" | tr -d '[:space:]')" in
     1) ACTION=perf ;;
     2) ACTION="profile-config" ;;
@@ -142,6 +144,8 @@ show_performance_menu() {
     6) ACTION="traffic-config" ;;
     7) ACTION="low-entropy-config" ;;
     8) ACTION="rate-status" ;;
+    9) ACTION="version-channel" ;;
+    10) ACTION="rate-restore" ;;
     0) return 2 ;;
     *) warn "$(t '无效选择' 'Invalid choice')"; return 1 ;;
   esac
@@ -189,24 +193,6 @@ show_backup_menu() {
   esac
 }
 
-show_advanced_menu() {
-  msg ""
-  t '【高级设置】' '[Advanced settings]'
-  msg '  1) Mieru 版本通道'
-  msg '  2) 清理并恢复本项目 tc 规则'
-  msg '  3) 帮助 / 全部 CLI 命令'
-  msg '  0) 返回'
-  local choice=""
-  read_tty choice "$(t '请选择 [0-3]: ' 'Choose [0-3]: ')" || choice=""
-  case "$(printf '%s' "$choice" | tr -d '[:space:]')" in
-    1) ACTION="version-channel" ;;
-    2) ACTION="rate-restore" ;;
-    3) ACTION=help ;;
-    0) return 2 ;;
-    *) warn "$(t '无效选择' 'Invalid choice')"; return 1 ;;
-  esac
-}
-
 show_menu() {
   if [ "${DRY_RUN:-0}" -ne 1 ] \
      && [ "${MENU_SCRIPTS_READY:-0}" -eq 0 ] \
@@ -225,7 +211,8 @@ show_menu() {
     version_text="$(t '未安装' 'not installed')"
   fi
   msg ''
-  t '========== Mieru OneClick ==========' '========== Mieru OneClick =========='
+  t '========== NoBrand-OneClick / Mieru ==========' \
+    '========== NoBrand-OneClick / Mieru =========='
   t "作者: ${SCRIPT_AUTHOR} / https://github.com/${SCRIPT_REPO}" \
     "Author: ${SCRIPT_AUTHOR} / https://github.com/${SCRIPT_REPO}"
   t "状态: $([ "$installed" = yes ] && printf '已安装' || printf '未安装')" \
@@ -254,8 +241,8 @@ show_menu() {
   msg ' 10) 卸载'
   msg '  0) 退出'
   msg ""
-  t '快捷命令: 直接输入 mita 打开菜单（不区分大小写）' \
-    'Quick command: type mita to open menu (case-insensitive)'
+  t '快捷命令: nobrand mieru（nb mieru 同义）' \
+    'Quick command: nobrand mieru (or nb mieru)'
   msg ""
   local choice=""
   read_tty choice "$(t '请选择 [0-10]: ' 'Choose [0-10]: ')" || choice=""
@@ -573,7 +560,7 @@ nobrand_menu_loop() {
     msg '  8) 性能 / BBR / FQ（Mieru 公共网络工具）'
     msg '  9) 备份 / 恢复'
     msg ' 10) 帮助 / CLI'
-    msg ' 11) 卸载 NoBrand Snell/HY2/VLESS/Common（保留 Mieru）'
+    msg ' 11) 卸载 NoBrand-OneClick（全部协议）'
     msg '  0) 退出'
     read_tty choice "$(t '请选择 [0-11]: ' 'Choose [0-11]: ')" || choice=""
     case "$choice" in

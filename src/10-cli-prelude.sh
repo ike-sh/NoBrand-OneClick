@@ -3,9 +3,9 @@ if [ -z "${BASH_VERSION:-}" ]; then
   if [ -f /etc/alpine-release ]; then
     echo "Alpine 默认无 bash，请先安装后执行（root 无需 sudo）：" >&2
     echo "  apk add --no-cache bash curl" >&2
-    echo "  curl -fsSL https://raw.githubusercontent.com/ike-sh/NoBrand-OneClick/main/install-nobrand.sh | bash" >&2
+    echo "  curl -fsSL https://github.com/ike-sh/NoBrand-OneClick/releases/latest/download/install-nobrand.sh | bash" >&2
   else
-    echo "  curl -fsSL .../install-mita.sh | sudo bash" >&2
+    echo "  curl -fsSL https://github.com/ike-sh/NoBrand-OneClick/releases/latest/download/install-nobrand.sh | sudo bash" >&2
   fi
   exit 1
 fi
@@ -18,13 +18,13 @@ trap on_error ERR
 
 usage() {
   cat <<EOF
-用法：install-mita.sh [选项]
+用法：nobrand mieru <动作> [选项]
 
-mieru mita 服务端一键安装 ${SCRIPT_VERSION}
+NoBrand-OneClick Mieru 管理 ${SCRIPT_VERSION}
 上游项目：https://github.com/${UPSTREAM_REPO}
 支持系统：Debian/Ubuntu、RHEL/CentOS/Rocky、Alpine Linux
 
-无参数时显示交互菜单；非交互请指定动作：
+执行 nobrand mieru 时显示交互菜单；非交互请指定动作：
   --install           新装 mita（已安装时建议用 --reconfigure）
   --reconfigure       修改端口 / 密码 / 协议（不重装二进制）
   --upgrade           按保存的 stable/latest/pinned 通道升级 mita
@@ -92,33 +92,27 @@ mieru mita 服务端一键安装 ${SCRIPT_VERSION}
   --version           显示版本
 
 快捷命令（子命令不区分大小写）：
-  install-mita                    打开菜单
-  install-mita status             查看状态
-  install-mita perf               只读性能诊断
-  install-mita profile            选择配置预设
-  install-mita reconfigure        重新配置
-  install-mita show               查看节点链接
-  install-mita mtu [auto|数值]    调整 MTU 并重新输出节点配置
-  install-mita users              用户管理列表
-  install-mita user-add --user a --password p
-  install-mita user-del a
-  install-mita restart            重启服务（start/stop 同理）
-  mita-menu                       同上（安装后可用）
-  登录 shell 下输入 mita          管理子命令不区分大小写；mita start/stop/restart 已走干净启停（含 systemd/openrc）
-  其余如 mita run/apply/reload     仍透传官方二进制
+  nobrand mieru                    打开 Mieru 菜单
+  nobrand mieru status             查看状态
+  nobrand mieru perf               只读性能诊断
+  nobrand mieru profile            选择配置预设
+  nobrand mieru reconfigure        重新配置
+  nobrand mieru show               查看节点链接
+  nobrand mieru mtu [auto|数值]    调整 MTU 并重新输出节点配置
+  nobrand mieru users              用户管理列表
+  nobrand mieru user-add --user a --password p
+  nobrand mieru user-del a
+  nobrand mieru restart            重启服务（start/stop 同理）
 
 一键安装（交互式，Debian/Ubuntu/CentOS 等）：
-  curl -fsSL https://raw.githubusercontent.com/ike-sh/NoBrand-OneClick/main/install-nobrand.sh | sudo bash
+  curl -fsSL ${NOBRAND_RELEASE_INSTALLER_URL} | sudo bash
 
 Alpine Linux（无 sudo，需先装 bash）：
   apk add --no-cache bash curl
-  curl -fsSL https://raw.githubusercontent.com/ike-sh/NoBrand-OneClick/main/install-nobrand.sh | bash
-
-Alpine 一行命令：
-  apk add --no-cache bash curl && curl -fsSL https://raw.githubusercontent.com/ike-sh/NoBrand-OneClick/main/install-nobrand.sh | bash
+  curl -fsSL ${NOBRAND_RELEASE_INSTALLER_URL} | bash
 
 非交互示例：
-  curl -fsSL .../install-mita.sh | sudo bash -s -- --install -y --port 2088 --user alice --password 'secret'
+  nobrand mieru install -y --port 2088 --advertise-auto --user alice --password 'secret'
 EOF
 }
 
@@ -149,8 +143,8 @@ t() {
 
 print_banner() {
   msg ""
-  t "mieru mita 服务端一键安装  v${SCRIPT_VERSION}" \
-    "mieru mita server one-click installer  v${SCRIPT_VERSION}"
+  t "NoBrand-OneClick / Mieru  v${SCRIPT_VERSION}" \
+    "NoBrand-OneClick / Mieru  v${SCRIPT_VERSION}"
   t "作者: ${SCRIPT_AUTHOR} / https://github.com/${SCRIPT_REPO}" \
     "Author: ${SCRIPT_AUTHOR} / https://github.com/${SCRIPT_REPO}"
 }
@@ -162,21 +156,21 @@ parse_nobrand_common_option() {
     --port)
       PORT="${2:-}"
       PORT_CLI=1
-      [ -n "$PORT" ] || die "--port 需要端口号"
+      [ -n "$PORT" ] && [[ "$PORT" != --* ]] || die "--port 需要端口号"
       return 2
       ;;
     --advertise-host)
       ADVERTISE_HOST="${2:-}"
       ADVERTISE_CLI=1
       ADVERTISE_AUTO_REQUESTED=0
-      [ -n "$ADVERTISE_HOST" ] || die "--advertise-host 需要地址"
+      [ -n "$ADVERTISE_HOST" ] && [[ "$ADVERTISE_HOST" != --* ]] || die "--advertise-host 需要地址"
       return 2
       ;;
     --advertise-port)
       ADVERTISE_PORT="${2:-}"
       ADVERTISE_CLI=1
       ADVERTISE_AUTO_REQUESTED=0
-      [ -n "$ADVERTISE_PORT" ] || die "--advertise-port 需要端口"
+      [ -n "$ADVERTISE_PORT" ] && [[ "$ADVERTISE_PORT" != --* ]] || die "--advertise-port 需要端口"
       return 2
       ;;
     --advertise-auto)
@@ -318,17 +312,8 @@ parse_nobrand_vless_sudoku_args() {
 }
 
 detect_nobrand_entry() {
-  local entry
-  entry="$(basename -- "$0" 2>/dev/null || printf '%s' "$0")"
-  case "$entry" in
-    install-nobrand.sh|install-nobrand|nobrand|nb) NOBRAND_ENTRY=1 ;;
-  esac
-  if [ "${1:-}" = nobrand ]; then
-    NOBRAND_ENTRY=1
-    shift
-    set -- "$@"
-  fi
-  [ "$NOBRAND_ENTRY" -eq 1 ] || return 0
+  # Every shipped executable is the NoBrand parser. There is deliberately no
+  # legacy basename branch in the 3.0 public API.
   [ "$#" -gt 0 ] || { NOBRAND_ARGS_HANDLED=1; return 0; }
   case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
     mieru)
@@ -337,7 +322,7 @@ detect_nobrand_entry() {
         ACTION="nobrand-mieru-menu"
         NOBRAND_ARGS_HANDLED=1
       else
-        # 将剩余参数交回原 Mieru 解析器，保持兼容 CLI。
+        # The mature Mieru option parser is an internal NoBrand subsystem.
         NOBRAND_REPARSED_ARGS=("$@")
       fi
       ;;
@@ -569,6 +554,7 @@ while [ "$NOBRAND_ARGS_HANDLED" -eq 0 ] && [ $# -gt 0 ]; do
     --protocol)
       PROTOCOL="${2:-}"
       PROTOCOL_CLI=1
+      [ -n "$PROTOCOL" ] && [[ "$PROTOCOL" != --* ]] || die "--protocol 需要 TCP、UDP 或 BOTH"
       shift
       ;;
     --profile)
@@ -580,12 +566,14 @@ while [ "$NOBRAND_ARGS_HANDLED" -eq 0 ] && [ $# -gt 0 ]; do
     --advertise-host|--entry-ip)
       ADVERTISE_HOST="${2:-}"
       ADVERTISE_CLI=1
+      ADVERTISE_AUTO_REQUESTED=0
       [ -n "$ADVERTISE_HOST" ] || die "--advertise-host 需要入口地址"
       shift
       ;;
     --advertise-port|--entry-port)
       ADVERTISE_PORT="${2:-}"
       ADVERTISE_CLI=1
+      ADVERTISE_AUTO_REQUESTED=0
       [ -n "$ADVERTISE_PORT" ] || die "--advertise-port 需要入口端口"
       shift
       ;;
@@ -593,6 +581,7 @@ while [ "$NOBRAND_ARGS_HANDLED" -eq 0 ] && [ $# -gt 0 ]; do
       ADVERTISE_HOST=""
       ADVERTISE_PORT=""
       ADVERTISE_CLI=1
+      ADVERTISE_AUTO_REQUESTED=1
       ;;
     --mtu)
       MTU_REQUEST="${2:-}"
@@ -603,21 +592,29 @@ while [ "$NOBRAND_ARGS_HANDLED" -eq 0 ] && [ $# -gt 0 ]; do
     --traffic-pattern|--traffic)
       TRAFFIC_PATTERN="${2:-}"
       TRAFFIC_CLI=1
+      [ -n "$TRAFFIC_PATTERN" ] && [[ "$TRAFFIC_PATTERN" != --* ]] \
+        || die "--traffic-pattern 需要 off、conservative 或 aggressive"
       shift
       ;;
     --low-entropy)
       LOW_ENTROPY_MODE="${2:-}"
       LOW_ENTROPY_CLI=1
+      [ -n "$LOW_ENTROPY_MODE" ] && [[ "$LOW_ENTROPY_MODE" != --* ]] \
+        || die "--low-entropy 需要 off、56、48、40 或 32"
       shift
       ;;
     --multiplexing)
       MULTIPLEXING="${2:-}"
       MULTIPLEXING_CLI=1
+      [ -n "$MULTIPLEXING" ] && [[ "$MULTIPLEXING" != --* ]] \
+        || die "--multiplexing 需要 off、low、middle 或 high"
       shift
       ;;
     --handshake-mode|--handshake)
       HANDSHAKE_MODE="${2:-}"
       HANDSHAKE_CLI=1
+      [ -n "$HANDSHAKE_MODE" ] && [[ "$HANDSHAKE_MODE" != --* ]] \
+        || die "--handshake-mode 需要 no-wait 或 standard"
       shift
       ;;
     --mieru-channel)
@@ -637,51 +634,61 @@ while [ "$NOBRAND_ARGS_HANDLED" -eq 0 ] && [ $# -gt 0 ]; do
     --user)
       USERNAME="${2:-}"
       USERNAME_CLI=1
+      [ -n "$USERNAME" ] && [[ "$USERNAME" != --* ]] || die "--user 需要用户名"
       shift
       ;;
     --password)
       PASSWORD="${2:-}"
       PASSWORD_CLI=1
+      [ -n "$PASSWORD" ] && [[ "$PASSWORD" != --* ]] || die "--password 需要值"
       shift
       ;;
     --package|--plan)
       USER_PACKAGE="${2:-}"
+      [ -n "$USER_PACKAGE" ] && [[ "$USER_PACKAGE" != --* ]] || die "--package 需要套餐名"
       shift
       ;;
     --quota-mb|--quota)
       USER_QUOTA_MB="${2:-}"
+      [ -n "$USER_QUOTA_MB" ] && [[ "$USER_QUOTA_MB" != --* ]] || die "--quota-mb 需要数值"
       shift
       ;;
     --quota-days)
       USER_QUOTA_DAYS="${2:-}"
+      [ -n "$USER_QUOTA_DAYS" ] && [[ "$USER_QUOTA_DAYS" != --* ]] || die "--quota-days 需要数值"
       shift
       ;;
     --quota-mode)
       USER_QUOTA_MODE="${2:-}"
+      [ -n "$USER_QUOTA_MODE" ] && [[ "$USER_QUOTA_MODE" != --* ]] || die "--quota-mode 需要 rolling 或 calendar"
       shift
       ;;
     --expire|--expires)
       USER_EXPIRE="${2:-}"
+      [ -n "$USER_EXPIRE" ] && [[ "$USER_EXPIRE" != --* ]] || die "--expire 需要日期、+Nd 或 0"
       shift
       ;;
     --bandwidth|--rate|--mbps)
       USER_BANDWIDTH_MBPS="${2:-}"
+      [ -n "$USER_BANDWIDTH_MBPS" ] && [[ "$USER_BANDWIDTH_MBPS" != --* ]] || die "--bandwidth 需要 Mbps 数值"
       shift
       ;;
     --op-user)
       OP_USER="${2:-}"
+      [ -n "$OP_USER" ] && [[ "$OP_USER" != --* ]] || die "--op-user 需要 Linux 用户名"
       shift
       ;;
     --enable-bbr) ENABLE_BBR=1 ;;
     --lang)
       case "${2:-}" in
         en) LANG_ZH=0 ;;
-        zh|*) LANG_ZH=1 ;;
+        zh) LANG_ZH=1 ;;
+        *) die "--lang 需要 zh 或 en" ;;
       esac
       shift
       ;;
     --help|-h) usage; exit 0 ;;
-    --version) echo "${SCRIPT_NAME} Mieru compatibility installer ${SCRIPT_VERSION} by ${SCRIPT_AUTHOR}"; exit 0 ;;
+    --version) printf '%s Mieru %s\nAuthor: %s\n' "$SCRIPT_NAME" "$SCRIPT_VERSION" "$SCRIPT_AUTHOR"; exit 0 ;;
     *)
       if [[ "$1" == --* ]]; then
         die "未知参数：$1（使用 --help 查看帮助）"

@@ -1,62 +1,15 @@
-SCRIPT_VERSION="1.3.0"
+SCRIPT_VERSION="3.0.0"
 SCRIPT_AUTHOR="ike"
 SCRIPT_NAME="NoBrand-OneClick"
 SCRIPT_REPO="ike-sh/NoBrand-OneClick"
+NOBRAND_SCHEMA_VERSION=3
 UPSTREAM_REPO="enfein/mieru"
 TESTED_MIERU_VERSION="3.35.0"
 GITHUB_API="https://api.github.com/repos/${UPSTREAM_REPO}/releases/latest"
 GITHUB_DL="https://github.com/${UPSTREAM_REPO}/releases/download"
-MITA_BIN="/usr/local/bin/mita"
-MITA_REAL_BIN="/usr/local/bin/mita-real"
-MITA_MANAGER_STATE_DIR="${MITA_MANAGER_STATE_DIR:-/var/lib/mita-oneclick}"
-MITA_LEGACY_STATE_DIR="/etc/mita"
-MITA_LEGACY_MARKER="${MITA_LEGACY_STATE_DIR}/.mieru-oneclick"
-MITA_LEGACY_STATE="${MITA_LEGACY_STATE_DIR}/install-state.env"
-MITA_LEGACY_USERS_STATE="${MITA_LEGACY_STATE_DIR}/users.json"
-MITA_LEGACY_USERS_BACKUP_DIR="${MITA_LEGACY_STATE_DIR}/backups"
-MITA_LEGACY_FIREWALL_STATE="${MITA_LEGACY_STATE_DIR}/firewall-owned.bindings"
-MITA_LEGACY_TC_STATE="${MITA_LEGACY_STATE_DIR}/tc-owned.filters"
-MITA_MARKER="${MITA_MARKER:-${MITA_MANAGER_STATE_DIR}/.installed}"
-MITA_STATE="${MITA_STATE:-${MITA_MANAGER_STATE_DIR}/install-state.env}"
-MITA_PRESERVE_PACKAGE_MARKER="${MITA_PRESERVE_PACKAGE_MARKER:-${MITA_MANAGER_STATE_DIR}/preserve-preexisting-package}"
-MITA_PRESERVE_USER_MARKER="${MITA_PRESERVE_USER_MARKER:-${MITA_MANAGER_STATE_DIR}/preserve-preexisting-user}"
-MITA_PRESERVE_GROUP_MARKER="${MITA_PRESERVE_GROUP_MARKER:-${MITA_MANAGER_STATE_DIR}/preserve-preexisting-group}"
-MITA_USERS_STATE="${MITA_USERS_STATE:-${MITA_MANAGER_STATE_DIR}/users.json}"
-MITA_USERS_LOCK="${MITA_USERS_LOCK:-${MITA_MANAGER_STATE_DIR}/users.lock}"
-MITA_USERS_CRON="${MITA_USERS_CRON:-/etc/cron.d/mita-users}"
-MITA_USERS_TIMER="/etc/systemd/system/mita-users-scan.timer"
-MITA_USERS_SERVICE="/etc/systemd/system/mita-users-scan.service"
-MITA_USERS_LOG="${MITA_USERS_LOG:-/var/log/mita-users.log}"
-MITA_USERS_BACKUP_DIR="${MITA_USERS_BACKUP_DIR:-${MITA_MANAGER_STATE_DIR}/backups}"
-MITA_ADMIN_LOCK="${MITA_ADMIN_LOCK:-${MITA_MANAGER_STATE_DIR}/admin.lock}"
-MITA_CLIENT_EXPORT_DIR="${MITA_CLIENT_EXPORT_DIR:-/root/mieru-clients}"
-MITA_LOGROTATE_CONF="${MITA_LOGROTATE_CONF:-/etc/logrotate.d/mita-oneclick}"
-MITA_FIREWALL_OWNED_STATE="${MITA_FIREWALL_OWNED_STATE:-${MITA_MANAGER_STATE_DIR}/firewall-owned.bindings}"
-MITA_FIREWALL_COMMENT="mieru-oneclick"
-MITA_METRICS_FILE="${MITA_METRICS_FILE:-/var/lib/mita/metrics.pb}"
-BBR_SYSCTL_CONF="${BBR_SYSCTL_CONF:-/etc/sysctl.d/mieru_tcp_bbr.conf}"
-BBR_STATE_FILE="${BBR_STATE_FILE:-${MITA_MANAGER_STATE_DIR}/bbr-owned.state}"
-BBR_BACKUP_FILE="${BBR_BACKUP_FILE:-${MITA_MANAGER_STATE_DIR}/bbr-sysctl.backup}"
-MITA_DEPLOYMENT_MODEL="isolated-v2"
-MITA_INSTANCES_DIR="${MITA_INSTANCES_DIR:-/etc/mita/instances}"
-MITA_INSTANCE_RUN_DIR="${MITA_INSTANCE_RUN_DIR:-/run/mita-instances}"
-MITA_INSTANCE_METRICS_DIR="${MITA_INSTANCE_METRICS_DIR:-/var/lib/mita/instances}"
-MITA_INSTANCE_SYSTEMD_TEMPLATE="${MITA_INSTANCE_SYSTEMD_TEMPLATE:-/etc/systemd/system/mita-oneclick@.service}"
-MITA_INSTANCE_TMPFILES="${MITA_INSTANCE_TMPFILES:-/etc/tmpfiles.d/mita-oneclick.conf}"
-MITA_INSTANCE_OPENRC_PREFIX="${MITA_INSTANCE_OPENRC_PREFIX:-/etc/init.d/mita-oneclick-}"
-MITA_INSTANCE_RUNNER="${MITA_INSTANCE_RUNNER:-/usr/local/libexec/mita-instance-run}"
-# 上游没有按用户清零指标的 API。isolated-v2 为每个用户挂载独立 metrics.pb，
-# calendar 因而可以只重置目标用户；password/days 旧方案不会真正清零，已禁用。
-QUOTA_RESET_METHOD="${QUOTA_RESET_METHOD:-metrics}"
-INSTALL_SCRIPT_PATH="/usr/local/bin/install-mita"
-MITA_MENU_PATH="/usr/local/bin/mita-menu"
-MITA_PROFILE_D="/etc/profile.d/mita-oneclick.sh"
-SCRIPT_REPO_RAW="https://raw.githubusercontent.com/${SCRIPT_REPO}/v${SCRIPT_VERSION}/install-nobrand.sh"
-OPENRC_SVC="/etc/init.d/mita"
-SYSTEMD_SVC="/etc/systemd/system/mita.service"
 
-# NoBrand Common Core。Mieru 的权威 state 和 /etc/mita 语义保持不变；这些
-# 路径只管理公共 metadata、Snell 与独立的 Xray-core 协议进程。
+# NoBrand 3.0 has one authoritative root. A directory without the exact v3
+# state marker is legacy/unknown input and is never imported or modified.
 NOBRAND_STATE_DIR="${NOBRAND_STATE_DIR:-/var/lib/nobrand-oneclick}"
 NOBRAND_CONFIG_DIR="${NOBRAND_CONFIG_DIR:-/etc/nobrand-oneclick}"
 NOBRAND_LIB_DIR="${NOBRAND_LIB_DIR:-/usr/local/lib/nobrand-oneclick}"
@@ -69,7 +22,49 @@ NOBRAND_FIREWALL_COMMENT="nobrand-oneclick"
 NOBRAND_INSTALL_SCRIPT_PATH="${NOBRAND_INSTALL_SCRIPT_PATH:-/usr/local/bin/install-nobrand}"
 NOBRAND_COMMAND_PATH="${NOBRAND_COMMAND_PATH:-/usr/local/bin/nobrand}"
 NOBRAND_SHORT_COMMAND_PATH="${NOBRAND_SHORT_COMMAND_PATH:-/usr/local/bin/nb}"
+NOBRAND_RELEASE_INSTALLER_URL="https://github.com/${SCRIPT_REPO}/releases/latest/download/install-nobrand.sh"
+NOBRAND_LEGACY_MIERU_STATE_DIR="${NOBRAND_LEGACY_MIERU_STATE_DIR:-/var/lib/mita-oneclick}"
 
+# Mieru's official runtime remains named mita, but NoBrand always invokes the
+# explicit managed copy below. It is protocol runtime, never a management CLI.
+MITA_MANAGER_STATE_DIR="${MITA_MANAGER_STATE_DIR:-${NOBRAND_STATE_DIR}/mieru}"
+MITA_BIN="${MITA_BIN:-${NOBRAND_BIN_DIR}/mita}"
+MITA_REAL_BIN="${MITA_REAL_BIN:-${MITA_BIN}}"
+MITA_PACKAGE_BIN="${MITA_PACKAGE_BIN:-/usr/bin/mita}"
+MITA_MARKER="${MITA_MARKER:-${MITA_MANAGER_STATE_DIR}/.installed}"
+MITA_STATE="${MITA_STATE:-${MITA_MANAGER_STATE_DIR}/install-state.env}"
+MITA_PRESERVE_PACKAGE_MARKER="${MITA_PRESERVE_PACKAGE_MARKER:-${MITA_MANAGER_STATE_DIR}/preserve-preexisting-package}"
+MITA_PRESERVE_USER_MARKER="${MITA_PRESERVE_USER_MARKER:-${MITA_MANAGER_STATE_DIR}/preserve-preexisting-user}"
+MITA_PRESERVE_GROUP_MARKER="${MITA_PRESERVE_GROUP_MARKER:-${MITA_MANAGER_STATE_DIR}/preserve-preexisting-group}"
+MITA_PRESERVE_SHARED_MARKER="${MITA_PRESERVE_SHARED_MARKER:-${MITA_MANAGER_STATE_DIR}/preserve-preexisting-shared-runtime}"
+MITA_USERS_STATE="${MITA_USERS_STATE:-${MITA_MANAGER_STATE_DIR}/users.json}"
+MITA_USERS_LOCK="${MITA_USERS_LOCK:-${MITA_MANAGER_STATE_DIR}/users.lock}"
+MITA_USERS_CRON="${MITA_USERS_CRON:-/etc/cron.d/nobrand-mieru-users}"
+MITA_USERS_TIMER="${MITA_USERS_TIMER:-/etc/systemd/system/nobrand-mieru-users-scan.timer}"
+MITA_USERS_SERVICE="${MITA_USERS_SERVICE:-/etc/systemd/system/nobrand-mieru-users-scan.service}"
+MITA_USERS_LOG="${MITA_USERS_LOG:-/var/log/nobrand-mieru-users.log}"
+MITA_USERS_BACKUP_DIR="${MITA_USERS_BACKUP_DIR:-${MITA_MANAGER_STATE_DIR}/backups}"
+MITA_ADMIN_LOCK="${MITA_ADMIN_LOCK:-${MITA_MANAGER_STATE_DIR}/admin.lock}"
+MITA_CLIENT_EXPORT_DIR="${MITA_CLIENT_EXPORT_DIR:-/root/nobrand-mieru-clients}"
+MITA_LOGROTATE_CONF="${MITA_LOGROTATE_CONF:-/etc/logrotate.d/nobrand-mieru}"
+MITA_FIREWALL_OWNED_STATE="${MITA_FIREWALL_OWNED_STATE:-${MITA_MANAGER_STATE_DIR}/firewall-owned.bindings}"
+MITA_FIREWALL_COMMENT="nobrand-mieru"
+MITA_METRICS_FILE="${MITA_METRICS_FILE:-/var/lib/mita/metrics.pb}"
+BBR_SYSCTL_CONF="${BBR_SYSCTL_CONF:-/etc/sysctl.d/mieru_tcp_bbr.conf}"
+BBR_STATE_FILE="${BBR_STATE_FILE:-${MITA_MANAGER_STATE_DIR}/bbr-owned.state}"
+BBR_BACKUP_FILE="${BBR_BACKUP_FILE:-${MITA_MANAGER_STATE_DIR}/bbr-sysctl.backup}"
+MITA_DEPLOYMENT_MODEL="isolated-v2"
+MITA_INSTANCES_DIR="${MITA_INSTANCES_DIR:-/etc/mita/instances}"
+MITA_INSTANCE_RUN_DIR="${MITA_INSTANCE_RUN_DIR:-/run/mita-instances}"
+MITA_INSTANCE_METRICS_DIR="${MITA_INSTANCE_METRICS_DIR:-/var/lib/mita/instances}"
+MITA_INSTANCE_SYSTEMD_TEMPLATE="${MITA_INSTANCE_SYSTEMD_TEMPLATE:-/etc/systemd/system/nobrand-mieru@.service}"
+MITA_INSTANCE_TMPFILES="${MITA_INSTANCE_TMPFILES:-/etc/tmpfiles.d/nobrand-mieru.conf}"
+MITA_INSTANCE_OPENRC_PREFIX="${MITA_INSTANCE_OPENRC_PREFIX:-/etc/init.d/nobrand-mieru-}"
+MITA_INSTANCE_RUNNER="${MITA_INSTANCE_RUNNER:-${NOBRAND_LIB_DIR}/mieru-instance-run}"
+# 上游没有按用户清零指标的 API。isolated-v2 为每个用户挂载独立 metrics.pb，
+# calendar 因而可以只重置目标用户；password/days 旧方案不会真正清零，已禁用。
+QUOTA_RESET_METHOD="${QUOTA_RESET_METHOD:-metrics}"
+INSTALL_SCRIPT_PATH="${NOBRAND_INSTALL_SCRIPT_PATH}"
 NOBRAND_SNELL_STATE_DIR="${NOBRAND_SNELL_STATE_DIR:-${NOBRAND_STATE_DIR}/snell/instances}"
 NOBRAND_SNELL_CONFIG_DIR="${NOBRAND_SNELL_CONFIG_DIR:-${NOBRAND_CONFIG_DIR}/snell/instances}"
 NOBRAND_SNELL_RUNTIME_DIR="${NOBRAND_SNELL_RUNTIME_DIR:-${NOBRAND_BIN_DIR}/snell}"
@@ -126,6 +121,7 @@ UNINSTALL_PRESERVE_EXTERNAL=0
 UNINSTALL_PRESERVE_PACKAGE=0
 UNINSTALL_PRESERVE_USER=0
 UNINSTALL_PRESERVE_GROUP=0
+UNINSTALL_PRESERVE_SHARED=0
 MITA_REINSTALL_TRIED=0
 YES=0
 DRY_RUN=0
@@ -192,8 +188,6 @@ TC_PREF_MAX=42999
 # 0=首次安装的短暂兼容路径；1=使用 users.json 管理用户专属实例。
 MULTI_USER_MODE=0
 
-# NoBrand 顶层 CLI 状态。旧 install-mita/mita 路径仍由原解析器处理。
-NOBRAND_ENTRY=0
 NOBRAND_ARGS_HANDLED=0
 NOBRAND_PROTOCOL_FILTER=""
 NOBRAND_BACKUP_ACTION=""

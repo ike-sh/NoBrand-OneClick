@@ -67,11 +67,6 @@ do_doctor() {
       if [ "$(service_manager)" = systemd ]; then
         check "instance service template" "$([ -f "$MITA_INSTANCE_SYSTEMD_TEMPLATE" ] && echo 1 || echo 0)"
         check "instance runtime tmpfiles" "$([ -f "$MITA_INSTANCE_TMPFILES" ] && echo 1 || echo 0)"
-        if systemctl is-active --quiet mita 2>/dev/null; then
-          check "legacy default service" 2 "仍在运行，可能产生端口冲突"
-        else
-          check "legacy default service inactive" 1
-        fi
       else
         check "instance runner" "$([ -x "$MITA_INSTANCE_RUNNER" ] && echo 1 || echo 0)"
       fi
@@ -102,21 +97,7 @@ PY
         fi
       done < <(users_enabled_instance_rows)
     else
-      check "deployment model" 2 "legacy single instance; next managed change will migrate"
-      ensure_mita_daemon 2>/dev/null || true
-      if wait_mita_socket 8 2>/dev/null; then
-        check "daemon socket" 1
-      else
-        check "daemon socket" 0 "未就绪"
-      fi
-      st="$("$bin" status 2>/dev/null || true)"
-      if printf '%s' "$st" | grep -qi RUNNING; then
-        check "proxy RUNNING" 1
-      elif printf '%s' "$st" | grep -qi IDLE; then
-        check "proxy status" 2 "IDLE（可能未 start）"
-      else
-        check "proxy status" 2 "${st:-unknown}"
-      fi
+      check "deployment model" 0 "schema v3 requires isolated-v2"
     fi
   else
     check "mita installed" 0
@@ -125,7 +106,7 @@ PY
   t '【用户状态】' '[Users state]'
   if users_state_exists; then
     check "users.json" 1 "$(users_count) users"
-    local en desired_users actual_users user_diff
+    local en
     en="$(python3 -c '
 import json,sys
 d=json.load(open(sys.argv[1]))
@@ -135,25 +116,8 @@ print(sum(1 for u in (d.get("users") or []) if u.get("enabled",True)))
       "$en$([ "${en:-0}" -eq 0 ] && printf ' (all disabled/expired)' || true)"
     if users_isolated_mode; then
       check "user-to-instance mapping" 1 "$en dedicated instances"
-    elif mita_installed 2>/dev/null \
-       && desired_users="$(users_enabled_names_from_state 2>/dev/null)" \
-       && actual_users="$(mita_actual_user_names 2>/dev/null)"; then
-      user_diff="$(DESIRED="$desired_users" ACTUAL="$actual_users" python3 -c '
-import os
-d=set(filter(None,os.environ.get("DESIRED","").splitlines()))
-a=set(filter(None,os.environ.get("ACTUAL","").splitlines()))
-parts=[]
-if a-d: parts.append("stale="+",".join(sorted(a-d)))
-if d-a: parts.append("missing="+",".join(sorted(d-a)))
-print("; ".join(parts))
-' 2>/dev/null || true)"
-      if [ -z "$user_diff" ]; then
-        check "actual user set" 1 "$en enabled"
-      else
-        check "actual user set" 0 "$user_diff"
-      fi
     else
-      check "actual user set" 2 "无法读取 mita 配置"
+      check "user-to-instance mapping" 0 "schema v3 requires isolated-v2"
     fi
     # 目录权限
     local mode
@@ -164,7 +128,7 @@ print("; ".join(parts))
       check "/etc/mita mode" 2 "$mode (建议 mita:mita 750)"
     fi
   else
-    check "users.json" 2 "单用户或未迁移"
+    check "users.json" 0 "schema v3 Mieru user state missing"
   fi
 
   t '【防火墙所有权】' '[Firewall ownership]'
@@ -178,7 +142,7 @@ print("; ".join(parts))
   doctor_check_tc_limits
 
   t '【定时任务】' '[Scheduler]'
-  if [ -f "$MITA_USERS_TIMER" ] || systemctl is-enabled mita-users-scan.timer >/dev/null 2>&1; then
+  if [ -f "$MITA_USERS_TIMER" ] || systemctl is-enabled nobrand-mieru-users-scan.timer >/dev/null 2>&1; then
     check "systemd timer" 1
   elif [ -f "$MITA_USERS_CRON" ]; then
     check "cron.d" 1 "$MITA_USERS_CRON"
@@ -269,7 +233,7 @@ do_perf() {
   fi
   if command -v ps >/dev/null 2>&1; then
     process_rows="$(ps -eo pid=,pcpu=,rss=,comm=,args= 2>/dev/null \
-      | awk '$4=="mita" || $4=="mita-real" {printf "    PID %-7s CPU %-6s RSS %.1f MiB  %s\n",$1,$2,$3/1024,$4}' \
+      | awk '$4=="mita" {printf "    PID %-7s CPU %-6s RSS %.1f MiB  %s\n",$1,$2,$3/1024,$4}' \
       | head -n 20 || true)"
   fi
   if [ -s "$TC_OWNED_STATE" ]; then

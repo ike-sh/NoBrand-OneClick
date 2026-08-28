@@ -3,10 +3,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 ROOT_ARTIFACT="${ROOT}/install-nobrand.sh"
-ROOT_COMPAT_ARTIFACT="${ROOT}/install-mita.sh"
 DIST_DIR="${ROOT}/dist"
 DIST_ARTIFACT="${DIST_DIR}/install-nobrand.sh"
-DIST_COMPAT_ARTIFACT="${DIST_DIR}/install-mita.sh"
 
 # The order is part of the release format. Do not replace this manifest with a glob.
 MODULES=(
@@ -143,14 +141,6 @@ if [ "$MODE" = check ]; then
     printf 'build: dist/install-nobrand.sh is stale; run scripts/build.sh\n' >&2
     exit 1
   fi
-  if [ ! -f "$ROOT_COMPAT_ARTIFACT" ] || ! cmp -s "$tmp" "$ROOT_COMPAT_ARTIFACT"; then
-    printf 'build: root install-mita.sh compatibility artifact is stale; run scripts/build.sh\n' >&2
-    exit 1
-  fi
-  if [ ! -f "$DIST_COMPAT_ARTIFACT" ] || ! cmp -s "$tmp" "$DIST_COMPAT_ARTIFACT"; then
-    printf 'build: dist/install-mita.sh compatibility artifact is stale; run scripts/build.sh\n' >&2
-    exit 1
-  fi
   printf 'build: generated artifacts are current\n'
   exit 0
 fi
@@ -161,12 +151,8 @@ command cp "$tmp" "$dist_tmp"
 command -v chmod >/dev/null 2>&1 && chmod 0644 "$dist_tmp"
 mv -f "$dist_tmp" "$DIST_ARTIFACT"
 dist_tmp=""
-command cp "$tmp" "$ROOT_COMPAT_ARTIFACT"
-command cp "$tmp" "$DIST_COMPAT_ARTIFACT"
 mv -f "$tmp" "$ROOT_ARTIFACT"
 tmp=""
 
 cmp -s "$ROOT_ARTIFACT" "$DIST_ARTIFACT"
-cmp -s "$ROOT_ARTIFACT" "$ROOT_COMPAT_ARTIFACT"
-cmp -s "$ROOT_ARTIFACT" "$DIST_COMPAT_ARTIFACT"
-printf 'build: wrote %s, %s and Mieru compatibility artifacts\n' "$ROOT_ARTIFACT" "$DIST_ARTIFACT"
+printf 'build: wrote %s and %s\n' "$ROOT_ARTIFACT" "$DIST_ARTIFACT"

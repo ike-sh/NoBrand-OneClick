@@ -36,8 +36,6 @@ export_traffic_pattern_value() {
     if instance_valid_id "$iid"; then
       value="$(instance_cmd "$iid" export traffic-pattern 2>/dev/null | tr -d '\r\n' || true)"
     fi
-  else
-    value="$("$bin" export traffic-pattern 2>/dev/null | tr -d '\r\n' || true)"
   fi
   case "$value" in
     ''|*[!A-Za-z0-9+/=]*) return 0 ;;
@@ -299,7 +297,7 @@ print_protocol_outputs() {
   if [ "$DRY_RUN" -ne 1 ]; then
     # v2.1.0 及更早版本的时间戳文件会造成通配符歧义和旧凭据回退，
     # 成功写入稳定文件后清理这些由脚本生成的旧导出。
-    rm -f /root/mieru_client_*.json 2>/dev/null || true
+    rm -f /root/nobrand_mieru_client_*.json 2>/dev/null || true
     case "${PROTOCOL:-TCP}" in
       TCP) rm -f "${current_dir}/${safe_user}_udp.json" 2>/dev/null || true ;;
       UDP) rm -f "${current_dir}/${safe_user}_tcp.json" 2>/dev/null || true ;;
@@ -445,7 +443,7 @@ install_fresh_isolated() {
   install_self_script
   admin_lock_acquire || return 1
   tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
-  if ! users_migrate_from_primary; then
+  if ! users_initialize_primary; then
     install_fresh_rollback "$tx"
     admin_lock_release
     die "$(t '创建初始用户状态失败' 'Failed to create the initial user state')" || return 1
@@ -453,8 +451,8 @@ install_fresh_isolated() {
   if ! apply_users_config "$tx" 0; then
     install_fresh_rollback "$tx"
     admin_lock_release
-    die "$(t '启动首个用户专属实例失败；未启用旧默认服务' \
-      'Failed to start the first dedicated user instance; the legacy default service was not enabled')" || return 1
+    die "$(t '启动首个用户专属实例失败' \
+      'Failed to start the first dedicated user instance')" || return 1
   fi
   bindings="$(multi_user_port_protocol_pairs)"
   if ! open_firewall_for_pairs "$bindings"; then
@@ -475,6 +473,7 @@ install_fresh_isolated() {
 }
 
 mita_preservable_config_exists() {
-  [ -s "$MITA_STATE" ] && return 0
-  users_state_exists && [ "$(users_count)" -gt 0 ]
+  mita_v3_install_state_valid \
+    && users_isolated_mode \
+    && [ "$(users_count 2>/dev/null || printf 0)" -gt 0 ]
 }

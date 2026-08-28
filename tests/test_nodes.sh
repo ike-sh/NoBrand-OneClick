@@ -38,7 +38,7 @@ vless_sudoku_generate_state "$NOBRAND_VLESS_STATE_FILE" 0.0.0.0 3606 \
 public_ip() { printf 198.51.100.20; }
 nb_service_is_active() {
   case "$1" in
-    mita-oneclick@m000000000000001.service|nobrand-snell@s0000000000000001.service|nobrand-hysteria2|nobrand-vless-sudoku) return 0 ;;
+    nobrand-mieru@m000000000000001.service|nobrand-snell@s0000000000000001.service|nobrand-hysteria2|nobrand-vless-sudoku) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -74,22 +74,6 @@ assert_contains "$vless_filtered" 'VLESS/Sudoku' 'filtered VLESS'
 assert_not_contains "$vless_filtered" 'Snell/v5' 'filtered out Snell from VLESS view'
 
 rm -f "$MITA_USERS_STATE"
-chmod 0700 "$MITA_MANAGER_STATE_DIR"
-{
-  _state_kv PORT 3605
-  _state_kv PROTOCOL TCP
-  _state_kv USERNAME legacy-mieru
-  _state_kv ADVERTISE_HOST legacy.example.com
-  _state_kv ADVERTISE_PORT 10443
-} >"$MITA_STATE"
-chmod 0600 "$MITA_STATE"
-nb_service_is_active() {
-  [ "$1" = mita.service ]
-}
-nb_port_is_listening() {
-  [ "$1:$2" = TCP:3605 ]
-}
-legacy="$(nb_mieru_node_rows)"
-assert_contains "$legacy" 'Mieru/TCP|legacy-mieru|legacy.example.com:10443|Running|TCP' 'legacy single-instance node adapter'
+[ -z "$(nb_mieru_node_rows)" ] || fail 'unified nodes must not read single-instance legacy state'
 
 pass 'unified node view and running/stopped status aggregation'

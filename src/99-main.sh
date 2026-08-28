@@ -1,22 +1,16 @@
 main() {
+  # Help/version are intentionally state-independent. Every other root action
+  # detects legacy/unknown state before it can read or mutate protocol data.
+  case "${ACTION:-menu}" in
+    nobrand-version) nobrand_version; return 0 ;;
+    nobrand-help) nobrand_usage; return 0 ;;
+  esac
   if [ "${DRY_RUN:-0}" -ne 1 ] \
      && [ "$(id -u 2>/dev/null || echo 1)" -eq 0 ]; then
-    ensure_manager_state_layout
-  fi
-  if [ "${NOBRAND_ENTRY:-0}" -eq 1 ] \
-     && [ "${DRY_RUN:-0}" -ne 1 ] \
-     && [ "$(id -u 2>/dev/null || echo 1)" -eq 0 ]; then
-    case "${ACTION:-menu}" in
-      nobrand-version|nobrand-help) ;;
-      *) snell_migrate_removed_v6 || die 'Snell v6 removal migration did not complete safely' ;;
-    esac
+    ensure_manager_state_layout 0
   fi
   if [ -z "$ACTION" ]; then
-    if [ "${NOBRAND_ENTRY:-0}" -eq 1 ]; then
-      nobrand_menu_loop
-    else
-      menu_loop
-    fi
+    nobrand_menu_loop
     exit 0
   fi
   if [ "$ACTION" != "menu" ] && [[ "$ACTION" != nobrand-* ]]; then
@@ -28,7 +22,8 @@ main() {
   fi
   if [ "${DRY_RUN:-0}" -ne 1 ] \
      && [ "$(id -u 2>/dev/null || echo 1)" -eq 0 ] \
-     && mita_installed; then
+     && nb_schema_v3_file_valid \
+     && is_mita_elf_binary "$MITA_BIN"; then
     repair_mita_binary_paths 2>/dev/null || true
   fi
   case "$ACTION" in
@@ -87,8 +82,6 @@ main() {
     nobrand-hy2) nobrand_run_hy2_action ;;
     nobrand-vless-sudoku) nobrand_run_vless_sudoku_action ;;
     nobrand-mieru-menu) menu_loop ;;
-    nobrand-help) nobrand_usage ;;
-    nobrand-version) nobrand_version ;;
     help) usage; exit 0 ;;
     menu)
       menu_loop

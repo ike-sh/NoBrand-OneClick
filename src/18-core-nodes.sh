@@ -13,20 +13,33 @@ nobrand_version() {
 }
 
 nobrand_usage() {
-  cat <<'EOF'
-NoBrand-OneClick — Mieru / Snell v4-v5 / Hysteria2 / VLESS + FinalMask + Sudoku (TCP)
+  cat <<EOF
+NoBrand-OneClick 3.0.0 — Mieru / Snell v4-v5 / Hysteria2 / VLESS + FinalMask + Sudoku (TCP)
 
 用法:
   nobrand                         打开统一菜单
+  nb                              与 nobrand 完全相同的短别名
   nobrand --version               显示产品版本与作者
+  nobrand --help                  显示本帮助
   nobrand status                  综合状态
   nobrand nodes [--protocol P]    查看全部或指定协议节点
   nobrand doctor                  综合诊断（默认不输出 secret）
-  nobrand backup create [FILE]    备份 NoBrand Snell/HY2/VLESS state 与配置
+  nobrand backup create [FILE]    备份 NoBrand 3.0 全部 state 与配置
   nobrand backup restore FILE     恢复 NoBrand 备份
-  nobrand uninstall [-y]          只删除 NoBrand 的 Snell/HY2/VLESS/Common 内容
+  nobrand uninstall [-y]          统一卸载 Mieru/Snell/HY2/VLESS/Common
 
-  nobrand mieru <原 mita 子命令与参数>
+  nobrand mieru                    打开完整 Mieru 菜单
+  nobrand mieru install|reconfigure|upgrade|uninstall|start|stop|restart
+  nobrand mieru status|doctor|perf|show|users
+  nobrand mieru user-add|user-del|user-show|user-set-endpoint
+  nobrand mieru user-set-quota|user-set-expire|user-enable|user-disable
+  nobrand mieru user-scan|user-quota-reset|user-set-rate|user-usage
+  nobrand mieru user-backup|user-restore|user-export|user-import|user-export-clients
+  Mieru 参数: --port --protocol --profile --advertise-host --advertise-port --advertise-auto
+    --mtu --traffic-pattern --low-entropy --multiplexing --handshake-mode
+    --mieru-channel --mieru-version --user --password --package --quota-mb
+    --quota-days --quota-mode --expire --bandwidth --op-user --enable-bbr --lang
+
   nobrand snell install --name NAME [--version 5|4] [--port PORT] [--quic on|off]
       [--advertise-host HOST --advertise-port PORT | --advertise-auto] [-y]
   nobrand snell show|status|doctor|start|stop|restart|remove [--name NAME]
@@ -54,6 +67,9 @@ NoBrand-OneClick — Mieru / Snell v4-v5 / Hysteria2 / VLESS + FinalMask + Sudok
   - 非交互 -y 必须明确给出完整 Display Endpoint 或 --advertise-auto。
   - VLESS Sudoku = plain VLESS + FinalMask(sudoku) + TCP。
   - VLESS Encryption: NOT USED；不调用密钥生成子命令，不保存加密密钥。
+  - Mieru 官方 runtime 仍名为 mita，但它不是管理命令；管理入口只有 nobrand/nb。
+  - v3 state 必须带 schema_version=3；旧 state 不读取、不导入、不删除。
+  - 正式安装器: ${NOBRAND_RELEASE_INSTALLER_URL}
 EOF
 }
 
@@ -85,22 +101,14 @@ nobrand_install_manager_script() {
   else
     chmod 0755 "$NOBRAND_INSTALL_SCRIPT_PATH" || return 1
   fi
-  local wrapper
-  wrapper="$(mktemp_file .sh)" || return 1
-  cat >"$wrapper" <<EOF
-#!/usr/bin/env bash
-exec ${NOBRAND_INSTALL_SCRIPT_PATH} "\$@"
-EOF
-  chmod 0755 "$wrapper" || { rm -f "$wrapper"; return 1; }
-  install -m 0755 "$wrapper" "$NOBRAND_COMMAND_PATH" || { rm -f "$wrapper"; return 1; }
-  install -m 0755 "$wrapper" "$NOBRAND_SHORT_COMMAND_PATH" || { rm -f "$wrapper"; return 1; }
-  rm -f "$wrapper"
+  ln -sfn "$NOBRAND_INSTALL_SCRIPT_PATH" "$NOBRAND_COMMAND_PATH" || return 1
+  ln -sfn "$NOBRAND_COMMAND_PATH" "$NOBRAND_SHORT_COMMAND_PATH" || return 1
 }
 
 nb_mieru_instance_running() {
   local instance_id="$1" transport="$2" port="$3" unit service
-  unit="mita-oneclick@${instance_id}.service"
-  service="mita-oneclick-${instance_id}"
+  unit="nobrand-mieru@${instance_id}.service"
+  service="nobrand-mieru-${instance_id}"
   nb_service_is_active "$unit" "$service" || return 1
   case "$transport" in
     BOTH) nb_port_is_listening TCP "$port" && nb_port_is_listening UDP "$((port + 1))" ;;
@@ -109,45 +117,9 @@ nb_mieru_instance_running() {
 }
 
 # protocol|name|display endpoint|status|transport
-nb_mieru_legacy_node_rows() {
-  local values name port protocol advertise_host advertise_port auto_host effective_host effective_port status
-  [ -s "$MITA_STATE" ] && state_file_is_secure "$MITA_STATE" || return 0
-  values="$(
-    PORT="" PROTOCOL="TCP" ADVERTISE_HOST="" ADVERTISE_PORT="" USERNAME="legacy"
-    # shellcheck disable=SC1090
-    source "$MITA_STATE" 2>/dev/null || exit 0
-    nb_valid_port "${PORT:-}" || exit 0
-    case "${PROTOCOL:-TCP}" in TCP|UDP|BOTH) ;; *) exit 0 ;; esac
-    printf '%s\t%s\t%s\t%s\t%s' "${USERNAME:-legacy}" "$PORT" "$PROTOCOL" \
-      "${ADVERTISE_HOST:-}" "${ADVERTISE_PORT:-}"
-  )"
-  [ -n "$values" ] || return 0
-  IFS=$'\t' read -r name port protocol advertise_host advertise_port <<<"$values"
-  auto_host="$(public_ip 2>/dev/null || printf 'YOUR_SERVER_IP')"
-  effective_host="${advertise_host:-$auto_host}"
-  effective_port="${advertise_port:-$port}"
-  status=Stopped
-  if nb_service_is_active mita.service mita; then
-    case "$protocol" in
-      TCP|UDP) nb_port_is_listening "$protocol" "$port" && status=Running ;;
-      BOTH) nb_port_is_listening TCP "$port" && nb_port_is_listening UDP "$((port + 1))" && status=Running ;;
-    esac
-  fi
-  if [ "$protocol" = BOTH ]; then
-    printf 'Mieru/BOTH|%s|%s:%s (TCP), %s:%s (UDP)|%s|BOTH\n' \
-      "$name" "$effective_host" "$effective_port" "$effective_host" "$((effective_port + 1))" "$status"
-  else
-    printf 'Mieru/%s|%s|%s:%s|%s|%s\n' \
-      "$protocol" "$name" "$effective_host" "$effective_port" "$status" "$protocol"
-  fi
-}
-
 nb_mieru_node_rows() {
   local auto_host instance_id name port protocol advertise_host advertise_port effective_host effective_port status
-  if [ ! -s "$MITA_USERS_STATE" ]; then
-    nb_mieru_legacy_node_rows
-    return 0
-  fi
+  [ -s "$MITA_USERS_STATE" ] || return 0
   command -v python3 >/dev/null 2>&1 || return 0
   auto_host="$(public_ip 2>/dev/null || printf 'YOUR_SERVER_IP')"
   while IFS=$'\t' read -r instance_id name port protocol advertise_host advertise_port; do
@@ -343,6 +315,8 @@ nobrand_backup_create() {
   cat >"$stage/manifest.txt" <<EOF
 project=NoBrand-OneClick
 version=${SCRIPT_VERSION}
+schema_version=${NOBRAND_SCHEMA_VERSION}
+ownership=nobrand-v3
 created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 contents=state,config
 EOF
@@ -377,6 +351,10 @@ nobrand_backup_restore() {
   tar -C "$stage" -xzf "$source" || { rm -rf -- "$stage"; return 1; }
   grep -qx 'project=NoBrand-OneClick' "$stage/manifest.txt" 2>/dev/null \
     || { rm -rf -- "$stage"; die '不是 NoBrand-OneClick 备份'; }
+  grep -qx 'schema_version=3' "$stage/manifest.txt" 2>/dev/null \
+    && grep -qx 'ownership=nobrand-v3' "$stage/manifest.txt" 2>/dev/null \
+    && nb_schema_v3_file_valid "$stage/state/state.json" \
+    || { rm -rf -- "$stage"; die '备份不是 NoBrand schema v3，拒绝导入旧 state'; }
   find "$stage/state" "$stage/config" -type f -name '*.json' -print0 2>/dev/null \
     | while IFS= read -r -d '' file; do jq empty "$file" >/dev/null || exit 1; done \
     || { rm -rf -- "$stage"; die '备份中存在无效 JSON'; }
@@ -397,14 +375,6 @@ nobrand_backup_restore() {
     die '恢复失败，已回滚原 NoBrand state/config'
   fi
   nb_init_state_layout
-  if ! snell_migrate_removed_v6; then
-    find "$safe_state" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + 2>/dev/null || true
-    find "$safe_config" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + 2>/dev/null || true
-    cp -a "$snapshot/state/." "$safe_state/" 2>/dev/null || true
-    cp -a "$snapshot/config/." "$safe_config/" 2>/dev/null || true
-    rm -rf -- "$stage" "$snapshot"
-    die '备份包含无法安全迁移的已移除 Snell v6 state；已回滚原 NoBrand state/config'
-  fi
   nobrand_start_enabled_services || {
     warn '配置已恢复，但部分服务未能启动；请运行 nobrand doctor'
   }
@@ -425,13 +395,18 @@ nobrand_backup_action() {
 
 nobrand_remove_owned_command() {
   local path="$1"
-  [ -f "$path" ] && [ ! -L "$path" ] || return 0
+  [ -e "$path" ] || [ -L "$path" ] || return 0
   case "$path" in
-    /usr/local/bin/install-nobrand|/usr/local/bin/nobrand|/usr/local/bin/nb|*/nobrand-oneclick/*|*/nobrand-oneclick-*/*) ;;
+    "$NOBRAND_INSTALL_SCRIPT_PATH"|"$NOBRAND_COMMAND_PATH"|"$NOBRAND_SHORT_COMMAND_PATH") ;;
     *) warn "拒绝删除 NoBrand command allowlist 以外的路径: $path"; return 1 ;;
   esac
-  if grep -qF 'NoBrand-OneClick' "$path" 2>/dev/null \
-     || grep -qF "$NOBRAND_INSTALL_SCRIPT_PATH" "$path" 2>/dev/null; then
+  if [ -L "$path" ]; then
+    case "$path:$(readlink "$path" 2>/dev/null || true)" in
+      "$NOBRAND_COMMAND_PATH:$NOBRAND_INSTALL_SCRIPT_PATH"|\
+      "$NOBRAND_SHORT_COMMAND_PATH:$NOBRAND_COMMAND_PATH") rm -f "$path" ;;
+      *) warn "拒绝删除目标不属于 NoBrand 的符号链接: $path"; return 1 ;;
+    esac
+  elif grep -qF 'NoBrand-OneClick' "$path" 2>/dev/null; then
     rm -f "$path"
   else
     warn "拒绝删除内容不属于 NoBrand 的命令: $path"
@@ -440,17 +415,20 @@ nobrand_remove_owned_command() {
 }
 
 nobrand_uninstall() {
-  local id port safe_state safe_config safe_lib pairs="" snell_pairs failed=0
+  local id port safe_state safe_config safe_lib pairs="" snell_pairs failed=0 had_mieru=0 saved_yes
   require_root
+  ensure_manager_state_layout 0
+  nb_schema_v3_file_valid || die '未检测到有效的 NoBrand schema v3 state，拒绝卸载未知资源'
   if [ "${YES:-0}" -ne 1 ]; then
-    confirm '确认删除 NoBrand 管理的 Snell/HY2/VLESS/Common state？Mieru 数据会保留。[y/N]: ' \
-      'Remove NoBrand-managed Snell/HY2/VLESS/Common state? Mieru data is preserved. [y/N]: ' \
+    confirm '确认完整卸载 NoBrand 3 管理的 Mieru/Snell/HY2/VLESS/Common？[y/N]: ' \
+      'Completely uninstall NoBrand-3-managed Mieru/Snell/HY2/VLESS/Common resources? [y/N]: ' \
       n \
       || { t '已取消' 'Cancelled'; return 0; }
   fi
   safe_state="$(nb_assert_safe_nobrand_root "$NOBRAND_STATE_DIR" NOBRAND_STATE_DIR)" || return 1
   safe_config="$(nb_assert_safe_nobrand_root "$NOBRAND_CONFIG_DIR" NOBRAND_CONFIG_DIR)" || return 1
   safe_lib="$(nb_assert_safe_nobrand_root "$NOBRAND_LIB_DIR" NOBRAND_LIB_DIR)" || return 1
+  mita_uninstall_target_present && had_mieru=1
   admin_lock_acquire || return 1
   while IFS= read -r id; do
     [ -n "$id" ] || continue
@@ -487,21 +465,32 @@ nobrand_uninstall() {
     /etc/systemd/system/nobrand-snell@.service) rm -f "$NOBRAND_SNELL_SYSTEMD_TEMPLATE" ;;
   esac
   [ "$(nb_service_manager)" != systemd ] || systemctl daemon-reload 2>/dev/null || true
+  admin_lock_release
+
+  if [ "$had_mieru" -eq 1 ]; then
+    saved_yes="$YES"
+    YES=1
+    do_uninstall || { YES="$saved_yes"; return 1; }
+    YES="$saved_yes"
+  fi
+
+  # State/config/lib roots are exact, validated NoBrand roots. Command removal
+  # deliberately happens only after every protocol/resource cleanup succeeds.
   find "$safe_state" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
   find "$safe_config" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
   find "$safe_lib" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
   rmdir "$safe_state" "$safe_config" "$safe_lib" 2>/dev/null || true
-  nobrand_remove_owned_command "$NOBRAND_COMMAND_PATH" || failed=1
   nobrand_remove_owned_command "$NOBRAND_SHORT_COMMAND_PATH" || failed=1
+  nobrand_remove_owned_command "$NOBRAND_COMMAND_PATH" || failed=1
   nobrand_remove_owned_command "$NOBRAND_INSTALL_SCRIPT_PATH" || failed=1
-  admin_lock_release
   [ "$failed" -eq 0 ] || return 1
-  t 'NoBrand Snell/HY2/VLESS/Common 内容已删除；Mieru、/etc/xray、xray.service、ike 均未触碰' \
-    'NoBrand Snell/HY2/VLESS/Common content removed; Mieru, /etc/xray, xray.service, and ike were untouched'
+  t 'NoBrand 3 的 Mieru/Snell/HY2/VLESS/Common 资源与 nobrand/nb 已完整删除；外部资源未触碰' \
+    'NoBrand 3 Mieru/Snell/HY2/VLESS/Common resources and nobrand/nb were removed; external resources were untouched'
 }
 
 nobrand_stop_all_services() {
   local id
+  users_state_exists && isolated_stop_all >/dev/null 2>&1 || true
   while IFS= read -r id; do
     [ -n "$id" ] || continue
     snell_service_action "$id" stop >/dev/null 2>&1 || true
@@ -512,7 +501,19 @@ nobrand_stop_all_services() {
 }
 
 nobrand_start_enabled_services() {
-  local id enabled port pairs failed=0
+  local id name enabled port pairs failed=0
+  if users_state_exists && [ "$(users_count)" -gt 0 ]; then
+    load_install_state || failed=1
+    install_instance_runtime >/dev/null 2>&1 || failed=1
+    while IFS=$'\t' read -r id name port; do
+      [ -n "$id" ] && [ -n "$name" ] && [ -n "$port" ] || continue
+      write_instance_config "$id" "$name" "$port" >/dev/null 2>&1 || failed=1
+    done < <(users_enabled_instance_rows)
+    reconcile_isolated_instances >/dev/null 2>&1 || failed=1
+    apply_tc_limits >/dev/null 2>&1 || failed=1
+    pairs="$(multi_user_port_protocol_pairs 2>/dev/null || true)"
+    [ -z "$pairs" ] || open_firewall_for_pairs "$pairs" >/dev/null 2>&1 || failed=1
+  fi
   while IFS= read -r id; do
     [ -n "$id" ] || continue
     enabled="$(snell_state_field "$id" enabled 2>/dev/null || printf false)"

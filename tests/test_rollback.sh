@@ -105,7 +105,10 @@ run_snell_failure_case() (
   fixed_id=s1111111111111111
   nobrand_prepare_common() { :; }
   snell_collect_install_requests() {
+    # Request globals are consumed indirectly by install_snell.
+    # shellcheck disable=SC2034
     SNELL_VERSION=5 SNELL_NAME="failure-${case_mode}" SNELL_PSK=0123456789abcdef
+    # shellcheck disable=SC2034
     PORT=3691 ADVERTISE_HOST=entry.example.com ADVERTISE_PORT=443
   }
   snell_install_runtime() { :; }

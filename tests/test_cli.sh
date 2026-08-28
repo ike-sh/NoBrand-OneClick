@@ -18,7 +18,7 @@ export TEST_ROOT
 cli_fixture="$(mktemp -d)"
 trap 'rm -rf -- "$cli_fixture"' EXIT
 
-assert_contains "$(parse install-mita.sh status)" 'status|' 'install-mita status stays Mieru'
+assert_contains "$(parse nobrand status)" 'nobrand-status|' 'canonical nobrand status'
 assert_contains "$(parse install-nobrand.sh status)" 'nobrand-status|' 'NoBrand unified status'
 assert_contains "$(parse install-nobrand.sh uninstall -y)" 'nobrand-uninstall|' 'NoBrand uninstall routing'
 assert_contains "$(parse install-nobrand.sh mieru users)" 'user-list|' 'NoBrand Mieru delegation'
@@ -83,7 +83,7 @@ assert_contains "$help" 'VLESS Encryption: NOT USED' 'NoBrand plain VLESS help n
 assert_contains "$help" 'nobrand --version' 'NoBrand version help'
 
 version="$(bash "$TEST_ROOT/install-nobrand.sh" --version)"
-assert_eq $'NoBrand-OneClick 1.3.0\nAuthor: ike' "$version" 'NoBrand product version output'
+assert_eq $'NoBrand-OneClick 3.0.0\nAuthor: ike' "$version" 'NoBrand product version output'
 cp "$TEST_ROOT/install-nobrand.sh" "$cli_fixture/nb"
 short_version="$(bash "$cli_fixture/nb" --version)"
 assert_eq "$version" "$short_version" 'nb version alias'
@@ -97,5 +97,13 @@ fi
 if bash "$TEST_ROOT/install-nobrand.sh" --version extra >/dev/null 2>&1; then
   fail 'version extra argument must fail'
 fi
+
+for option in --protocol --traffic-pattern --low-entropy --multiplexing --handshake-mode \
+  --user --password --package --quota-mb --quota-days --quota-mode --expire \
+  --bandwidth --op-user --lang; do
+  if parse nobrand mieru install "$option" >/dev/null 2>&1; then
+    fail "missing value for ${option} must fail clearly"
+  fi
+done
 
 pass 'NoBrand/Mieru CLI routing and explicit endpoint enforcement'

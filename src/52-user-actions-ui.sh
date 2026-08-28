@@ -150,7 +150,8 @@ do_user_set_endpoint() {
   require_linux
   local requested_name="${USERNAME:-}" requested_host="${ADVERTISE_HOST:-}"
   local requested_port="${ADVERTISE_PORT:-}" requested_cli="${ADVERTISE_CLI:-0}"
-  local name host port actual_port tx auto_host=""
+  local requested_auto="${ADVERTISE_AUTO_REQUESTED:-0}"
+  local name host port actual_port current_host current_port tx auto_host=""
   USERNAME_CLI=0
   ADVERTISE_CLI=0
   load_install_state
@@ -163,10 +164,20 @@ do_user_set_endpoint() {
   fi
   users_name_exists "$name" || die "$(t "用户不存在: $name" "User not found: $name")"
   actual_port="$(users_get_field "$name" port)"
+  current_host="$(users_get_field "$name" advertise_host 2>/dev/null || true)"
+  current_port="$(users_get_field "$name" advertise_port 2>/dev/null || true)"
 
   if [ "$requested_cli" -eq 1 ]; then
-    host="$requested_host"
-    port="$requested_port"
+    if [ "$requested_auto" -eq 1 ]; then
+      host=""
+      port=""
+    else
+      host="${requested_host:-$current_host}"
+      port="${requested_port:-${current_port:-$actual_port}}"
+      if [ -z "$host" ]; then
+        host="$(public_ip 2>/dev/null || true)"
+      fi
+    fi
     validate_advertise_endpoint_values "$host" "$port" "$PROTOCOL" \
       || die "$(t '自定义客户端入口参数无效' 'Invalid custom client entry parameters')"
     [ -z "$port" ] || port="$(normalize_uint "$port")"
@@ -206,6 +217,7 @@ do_user_set_endpoint() {
   fi
   users_tx_commit "$tx"
   admin_lock_release
+  ADVERTISE_AUTO_REQUESTED=0
   t "已更新 ${name} 的客户端展示入口；服务端实例未重启" \
     "Updated ${name} client display endpoint; server instance was not restarted"
   print_user_outputs "$name"

@@ -10,6 +10,8 @@ export NOBRAND_LIB_DIR="$fixture/nobrand-oneclick/lib"
 source_installer
 nb_init_state_layout
 
+# Read indirectly by generate_hysteria2_cert from the sourced installer.
+# shellcheck disable=SC2034
 HY2_SNI=cert.example.com
 generate_hysteria2_cert
 openssl ec -in "$NOBRAND_HY2_KEY_FILE" -noout -text 2>/dev/null | grep -q 'ASN1 OID: prime256v1' \

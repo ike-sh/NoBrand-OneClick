@@ -39,8 +39,12 @@ nobrand_backup_action() { printf 'backup:%s:%s\n' "$NOBRAND_BACKUP_ACTION" "${NO
 nobrand_run_snell_action() {
   printf 'snell:%s:%s:%s\n' "$SNELL_ACTION" "${SNELL_VERSION:-}" "${SNELL_QUIC_PROXY:-}" >>"$action_log"
 }
+# The real menu function reads this test-selection global indirectly.
+# shellcheck disable=SC2034
 snell_menu_select_instance() { SNELL_NAME=menu-v5; }
 set_inputs invalid '' 1 2 3 4 1 4 2 7 1 7 2 8 0
+# Loaded by source_installer; the later definition is the top-level routing stub.
+# shellcheck disable=SC2218
 snell_menu_loop >"$fixture/snell.out"
 snell_output="$(<"$fixture/snell.out")"
 assert_contains "$snell_output" '安装 Snell v5 [推荐]' 'Snell v5 menu default'
@@ -53,6 +57,8 @@ grep -qx 'snell:upgrade:5:on' "$action_log" || fail 'Snell menu v5 upgrade handl
 grep -qx 'snell:upgrade:4:on' "$action_log" || fail 'Snell menu v4 upgrade handler'
 
 set_inputs invalid -1 999 '' 1 2 3 4 5 6 7 8 9 10 11 yes 0
+# Loaded by source_installer; the later definition is the top-level routing stub.
+# shellcheck disable=SC2218
 vless_sudoku_menu_loop >"$fixture/vless.out"
 vless_output="$(<"$fixture/vless.out")"
 assert_contains "$vless_output" 'VLESS Encryption: NOT USED' 'VLESS submenu plain-mode notice'
@@ -62,6 +68,8 @@ done
 
 restore_path="$fixture/backup.tar.gz"
 set_inputs invalid -1 999 '' 1 2 3 "$restore_path" 0
+# Loaded by source_installer; the later definition is the top-level routing stub.
+# shellcheck disable=SC2218
 nobrand_backup_menu_loop >"$fixture/backup.out"
 grep -qx 'backup:create:' "$action_log" || fail 'backup create menu handler'
 grep -qx 'backup:list:' "$action_log" || fail 'backup list menu handler'
@@ -76,6 +84,8 @@ set_inputs invalid -1 999 '' 1 2 3 4 5 6 7 8 9 10 11 0
 nobrand_menu_loop >"$fixture/top.out"
 top_output="$(<"$fixture/top.out")"
 assert_contains "$top_output" 'VLESS + FinalMask + Sudoku (TCP)' 'top VLESS menu visibility'
+assert_contains "$top_output" '卸载 NoBrand-OneClick（全部协议）' 'top unified uninstall label'
+assert_not_contains "$top_output" '保留 Mieru' 'top uninstall must not claim Mieru preservation'
 for item in mieru snell hy2 vless nodes status doctor network backup help uninstall; do
   grep -qx "top:${item}" "$action_log" || fail "top menu handler not reached: $item"
 done

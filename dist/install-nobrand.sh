@@ -15,65 +15,18 @@
 set -euo pipefail
 umask 077
 
-SCRIPT_VERSION="1.3.0"
+SCRIPT_VERSION="3.0.0"
 SCRIPT_AUTHOR="ike"
 SCRIPT_NAME="NoBrand-OneClick"
 SCRIPT_REPO="ike-sh/NoBrand-OneClick"
+NOBRAND_SCHEMA_VERSION=3
 UPSTREAM_REPO="enfein/mieru"
 TESTED_MIERU_VERSION="3.35.0"
 GITHUB_API="https://api.github.com/repos/${UPSTREAM_REPO}/releases/latest"
 GITHUB_DL="https://github.com/${UPSTREAM_REPO}/releases/download"
-MITA_BIN="/usr/local/bin/mita"
-MITA_REAL_BIN="/usr/local/bin/mita-real"
-MITA_MANAGER_STATE_DIR="${MITA_MANAGER_STATE_DIR:-/var/lib/mita-oneclick}"
-MITA_LEGACY_STATE_DIR="/etc/mita"
-MITA_LEGACY_MARKER="${MITA_LEGACY_STATE_DIR}/.mieru-oneclick"
-MITA_LEGACY_STATE="${MITA_LEGACY_STATE_DIR}/install-state.env"
-MITA_LEGACY_USERS_STATE="${MITA_LEGACY_STATE_DIR}/users.json"
-MITA_LEGACY_USERS_BACKUP_DIR="${MITA_LEGACY_STATE_DIR}/backups"
-MITA_LEGACY_FIREWALL_STATE="${MITA_LEGACY_STATE_DIR}/firewall-owned.bindings"
-MITA_LEGACY_TC_STATE="${MITA_LEGACY_STATE_DIR}/tc-owned.filters"
-MITA_MARKER="${MITA_MARKER:-${MITA_MANAGER_STATE_DIR}/.installed}"
-MITA_STATE="${MITA_STATE:-${MITA_MANAGER_STATE_DIR}/install-state.env}"
-MITA_PRESERVE_PACKAGE_MARKER="${MITA_PRESERVE_PACKAGE_MARKER:-${MITA_MANAGER_STATE_DIR}/preserve-preexisting-package}"
-MITA_PRESERVE_USER_MARKER="${MITA_PRESERVE_USER_MARKER:-${MITA_MANAGER_STATE_DIR}/preserve-preexisting-user}"
-MITA_PRESERVE_GROUP_MARKER="${MITA_PRESERVE_GROUP_MARKER:-${MITA_MANAGER_STATE_DIR}/preserve-preexisting-group}"
-MITA_USERS_STATE="${MITA_USERS_STATE:-${MITA_MANAGER_STATE_DIR}/users.json}"
-MITA_USERS_LOCK="${MITA_USERS_LOCK:-${MITA_MANAGER_STATE_DIR}/users.lock}"
-MITA_USERS_CRON="${MITA_USERS_CRON:-/etc/cron.d/mita-users}"
-MITA_USERS_TIMER="/etc/systemd/system/mita-users-scan.timer"
-MITA_USERS_SERVICE="/etc/systemd/system/mita-users-scan.service"
-MITA_USERS_LOG="${MITA_USERS_LOG:-/var/log/mita-users.log}"
-MITA_USERS_BACKUP_DIR="${MITA_USERS_BACKUP_DIR:-${MITA_MANAGER_STATE_DIR}/backups}"
-MITA_ADMIN_LOCK="${MITA_ADMIN_LOCK:-${MITA_MANAGER_STATE_DIR}/admin.lock}"
-MITA_CLIENT_EXPORT_DIR="${MITA_CLIENT_EXPORT_DIR:-/root/mieru-clients}"
-MITA_LOGROTATE_CONF="${MITA_LOGROTATE_CONF:-/etc/logrotate.d/mita-oneclick}"
-MITA_FIREWALL_OWNED_STATE="${MITA_FIREWALL_OWNED_STATE:-${MITA_MANAGER_STATE_DIR}/firewall-owned.bindings}"
-MITA_FIREWALL_COMMENT="mieru-oneclick"
-MITA_METRICS_FILE="${MITA_METRICS_FILE:-/var/lib/mita/metrics.pb}"
-BBR_SYSCTL_CONF="${BBR_SYSCTL_CONF:-/etc/sysctl.d/mieru_tcp_bbr.conf}"
-BBR_STATE_FILE="${BBR_STATE_FILE:-${MITA_MANAGER_STATE_DIR}/bbr-owned.state}"
-BBR_BACKUP_FILE="${BBR_BACKUP_FILE:-${MITA_MANAGER_STATE_DIR}/bbr-sysctl.backup}"
-MITA_DEPLOYMENT_MODEL="isolated-v2"
-MITA_INSTANCES_DIR="${MITA_INSTANCES_DIR:-/etc/mita/instances}"
-MITA_INSTANCE_RUN_DIR="${MITA_INSTANCE_RUN_DIR:-/run/mita-instances}"
-MITA_INSTANCE_METRICS_DIR="${MITA_INSTANCE_METRICS_DIR:-/var/lib/mita/instances}"
-MITA_INSTANCE_SYSTEMD_TEMPLATE="${MITA_INSTANCE_SYSTEMD_TEMPLATE:-/etc/systemd/system/mita-oneclick@.service}"
-MITA_INSTANCE_TMPFILES="${MITA_INSTANCE_TMPFILES:-/etc/tmpfiles.d/mita-oneclick.conf}"
-MITA_INSTANCE_OPENRC_PREFIX="${MITA_INSTANCE_OPENRC_PREFIX:-/etc/init.d/mita-oneclick-}"
-MITA_INSTANCE_RUNNER="${MITA_INSTANCE_RUNNER:-/usr/local/libexec/mita-instance-run}"
-# 上游没有按用户清零指标的 API。isolated-v2 为每个用户挂载独立 metrics.pb，
-# calendar 因而可以只重置目标用户；password/days 旧方案不会真正清零，已禁用。
-QUOTA_RESET_METHOD="${QUOTA_RESET_METHOD:-metrics}"
-INSTALL_SCRIPT_PATH="/usr/local/bin/install-mita"
-MITA_MENU_PATH="/usr/local/bin/mita-menu"
-MITA_PROFILE_D="/etc/profile.d/mita-oneclick.sh"
-SCRIPT_REPO_RAW="https://raw.githubusercontent.com/${SCRIPT_REPO}/v${SCRIPT_VERSION}/install-nobrand.sh"
-OPENRC_SVC="/etc/init.d/mita"
-SYSTEMD_SVC="/etc/systemd/system/mita.service"
 
-# NoBrand Common Core。Mieru 的权威 state 和 /etc/mita 语义保持不变；这些
-# 路径只管理公共 metadata、Snell 与独立的 Xray-core 协议进程。
+# NoBrand 3.0 has one authoritative root. A directory without the exact v3
+# state marker is legacy/unknown input and is never imported or modified.
 NOBRAND_STATE_DIR="${NOBRAND_STATE_DIR:-/var/lib/nobrand-oneclick}"
 NOBRAND_CONFIG_DIR="${NOBRAND_CONFIG_DIR:-/etc/nobrand-oneclick}"
 NOBRAND_LIB_DIR="${NOBRAND_LIB_DIR:-/usr/local/lib/nobrand-oneclick}"
@@ -86,7 +39,49 @@ NOBRAND_FIREWALL_COMMENT="nobrand-oneclick"
 NOBRAND_INSTALL_SCRIPT_PATH="${NOBRAND_INSTALL_SCRIPT_PATH:-/usr/local/bin/install-nobrand}"
 NOBRAND_COMMAND_PATH="${NOBRAND_COMMAND_PATH:-/usr/local/bin/nobrand}"
 NOBRAND_SHORT_COMMAND_PATH="${NOBRAND_SHORT_COMMAND_PATH:-/usr/local/bin/nb}"
+NOBRAND_RELEASE_INSTALLER_URL="https://github.com/${SCRIPT_REPO}/releases/latest/download/install-nobrand.sh"
+NOBRAND_LEGACY_MIERU_STATE_DIR="${NOBRAND_LEGACY_MIERU_STATE_DIR:-/var/lib/mita-oneclick}"
 
+# Mieru's official runtime remains named mita, but NoBrand always invokes the
+# explicit managed copy below. It is protocol runtime, never a management CLI.
+MITA_MANAGER_STATE_DIR="${MITA_MANAGER_STATE_DIR:-${NOBRAND_STATE_DIR}/mieru}"
+MITA_BIN="${MITA_BIN:-${NOBRAND_BIN_DIR}/mita}"
+MITA_REAL_BIN="${MITA_REAL_BIN:-${MITA_BIN}}"
+MITA_PACKAGE_BIN="${MITA_PACKAGE_BIN:-/usr/bin/mita}"
+MITA_MARKER="${MITA_MARKER:-${MITA_MANAGER_STATE_DIR}/.installed}"
+MITA_STATE="${MITA_STATE:-${MITA_MANAGER_STATE_DIR}/install-state.env}"
+MITA_PRESERVE_PACKAGE_MARKER="${MITA_PRESERVE_PACKAGE_MARKER:-${MITA_MANAGER_STATE_DIR}/preserve-preexisting-package}"
+MITA_PRESERVE_USER_MARKER="${MITA_PRESERVE_USER_MARKER:-${MITA_MANAGER_STATE_DIR}/preserve-preexisting-user}"
+MITA_PRESERVE_GROUP_MARKER="${MITA_PRESERVE_GROUP_MARKER:-${MITA_MANAGER_STATE_DIR}/preserve-preexisting-group}"
+MITA_PRESERVE_SHARED_MARKER="${MITA_PRESERVE_SHARED_MARKER:-${MITA_MANAGER_STATE_DIR}/preserve-preexisting-shared-runtime}"
+MITA_USERS_STATE="${MITA_USERS_STATE:-${MITA_MANAGER_STATE_DIR}/users.json}"
+MITA_USERS_LOCK="${MITA_USERS_LOCK:-${MITA_MANAGER_STATE_DIR}/users.lock}"
+MITA_USERS_CRON="${MITA_USERS_CRON:-/etc/cron.d/nobrand-mieru-users}"
+MITA_USERS_TIMER="${MITA_USERS_TIMER:-/etc/systemd/system/nobrand-mieru-users-scan.timer}"
+MITA_USERS_SERVICE="${MITA_USERS_SERVICE:-/etc/systemd/system/nobrand-mieru-users-scan.service}"
+MITA_USERS_LOG="${MITA_USERS_LOG:-/var/log/nobrand-mieru-users.log}"
+MITA_USERS_BACKUP_DIR="${MITA_USERS_BACKUP_DIR:-${MITA_MANAGER_STATE_DIR}/backups}"
+MITA_ADMIN_LOCK="${MITA_ADMIN_LOCK:-${MITA_MANAGER_STATE_DIR}/admin.lock}"
+MITA_CLIENT_EXPORT_DIR="${MITA_CLIENT_EXPORT_DIR:-/root/nobrand-mieru-clients}"
+MITA_LOGROTATE_CONF="${MITA_LOGROTATE_CONF:-/etc/logrotate.d/nobrand-mieru}"
+MITA_FIREWALL_OWNED_STATE="${MITA_FIREWALL_OWNED_STATE:-${MITA_MANAGER_STATE_DIR}/firewall-owned.bindings}"
+MITA_FIREWALL_COMMENT="nobrand-mieru"
+MITA_METRICS_FILE="${MITA_METRICS_FILE:-/var/lib/mita/metrics.pb}"
+BBR_SYSCTL_CONF="${BBR_SYSCTL_CONF:-/etc/sysctl.d/mieru_tcp_bbr.conf}"
+BBR_STATE_FILE="${BBR_STATE_FILE:-${MITA_MANAGER_STATE_DIR}/bbr-owned.state}"
+BBR_BACKUP_FILE="${BBR_BACKUP_FILE:-${MITA_MANAGER_STATE_DIR}/bbr-sysctl.backup}"
+MITA_DEPLOYMENT_MODEL="isolated-v2"
+MITA_INSTANCES_DIR="${MITA_INSTANCES_DIR:-/etc/mita/instances}"
+MITA_INSTANCE_RUN_DIR="${MITA_INSTANCE_RUN_DIR:-/run/mita-instances}"
+MITA_INSTANCE_METRICS_DIR="${MITA_INSTANCE_METRICS_DIR:-/var/lib/mita/instances}"
+MITA_INSTANCE_SYSTEMD_TEMPLATE="${MITA_INSTANCE_SYSTEMD_TEMPLATE:-/etc/systemd/system/nobrand-mieru@.service}"
+MITA_INSTANCE_TMPFILES="${MITA_INSTANCE_TMPFILES:-/etc/tmpfiles.d/nobrand-mieru.conf}"
+MITA_INSTANCE_OPENRC_PREFIX="${MITA_INSTANCE_OPENRC_PREFIX:-/etc/init.d/nobrand-mieru-}"
+MITA_INSTANCE_RUNNER="${MITA_INSTANCE_RUNNER:-${NOBRAND_LIB_DIR}/mieru-instance-run}"
+# 上游没有按用户清零指标的 API。isolated-v2 为每个用户挂载独立 metrics.pb，
+# calendar 因而可以只重置目标用户；password/days 旧方案不会真正清零，已禁用。
+QUOTA_RESET_METHOD="${QUOTA_RESET_METHOD:-metrics}"
+INSTALL_SCRIPT_PATH="${NOBRAND_INSTALL_SCRIPT_PATH}"
 NOBRAND_SNELL_STATE_DIR="${NOBRAND_SNELL_STATE_DIR:-${NOBRAND_STATE_DIR}/snell/instances}"
 NOBRAND_SNELL_CONFIG_DIR="${NOBRAND_SNELL_CONFIG_DIR:-${NOBRAND_CONFIG_DIR}/snell/instances}"
 NOBRAND_SNELL_RUNTIME_DIR="${NOBRAND_SNELL_RUNTIME_DIR:-${NOBRAND_BIN_DIR}/snell}"
@@ -143,6 +138,7 @@ UNINSTALL_PRESERVE_EXTERNAL=0
 UNINSTALL_PRESERVE_PACKAGE=0
 UNINSTALL_PRESERVE_USER=0
 UNINSTALL_PRESERVE_GROUP=0
+UNINSTALL_PRESERVE_SHARED=0
 MITA_REINSTALL_TRIED=0
 YES=0
 DRY_RUN=0
@@ -209,8 +205,6 @@ TC_PREF_MAX=42999
 # 0=首次安装的短暂兼容路径；1=使用 users.json 管理用户专属实例。
 MULTI_USER_MODE=0
 
-# NoBrand 顶层 CLI 状态。旧 install-mita/mita 路径仍由原解析器处理。
-NOBRAND_ENTRY=0
 NOBRAND_ARGS_HANDLED=0
 NOBRAND_PROTOCOL_FILTER=""
 NOBRAND_BACKUP_ACTION=""
@@ -243,9 +237,9 @@ if [ -z "${BASH_VERSION:-}" ]; then
   if [ -f /etc/alpine-release ]; then
     echo "Alpine 默认无 bash，请先安装后执行（root 无需 sudo）：" >&2
     echo "  apk add --no-cache bash curl" >&2
-    echo "  curl -fsSL https://raw.githubusercontent.com/ike-sh/NoBrand-OneClick/main/install-nobrand.sh | bash" >&2
+    echo "  curl -fsSL https://github.com/ike-sh/NoBrand-OneClick/releases/latest/download/install-nobrand.sh | bash" >&2
   else
-    echo "  curl -fsSL .../install-mita.sh | sudo bash" >&2
+    echo "  curl -fsSL https://github.com/ike-sh/NoBrand-OneClick/releases/latest/download/install-nobrand.sh | sudo bash" >&2
   fi
   exit 1
 fi
@@ -258,13 +252,13 @@ trap on_error ERR
 
 usage() {
   cat <<EOF
-用法：install-mita.sh [选项]
+用法：nobrand mieru <动作> [选项]
 
-mieru mita 服务端一键安装 ${SCRIPT_VERSION}
+NoBrand-OneClick Mieru 管理 ${SCRIPT_VERSION}
 上游项目：https://github.com/${UPSTREAM_REPO}
 支持系统：Debian/Ubuntu、RHEL/CentOS/Rocky、Alpine Linux
 
-无参数时显示交互菜单；非交互请指定动作：
+执行 nobrand mieru 时显示交互菜单；非交互请指定动作：
   --install           新装 mita（已安装时建议用 --reconfigure）
   --reconfigure       修改端口 / 密码 / 协议（不重装二进制）
   --upgrade           按保存的 stable/latest/pinned 通道升级 mita
@@ -332,33 +326,27 @@ mieru mita 服务端一键安装 ${SCRIPT_VERSION}
   --version           显示版本
 
 快捷命令（子命令不区分大小写）：
-  install-mita                    打开菜单
-  install-mita status             查看状态
-  install-mita perf               只读性能诊断
-  install-mita profile            选择配置预设
-  install-mita reconfigure        重新配置
-  install-mita show               查看节点链接
-  install-mita mtu [auto|数值]    调整 MTU 并重新输出节点配置
-  install-mita users              用户管理列表
-  install-mita user-add --user a --password p
-  install-mita user-del a
-  install-mita restart            重启服务（start/stop 同理）
-  mita-menu                       同上（安装后可用）
-  登录 shell 下输入 mita          管理子命令不区分大小写；mita start/stop/restart 已走干净启停（含 systemd/openrc）
-  其余如 mita run/apply/reload     仍透传官方二进制
+  nobrand mieru                    打开 Mieru 菜单
+  nobrand mieru status             查看状态
+  nobrand mieru perf               只读性能诊断
+  nobrand mieru profile            选择配置预设
+  nobrand mieru reconfigure        重新配置
+  nobrand mieru show               查看节点链接
+  nobrand mieru mtu [auto|数值]    调整 MTU 并重新输出节点配置
+  nobrand mieru users              用户管理列表
+  nobrand mieru user-add --user a --password p
+  nobrand mieru user-del a
+  nobrand mieru restart            重启服务（start/stop 同理）
 
 一键安装（交互式，Debian/Ubuntu/CentOS 等）：
-  curl -fsSL https://raw.githubusercontent.com/ike-sh/NoBrand-OneClick/main/install-nobrand.sh | sudo bash
+  curl -fsSL ${NOBRAND_RELEASE_INSTALLER_URL} | sudo bash
 
 Alpine Linux（无 sudo，需先装 bash）：
   apk add --no-cache bash curl
-  curl -fsSL https://raw.githubusercontent.com/ike-sh/NoBrand-OneClick/main/install-nobrand.sh | bash
-
-Alpine 一行命令：
-  apk add --no-cache bash curl && curl -fsSL https://raw.githubusercontent.com/ike-sh/NoBrand-OneClick/main/install-nobrand.sh | bash
+  curl -fsSL ${NOBRAND_RELEASE_INSTALLER_URL} | bash
 
 非交互示例：
-  curl -fsSL .../install-mita.sh | sudo bash -s -- --install -y --port 2088 --user alice --password 'secret'
+  nobrand mieru install -y --port 2088 --advertise-auto --user alice --password 'secret'
 EOF
 }
 
@@ -389,8 +377,8 @@ t() {
 
 print_banner() {
   msg ""
-  t "mieru mita 服务端一键安装  v${SCRIPT_VERSION}" \
-    "mieru mita server one-click installer  v${SCRIPT_VERSION}"
+  t "NoBrand-OneClick / Mieru  v${SCRIPT_VERSION}" \
+    "NoBrand-OneClick / Mieru  v${SCRIPT_VERSION}"
   t "作者: ${SCRIPT_AUTHOR} / https://github.com/${SCRIPT_REPO}" \
     "Author: ${SCRIPT_AUTHOR} / https://github.com/${SCRIPT_REPO}"
 }
@@ -402,21 +390,21 @@ parse_nobrand_common_option() {
     --port)
       PORT="${2:-}"
       PORT_CLI=1
-      [ -n "$PORT" ] || die "--port 需要端口号"
+      [ -n "$PORT" ] && [[ "$PORT" != --* ]] || die "--port 需要端口号"
       return 2
       ;;
     --advertise-host)
       ADVERTISE_HOST="${2:-}"
       ADVERTISE_CLI=1
       ADVERTISE_AUTO_REQUESTED=0
-      [ -n "$ADVERTISE_HOST" ] || die "--advertise-host 需要地址"
+      [ -n "$ADVERTISE_HOST" ] && [[ "$ADVERTISE_HOST" != --* ]] || die "--advertise-host 需要地址"
       return 2
       ;;
     --advertise-port)
       ADVERTISE_PORT="${2:-}"
       ADVERTISE_CLI=1
       ADVERTISE_AUTO_REQUESTED=0
-      [ -n "$ADVERTISE_PORT" ] || die "--advertise-port 需要端口"
+      [ -n "$ADVERTISE_PORT" ] && [[ "$ADVERTISE_PORT" != --* ]] || die "--advertise-port 需要端口"
       return 2
       ;;
     --advertise-auto)
@@ -558,17 +546,8 @@ parse_nobrand_vless_sudoku_args() {
 }
 
 detect_nobrand_entry() {
-  local entry
-  entry="$(basename -- "$0" 2>/dev/null || printf '%s' "$0")"
-  case "$entry" in
-    install-nobrand.sh|install-nobrand|nobrand|nb) NOBRAND_ENTRY=1 ;;
-  esac
-  if [ "${1:-}" = nobrand ]; then
-    NOBRAND_ENTRY=1
-    shift
-    set -- "$@"
-  fi
-  [ "$NOBRAND_ENTRY" -eq 1 ] || return 0
+  # Every shipped executable is the NoBrand parser. There is deliberately no
+  # legacy basename branch in the 3.0 public API.
   [ "$#" -gt 0 ] || { NOBRAND_ARGS_HANDLED=1; return 0; }
   case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
     mieru)
@@ -577,7 +556,7 @@ detect_nobrand_entry() {
         ACTION="nobrand-mieru-menu"
         NOBRAND_ARGS_HANDLED=1
       else
-        # 将剩余参数交回原 Mieru 解析器，保持兼容 CLI。
+        # The mature Mieru option parser is an internal NoBrand subsystem.
         NOBRAND_REPARSED_ARGS=("$@")
       fi
       ;;
@@ -809,6 +788,7 @@ while [ "$NOBRAND_ARGS_HANDLED" -eq 0 ] && [ $# -gt 0 ]; do
     --protocol)
       PROTOCOL="${2:-}"
       PROTOCOL_CLI=1
+      [ -n "$PROTOCOL" ] && [[ "$PROTOCOL" != --* ]] || die "--protocol 需要 TCP、UDP 或 BOTH"
       shift
       ;;
     --profile)
@@ -820,12 +800,14 @@ while [ "$NOBRAND_ARGS_HANDLED" -eq 0 ] && [ $# -gt 0 ]; do
     --advertise-host|--entry-ip)
       ADVERTISE_HOST="${2:-}"
       ADVERTISE_CLI=1
+      ADVERTISE_AUTO_REQUESTED=0
       [ -n "$ADVERTISE_HOST" ] || die "--advertise-host 需要入口地址"
       shift
       ;;
     --advertise-port|--entry-port)
       ADVERTISE_PORT="${2:-}"
       ADVERTISE_CLI=1
+      ADVERTISE_AUTO_REQUESTED=0
       [ -n "$ADVERTISE_PORT" ] || die "--advertise-port 需要入口端口"
       shift
       ;;
@@ -833,6 +815,7 @@ while [ "$NOBRAND_ARGS_HANDLED" -eq 0 ] && [ $# -gt 0 ]; do
       ADVERTISE_HOST=""
       ADVERTISE_PORT=""
       ADVERTISE_CLI=1
+      ADVERTISE_AUTO_REQUESTED=1
       ;;
     --mtu)
       MTU_REQUEST="${2:-}"
@@ -843,21 +826,29 @@ while [ "$NOBRAND_ARGS_HANDLED" -eq 0 ] && [ $# -gt 0 ]; do
     --traffic-pattern|--traffic)
       TRAFFIC_PATTERN="${2:-}"
       TRAFFIC_CLI=1
+      [ -n "$TRAFFIC_PATTERN" ] && [[ "$TRAFFIC_PATTERN" != --* ]] \
+        || die "--traffic-pattern 需要 off、conservative 或 aggressive"
       shift
       ;;
     --low-entropy)
       LOW_ENTROPY_MODE="${2:-}"
       LOW_ENTROPY_CLI=1
+      [ -n "$LOW_ENTROPY_MODE" ] && [[ "$LOW_ENTROPY_MODE" != --* ]] \
+        || die "--low-entropy 需要 off、56、48、40 或 32"
       shift
       ;;
     --multiplexing)
       MULTIPLEXING="${2:-}"
       MULTIPLEXING_CLI=1
+      [ -n "$MULTIPLEXING" ] && [[ "$MULTIPLEXING" != --* ]] \
+        || die "--multiplexing 需要 off、low、middle 或 high"
       shift
       ;;
     --handshake-mode|--handshake)
       HANDSHAKE_MODE="${2:-}"
       HANDSHAKE_CLI=1
+      [ -n "$HANDSHAKE_MODE" ] && [[ "$HANDSHAKE_MODE" != --* ]] \
+        || die "--handshake-mode 需要 no-wait 或 standard"
       shift
       ;;
     --mieru-channel)
@@ -877,51 +868,61 @@ while [ "$NOBRAND_ARGS_HANDLED" -eq 0 ] && [ $# -gt 0 ]; do
     --user)
       USERNAME="${2:-}"
       USERNAME_CLI=1
+      [ -n "$USERNAME" ] && [[ "$USERNAME" != --* ]] || die "--user 需要用户名"
       shift
       ;;
     --password)
       PASSWORD="${2:-}"
       PASSWORD_CLI=1
+      [ -n "$PASSWORD" ] && [[ "$PASSWORD" != --* ]] || die "--password 需要值"
       shift
       ;;
     --package|--plan)
       USER_PACKAGE="${2:-}"
+      [ -n "$USER_PACKAGE" ] && [[ "$USER_PACKAGE" != --* ]] || die "--package 需要套餐名"
       shift
       ;;
     --quota-mb|--quota)
       USER_QUOTA_MB="${2:-}"
+      [ -n "$USER_QUOTA_MB" ] && [[ "$USER_QUOTA_MB" != --* ]] || die "--quota-mb 需要数值"
       shift
       ;;
     --quota-days)
       USER_QUOTA_DAYS="${2:-}"
+      [ -n "$USER_QUOTA_DAYS" ] && [[ "$USER_QUOTA_DAYS" != --* ]] || die "--quota-days 需要数值"
       shift
       ;;
     --quota-mode)
       USER_QUOTA_MODE="${2:-}"
+      [ -n "$USER_QUOTA_MODE" ] && [[ "$USER_QUOTA_MODE" != --* ]] || die "--quota-mode 需要 rolling 或 calendar"
       shift
       ;;
     --expire|--expires)
       USER_EXPIRE="${2:-}"
+      [ -n "$USER_EXPIRE" ] && [[ "$USER_EXPIRE" != --* ]] || die "--expire 需要日期、+Nd 或 0"
       shift
       ;;
     --bandwidth|--rate|--mbps)
       USER_BANDWIDTH_MBPS="${2:-}"
+      [ -n "$USER_BANDWIDTH_MBPS" ] && [[ "$USER_BANDWIDTH_MBPS" != --* ]] || die "--bandwidth 需要 Mbps 数值"
       shift
       ;;
     --op-user)
       OP_USER="${2:-}"
+      [ -n "$OP_USER" ] && [[ "$OP_USER" != --* ]] || die "--op-user 需要 Linux 用户名"
       shift
       ;;
     --enable-bbr) ENABLE_BBR=1 ;;
     --lang)
       case "${2:-}" in
         en) LANG_ZH=0 ;;
-        zh|*) LANG_ZH=1 ;;
+        zh) LANG_ZH=1 ;;
+        *) die "--lang 需要 zh 或 en" ;;
       esac
       shift
       ;;
     --help|-h) usage; exit 0 ;;
-    --version) echo "${SCRIPT_NAME} Mieru compatibility installer ${SCRIPT_VERSION} by ${SCRIPT_AUTHOR}"; exit 0 ;;
+    --version) printf '%s Mieru %s\nAuthor: %s\n' "$SCRIPT_NAME" "$SCRIPT_VERSION" "$SCRIPT_AUTHOR"; exit 0 ;;
     *)
       if [[ "$1" == --* ]]; then
         die "未知参数：$1（使用 --help 查看帮助）"
@@ -959,91 +960,79 @@ state_file_is_secure() {
   secure_stat_path "$parent" dir && secure_stat_path "$path" file
 }
 
-secure_migrate_root_file() {
-  local src="$1" dest="$2" mode="${3:-0600}"
-  [ -e "$dest" ] && return 0
-  [ -f "$src" ] && [ ! -L "$src" ] || return 0
-  command -v python3 >/dev/null 2>&1 || {
-    warn "$(t "无法安全迁移旧状态（缺少 python3）: ${src}" \
-      "Cannot securely migrate legacy state without python3: ${src}")"
-    return 1
-  }
-  python3 - "$src" "$dest" "$mode" <<'PY'
-import os, stat, sys, tempfile
-
-src, dest, mode_text = sys.argv[1:4]
-flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-fd = os.open(src, flags)
-try:
-    info = os.fstat(fd)
-    if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
-        raise PermissionError("legacy state is not a root-owned protected regular file")
-    chunks = []
-    while True:
-        chunk = os.read(fd, 1024 * 1024)
-        if not chunk:
-            break
-        chunks.append(chunk)
-        if sum(map(len, chunks)) > 64 * 1024 * 1024:
-            raise ValueError("legacy state is unexpectedly large")
-finally:
-    os.close(fd)
-
-parent = os.path.dirname(dest)
-os.makedirs(parent, mode=0o700, exist_ok=True)
-os.chown(parent, 0, 0)
-os.chmod(parent, 0o700)
-tmp_fd, tmp_path = tempfile.mkstemp(prefix=".migrate-", dir=parent)
-try:
-    os.fchmod(tmp_fd, int(mode_text, 8))
-    os.write(tmp_fd, b"".join(chunks))
-    os.fsync(tmp_fd)
-    os.close(tmp_fd)
-    tmp_fd = -1
-    os.replace(tmp_path, dest)
-finally:
-    if tmp_fd >= 0:
-        os.close(tmp_fd)
-    try:
-        os.unlink(tmp_path)
-    except FileNotFoundError:
-        pass
+nb_schema_v3_file_valid() {
+  local path="${1:-$NOBRAND_REGISTRY_FILE}"
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  if command -v jq >/dev/null 2>&1; then
+    jq -e --argjson schema "$NOBRAND_SCHEMA_VERSION" '
+      .schema_version == $schema
+      and .project == "NoBrand-OneClick"
+      and .ownership == "nobrand-v3"
+    ' "$path" >/dev/null 2>&1
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 - "$path" "$NOBRAND_SCHEMA_VERSION" <<'PY' >/dev/null 2>&1
+import json, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+raise SystemExit(0 if doc.get("schema_version") == int(sys.argv[2])
+                 and doc.get("project") == "NoBrand-OneClick"
+                 and doc.get("ownership") == "nobrand-v3" else 1)
 PY
+  else
+    grep -Eq '"schema_version"[[:space:]]*:[[:space:]]*3([,}])' "$path" \
+      && grep -Eq '"project"[[:space:]]*:[[:space:]]*"NoBrand-OneClick"' "$path" \
+      && grep -Eq '"ownership"[[:space:]]*:[[:space:]]*"nobrand-v3"' "$path"
+  fi
+}
+
+nb_legacy_state_detected() {
+  # Test sandboxes can override the old Mieru path. The production default is
+  # intentionally outside the v3 root and is never read or removed here.
+  [ -e "$NOBRAND_LEGACY_MIERU_STATE_DIR" ]
+}
+
+nb_fail_legacy_state() {
+  die "$(t \
+    '检测到旧版安装数据。NoBrand-OneClick 3.0.0 不提供旧用户自动迁移；请先备份并清理旧安装后重新部署。' \
+    'Legacy installation data was detected. NoBrand-OneClick 3.0.0 does not migrate old users; back it up, clean the old installation, then deploy fresh.')"
+}
+
+nb_write_schema_v3_file() {
+  local tmp
+  tmp="$(mktemp "${NOBRAND_REGISTRY_FILE}.tmp.XXXXXX")" || return 1
+  if ! printf '%s\n' \
+      "{\"schema_version\":${NOBRAND_SCHEMA_VERSION},\"project\":\"NoBrand-OneClick\",\"ownership\":\"nobrand-v3\",\"author\":\"ike\"}" \
+      >"$tmp" \
+    || ! chmod 0600 "$tmp" \
+    || ! mv -f "$tmp" "$NOBRAND_REGISTRY_FILE"; then
+    rm -f "$tmp"
+    return 1
+  fi
 }
 
 ensure_manager_state_layout() {
   local create="${1:-0}"
   [ "${DRY_RUN:-0}" -eq 1 ] && return 0
-  if [ "$create" -ne 1 ] && [ ! -d "$MITA_MANAGER_STATE_DIR" ] \
-     && [ ! -e "$MITA_LEGACY_STATE" ] && [ ! -e "$MITA_LEGACY_USERS_STATE" ] \
-     && [ ! -e "$MITA_LEGACY_FIREWALL_STATE" ] && [ ! -e "$MITA_LEGACY_TC_STATE" ] \
-     && [ ! -d "$MITA_LEGACY_USERS_BACKUP_DIR" ] && [ ! -e "$MITA_LEGACY_MARKER" ]; then
+  nb_legacy_state_detected && nb_fail_legacy_state
+
+  if [ -e "$NOBRAND_STATE_DIR" ]; then
+    [ -d "$NOBRAND_STATE_DIR" ] && [ ! -L "$NOBRAND_STATE_DIR" ] || nb_fail_legacy_state
+    nb_schema_v3_file_valid || nb_fail_legacy_state
+  elif [ "$create" -eq 1 ]; then
+    mkdir -p "$NOBRAND_STATE_DIR" || return 1
+    chmod 0700 "$NOBRAND_STATE_DIR" || return 1
+    chown root:root "$NOBRAND_STATE_DIR" 2>/dev/null || true
+    nb_write_schema_v3_file || return 1
+  else
     return 0
   fi
-  install -d -o root -g root -m 0700 "$MITA_MANAGER_STATE_DIR" "$MITA_USERS_BACKUP_DIR"
 
-  secure_migrate_root_file "$MITA_LEGACY_STATE" "$MITA_STATE" 0600
-  secure_migrate_root_file "$MITA_LEGACY_USERS_STATE" "$MITA_USERS_STATE" 0600
-  secure_migrate_root_file "$MITA_LEGACY_FIREWALL_STATE" "$MITA_FIREWALL_OWNED_STATE" 0600
-  secure_migrate_root_file "$MITA_LEGACY_TC_STATE" "$TC_OWNED_STATE" 0600
-
-  local legacy_backup dest
-  if [ -d "$MITA_LEGACY_USERS_BACKUP_DIR" ]; then
-    for legacy_backup in "$MITA_LEGACY_USERS_BACKUP_DIR"/users_*.json; do
-      [ -f "$legacy_backup" ] || continue
-      dest="${MITA_USERS_BACKUP_DIR}/$(basename "$legacy_backup")"
-      secure_migrate_root_file "$legacy_backup" "$dest" 0600
-    done
-  fi
-  if [ -e "$MITA_LEGACY_MARKER" ] && [ ! -e "$MITA_MARKER" ]; then
-    install -o root -g root -m 0600 /dev/null "$MITA_MARKER"
-  fi
-
-  [ ! -e "$MITA_STATE" ] || rm -f "$MITA_LEGACY_STATE"
-  [ ! -e "$MITA_USERS_STATE" ] || rm -f "$MITA_LEGACY_USERS_STATE"
-  [ ! -e "$MITA_FIREWALL_OWNED_STATE" ] || rm -f "$MITA_LEGACY_FIREWALL_STATE"
-  [ ! -e "$TC_OWNED_STATE" ] || rm -f "$MITA_LEGACY_TC_STATE"
-  rm -f "${MITA_LEGACY_STATE_DIR}/users.lock" "${MITA_LEGACY_STATE_DIR}/admin.lock" 2>/dev/null || true
+  mkdir -p "$MITA_MANAGER_STATE_DIR" "$MITA_USERS_BACKUP_DIR" \
+    "$NOBRAND_BACKUP_DIR" "$NOBRAND_LOCK_DIR" || return 1
+  chmod 0700 "$MITA_MANAGER_STATE_DIR" "$MITA_USERS_BACKUP_DIR" \
+    "$NOBRAND_BACKUP_DIR" "$NOBRAND_LOCK_DIR" || return 1
+  chown root:root "$MITA_MANAGER_STATE_DIR" "$MITA_USERS_BACKUP_DIR" \
+    "$NOBRAND_BACKUP_DIR" "$NOBRAND_LOCK_DIR" 2>/dev/null || true
+  chmod 0600 "$NOBRAND_REGISTRY_FILE" 2>/dev/null || return 1
 }
 
 dry_run_action_preview() {
@@ -1392,7 +1381,7 @@ ${MITA_USERS_LOG} {
     create 0640 root root
 }
 
-/var/log/mita-oneclick-*.log /var/log/mita-oneclick-*.err {
+/var/log/nobrand-mieru-*.log /var/log/nobrand-mieru-*.err {
     weekly
     rotate 8
     compress
@@ -1450,6 +1439,8 @@ save_install_state() {
   run mkdir -p "$(dirname "$MITA_STATE")"
   state_tmp="$(mktemp "${MITA_STATE}.XXXXXX" 2>/dev/null || mktemp_file .state)"
   if ! {
+    _state_kv SCHEMA_VERSION "$NOBRAND_SCHEMA_VERSION"
+    _state_kv OWNERSHIP "nobrand-v3"
     _state_kv PORT "$PORT"
     _state_kv PORT_RANGE "$PORT_RANGE"
     _state_kv PROTOCOL "$PROTOCOL"
@@ -1468,7 +1459,7 @@ save_install_state() {
     _state_kv MIERU_CHANNEL "$MIERU_CHANNEL"
     _state_kv MIERU_VERSION "$MIERU_VERSION"
     _state_kv INSTALL_SCRIPT "$INSTALL_SCRIPT_PATH"
-    printf 'INSTALL_METHOD=oneclick\n'
+    printf 'INSTALL_METHOD=nobrand-v3\n'
   } >"$state_tmp"; then
     rm -f "$state_tmp"
     return 1
@@ -1485,6 +1476,19 @@ save_install_state() {
   rm -f "$state_tmp"
   harden_mita_permissions
   run touch "$MITA_MARKER"
+}
+
+mita_v3_install_state_valid() {
+  local key
+  [ -f "$MITA_STATE" ] || return 1
+  grep -qx 'SCHEMA_VERSION=3' "$MITA_STATE" 2>/dev/null || return 1
+  grep -qx 'OWNERSHIP=nobrand-v3' "$MITA_STATE" 2>/dev/null || return 1
+  grep -qx 'INSTALL_METHOD=nobrand-v3' "$MITA_STATE" 2>/dev/null || return 1
+  for key in PORT PORT_RANGE PROTOCOL PROFILE ADVERTISE_HOST ADVERTISE_PORT MTU MTU_POLICY \
+    USERNAME PASSWORD TRAFFIC_PATTERN TRAFFIC_SEED LOW_ENTROPY_MODE MULTIPLEXING \
+    HANDSHAKE_MODE MIERU_CHANNEL MIERU_VERSION INSTALL_SCRIPT; do
+    grep -q "^${key}=" "$MITA_STATE" 2>/dev/null || return 1
+  done
 }
 
 mark_oneclick_install() {
@@ -1509,24 +1513,32 @@ mita_package_is_installed() {
 # 首次接管前已存在的包/账号不属于 OneClick。使用独立所有权标记，
 # 不改变 install-state.env、users.json 或任何运行配置的 schema。
 record_preexisting_mita_resources() {
-  local pm="${1:-}"
+  local pm="${1:-}" path
   installed_by_oneclick && return 0
   run mkdir -p "$MITA_MANAGER_STATE_DIR"
   mita_package_is_installed "$pm" && run touch "$MITA_PRESERVE_PACKAGE_MARKER"
   _has_user mita && run touch "$MITA_PRESERVE_USER_MARKER"
   _has_group mita && run touch "$MITA_PRESERVE_GROUP_MARKER"
+  for path in /etc/mita /var/lib/mita /run/mita /var/run/mita /usr/bin/mita \
+    /etc/systemd/system/mita.service /lib/systemd/system/mita.service \
+    /usr/lib/systemd/system/mita.service /etc/init.d/mita; do
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      run touch "$MITA_PRESERVE_SHARED_MARKER"
+      break
+    fi
+  done
   run chmod 0600 "$MITA_PRESERVE_PACKAGE_MARKER" "$MITA_PRESERVE_USER_MARKER" \
-    "$MITA_PRESERVE_GROUP_MARKER" 2>/dev/null || true
+    "$MITA_PRESERVE_GROUP_MARKER" "$MITA_PRESERVE_SHARED_MARKER" 2>/dev/null || true
 }
 
 preexisting_mita_resources_recorded() {
   [ -f "$MITA_PRESERVE_PACKAGE_MARKER" ] \
     || [ -f "$MITA_PRESERVE_USER_MARKER" ] \
-    || [ -f "$MITA_PRESERVE_GROUP_MARKER" ]
+    || [ -f "$MITA_PRESERVE_GROUP_MARKER" ] \
+    || [ -f "$MITA_PRESERVE_SHARED_MARKER" ]
 }
 
 load_install_state() {
-  local _live_bin="" _live_desc="" _live_mtu=""
   local _cli_port="$PORT"
   local _cli_port_range="$PORT_RANGE"
   local _cli_protocol="$PROTOCOL"
@@ -1554,53 +1566,19 @@ load_install_state() {
       "Refusing to read install state with unsafe ownership or permissions: ${MITA_STATE}")"
     return 1
   }
+  mita_v3_install_state_valid || {
+    warn "$(t "拒绝读取非 schema v3 的 Mieru 状态: ${MITA_STATE}" \
+      "Refusing to read non-schema-v3 Mieru state: ${MITA_STATE}")"
+    return 1
+  }
   local _cli_tp="$TRAFFIC_PATTERN"
   local _cli_le="$LOW_ENTROPY_MODE"
   local _cli_mux="$MULTIPLEXING"
   local _cli_hs="$HANDSHAKE_MODE"
   # shellcheck disable=SC1090
   source "$MITA_STATE" 2>/dev/null || true
-  # v2.1 及更早状态没有 Profile：只根据已保存的完整真实参数反推元数据，
-  # 绝不为了匹配预设去覆盖旧参数。字段不全时保守标记 custom。
-  if ! grep -q '^PROFILE=' "$MITA_STATE" 2>/dev/null; then
-    if grep -q '^PROTOCOL=' "$MITA_STATE" 2>/dev/null \
-       && grep -q '^MTU=' "$MITA_STATE" 2>/dev/null \
-       && grep -q '^MULTIPLEXING=' "$MITA_STATE" 2>/dev/null \
-       && grep -q '^HANDSHAKE_MODE=' "$MITA_STATE" 2>/dev/null \
-       && grep -q '^TRAFFIC_PATTERN=' "$MITA_STATE" 2>/dev/null \
-       && grep -q '^LOW_ENTROPY_MODE=' "$MITA_STATE" 2>/dev/null; then
-      PROFILE="$(infer_profile_from_values)"
-    else
-      PROFILE="custom"
-    fi
-  fi
   PROFILE="$(normalize_profile "${PROFILE:-custom}" 2>/dev/null || printf 'custom')"
-  # 旧版升级始终跟随 upstream latest；缺少通道时延续该行为，避免升级语义突变。
-  if ! grep -q '^MIERU_CHANNEL=' "$MITA_STATE" 2>/dev/null; then
-    MIERU_CHANNEL="latest"
-  fi
-  MIERU_CHANNEL="$(normalize_mieru_channel "${MIERU_CHANNEL:-latest}" 2>/dev/null || printf 'latest')"
-  if ! grep -q '^MIERU_VERSION=' "$MITA_STATE" 2>/dev/null; then
-    MIERU_VERSION="$(installed_version 2>/dev/null || true)"
-  fi
-  # 兼容旧状态文件：优先保留正在运行配置中的 MTU，避免后续用户管理重建配置时降回 1400。
-  if ! grep -q '^MTU=' "$MITA_STATE" 2>/dev/null; then
-    _live_bin="$(mita_bin 2>/dev/null || true)"
-    if [ -x "$_live_bin" ]; then
-      _live_desc="$("$_live_bin" describe config 2>/dev/null || true)"
-      _live_mtu="$(extract_mtu_from_describe "$_live_desc" 2>/dev/null || true)"
-      if valid_mtu "$_live_mtu"; then
-        MTU="$_live_mtu"
-      fi
-    fi
-  fi
-  if ! grep -q '^MTU_POLICY=' "$MITA_STATE" 2>/dev/null; then
-    if valid_mtu "${MTU:-}" && [ "$MTU" -ne 1400 ]; then
-      MTU_POLICY="custom"
-    else
-      MTU_POLICY="safe"
-    fi
-  fi
+  MIERU_CHANNEL="$(normalize_mieru_channel "${MIERU_CHANNEL:-stable}" 2>/dev/null || printf 'stable')"
   # 命令行显式指定 --traffic-pattern 时优先，不被已保存状态覆盖
   [ "${TRAFFIC_CLI:-0}" -eq 1 ] && TRAFFIC_PATTERN="$_cli_tp"
   [ "${LOW_ENTROPY_CLI:-0}" -eq 1 ] && LOW_ENTROPY_MODE="$_cli_le"
@@ -1642,13 +1620,6 @@ nb_normalize_transport() {
     UDP) printf 'UDP' ;;
     *) return 1 ;;
   esac
-}
-
-nb_normalized_port_key() {
-  local transport port
-  transport="$(nb_normalize_transport "${1:-}")" || return 1
-  port="$(normalize_uint "${2:-}")" || return 1
-  printf '%s:%s' "$(printf '%s' "$transport" | tr '[:upper:]' '[:lower:]')" "$port"
 }
 
 # 手工端口允许 1-65535；自动分配始终从 1025 起。Mieru 自身仍通过
@@ -1843,14 +1814,14 @@ nb_port_listener_pids() {
     | LC_ALL=C sort -u
 }
 
-# 输出 owner|transport|port|advertise_host|advertise_port。Mieru 仍从原
-# /var/lib/mita-oneclick adapter 读取，不复制、不迁移其 state。
+# 输出 owner|transport|port|advertise_host|advertise_port。Mieru only reads
+# schema-v3 users.json under the authoritative NoBrand state root.
 nb_registry_rows() {
   command -v python3 >/dev/null 2>&1 || return 0
   NOBRAND_SNELL_STATE_DIR="$NOBRAND_SNELL_STATE_DIR" \
   NOBRAND_HY2_STATE_FILE="$NOBRAND_HY2_STATE_FILE" \
   NOBRAND_VLESS_STATE_FILE="$NOBRAND_VLESS_STATE_FILE" \
-  MITA_USERS_STATE="$MITA_USERS_STATE" MITA_STATE="$MITA_STATE" \
+  MITA_USERS_STATE="$MITA_USERS_STATE" \
   python3 - <<'PY'
 import glob
 import json
@@ -1914,32 +1885,6 @@ if mita_users and os.path.isfile(mita_users):
     except Exception:
         pass
 PY
-  # v1.x 单实例安装可能还没有 users.json。只在原 Mieru 安全检查通过后，
-  # 于子 shell 中 source allowlisted 字段，避免污染 NoBrand 当前 globals。
-  if [ ! -s "$MITA_USERS_STATE" ] && [ -s "$MITA_STATE" ] \
-     && state_file_is_secure "$MITA_STATE"; then
-    (
-      PORT="" PROTOCOL="TCP" ADVERTISE_HOST="" ADVERTISE_PORT=""
-      # shellcheck disable=SC1090
-      source "$MITA_STATE" 2>/dev/null || exit 0
-      nb_valid_port "${PORT:-}" || exit 0
-      case "${PROTOCOL:-TCP}" in
-        TCP|UDP)
-          printf 'mieru:legacy|%s|%s|%s|%s\n' \
-            "$PROTOCOL" "$PORT" "${ADVERTISE_HOST:-}" "${ADVERTISE_PORT:-}"
-          ;;
-        BOTH)
-          [ "$PORT" -le 65534 ] || exit 0
-          printf 'mieru:legacy|TCP|%s|%s|%s\n' \
-            "$PORT" "${ADVERTISE_HOST:-}" "${ADVERTISE_PORT:-}"
-          local_udp_advertise=""
-          [ -z "${ADVERTISE_PORT:-}" ] || local_udp_advertise=$((ADVERTISE_PORT + 1))
-          printf 'mieru:legacy|UDP|%s|%s|%s\n' \
-            "$((PORT + 1))" "${ADVERTISE_HOST:-}" "$local_udp_advertise"
-          ;;
-      esac
-    )
-  fi
 }
 
 nb_registry_port_owner() {
@@ -2031,12 +1976,13 @@ nb_describe_port_conflict() {
 # ---------- NoBrand Common Core: state、Endpoint、firewall/service adapters ----------
 
 nb_init_state_layout() {
-  local tmp
   if [ "${DRY_RUN:-0}" -eq 1 ]; then
     msg "[dry-run] initialize NoBrand state: $NOBRAND_STATE_DIR"
     return 0
   fi
-  mkdir -p "$NOBRAND_STATE_DIR" "$NOBRAND_BACKUP_DIR" "$NOBRAND_LOCK_DIR" \
+  ensure_manager_state_layout 1 || return 1
+  mkdir -p "$NOBRAND_BACKUP_DIR" "$NOBRAND_LOCK_DIR" \
+    "$MITA_MANAGER_STATE_DIR" "$MITA_USERS_BACKUP_DIR" \
     "$NOBRAND_SNELL_STATE_DIR" "$NOBRAND_HY2_STATE_DIR" \
     "$NOBRAND_VLESS_STATE_DIR" \
     "$NOBRAND_CONFIG_DIR" "$NOBRAND_SNELL_CONFIG_DIR" "$NOBRAND_HY2_CONFIG_DIR" \
@@ -2044,17 +1990,17 @@ nb_init_state_layout() {
     "$NOBRAND_BIN_DIR" "$NOBRAND_SNELL_RUNTIME_DIR" "$NOBRAND_LIB_DIR" \
     || return 1
   chmod 0700 "$NOBRAND_STATE_DIR" "$NOBRAND_BACKUP_DIR" "$NOBRAND_LOCK_DIR" \
+    "$MITA_MANAGER_STATE_DIR" "$MITA_USERS_BACKUP_DIR" \
     "$NOBRAND_SNELL_STATE_DIR" "$NOBRAND_HY2_STATE_DIR" \
     "$NOBRAND_VLESS_STATE_DIR" \
     "$NOBRAND_CONFIG_DIR" "$NOBRAND_SNELL_CONFIG_DIR" "$NOBRAND_HY2_CONFIG_DIR" \
-    "$NOBRAND_VLESS_CONFIG_DIR" \
-    "$NOBRAND_LIB_DIR" "$NOBRAND_BIN_DIR" "$NOBRAND_SNELL_RUNTIME_DIR" || return 1
-  if [ ! -f "$NOBRAND_REGISTRY_FILE" ]; then
-    tmp="$(mktemp "${NOBRAND_REGISTRY_FILE}.tmp.XXXXXX")" || return 1
-    printf '%s\n' '{"version":1,"project":"NoBrand-OneClick","author":"ike"}' >"$tmp" \
-      && chmod 0600 "$tmp" && mv -f "$tmp" "$NOBRAND_REGISTRY_FILE" \
-      || { rm -f "$tmp"; return 1; }
-  fi
+    "$NOBRAND_VLESS_CONFIG_DIR" || return 1
+  # Protocol services can run as dedicated unprivileged users (Mieru uses the
+  # mita account). Runtime directories contain only managed executables/assets
+  # and must remain traversable; secrets stay in the 0700 state/config roots.
+  chmod 0755 "$NOBRAND_LIB_DIR" "$NOBRAND_BIN_DIR" "$NOBRAND_SNELL_RUNTIME_DIR" \
+    || return 1
+  nb_schema_v3_file_valid || return 1
   chmod 0600 "$NOBRAND_REGISTRY_FILE" 2>/dev/null || return 1
 }
 
@@ -2270,20 +2216,33 @@ nobrand_version() {
 }
 
 nobrand_usage() {
-  cat <<'EOF'
-NoBrand-OneClick — Mieru / Snell v4-v5 / Hysteria2 / VLESS + FinalMask + Sudoku (TCP)
+  cat <<EOF
+NoBrand-OneClick 3.0.0 — Mieru / Snell v4-v5 / Hysteria2 / VLESS + FinalMask + Sudoku (TCP)
 
 用法:
   nobrand                         打开统一菜单
+  nb                              与 nobrand 完全相同的短别名
   nobrand --version               显示产品版本与作者
+  nobrand --help                  显示本帮助
   nobrand status                  综合状态
   nobrand nodes [--protocol P]    查看全部或指定协议节点
   nobrand doctor                  综合诊断（默认不输出 secret）
-  nobrand backup create [FILE]    备份 NoBrand Snell/HY2/VLESS state 与配置
+  nobrand backup create [FILE]    备份 NoBrand 3.0 全部 state 与配置
   nobrand backup restore FILE     恢复 NoBrand 备份
-  nobrand uninstall [-y]          只删除 NoBrand 的 Snell/HY2/VLESS/Common 内容
+  nobrand uninstall [-y]          统一卸载 Mieru/Snell/HY2/VLESS/Common
 
-  nobrand mieru <原 mita 子命令与参数>
+  nobrand mieru                    打开完整 Mieru 菜单
+  nobrand mieru install|reconfigure|upgrade|uninstall|start|stop|restart
+  nobrand mieru status|doctor|perf|show|users
+  nobrand mieru user-add|user-del|user-show|user-set-endpoint
+  nobrand mieru user-set-quota|user-set-expire|user-enable|user-disable
+  nobrand mieru user-scan|user-quota-reset|user-set-rate|user-usage
+  nobrand mieru user-backup|user-restore|user-export|user-import|user-export-clients
+  Mieru 参数: --port --protocol --profile --advertise-host --advertise-port --advertise-auto
+    --mtu --traffic-pattern --low-entropy --multiplexing --handshake-mode
+    --mieru-channel --mieru-version --user --password --package --quota-mb
+    --quota-days --quota-mode --expire --bandwidth --op-user --enable-bbr --lang
+
   nobrand snell install --name NAME [--version 5|4] [--port PORT] [--quic on|off]
       [--advertise-host HOST --advertise-port PORT | --advertise-auto] [-y]
   nobrand snell show|status|doctor|start|stop|restart|remove [--name NAME]
@@ -2311,6 +2270,9 @@ NoBrand-OneClick — Mieru / Snell v4-v5 / Hysteria2 / VLESS + FinalMask + Sudok
   - 非交互 -y 必须明确给出完整 Display Endpoint 或 --advertise-auto。
   - VLESS Sudoku = plain VLESS + FinalMask(sudoku) + TCP。
   - VLESS Encryption: NOT USED；不调用密钥生成子命令，不保存加密密钥。
+  - Mieru 官方 runtime 仍名为 mita，但它不是管理命令；管理入口只有 nobrand/nb。
+  - v3 state 必须带 schema_version=3；旧 state 不读取、不导入、不删除。
+  - 正式安装器: ${NOBRAND_RELEASE_INSTALLER_URL}
 EOF
 }
 
@@ -2342,22 +2304,14 @@ nobrand_install_manager_script() {
   else
     chmod 0755 "$NOBRAND_INSTALL_SCRIPT_PATH" || return 1
   fi
-  local wrapper
-  wrapper="$(mktemp_file .sh)" || return 1
-  cat >"$wrapper" <<EOF
-#!/usr/bin/env bash
-exec ${NOBRAND_INSTALL_SCRIPT_PATH} "\$@"
-EOF
-  chmod 0755 "$wrapper" || { rm -f "$wrapper"; return 1; }
-  install -m 0755 "$wrapper" "$NOBRAND_COMMAND_PATH" || { rm -f "$wrapper"; return 1; }
-  install -m 0755 "$wrapper" "$NOBRAND_SHORT_COMMAND_PATH" || { rm -f "$wrapper"; return 1; }
-  rm -f "$wrapper"
+  ln -sfn "$NOBRAND_INSTALL_SCRIPT_PATH" "$NOBRAND_COMMAND_PATH" || return 1
+  ln -sfn "$NOBRAND_COMMAND_PATH" "$NOBRAND_SHORT_COMMAND_PATH" || return 1
 }
 
 nb_mieru_instance_running() {
   local instance_id="$1" transport="$2" port="$3" unit service
-  unit="mita-oneclick@${instance_id}.service"
-  service="mita-oneclick-${instance_id}"
+  unit="nobrand-mieru@${instance_id}.service"
+  service="nobrand-mieru-${instance_id}"
   nb_service_is_active "$unit" "$service" || return 1
   case "$transport" in
     BOTH) nb_port_is_listening TCP "$port" && nb_port_is_listening UDP "$((port + 1))" ;;
@@ -2366,45 +2320,9 @@ nb_mieru_instance_running() {
 }
 
 # protocol|name|display endpoint|status|transport
-nb_mieru_legacy_node_rows() {
-  local values name port protocol advertise_host advertise_port auto_host effective_host effective_port status
-  [ -s "$MITA_STATE" ] && state_file_is_secure "$MITA_STATE" || return 0
-  values="$(
-    PORT="" PROTOCOL="TCP" ADVERTISE_HOST="" ADVERTISE_PORT="" USERNAME="legacy"
-    # shellcheck disable=SC1090
-    source "$MITA_STATE" 2>/dev/null || exit 0
-    nb_valid_port "${PORT:-}" || exit 0
-    case "${PROTOCOL:-TCP}" in TCP|UDP|BOTH) ;; *) exit 0 ;; esac
-    printf '%s\t%s\t%s\t%s\t%s' "${USERNAME:-legacy}" "$PORT" "$PROTOCOL" \
-      "${ADVERTISE_HOST:-}" "${ADVERTISE_PORT:-}"
-  )"
-  [ -n "$values" ] || return 0
-  IFS=$'\t' read -r name port protocol advertise_host advertise_port <<<"$values"
-  auto_host="$(public_ip 2>/dev/null || printf 'YOUR_SERVER_IP')"
-  effective_host="${advertise_host:-$auto_host}"
-  effective_port="${advertise_port:-$port}"
-  status=Stopped
-  if nb_service_is_active mita.service mita; then
-    case "$protocol" in
-      TCP|UDP) nb_port_is_listening "$protocol" "$port" && status=Running ;;
-      BOTH) nb_port_is_listening TCP "$port" && nb_port_is_listening UDP "$((port + 1))" && status=Running ;;
-    esac
-  fi
-  if [ "$protocol" = BOTH ]; then
-    printf 'Mieru/BOTH|%s|%s:%s (TCP), %s:%s (UDP)|%s|BOTH\n' \
-      "$name" "$effective_host" "$effective_port" "$effective_host" "$((effective_port + 1))" "$status"
-  else
-    printf 'Mieru/%s|%s|%s:%s|%s|%s\n' \
-      "$protocol" "$name" "$effective_host" "$effective_port" "$status" "$protocol"
-  fi
-}
-
 nb_mieru_node_rows() {
   local auto_host instance_id name port protocol advertise_host advertise_port effective_host effective_port status
-  if [ ! -s "$MITA_USERS_STATE" ]; then
-    nb_mieru_legacy_node_rows
-    return 0
-  fi
+  [ -s "$MITA_USERS_STATE" ] || return 0
   command -v python3 >/dev/null 2>&1 || return 0
   auto_host="$(public_ip 2>/dev/null || printf 'YOUR_SERVER_IP')"
   while IFS=$'\t' read -r instance_id name port protocol advertise_host advertise_port; do
@@ -2600,6 +2518,8 @@ nobrand_backup_create() {
   cat >"$stage/manifest.txt" <<EOF
 project=NoBrand-OneClick
 version=${SCRIPT_VERSION}
+schema_version=${NOBRAND_SCHEMA_VERSION}
+ownership=nobrand-v3
 created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 contents=state,config
 EOF
@@ -2634,6 +2554,10 @@ nobrand_backup_restore() {
   tar -C "$stage" -xzf "$source" || { rm -rf -- "$stage"; return 1; }
   grep -qx 'project=NoBrand-OneClick' "$stage/manifest.txt" 2>/dev/null \
     || { rm -rf -- "$stage"; die '不是 NoBrand-OneClick 备份'; }
+  grep -qx 'schema_version=3' "$stage/manifest.txt" 2>/dev/null \
+    && grep -qx 'ownership=nobrand-v3' "$stage/manifest.txt" 2>/dev/null \
+    && nb_schema_v3_file_valid "$stage/state/state.json" \
+    || { rm -rf -- "$stage"; die '备份不是 NoBrand schema v3，拒绝导入旧 state'; }
   find "$stage/state" "$stage/config" -type f -name '*.json' -print0 2>/dev/null \
     | while IFS= read -r -d '' file; do jq empty "$file" >/dev/null || exit 1; done \
     || { rm -rf -- "$stage"; die '备份中存在无效 JSON'; }
@@ -2654,14 +2578,6 @@ nobrand_backup_restore() {
     die '恢复失败，已回滚原 NoBrand state/config'
   fi
   nb_init_state_layout
-  if ! snell_migrate_removed_v6; then
-    find "$safe_state" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + 2>/dev/null || true
-    find "$safe_config" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + 2>/dev/null || true
-    cp -a "$snapshot/state/." "$safe_state/" 2>/dev/null || true
-    cp -a "$snapshot/config/." "$safe_config/" 2>/dev/null || true
-    rm -rf -- "$stage" "$snapshot"
-    die '备份包含无法安全迁移的已移除 Snell v6 state；已回滚原 NoBrand state/config'
-  fi
   nobrand_start_enabled_services || {
     warn '配置已恢复，但部分服务未能启动；请运行 nobrand doctor'
   }
@@ -2682,13 +2598,18 @@ nobrand_backup_action() {
 
 nobrand_remove_owned_command() {
   local path="$1"
-  [ -f "$path" ] && [ ! -L "$path" ] || return 0
+  [ -e "$path" ] || [ -L "$path" ] || return 0
   case "$path" in
-    /usr/local/bin/install-nobrand|/usr/local/bin/nobrand|/usr/local/bin/nb|*/nobrand-oneclick/*|*/nobrand-oneclick-*/*) ;;
+    "$NOBRAND_INSTALL_SCRIPT_PATH"|"$NOBRAND_COMMAND_PATH"|"$NOBRAND_SHORT_COMMAND_PATH") ;;
     *) warn "拒绝删除 NoBrand command allowlist 以外的路径: $path"; return 1 ;;
   esac
-  if grep -qF 'NoBrand-OneClick' "$path" 2>/dev/null \
-     || grep -qF "$NOBRAND_INSTALL_SCRIPT_PATH" "$path" 2>/dev/null; then
+  if [ -L "$path" ]; then
+    case "$path:$(readlink "$path" 2>/dev/null || true)" in
+      "$NOBRAND_COMMAND_PATH:$NOBRAND_INSTALL_SCRIPT_PATH"|\
+      "$NOBRAND_SHORT_COMMAND_PATH:$NOBRAND_COMMAND_PATH") rm -f "$path" ;;
+      *) warn "拒绝删除目标不属于 NoBrand 的符号链接: $path"; return 1 ;;
+    esac
+  elif grep -qF 'NoBrand-OneClick' "$path" 2>/dev/null; then
     rm -f "$path"
   else
     warn "拒绝删除内容不属于 NoBrand 的命令: $path"
@@ -2697,17 +2618,20 @@ nobrand_remove_owned_command() {
 }
 
 nobrand_uninstall() {
-  local id port safe_state safe_config safe_lib pairs="" snell_pairs failed=0
+  local id port safe_state safe_config safe_lib pairs="" snell_pairs failed=0 had_mieru=0 saved_yes
   require_root
+  ensure_manager_state_layout 0
+  nb_schema_v3_file_valid || die '未检测到有效的 NoBrand schema v3 state，拒绝卸载未知资源'
   if [ "${YES:-0}" -ne 1 ]; then
-    confirm '确认删除 NoBrand 管理的 Snell/HY2/VLESS/Common state？Mieru 数据会保留。[y/N]: ' \
-      'Remove NoBrand-managed Snell/HY2/VLESS/Common state? Mieru data is preserved. [y/N]: ' \
+    confirm '确认完整卸载 NoBrand 3 管理的 Mieru/Snell/HY2/VLESS/Common？[y/N]: ' \
+      'Completely uninstall NoBrand-3-managed Mieru/Snell/HY2/VLESS/Common resources? [y/N]: ' \
       n \
       || { t '已取消' 'Cancelled'; return 0; }
   fi
   safe_state="$(nb_assert_safe_nobrand_root "$NOBRAND_STATE_DIR" NOBRAND_STATE_DIR)" || return 1
   safe_config="$(nb_assert_safe_nobrand_root "$NOBRAND_CONFIG_DIR" NOBRAND_CONFIG_DIR)" || return 1
   safe_lib="$(nb_assert_safe_nobrand_root "$NOBRAND_LIB_DIR" NOBRAND_LIB_DIR)" || return 1
+  mita_uninstall_target_present && had_mieru=1
   admin_lock_acquire || return 1
   while IFS= read -r id; do
     [ -n "$id" ] || continue
@@ -2744,21 +2668,32 @@ nobrand_uninstall() {
     /etc/systemd/system/nobrand-snell@.service) rm -f "$NOBRAND_SNELL_SYSTEMD_TEMPLATE" ;;
   esac
   [ "$(nb_service_manager)" != systemd ] || systemctl daemon-reload 2>/dev/null || true
+  admin_lock_release
+
+  if [ "$had_mieru" -eq 1 ]; then
+    saved_yes="$YES"
+    YES=1
+    do_uninstall || { YES="$saved_yes"; return 1; }
+    YES="$saved_yes"
+  fi
+
+  # State/config/lib roots are exact, validated NoBrand roots. Command removal
+  # deliberately happens only after every protocol/resource cleanup succeeds.
   find "$safe_state" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
   find "$safe_config" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
   find "$safe_lib" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
   rmdir "$safe_state" "$safe_config" "$safe_lib" 2>/dev/null || true
-  nobrand_remove_owned_command "$NOBRAND_COMMAND_PATH" || failed=1
   nobrand_remove_owned_command "$NOBRAND_SHORT_COMMAND_PATH" || failed=1
+  nobrand_remove_owned_command "$NOBRAND_COMMAND_PATH" || failed=1
   nobrand_remove_owned_command "$NOBRAND_INSTALL_SCRIPT_PATH" || failed=1
-  admin_lock_release
   [ "$failed" -eq 0 ] || return 1
-  t 'NoBrand Snell/HY2/VLESS/Common 内容已删除；Mieru、/etc/xray、xray.service、ike 均未触碰' \
-    'NoBrand Snell/HY2/VLESS/Common content removed; Mieru, /etc/xray, xray.service, and ike were untouched'
+  t 'NoBrand 3 的 Mieru/Snell/HY2/VLESS/Common 资源与 nobrand/nb 已完整删除；外部资源未触碰' \
+    'NoBrand 3 Mieru/Snell/HY2/VLESS/Common resources and nobrand/nb were removed; external resources were untouched'
 }
 
 nobrand_stop_all_services() {
   local id
+  users_state_exists && isolated_stop_all >/dev/null 2>&1 || true
   while IFS= read -r id; do
     [ -n "$id" ] || continue
     snell_service_action "$id" stop >/dev/null 2>&1 || true
@@ -2769,7 +2704,19 @@ nobrand_stop_all_services() {
 }
 
 nobrand_start_enabled_services() {
-  local id enabled port pairs failed=0
+  local id name enabled port pairs failed=0
+  if users_state_exists && [ "$(users_count)" -gt 0 ]; then
+    load_install_state || failed=1
+    install_instance_runtime >/dev/null 2>&1 || failed=1
+    while IFS=$'\t' read -r id name port; do
+      [ -n "$id" ] && [ -n "$name" ] && [ -n "$port" ] || continue
+      write_instance_config "$id" "$name" "$port" >/dev/null 2>&1 || failed=1
+    done < <(users_enabled_instance_rows)
+    reconcile_isolated_instances >/dev/null 2>&1 || failed=1
+    apply_tc_limits >/dev/null 2>&1 || failed=1
+    pairs="$(multi_user_port_protocol_pairs 2>/dev/null || true)"
+    [ -z "$pairs" ] || open_firewall_for_pairs "$pairs" >/dev/null 2>&1 || failed=1
+  fi
   while IFS= read -r id; do
     [ -n "$id" ] || continue
     enabled="$(snell_state_field "$id" enabled 2>/dev/null || printf false)"
@@ -2797,15 +2744,12 @@ nobrand_start_enabled_services() {
 
 install_self_script() {
   STAGE="安装管理脚本"
-  local main_url="https://raw.githubusercontent.com/ike-sh/NoBrand-OneClick/main/install-nobrand.sh"
   local tmp src_real="" dest_real="" installed=0
   tmp="$(mktemp_file .sh)"
-  # 已发布版本优先；下载到临时文件且版本必须精确匹配，避免截断现有脚本或被 main 降级。
-  if curl -fsSL --connect-timeout 15 --max-time 60 "$SCRIPT_REPO_RAW" -o "$tmp" 2>/dev/null \
-     && grep -qxF "SCRIPT_VERSION=\"${SCRIPT_VERSION}\"" "$tmp"; then
-    run install -m 0755 "$tmp" "$INSTALL_SCRIPT_PATH"
-    installed=1
-  elif [ -n "${BASH_SOURCE[0]:-}" ] && [ -r "${BASH_SOURCE[0]}" ] \
+  # An unpublished development build must install the exact local artifact
+  # that is being executed. Released builds may fall back only to the latest
+  # GitHub Release asset; raw main is deliberately not an installation source.
+  if [ -n "${BASH_SOURCE[0]:-}" ] && [ -r "${BASH_SOURCE[0]}" ] \
        && grep -qxF "SCRIPT_VERSION=\"${SCRIPT_VERSION}\"" "${BASH_SOURCE[0]}" 2>/dev/null; then
     src_real="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null \
       || realpath "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
@@ -2817,7 +2761,11 @@ install_self_script() {
       run chmod 0755 "$INSTALL_SCRIPT_PATH"
     fi
     installed=1
-  elif curl -fsSL --connect-timeout 15 --max-time 60 "$main_url" -o "$tmp" 2>/dev/null \
+  elif [ -r "$INSTALL_SCRIPT_PATH" ] \
+       && grep -qxF "SCRIPT_VERSION=\"${SCRIPT_VERSION}\"" "$INSTALL_SCRIPT_PATH" 2>/dev/null; then
+    run chmod 0755 "$INSTALL_SCRIPT_PATH"
+    installed=1
+  elif curl -fsSL --connect-timeout 15 --max-time 60 "$NOBRAND_RELEASE_INSTALLER_URL" -o "$tmp" 2>/dev/null \
        && grep -qxF "SCRIPT_VERSION=\"${SCRIPT_VERSION}\"" "$tmp"; then
     run install -m 0755 "$tmp" "$INSTALL_SCRIPT_PATH"
     installed=1
@@ -2825,81 +2773,13 @@ install_self_script() {
   rm -f "$tmp"
   [ "$installed" -eq 1 ] || die "$(t '无法取得与当前版本一致的管理脚本，拒绝用其它版本覆盖' \
     'Could not obtain the exact current manager version; refusing to overwrite with another version')"
-  install_mita_wrapper_force
-  migrate_mita_binary_layout
-  install_mita_shortcuts
-  # NoBrand 的统一入口与 Mieru 兼容入口使用同一份生成脚本；保留 install-mita/mita。
-  nobrand_install_manager_script || true
-}
-
-install_mita_wrapper_force() {
-  if is_mita_wrapper "$MITA_BIN"; then
-    return 0
-  fi
-  if mita_installed || [ -f "$MITA_MARKER" ] || [ -x "$INSTALL_SCRIPT_PATH" ]; then
-    install_mita_wrapper
-  fi
+  nobrand_install_manager_script
 }
 
 ensure_management_scripts() {
   STAGE="更新管理脚本"
   install_self_script
   repair_mita_binary_paths
-}
-
-install_mita_wrapper() {
-  STAGE="安装 mita 快捷入口"
-  cat >"$MITA_BIN" <<'EOF'
-#!/usr/bin/env bash
-# mieru-OneClick mita wrapper — 无参数打开菜单；管理子命令不区分大小写
-INSTALL_MITA="/usr/local/bin/install-mita"
-
-find_mita_real() {
-  local c
-  for c in /usr/local/bin/mita-real /usr/bin/mita; do
-    [ -x "$c" ] || continue
-    [ "$(head -c 4 "$c" 2>/dev/null || true)" = $'\x7fELF' ] || continue
-    printf '%s' "$c"
-    return 0
-  done
-  return 1
-}
-
-MITA_REAL="$(find_mita_real || true)"
-
-if [ $# -eq 0 ]; then
-  if [ -x "$INSTALL_MITA" ]; then
-    exec "$INSTALL_MITA"
-  fi
-  echo "[错误] 未找到 install-mita，请先运行一键安装脚本" >&2
-  echo "  curl -fsSL https://raw.githubusercontent.com/ike-sh/NoBrand-OneClick/main/install-mita.sh | bash" >&2
-  exit 1
-fi
-
-  if [ $# -gt 0 ] && [ -x "$INSTALL_MITA" ]; then
-    cmd="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
-    case "$cmd" in
-      menu|install|upgrade|uninstall|status|reconfigure|client-config|show|mtu|mtu-config|set-mtu|profile|profile-config|perf|start|stop|restart|配置|节点|help|\
-      users|user-list|user-add|user-del|user-delete|user-show|user-manage|user-set-endpoint|\
-      user-set-quota|user-set-expire|user-enable|user-disable|user-scan|user-quota-reset|\
-      user-set-rate|user-set-bandwidth|rate-status|rate-restore|tc-status|tc-restore|\
-      user-usage|usage|user-export-clients|user-backup|user-restore|user-export|user-import|\
-      doctor|verify)
-        shift
-        exec "$INSTALL_MITA" "$cmd" "$@"
-        ;;
-    esac
-  fi
-
-if [ -z "$MITA_REAL" ]; then
-  echo "[错误] 未找到 mita 二进制；请重新运行安装脚本并选择「升级」自动重装：" >&2
-  echo "  curl -fsSL https://raw.githubusercontent.com/ike-sh/NoBrand-OneClick/main/install-mita.sh | sudo bash -s -- upgrade -y" >&2
-  exit 127
-fi
-exec "$MITA_REAL" "$@"
-EOF
-  run chmod 0755 "$MITA_BIN"
-  hash -r 2>/dev/null || true
 }
 
 # 重新下载官方包并安装，修复缺失的 mita 二进制（deb/rpm）。
@@ -2949,101 +2829,37 @@ recover_deb_mita() {
   if [ -n "$deb_bin" ] && [ -x "$deb_bin" ] && [ ! -e /usr/bin/mita ]; then
     run ln -sf "$deb_bin" /usr/bin/mita 2>/dev/null || true
   fi
-  is_mita_elf_binary /usr/bin/mita && return 0
-  reinstall_mita_package
+  if is_mita_elf_binary "$MITA_PACKAGE_BIN"; then
+    refresh_managed_mita_runtime
+    return $?
+  fi
+  reinstall_mita_package && refresh_managed_mita_runtime
+}
+
+refresh_managed_mita_runtime() {
+  local package_bin="${1:-$MITA_PACKAGE_BIN}"
+  is_mita_elf_binary "$package_bin" || return 1
+  run install -d -o root -g root -m 0755 "$NOBRAND_LIB_DIR" "$NOBRAND_BIN_DIR"
+  run install -m 0755 "$package_bin" "$MITA_BIN"
+  is_mita_elf_binary "$MITA_BIN"
 }
 
 repair_mita_binary_paths() {
   STAGE="修复 mita 二进制路径"
-  local is_deb=0
-  if command -v dpkg >/dev/null 2>&1; then
-    is_deb=1
-  fi
-  if [ "$is_deb" -eq 1 ]; then
-    local deb_bin
-    deb_bin="$(dpkg -L mita 2>/dev/null | grep '/bin/mita$' | head -n1)"
-    if [ -n "$deb_bin" ] && [ -x "$deb_bin" ] && [ ! -e /usr/bin/mita ]; then
-      run ln -sf "$deb_bin" /usr/bin/mita 2>/dev/null || true
-    fi
-  fi
-  if ! is_mita_elf_binary "$(mita_real_bin 2>/dev/null || true)"; then
-    if [ "$is_deb" -eq 1 ]; then
+  if ! is_mita_elf_binary "$MITA_BIN"; then
+    if is_mita_elf_binary "$MITA_PACKAGE_BIN"; then
+      refresh_managed_mita_runtime || return 1
+    elif command -v dpkg >/dev/null 2>&1; then
       recover_deb_mita || warn "$(t 'mita 二进制自动修复未成功，请重新运行脚本并选择「升级」重新安装' \
         'auto-repair failed; re-run the script and choose Upgrade to reinstall')"
     else
-      warn "$(t 'mita 二进制不可用，请重新运行脚本并选择「升级」重新安装' \
-        'mita binary unavailable; re-run the script and choose Upgrade to reinstall')"
+      reinstall_mita_package && refresh_managed_mita_runtime || warn "$(t \
+        'mita 二进制不可用，请执行 nobrand mieru upgrade 重新安装' \
+        'mita binary unavailable; run nobrand mieru upgrade to reinstall')"
     fi
   fi
-  install_mita_wrapper_force
+  is_mita_elf_binary "$MITA_BIN"
   hash -r 2>/dev/null || true
-}
-
-migrate_mita_binary_layout() {
-  STAGE="迁移 mita 二进制布局"
-  if [ -f "$MITA_REAL_BIN" ] && ! is_mita_elf_binary "$MITA_REAL_BIN"; then
-    run rm -f "$MITA_REAL_BIN"
-  fi
-  if [ -f "$MITA_BIN" ] && [ ! -f "$MITA_REAL_BIN" ] && is_mita_elf_binary "$MITA_BIN"; then
-    run mv "$MITA_BIN" "$MITA_REAL_BIN"
-    if [ -L /usr/bin/mita ] && [ "$(readlink -f /usr/bin/mita 2>/dev/null || true)" = "$(readlink -f "$MITA_REAL_BIN" 2>/dev/null || true)" ]; then
-      run rm -f /usr/bin/mita
-    fi
-    run ln -sf "$MITA_REAL_BIN" /usr/bin/mita-real 2>/dev/null || true
-    if [ -f "$OPENRC_SVC" ]; then
-      install_mita_openrc
-    elif [ -f "$SYSTEMD_SVC" ]; then
-      install_mita_systemd
-    fi
-  fi
-  install_mita_wrapper_force
-}
-
-install_mita_shortcuts() {
-  STAGE="安装快捷命令"
-  cat >"$MITA_MENU_PATH" <<'EOF'
-#!/usr/bin/env bash
-# mieru-OneClick 管理快捷入口（子命令不区分大小写）
-IM="/usr/local/bin/install-mita"
-if [ ! -x "$IM" ]; then
-  echo "[错误] 未找到 install-mita，请先完成安装" >&2
-  exit 1
-fi
-if [ $# -eq 0 ]; then
-  exec "$IM"
-fi
-cmd="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
-case "$cmd" in
-  install|upgrade|uninstall|status|reconfigure|client-config|show|mtu|mtu-config|set-mtu|profile|profile-config|perf|menu|start|stop|restart|配置|节点|\
-  users|user-list|user-add|user-del|user-delete|user-show|user-manage|user-set-endpoint|\
-  user-set-quota|user-set-expire|user-enable|user-disable|user-scan|user-quota-reset|\
-  user-set-rate|user-set-bandwidth|rate-status|rate-restore|tc-status|tc-restore|\
-  user-usage|usage|user-export-clients|user-backup|user-restore|user-export|user-import|\
-  doctor|verify|help)
-    set -- "$cmd" "${@:2}"
-    ;;
-esac
-exec "$IM" "$@"
-EOF
-  run chmod 0755 "$MITA_MENU_PATH"
-  # /usr/local/bin/mita 包装器已完整处理菜单及大小写；profile 函数既重复，
-  # 又会在卸载后残留于当前父 shell，故升级时一并移除旧实现。
-  run rm -f "$MITA_PROFILE_D"
-}
-
-remove_mita_shortcuts() {
-  run rm -f "$MITA_MENU_PATH" "$MITA_PROFILE_D"
-}
-
-remove_self_script() {
-  remove_mita_shortcuts
-  if [ -f "$INSTALL_SCRIPT_PATH" ]; then
-    run rm -f "$INSTALL_SCRIPT_PATH"
-    t "已删除管理脚本 ${INSTALL_SCRIPT_PATH}" "Removed manager script ${INSTALL_SCRIPT_PATH}"
-  fi
-  if [ -f "$MITA_STATE" ]; then
-    run rm -f "$MITA_STATE"
-  fi
 }
 
 service_manager() {
@@ -3054,42 +2870,6 @@ service_manager() {
   else
     echo none
   fi
-}
-
-mita_restart_hint() {
-  case "$(service_manager)" in
-    systemd) printf '%s' 'systemctl restart mita' ;;
-    openrc) printf '%s' 'rc-service mita zap && rc-service mita start' ;;
-    *) printf '%s' "$(mita_bin) run &" ;;
-  esac
-}
-
-mita_log_hint() {
-  case "$(service_manager)" in
-    systemd) printf '%s' 'journalctl -e -u mita --no-pager' ;;
-    openrc) printf '%s' 'tail -n 30 /var/log/mita.err /var/log/mita.log' ;;
-    *) printf '%s' 'tail -n 30 /var/log/mita.err /var/log/mita.log' ;;
-  esac
-}
-
-openrc_mita_status_line() {
-  rc-service mita status 2>/dev/null || true
-}
-
-openrc_mita_is_crashed() {
-  openrc_mita_status_line | grep -qi crashed
-}
-
-openrc_mita_is_started() {
-  openrc_mita_status_line | grep -qE 'started|running'
-}
-
-openrc_mita_recover() {
-  if openrc_mita_is_crashed || ! openrc_mita_is_started; then
-    run rc-service mita zap 2>/dev/null || true
-  fi
-  run rc-service mita start 2>/dev/null || run rc-service mita restart 2>/dev/null || true
-  sleep 2
 }
 
 arch_tar_suffix() {
@@ -3178,32 +2958,17 @@ mita_installed() {
   command -v mita >/dev/null 2>&1
 }
 
-is_mita_wrapper() {
-  [ -f "$1" ] || return 1
-  head -c 320 "$1" 2>/dev/null | grep -q 'mieru-OneClick mita wrapper'
-}
-
 is_mita_elf_binary() {
   [ -f "$1" ] || return 1
   [ "$(head -c 4 "$1" 2>/dev/null || true)" = $'\x7fELF' ]
 }
 
 mita_real_bin() {
-  if [ -x "$MITA_REAL_BIN" ] && is_mita_elf_binary "$MITA_REAL_BIN"; then
-    printf '%s' "$MITA_REAL_BIN"
-  elif [ -x /usr/bin/mita ] && is_mita_elf_binary /usr/bin/mita; then
-    printf '%s' /usr/bin/mita
-  elif [ -x "$MITA_BIN" ] && is_mita_elf_binary "$MITA_BIN"; then
-    printf '%s' "$MITA_BIN"
-  elif command -v mita-real >/dev/null 2>&1 && is_mita_elf_binary "$(command -v mita-real)"; then
-    command -v mita-real
-  else
-    printf '%s' "$MITA_REAL_BIN"
-  fi
+  printf '%s' "$MITA_BIN"
 }
 
 mita_bin() {
-  mita_real_bin
+  printf '%s' "$MITA_BIN"
 }
 
 installed_version() {
@@ -3333,75 +3098,6 @@ ensure_mita_account() {
   run chmod 0755 /var/lib/mita /var/run/mita /run/mita
 }
 
-install_mita_systemd() {
-  STAGE="安装 systemd 服务"
-  local bin
-  bin="$(mita_real_bin)"
-  cat >"$SYSTEMD_SVC" <<EOF
-[Unit]
-Description=Mieru proxy server
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=exec
-User=mita
-Group=mita
-ExecStart=${bin} run
-Restart=on-failure
-RestartSec=2
-
-[Install]
-WantedBy=multi-user.target
-EOF
-  run systemctl daemon-reload
-}
-
-install_mita_openrc() {
-  STAGE="安装 OpenRC 服务"
-  local bin
-  bin="$(mita_real_bin)"
-  cat >"$OPENRC_SVC" <<EOF
-#!/sbin/openrc-run
-
-name="mita"
-description="Mieru proxy server"
-command="${bin}"
-command_args="run"
-command_user="mita"
-command_background="yes"
-pidfile="/run/\${RC_SVCNAME}.pid"
-output_log="/var/log/mita.log"
-error_log="/var/log/mita.err"
-directory="/var/lib/mita"
-respawn
-respawn_delay 5
-respawn_max 0
-
-depend() {
-    need net localmount
-    after firewall
-}
-
-start_pre() {
-    checkpath --directory --owner mita:mita --mode 0750 /etc/mita
-    checkpath --directory --owner mita:mita --mode 0755 /var/lib/mita /var/run/mita /run/mita
-    checkpath --file --owner mita:mita --mode 0644 /var/log/mita.log /var/log/mita.err
-}
-EOF
-  run chmod 0755 "$OPENRC_SVC"
-}
-
-install_mita_service() {
-  case "$(service_manager)" in
-    systemd) install_mita_systemd ;;
-    openrc) install_mita_openrc ;;
-    *)
-      warn "$(t '未检测到 systemd/OpenRC，将仅安装二进制' 'No systemd/OpenRC; binary only')"
-      ;;
-  esac
-}
-
 package_service_guard_begin() {
   local guard_dir
   PACKAGE_SERVICE_GUARD_DIR=""
@@ -3508,10 +3204,8 @@ extract_mita_tarball() {
   run tar -xzf "$tarball" -C "$tmpdir"
   bin="$(find "$tmpdir" -type f -name mita | head -n1)"
   [ -n "$bin" ] || die "$(t '压缩包中未找到 mita 二进制' 'mita binary not found in archive')"
-  run install -m 0755 "$bin" "$MITA_REAL_BIN"
-  run rm -f /usr/bin/mita /usr/bin/mita-real
-  run ln -sf "$MITA_REAL_BIN" /usr/bin/mita-real 2>/dev/null || true
-  install_mita_wrapper
+  run install -d -o root -g root -m 0755 "$NOBRAND_LIB_DIR" "$NOBRAND_BIN_DIR"
+  run install -m 0755 "$bin" "$MITA_BIN"
   rm -rf "$tmpdir"
   run touch "$MITA_MARKER"
 }
@@ -3539,8 +3233,7 @@ install_package() {
     alpine)
       if ! install_alpine_deps \
          || ! ensure_mita_account \
-         || ! extract_mita_tarball "$path" \
-         || ! install_mita_service; then
+         || ! extract_mita_tarball "$path"; then
         install_rc=1
       fi
       ;;
@@ -3552,7 +3245,12 @@ install_package() {
       'The mita package installation or previous service-state restoration failed')" || return 1
   fi
   case "$pm" in
-    deb|rpm) mark_oneclick_install ;;
+    deb|rpm)
+      refresh_managed_mita_runtime "$MITA_PACKAGE_BIN" \
+        || die "$(t '无法把官方 mita runtime 安装到 NoBrand 管理路径' \
+          'Could not install the official mita runtime into the NoBrand-managed path')"
+      mark_oneclick_install
+      ;;
   esac
 }
 
@@ -4917,7 +4615,8 @@ users_state_init_empty() {
     return 0
   fi
   run mkdir -p "$(dirname "$MITA_USERS_STATE")"
-  printf '%s\n' '{"version":2,"users":[]}' >"$MITA_USERS_STATE"
+  printf '{"version":2,"deployment_model":"%s","protocol":"%s","users":[]}\n' \
+    "$MITA_DEPLOYMENT_MODEL" "${PROTOCOL:-TCP}" >"$MITA_USERS_STATE"
   run chmod 0600 "$MITA_USERS_STATE" 2>/dev/null || true
 }
 
@@ -4957,7 +4656,7 @@ users_tx_restore() {
 }
 
 users_tx_rollback() {
-  local snapshot="${1:-}" reapply="${2:-0}" restored=0 restore_rc=0 cfg bin
+  local snapshot="${1:-}" reapply="${2:-0}" restored=0 restore_rc=0
   [ -n "$snapshot" ] || return 0
   # apply_users_config 失败时会自行消费快照；外层再次回滚应是安全空操作。
   [ -f "$snapshot" ] || return 0
@@ -4976,30 +4675,14 @@ users_tx_rollback() {
     MULTI_USER_MODE=1
     if [ "$restored" -eq 2 ]; then
       isolated_stop_all
-      default_mita_restore 2>/dev/null || warn "$(t '用户状态已恢复为空，但旧默认服务恢复失败，请立即运行 doctor' \
-        'Users state was restored to absent, but the old default service failed to recover; run doctor now')"
       apply_tc_limits 2>/dev/null || true
-    elif users_isolated_mode; then
+    else
       if ! reconcile_isolated_instances 2>/dev/null; then
         warn "$(t '用户状态已回滚，但专属实例配置重新应用失败，请立即运行 doctor' \
           'Users state was rolled back, but reapplying dedicated instances failed; run doctor now')"
       fi
       apply_tc_limits 2>/dev/null || warn "$(t '用户状态已回滚，但旧限速规则未能完全恢复' \
         'Users state was rolled back, but previous rate filters were not fully restored')"
-    else
-      # 本次操作可能刚从旧单实例迁移而来，先清理所有已生成的专属实例，
-      # 再恢复旧默认服务，避免两套运行时同时占用端口。
-      isolated_stop_all
-      if cfg="$(write_server_config_multi 2>/dev/null)" \
-         && apply_config "$cfg" \
-         && mita_sync_users_to_state; then
-          bin="$(mita_bin)"
-          "$bin" reload 2>/dev/null || start_mita 2>/dev/null || true
-          apply_tc_limits 2>/dev/null || true
-      else
-        warn "$(t '用户状态已回滚，但旧服务端配置重新应用失败，请立即运行 doctor' \
-          'Users state was rolled back, but reapplying the old server config failed; run doctor now')"
-      fi
     fi
   fi
   users_tx_commit "$snapshot"
@@ -5033,25 +4716,6 @@ users_deployment_model() {
 
 users_isolated_mode() {
   [ "$(users_deployment_model 2>/dev/null || true)" = "$MITA_DEPLOYMENT_MODEL" ]
-}
-
-users_set_deployment_model() {
-  local model="$1"
-  [ "${DRY_RUN:-0}" -eq 1 ] && {
-    msg "[dry-run] set deployment_model=$model in $MITA_USERS_STATE"
-    return 0
-  }
-  _U_DEPLOYMENT_MODEL="$model" users_py_locked '
-import json, os
-path = os.environ["MITA_USERS_STATE"]
-d = json.load(open(path))
-model = os.environ.get("_U_DEPLOYMENT_MODEL") or ""
-if model:
-    d["deployment_model"] = model
-else:
-    d.pop("deployment_model", None)
-json.dump(d, open(path, "w"), indent=2)
-'
 }
 
 users_enabled_instance_rows() {
@@ -5090,8 +4754,8 @@ instance_config_path() { printf '%s/%s/server.json' "$MITA_INSTANCES_DIR" "$1"; 
 instance_socket_path() { printf '%s/%s.sock' "$MITA_INSTANCE_RUN_DIR" "$1"; }
 instance_metrics_dir() { printf '%s/%s' "$MITA_INSTANCE_METRICS_DIR" "$1"; }
 instance_metrics_file() { printf '%s/%s/metrics.pb' "$MITA_INSTANCE_METRICS_DIR" "$1"; }
-instance_systemd_unit() { printf 'mita-oneclick@%s.service' "$1"; }
-instance_openrc_service() { printf 'mita-oneclick-%s' "$1"; }
+instance_systemd_unit() { printf 'nobrand-mieru@%s.service' "$1"; }
+instance_openrc_service() { printf 'nobrand-mieru-%s' "$1"; }
 
 instance_cmd() {
   local id="$1"
@@ -5243,9 +4907,9 @@ description="Mieru dedicated user instance ${id}"
 command="${MITA_INSTANCE_RUNNER}"
 command_args="${id}"
 command_background="yes"
-pidfile="/run/mita-oneclick-${id}.pid"
-output_log="/var/log/mita-oneclick-${id}.log"
-error_log="/var/log/mita-oneclick-${id}.err"
+pidfile="/run/nobrand-mieru-${id}.pid"
+output_log="/var/log/nobrand-mieru-${id}.log"
+error_log="/var/log/nobrand-mieru-${id}.err"
 respawn
 respawn_delay=5
 respawn_max=0
@@ -5257,7 +4921,7 @@ depend() {
 
 start_pre() {
   checkpath --directory --owner mita:mita --mode 0750 "${MITA_INSTANCE_RUN_DIR}" "${MITA_INSTANCE_METRICS_DIR}/${id}"
-  checkpath --file --owner mita:mita --mode 0640 "/var/log/mita-oneclick-${id}.log" "/var/log/mita-oneclick-${id}.err"
+  checkpath --file --owner mita:mita --mode 0640 "/var/log/nobrand-mieru-${id}.log" "/var/log/nobrand-mieru-${id}.err"
 }
 EOF
   run chmod 0755 "$svc"
@@ -5367,8 +5031,8 @@ instance_log_tail() {
       journalctl -u "$unit" -n 20 --no-pager 2>/dev/null >&2 || true
       ;;
     openrc)
-      tail -n 20 "/var/log/mita-oneclick-${id}.err" \
-        "/var/log/mita-oneclick-${id}.log" 2>/dev/null >&2 || true
+      tail -n 20 "/var/log/nobrand-mieru-${id}.err" \
+        "/var/log/nobrand-mieru-${id}.log" 2>/dev/null >&2 || true
       ;;
   esac
 }
@@ -5390,41 +5054,6 @@ instance_start_proxy() {
     return 1
   fi
   return 0
-}
-
-default_mita_stop() {
-  local sm bin
-  sm="$(service_manager)"
-  bin="$(mita_bin)"
-  "$bin" stop >/dev/null 2>&1 || true
-  case "$sm" in
-    systemd)
-      run systemctl stop mita >/dev/null 2>&1 || true
-      run systemctl disable mita >/dev/null 2>&1 || true
-      ;;
-    openrc)
-      run rc-service mita stop >/dev/null 2>&1 || true
-      run rc-update del mita default >/dev/null 2>&1 || true
-      ;;
-  esac
-}
-
-default_mita_restore() {
-  local sm bin
-  sm="$(service_manager)"
-  bin="$(mita_bin)"
-  case "$sm" in
-    systemd)
-      run systemctl enable mita >/dev/null 2>&1 || true
-      run systemctl start mita
-      ;;
-    openrc)
-      run rc-update add mita default >/dev/null 2>&1 || true
-      run rc-service mita start
-      ;;
-    *) return 1 ;;
-  esac
-  wait_mita_socket 30 && "$bin" start >/dev/null 2>&1
 }
 
 isolated_stop_all() {
@@ -5507,51 +5136,12 @@ reconcile_isolated_instances() {
 }
 
 ensure_isolated_deployment() {
-  local restore_default="${1:-1}" id name port migrated=0
-  users_isolated_mode && {
-    reconcile_isolated_instances
-    return
-  }
-  users_ensure_instance_ids || return 1
-  install_instance_runtime || return 1
-  while IFS=$'\t' read -r id name port; do
-    [ -n "$id" ] && [ -n "$name" ] && [ -n "$port" ] || continue
-    write_instance_config "$id" "$name" "$port" || return 1
-  done < <(users_enabled_instance_rows)
-
-  default_mita_stop
-  # 旧单实例停止后再复制最终落盘的 metrics，避免迁移窗口丢失最后一小段计数。
-  while IFS=$'\t' read -r id name port; do
-    [ -n "$id" ] && [ -n "$name" ] && [ -n "$port" ] || continue
-    if [ -s "$MITA_METRICS_FILE" ] && [ ! -s "$(instance_metrics_file "$id")" ]; then
-      if ! cp -f "$MITA_METRICS_FILE" "$(instance_metrics_file "$id")"; then
-        if [ "$restore_default" -eq 1 ]; then
-          default_mita_restore || true
-        fi
-        return 1
-      fi
-      chown mita:mita "$(instance_metrics_file "$id")" 2>/dev/null || true
-      chmod 0600 "$(instance_metrics_file "$id")" 2>/dev/null || true
-    fi
-  done < <(users_enabled_instance_rows)
-
-  if reconcile_isolated_instances; then
-    users_set_deployment_model "$MITA_DEPLOYMENT_MODEL" || {
-      isolated_stop_all
-      if [ "$restore_default" -eq 1 ]; then
-        default_mita_restore || true
-      fi
-      return 1
-    }
-    migrated=1
-  else
-    isolated_stop_all
-    if [ "$restore_default" -eq 1 ]; then
-      default_mita_restore || true
-    fi
+  users_isolated_mode || {
+    warn "$(t 'schema v3 Mieru 用户状态缺少 isolated-v2 标记，拒绝转换' \
+      'Schema-v3 Mieru user state lacks the isolated-v2 marker; refusing conversion')"
     return 1
-  fi
-  [ "$migrated" -eq 1 ] && users_log "deployment migrated to ${MITA_DEPLOYMENT_MODEL}"
+  }
+  reconcile_isolated_instances
 }
 
 # 在 flock 下执行 python -c（$1=代码）；环境变量传参
@@ -5820,8 +5410,8 @@ allocate_user_port() {
     "Port pool ${_pool_lo}-${_pool_hi} exhausted; pass --port or enlarge pool")" || return 1
 }
 
-users_migrate_from_primary() {
-  # 将当前 USERNAME/PASSWORD/PORT 写入 users.json（若空）
+users_initialize_primary() {
+  # Fresh schema-v3 install: materialize the first dedicated user.
   users_require_python
   [ -n "${USERNAME:-}" ] || return 0
   [ -n "${PORT:-}" ] || return 0
@@ -5837,11 +5427,11 @@ users_migrate_from_primary() {
   run mkdir -p "$(dirname "$MITA_USERS_STATE")"
   if ! python3 -c '
 import hashlib, json, sys, time
-path, name, pwd, port, proto, advertise_host, advertise_port = sys.argv[1:8]
+path, name, pwd, port, proto, advertise_host, advertise_port, deployment_model = sys.argv[1:9]
 port = int(port)
 advertise_port = int(advertise_port) if advertise_port else ""
 instance_id = "u" + hashlib.sha256(("%s\0%s" % (name, port)).encode()).hexdigest()[:16]
-d = {"version": 2, "protocol": proto, "users": [{
+d = {"version": 2, "deployment_model": deployment_model, "protocol": proto, "users": [{
     "instance_id": instance_id,
     "name": name,
     "password": pwd,
@@ -5860,8 +5450,8 @@ d = {"version": 2, "protocol": proto, "users": [{
     "updated_at": int(time.time()),
 }]}
 json.dump(d, open(path, "w"), indent=2)
-' "$MITA_USERS_STATE" "$USERNAME" "$PASSWORD" "$PORT" "${PROTOCOL:-TCP}" \
-    "${ADVERTISE_HOST:-}" "${ADVERTISE_PORT:-}"
+  ' "$MITA_USERS_STATE" "$USERNAME" "$PASSWORD" "$PORT" "${PROTOCOL:-TCP}" \
+    "${ADVERTISE_HOST:-}" "${ADVERTISE_PORT:-}" "$MITA_DEPLOYMENT_MODEL"
   then
     admin_lock_release
     return 1
@@ -5901,10 +5491,7 @@ users_ensure_loaded() {
     users_sync_primary_globals
     return 0
   fi
-  # 尝试从 mita / 安装状态迁移
-  if [ -n "${USERNAME:-}" ] && [ -n "${PORT:-}" ]; then
-    users_migrate_from_primary
-  fi
+  return 0
 }
 
 users_add() {
@@ -5935,11 +5522,7 @@ users_add() {
   fi
   load_install_state
   if ! users_state_exists || [ "$(users_count)" -eq 0 ]; then
-    if [ -n "${USERNAME:-}" ] && [ -n "${PORT:-}" ] && [ -n "${PASSWORD:-}" ]; then
-      users_migrate_from_primary
-    else
-      users_state_init_empty
-    fi
+    users_state_init_empty
   fi
   if users_name_exists "$name"; then
     warn "$(t "用户已存在: $name" "User already exists: $name")"
@@ -6176,116 +5759,6 @@ PY
     fi
   fi
   printf '%s' "$cfg"
-}
-
-users_enabled_names_from_state() {
-  users_require_python || return 1
-  users_state_exists || return 1
-  python3 -c '
-import json, sys
-d = json.load(open(sys.argv[1]))
-names = {
-    str(u.get("name") or "")
-    for u in (d.get("users") or [])
-    if u.get("enabled", True) and str(u.get("name") or "")
-}
-print("\n".join(sorted(names)))
-' "$MITA_USERS_STATE" 2>/dev/null
-}
-
-mita_actual_user_names() {
-  local bin desc
-  bin="$(mita_bin)" || return 1
-  [ -x "$bin" ] || return 1
-  desc="$("$bin" describe config 2>/dev/null)" || return 1
-  [ -n "$desc" ] || return 1
-  printf '%s' "$desc" | python3 -c '
-import json, sys
-d = json.load(sys.stdin)
-names = {
-    str(u.get("name") or "")
-    for u in (d.get("users") or [])
-    if str(u.get("name") or "")
-}
-print("\n".join(sorted(names)))
-' 2>/dev/null
-}
-
-mita_delete_user_exact() {
-  local name="$1" bin
-  [ -n "$name" ] || return 1
-  bin="$(mita_bin)" || return 1
-  if [ "${DRY_RUN:-0}" -eq 1 ]; then
-    msg "[dry-run] $(printf '%q ' "$bin" delete user "$name")"
-    return 0
-  fi
-  "$bin" delete user "$name" >/dev/null 2>&1
-}
-
-# mita apply config 会合并用户而不是替换用户。这里把脚本管理的用户集合
-# 显式同步成期望集合，确保删除、停用、到期和事务回滚真正撤销旧凭据。
-mita_sync_user_names() {
-  local desired_raw="${1:-}" desired actual stale after
-  users_require_python || return 1
-  desired="$(printf '%s\n' "$desired_raw" | sed '/^[[:space:]]*$/d' | LC_ALL=C sort -u)"
-  [ -n "$desired" ] || {
-    warn "$(t '拒绝同步空用户集合' 'Refusing to synchronize an empty user set')"
-    return 1
-  }
-  if ! actual="$(mita_actual_user_names)"; then
-    warn "$(t '无法读取 mita 实际用户集合，未执行删除' \
-      'Cannot read the actual mita user set; no deletion was attempted')"
-    return 1
-  fi
-  stale="$(DESIRED="$desired" ACTUAL="$actual" python3 -c '
-import os
-desired = set(filter(None, os.environ.get("DESIRED", "").splitlines()))
-actual = set(filter(None, os.environ.get("ACTUAL", "").splitlines()))
-print("\n".join(sorted(actual - desired)))
-' 2>/dev/null)" || return 1
-  if [ -n "$stale" ]; then
-    local name
-    while IFS= read -r name; do
-      [ -n "$name" ] || continue
-      if ! mita_delete_user_exact "$name"; then
-        warn "$(t "无法从 mita 删除旧用户: $name" \
-          "Failed to delete stale user from mita: $name")"
-        return 1
-      fi
-      users_log "mita user revoked: $name"
-    done <<< "$stale"
-  fi
-  if [ "${DRY_RUN:-0}" -eq 1 ]; then
-    return 0
-  fi
-  if ! after="$(mita_actual_user_names)"; then
-    warn "$(t '删除后无法重新读取 mita 用户集合' \
-      'Cannot read the mita user set after synchronization')"
-    return 1
-  fi
-  if ! DESIRED="$desired" ACTUAL="$after" python3 -c '
-import os, sys
-desired = set(filter(None, os.environ.get("DESIRED", "").splitlines()))
-actual = set(filter(None, os.environ.get("ACTUAL", "").splitlines()))
-sys.exit(0 if actual == desired else 1)
-' 2>/dev/null; then
-    warn "$(t 'mita 实际用户与 users.json 启用用户仍不一致' \
-      'The actual mita users still differ from enabled users in users.json')"
-    return 1
-  fi
-  return 0
-}
-
-mita_sync_users_to_state() {
-  local desired
-  desired="$(users_enabled_names_from_state)" || return 1
-  mita_sync_user_names "$desired"
-}
-
-mita_sync_single_user() {
-  local name="$1"
-  [ -n "$name" ] || return 1
-  mita_sync_user_names "$name"
 }
 
 multi_user_port_protocol_pairs() {
@@ -6542,8 +6015,8 @@ print(1 if any(u.get("enabled",True) and int(u.get("bandwidth_mbps") or 0)>0 for
     return 0
   fi
   users_isolated_mode || {
-    warn "$(t '拒绝应用限速：当前尚未迁移到用户专属实例模型' \
-      'Refusing rate limits: deployment has not migrated to dedicated user instances')"
+    warn "$(t '拒绝应用限速：schema v3 必须使用 isolated-v2 用户专属实例' \
+      'Refusing rate limits: schema v3 requires isolated-v2 dedicated instances')"
     return 1
   }
   tc_available || {
@@ -6843,8 +6316,8 @@ users_scan_calendar_quota_reset() {
   users_isolated_mode || {
     users_tx_rollback "$tx" 1
     admin_lock_release
-    warn "$(t 'calendar 重置要求 isolated-v2，但迁移后模型未生效' \
-      'Calendar reset requires isolated-v2, but migration did not take effect')"
+    warn "$(t 'calendar 重置要求 isolated-v2，但当前模型无效' \
+      'Calendar reset requires isolated-v2, but the current model is invalid')"
     return 1
   }
 
@@ -6912,34 +6385,30 @@ install_users_scheduler() {
   if command -v systemctl >/dev/null 2>&1 && [ -d /etc/systemd/system ]; then
     cat >"$MITA_USERS_SERVICE" <<EOF
 [Unit]
-Description=mita users expire and calendar quota scan
+Description=NoBrand Mieru users expire and calendar quota scan
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=${script_path} user-scan
+ExecStart=${script_path} mieru user-scan
 Nice=10
 EOF
     cat >"$MITA_USERS_TIMER" <<EOF
 [Unit]
-Description=Run mita users scan every 15 minutes
+Description=Run NoBrand Mieru users scan every 15 minutes
 
 [Timer]
 OnBootSec=2min
 OnUnitActiveSec=15min
 AccuracySec=1min
-Unit=mita-users-scan.service
+Unit=nobrand-mieru-users-scan.service
 
 [Install]
 WantedBy=timers.target
 EOF
     systemctl daemon-reload 2>/dev/null || true
-    systemctl enable --now mita-users-scan.timer 2>/dev/null || true
-    # 清理 v1.9.5 及更早版本创建的、已证明不可作为按用户限速的恢复服务。
-    systemctl disable --now mita-tc-restore.service 2>/dev/null || true
-    rm -f /etc/systemd/system/mita-tc-restore.service 2>/dev/null || true
-    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable --now nobrand-mieru-users-scan.timer 2>/dev/null || true
     install_logrotate_config 2>/dev/null || true
     harden_mita_permissions 2>/dev/null || true
     users_log "scheduler: systemd expiry/quota timer"
@@ -6948,8 +6417,8 @@ EOF
 
   if [ -d /etc/cron.d ]; then
     cat >"$MITA_USERS_CRON" <<EOF
-# mita multi-user expire / quota scan (every 15 min)
-*/15 * * * * root ${script_path} user-scan >>${MITA_USERS_LOG} 2>&1
+# NoBrand Mieru multi-user expire / quota scan (every 15 min)
+*/15 * * * * root ${script_path} mieru user-scan >>${MITA_USERS_LOG} 2>&1
 EOF
     chmod 0644 "$MITA_USERS_CRON" 2>/dev/null || true
     install_logrotate_config 2>/dev/null || true
@@ -6959,15 +6428,14 @@ EOF
   fi
   # OpenRC / 无 cron：写入 hint
   install_logrotate_config 2>/dev/null || true
-  warn "$(t '未找到 systemd timer 或 /etc/cron.d，请手动定期执行: install-mita user-scan' \
-    'No systemd timer or /etc/cron.d; run: install-mita user-scan')"
+  warn "$(t '未找到 systemd timer 或 /etc/cron.d，请手动定期执行: nobrand mieru user-scan' \
+    'No systemd timer or /etc/cron.d; run: nobrand mieru user-scan')"
 }
 
 remove_users_scheduler() {
   if [ -f "$MITA_USERS_TIMER" ] || [ -f "$MITA_USERS_SERVICE" ]; then
-    systemctl disable --now mita-users-scan.timer 2>/dev/null || true
-    systemctl disable --now mita-tc-restore.service 2>/dev/null || true
-    rm -f "$MITA_USERS_TIMER" "$MITA_USERS_SERVICE" /etc/systemd/system/mita-tc-restore.service 2>/dev/null || true
+    systemctl disable --now nobrand-mieru-users-scan.timer 2>/dev/null || true
+    rm -f "$MITA_USERS_TIMER" "$MITA_USERS_SERVICE" 2>/dev/null || true
     systemctl daemon-reload 2>/dev/null || true
   fi
   rm -f "$MITA_USERS_CRON" 2>/dev/null || true
@@ -6996,7 +6464,7 @@ users_backup_now() {
   if command -v python3 >/dev/null 2>&1; then
     MITA_USERS_BACKUP_DIR="$MITA_USERS_BACKUP_DIR" python3 -c '
 import os, glob
-d=os.environ.get("MITA_USERS_BACKUP_DIR", "/var/lib/mita-oneclick/backups")
+d=os.environ.get("MITA_USERS_BACKUP_DIR", "/var/lib/nobrand-oneclick/mieru/backups")
 files=sorted(glob.glob(os.path.join(d, "users_*.json")), key=os.path.getmtime, reverse=True)
 for f in files[20:]:
     try: os.remove(f)
@@ -7014,6 +6482,8 @@ import datetime,ipaddress,json,re,sys
 d=json.load(open(sys.argv[1]))
 proto=(sys.argv[2] if len(sys.argv)>2 else "TCP").upper()
 auto_host=(sys.argv[3] if len(sys.argv)>3 else "").strip()
+if d.get("deployment_model") != "isolated-v2":
+    sys.exit(19)
 def normalize_endpoint_host(value):
     value=str(value or "").strip()
     try:
@@ -7124,6 +6594,7 @@ for u in users:
     u["package"]=package
     u["bandwidth_mbps"]=bw
 d["version"]=2
+d["deployment_model"]="isolated-v2"
 d["protocol"]=proto
 json.dump(d, open(sys.argv[1]+".norm","w"), indent=2)
 ' "$f" "$protocol" "$auto_host" 2>/dev/null || return 1
@@ -7413,11 +6884,7 @@ do_user_list() {
   load_install_state
   users_ensure_loaded
   if ! users_state_exists || [ "$(users_count)" -eq 0 ]; then
-    t '（无多用户记录；当前为单用户安装，添加用户后将自动迁移）' \
-      '(No multi-user state; single-user install. Adding a user migrates automatically.)'
-    if [ -n "${USERNAME:-}" ]; then
-      t "  主用户: ${USERNAME}  端口: ${PORT:-?}" "  Primary: ${USERNAME}  port: ${PORT:-?}"
-    fi
+    t '（schema v3 中没有 Mieru 用户）' '(No Mieru users in schema v3 state.)'
     return 0
   fi
   msg ""
@@ -7488,14 +6955,8 @@ do_user_add() {
   [ -z "$requested_advertise_port" ] \
     || requested_advertise_port="$(normalize_uint "$requested_advertise_port")"
   if ! users_state_exists || [ "$(users_count)" -eq 0 ]; then
-    load_config_from_mita || return 1
-    load_credentials_fallback 2>/dev/null || true
-    users_migrate_from_primary || return 1
-    users_state_exists || {
-      warn "$(t '无法迁移现有主用户，已取消新增以避免覆盖服务端账号' \
-        'Could not migrate the existing primary user; add cancelled to avoid overwriting server accounts')"
-      return 1
-    }
+    die "$(t 'schema v3 Mieru 用户状态缺失；请重新执行 fresh install' \
+      'Schema-v3 Mieru user state is missing; perform a fresh install')"
   fi
   if [ -z "$name" ]; then
     if [ "$YES" -eq 1 ]; then
@@ -7816,28 +7277,18 @@ do_user_scan() {
 do_user_usage() {
   require_root 2>/dev/null || true
   mita_installed || die "$(t 'mita 未安装' 'mita is not installed')"
-  local bin iid iname iport
-  bin="$(mita_bin)"
-  if users_isolated_mode; then
-    while IFS=$'\t' read -r iid iname iport; do
-      [ -n "$iid" ] || continue
-      msg ""
-      t "【${iname} / 专属实例 ${iid}】" "[${iname} / dedicated instance ${iid}]"
-      instance_cmd "$iid" get users 2>/dev/null \
-        || warn "$(t "${iname}: mita get users 不可用" "${iname}: mita get users unavailable")"
-      instance_cmd "$iid" get quotas 2>/dev/null \
-        || warn "$(t "${iname}: mita get quotas 不可用" "${iname}: mita get quotas unavailable")"
-    done < <(users_enabled_instance_rows)
-  else
-    ensure_mita_daemon 2>/dev/null || true
-    wait_mita_socket 10 2>/dev/null || true
+  users_isolated_mode || die "$(t 'schema v3 Mieru 状态必须使用 isolated-v2' \
+    'Schema-v3 Mieru state must use isolated-v2')"
+  local iid iname iport
+  while IFS=$'\t' read -r iid iname iport; do
+    [ -n "$iid" ] || continue
     msg ""
-    t '【用户流量】mita get users' '[User traffic] mita get users'
-    "$bin" get users 2>/dev/null || warn "$(t 'mita get users 不可用' 'mita get users unavailable')"
-    msg ""
-    t '【配额用量】mita get quotas' '[Quota usage] mita get quotas'
-    "$bin" get quotas 2>/dev/null || warn "$(t 'mita get quotas 不可用' 'mita get quotas unavailable')"
-  fi
+    t "【${iname} / 专属实例 ${iid}】" "[${iname} / dedicated instance ${iid}]"
+    instance_cmd "$iid" get users 2>/dev/null \
+      || warn "$(t "${iname}: mita get users 不可用" "${iname}: mita get users unavailable")"
+    instance_cmd "$iid" get quotas 2>/dev/null \
+      || warn "$(t "${iname}: mita get quotas 不可用" "${iname}: mita get quotas unavailable")"
+  done < <(users_enabled_instance_rows)
   msg ""
   t '【本地套餐配置】' '[Local package config]'
   if users_state_exists; then
@@ -7980,11 +7431,6 @@ do_doctor() {
       if [ "$(service_manager)" = systemd ]; then
         check "instance service template" "$([ -f "$MITA_INSTANCE_SYSTEMD_TEMPLATE" ] && echo 1 || echo 0)"
         check "instance runtime tmpfiles" "$([ -f "$MITA_INSTANCE_TMPFILES" ] && echo 1 || echo 0)"
-        if systemctl is-active --quiet mita 2>/dev/null; then
-          check "legacy default service" 2 "仍在运行，可能产生端口冲突"
-        else
-          check "legacy default service inactive" 1
-        fi
       else
         check "instance runner" "$([ -x "$MITA_INSTANCE_RUNNER" ] && echo 1 || echo 0)"
       fi
@@ -8015,21 +7461,7 @@ PY
         fi
       done < <(users_enabled_instance_rows)
     else
-      check "deployment model" 2 "legacy single instance; next managed change will migrate"
-      ensure_mita_daemon 2>/dev/null || true
-      if wait_mita_socket 8 2>/dev/null; then
-        check "daemon socket" 1
-      else
-        check "daemon socket" 0 "未就绪"
-      fi
-      st="$("$bin" status 2>/dev/null || true)"
-      if printf '%s' "$st" | grep -qi RUNNING; then
-        check "proxy RUNNING" 1
-      elif printf '%s' "$st" | grep -qi IDLE; then
-        check "proxy status" 2 "IDLE（可能未 start）"
-      else
-        check "proxy status" 2 "${st:-unknown}"
-      fi
+      check "deployment model" 0 "schema v3 requires isolated-v2"
     fi
   else
     check "mita installed" 0
@@ -8038,7 +7470,7 @@ PY
   t '【用户状态】' '[Users state]'
   if users_state_exists; then
     check "users.json" 1 "$(users_count) users"
-    local en desired_users actual_users user_diff
+    local en
     en="$(python3 -c '
 import json,sys
 d=json.load(open(sys.argv[1]))
@@ -8048,25 +7480,8 @@ print(sum(1 for u in (d.get("users") or []) if u.get("enabled",True)))
       "$en$([ "${en:-0}" -eq 0 ] && printf ' (all disabled/expired)' || true)"
     if users_isolated_mode; then
       check "user-to-instance mapping" 1 "$en dedicated instances"
-    elif mita_installed 2>/dev/null \
-       && desired_users="$(users_enabled_names_from_state 2>/dev/null)" \
-       && actual_users="$(mita_actual_user_names 2>/dev/null)"; then
-      user_diff="$(DESIRED="$desired_users" ACTUAL="$actual_users" python3 -c '
-import os
-d=set(filter(None,os.environ.get("DESIRED","").splitlines()))
-a=set(filter(None,os.environ.get("ACTUAL","").splitlines()))
-parts=[]
-if a-d: parts.append("stale="+",".join(sorted(a-d)))
-if d-a: parts.append("missing="+",".join(sorted(d-a)))
-print("; ".join(parts))
-' 2>/dev/null || true)"
-      if [ -z "$user_diff" ]; then
-        check "actual user set" 1 "$en enabled"
-      else
-        check "actual user set" 0 "$user_diff"
-      fi
     else
-      check "actual user set" 2 "无法读取 mita 配置"
+      check "user-to-instance mapping" 0 "schema v3 requires isolated-v2"
     fi
     # 目录权限
     local mode
@@ -8077,7 +7492,7 @@ print("; ".join(parts))
       check "/etc/mita mode" 2 "$mode (建议 mita:mita 750)"
     fi
   else
-    check "users.json" 2 "单用户或未迁移"
+    check "users.json" 0 "schema v3 Mieru user state missing"
   fi
 
   t '【防火墙所有权】' '[Firewall ownership]'
@@ -8091,7 +7506,7 @@ print("; ".join(parts))
   doctor_check_tc_limits
 
   t '【定时任务】' '[Scheduler]'
-  if [ -f "$MITA_USERS_TIMER" ] || systemctl is-enabled mita-users-scan.timer >/dev/null 2>&1; then
+  if [ -f "$MITA_USERS_TIMER" ] || systemctl is-enabled nobrand-mieru-users-scan.timer >/dev/null 2>&1; then
     check "systemd timer" 1
   elif [ -f "$MITA_USERS_CRON" ]; then
     check "cron.d" 1 "$MITA_USERS_CRON"
@@ -8182,7 +7597,7 @@ do_perf() {
   fi
   if command -v ps >/dev/null 2>&1; then
     process_rows="$(ps -eo pid=,pcpu=,rss=,comm=,args= 2>/dev/null \
-      | awk '$4=="mita" || $4=="mita-real" {printf "    PID %-7s CPU %-6s RSS %.1f MiB  %s\n",$1,$2,$3/1024,$4}' \
+      | awk '$4=="mita" {printf "    PID %-7s CPU %-6s RSS %.1f MiB  %s\n",$1,$2,$3/1024,$4}' \
       | head -n 20 || true)"
   fi
   if [ -s "$TC_OWNED_STATE" ]; then
@@ -8450,7 +7865,8 @@ do_user_set_endpoint() {
   require_linux
   local requested_name="${USERNAME:-}" requested_host="${ADVERTISE_HOST:-}"
   local requested_port="${ADVERTISE_PORT:-}" requested_cli="${ADVERTISE_CLI:-0}"
-  local name host port actual_port tx auto_host=""
+  local requested_auto="${ADVERTISE_AUTO_REQUESTED:-0}"
+  local name host port actual_port current_host current_port tx auto_host=""
   USERNAME_CLI=0
   ADVERTISE_CLI=0
   load_install_state
@@ -8463,10 +7879,20 @@ do_user_set_endpoint() {
   fi
   users_name_exists "$name" || die "$(t "用户不存在: $name" "User not found: $name")"
   actual_port="$(users_get_field "$name" port)"
+  current_host="$(users_get_field "$name" advertise_host 2>/dev/null || true)"
+  current_port="$(users_get_field "$name" advertise_port 2>/dev/null || true)"
 
   if [ "$requested_cli" -eq 1 ]; then
-    host="$requested_host"
-    port="$requested_port"
+    if [ "$requested_auto" -eq 1 ]; then
+      host=""
+      port=""
+    else
+      host="${requested_host:-$current_host}"
+      port="${requested_port:-${current_port:-$actual_port}}"
+      if [ -z "$host" ]; then
+        host="$(public_ip 2>/dev/null || true)"
+      fi
+    fi
     validate_advertise_endpoint_values "$host" "$port" "$PROTOCOL" \
       || die "$(t '自定义客户端入口参数无效' 'Invalid custom client entry parameters')"
     [ -z "$port" ] || port="$(normalize_uint "$port")"
@@ -8506,6 +7932,7 @@ do_user_set_endpoint() {
   fi
   users_tx_commit "$tx"
   admin_lock_release
+  ADVERTISE_AUTO_REQUESTED=0
   t "已更新 ${name} 的客户端展示入口；服务端实例未重启" \
     "Updated ${name} client display endpoint; server instance was not restarted"
   print_user_outputs "$name"
@@ -9234,255 +8661,29 @@ collect_config_interactive() {
 }
 
 load_config_from_mita() {
-  local desc bin bindings live_mtu=""
   local cli_user="$USERNAME" cli_password="$PASSWORD"
   local cli_port="$PORT" cli_port_range="$PORT_RANGE" cli_protocol="$PROTOCOL"
   local cli_advertise_host="$ADVERTISE_HOST" cli_advertise_port="$ADVERTISE_PORT"
   local cli_mtu_request="$MTU_REQUEST"
-  load_install_state
-  local state_user="$USERNAME" state_password="$PASSWORD"
-  local state_port="$PORT" state_port_range="$PORT_RANGE" state_protocol="$PROTOCOL"
-  local state_mtu="$MTU" state_mtu_policy="$MTU_POLICY"
-  if users_isolated_mode; then
-    users_sync_primary_globals
-    PORT_RANGE=""
-    MTU="$state_mtu"
-    MTU_POLICY="$(normalize_mtu_policy "$state_mtu_policy" 2>/dev/null || printf 'safe')"
-    [ "${USERNAME_CLI:-0}" -eq 1 ] && USERNAME="$cli_user"
-    [ "${PASSWORD_CLI:-0}" -eq 1 ] && PASSWORD="$cli_password"
-    [ "${PORT_CLI:-0}" -eq 1 ] && PORT="$cli_port"
-    [ "${PORT_RANGE_CLI:-0}" -eq 1 ] && { PORT=""; PORT_RANGE="$cli_port_range"; }
-    [ "${PROTOCOL_CLI:-0}" -eq 1 ] && PROTOCOL="$cli_protocol"
-    if [ "${ADVERTISE_CLI:-0}" -eq 1 ]; then
-      ADVERTISE_HOST="$cli_advertise_host"
-      ADVERTISE_PORT="$cli_advertise_port"
-    fi
-    [ "${MTU_CLI:-0}" -eq 1 ] && MTU_REQUEST="$cli_mtu_request"
-    validate_proxy_credentials || return 1
-    return 0
-  fi
-  bin="$(mita_bin)"
-  if ! [ -x "$bin" ]; then
-    recover_deb_mita 2>/dev/null || true
-    bin="$(mita_bin)"
-  fi
-  if ! [ -x "$bin" ]; then
-    bail "$(t '未找到 mita 二进制，自动修复未成功；请重新运行脚本并选择「升级」重新安装' \
-      'mita binary not found and auto-repair failed; re-run the script and choose Upgrade')" || return 1
-  fi
-  desc="$("$bin" describe config 2>/dev/null || true)"
-  if [ -z "$desc" ]; then
-    bail "$(t '无法读取服务端配置。请先使用「服务管理 → 状态」检查；若守护进程未运行: systemctl restart mita' \
-      'Cannot read server config. Use 5) Status; if daemon is down: systemctl restart mita')" || return 1
-  fi
-
-  live_mtu="$(extract_mtu_from_describe "$desc" 2>/dev/null || true)"
-  MTU="$state_mtu"
-  MTU_POLICY="$(normalize_mtu_policy "$state_mtu_policy" 2>/dev/null || printf 'safe')"
-  if valid_mtu "$live_mtu"; then
-    MTU="$live_mtu"
-    if ! grep -q '^MTU_POLICY=' "$MITA_STATE" 2>/dev/null || [ "$state_mtu" != "$live_mtu" ]; then
-      if [ "$live_mtu" -eq 1400 ]; then
-        MTU_POLICY="safe"
-      else
-        MTU_POLICY="custom"
-      fi
-    fi
-  fi
-  if [ "${MTU_CLI:-0}" -eq 1 ]; then
-    MTU_REQUEST="$cli_mtu_request"
-  fi
-
-  USERNAME=""
-  PASSWORD=""
-  if ! command -v python3 >/dev/null 2>&1 \
-     && [ -n "$state_user" ] && [ -n "$state_password" ]; then
-    USERNAME="$state_user"
-    PASSWORD="$state_password"
-  else
-    parse_user_from_describe "$desc" || true
-  fi
-  [ -n "$USERNAME" ] || USERNAME="$state_user"
-  if [ -z "$PASSWORD" ] || [[ "$PASSWORD" == \** ]]; then
-    PASSWORD="$state_password"
-  fi
-  if [ -z "$USERNAME" ] || [ -z "$PASSWORD" ] || [[ "$PASSWORD" == \** ]]; then
-    load_credentials_fallback || true
-  fi
+  load_install_state || return 1
+  users_isolated_mode || {
+    bail "$(t 'schema v3 Mieru 状态必须使用 isolated-v2' \
+      'Schema-v3 Mieru state must use isolated-v2')" || return 1
+  }
+  users_sync_primary_globals
+  PORT_RANGE=""
+  MTU_POLICY="$(normalize_mtu_policy "$MTU_POLICY" 2>/dev/null || printf 'safe')"
   [ "${USERNAME_CLI:-0}" -eq 1 ] && USERNAME="$cli_user"
   [ "${PASSWORD_CLI:-0}" -eq 1 ] && PASSWORD="$cli_password"
-  if [ -z "$USERNAME" ]; then
-    bail "$(t '配置中缺少用户名' 'Missing username in config')" || return 1
-  fi
-  if [ -z "$PASSWORD" ]; then
-    bail "$(t '密码已哈希存储，无法生成节点链接。请使用「重新配置」设置新密码' \
-      'Password is hashed; use 2) Reconfigure to set a new password')" || return 1
-  fi
-  validate_proxy_credentials || return 1
-
-  bindings="$(extract_bindings_from_describe "$desc")"
-  PORT="$state_port"
-  PORT_RANGE="$state_port_range"
-  PROTOCOL="$state_protocol"
-  if [ -n "$bindings" ]; then
-    local pp proto p has_tcp=0 has_udp=0 tcp_port="" primary_port="" live_range=""
-    PORT=""
-    PORT_RANGE=""
-    while IFS= read -r pp; do
-      [ -n "$pp" ] || continue
-      proto="${pp%%|*}"
-      p="${pp#*|}"
-      case "$proto" in
-        TCP)
-          has_tcp=1
-          if [[ "$p" =~ ^[0-9]+$ ]]; then
-            [ -n "$tcp_port" ] || tcp_port="$p"
-            [ -n "$primary_port" ] || primary_port="$p"
-          elif [[ "$p" == *-* ]] && [ -z "$live_range" ]; then
-            live_range="$p"
-          fi
-          ;;
-        UDP)
-          has_udp=1
-          if [[ "$p" =~ ^[0-9]+$ ]] && [ -z "$primary_port" ]; then
-            primary_port="$p"
-          elif [[ "$p" == *-* ]] && [ -z "$live_range" ]; then
-            live_range="$p"
-          fi
-          ;;
-      esac
-    done <<< "$bindings"
-    PORT="${tcp_port:-$primary_port}"
-    PORT_RANGE="$live_range"
-    if [ "$has_tcp" -gt 0 ] && [ "$has_udp" -gt 0 ]; then
-      PROTOCOL="BOTH"
-    elif [ "$has_udp" -gt 0 ]; then
-      PROTOCOL="UDP"
-    else
-      PROTOCOL="TCP"
-    fi
-  fi
-  [ "${PORT_CLI:-0}" -eq 1 ] && { PORT="$cli_port"; PORT_RANGE=""; }
+  [ "${PORT_CLI:-0}" -eq 1 ] && PORT="$cli_port"
   [ "${PORT_RANGE_CLI:-0}" -eq 1 ] && { PORT=""; PORT_RANGE="$cli_port_range"; }
   [ "${PROTOCOL_CLI:-0}" -eq 1 ] && PROTOCOL="$cli_protocol"
-  if [ -n "$PORT_RANGE" ]; then
-    warn "$(t "检测到旧端口段 ${PORT_RANGE}；v2 专属实例将使用其首端口，请在本次重配中确认" \
-      "Legacy port range ${PORT_RANGE} detected; v2 dedicated mode will use its first port, confirm it during reconfigure")"
-    PORT="${PORT_RANGE%-*}"
-    PORT_RANGE=""
+  if [ "${ADVERTISE_CLI:-0}" -eq 1 ]; then
+    ADVERTISE_HOST="$cli_advertise_host"
+    ADVERTISE_PORT="$cli_advertise_port"
   fi
-  # 旧安装：状态无 TRAFFIC_PATTERN 记录、且服务端配置本身无 trafficPattern 时，
-  # 不在客户端配置/重配里凭空注入（保持与服务端一致）；显式 --traffic-pattern 优先
-  if [ "${TRAFFIC_CLI:-0}" -ne 1 ] \
-     && ! grep -q '^TRAFFIC_PATTERN=' "$MITA_STATE" 2>/dev/null \
-     && ! printf '%s' "$desc" | grep -q '"trafficPattern"'; then
-    TRAFFIC_PATTERN="off"
-  fi
-}
-
-parse_user_from_describe() {
-  local desc="$1" line
-  [ -n "$desc" ] || return 1
-  if command -v python3 >/dev/null 2>&1; then
-    line="$(printf '%s' "$desc" | python3 -c '
-import json, sys
-try:
-    data = json.load(sys.stdin)
-except Exception:
-    sys.exit(1)
-users = data.get("users") or []
-if not users:
-    sys.exit(1)
-u = users[0]
-name = u.get("name", "") or ""
-pwd = u.get("password", "") or ""
-print(f"{name}\t{pwd}")
-' 2>/dev/null)" || return 1
-    USERNAME="${line%%$'\t'*}"
-    PASSWORD="${line#*$'\t'}"
-    [ -n "$USERNAME" ] && return 0
-    return 1
-  fi
-  USERNAME="$(printf '%s' "$desc" | sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)"
-  PASSWORD="$(printf '%s' "$desc" | sed -n 's/.*"password"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)"
-  [ -n "$USERNAME" ] && [ -n "$PASSWORD" ]
-}
-
-# The state file intentionally sets USERNAME/PASSWORD inside a subshell; only the
-# serialized line is consumed in the parent.
-# shellcheck disable=SC2030,SC2031
-load_credentials_fallback() {
-  local line
-  if [ -f "$MITA_STATE" ]; then
-    state_file_is_secure "$MITA_STATE" || return 1
-    line="$(
-      (
-        local USERNAME="" PASSWORD=""
-        # shellcheck disable=SC1090
-        source "$MITA_STATE" 2>/dev/null || true
-        printf '%s\t%s' "${USERNAME:-}" "${PASSWORD:-}"
-      )
-    )"
-    [ -z "$USERNAME" ] && USERNAME="${line%%$'\t'*}"
-    if [ -z "$PASSWORD" ] || [[ "$PASSWORD" == \** ]]; then
-      PASSWORD="${line#*$'\t'}"
-    fi
-  fi
-  [ -n "$USERNAME" ] && [ -n "$PASSWORD" ] && [[ "$PASSWORD" != \** ]] && return 0
-  if ! command -v python3 >/dev/null 2>&1; then
-    return 1
-  fi
-  # users.json 是管理面的权威状态；安装状态损坏时也不应先从旧客户端导出恢复凭据。
-  if users_state_exists && state_file_is_secure "$MITA_USERS_STATE"; then
-    line="$(python3 -c '
-import json,sys
-d=json.load(open(sys.argv[1]))
-users=d.get("users") or []
-ordered=[u for u in users if u.get("enabled", True)] + [u for u in users if not u.get("enabled", True)]
-for u in ordered:
-    name=u.get("name") or ""
-    password=u.get("password") or ""
-    if name and password:
-        print(f"{name}\t{password}")
-        raise SystemExit(0)
-raise SystemExit(1)
-' "$MITA_USERS_STATE" 2>/dev/null || true)"
-    [ -z "$USERNAME" ] && USERNAME="${line%%$'\t'*}"
-    if [ -z "$PASSWORD" ] || [[ "$PASSWORD" == \** ]]; then
-      PASSWORD="${line#*$'\t'}"
-    fi
-    [ -n "$USERNAME" ] && [ -n "$PASSWORD" ] && [[ "$PASSWORD" != \** ]] && return 0
-  fi
-
-  # 最后兜底才读取客户端文件，并按 mtime 取最新有效文件，避免恢复到旧密码。
-  line="$(CLIENT_CURRENT_DIR="$(client_current_dir)" python3 - <<'PY' 2>/dev/null || true
-import glob, json, os
-
-paths = glob.glob(os.path.join(os.environ["CLIENT_CURRENT_DIR"], "*.json"))
-paths += glob.glob("/root/mieru_client_*.json")
-paths = sorted(set(paths), key=lambda p: os.path.getmtime(p), reverse=True)
-for path in paths:
-    try:
-        data = json.load(open(path))
-        if "profiles" in data:
-            user = (data.get("profiles") or [{}])[0].get("user") or {}
-        else:
-            user = (data.get("users") or [{}])[0]
-        name = user.get("name") or ""
-        password = user.get("password") or ""
-        if name and password:
-            print(f"{name}\t{password}")
-            raise SystemExit(0)
-    except Exception:
-        continue
-raise SystemExit(1)
-PY
-)"
-  [ -z "$USERNAME" ] && USERNAME="${line%%$'\t'*}"
-  if [ -z "$PASSWORD" ] || [[ "$PASSWORD" == \** ]]; then
-    PASSWORD="${line#*$'\t'}"
-  fi
-  [ -n "$USERNAME" ] && [ -n "$PASSWORD" ] && [[ "$PASSWORD" != \** ]]
+  [ "${MTU_CLI:-0}" -eq 1 ] && MTU_REQUEST="$cli_mtu_request"
+  validate_proxy_credentials
 }
 
 collect_reconfigure_interactive() {
@@ -9701,7 +8902,8 @@ EOF
 }
 
 write_server_config() {
-  # 首次安装兼容路径；完成后立即迁移到每用户一个配置/实例。
+  # Single-user semantic builder is retained as the golden-parity primitive;
+  # production schema-v3 installs use the users.json multi-instance branch.
   if [ "${MULTI_USER_MODE:-0}" -eq 1 ] && users_state_exists && [ "$(users_count)" -gt 0 ]; then
     write_server_config_multi
     return
@@ -10615,81 +9817,6 @@ snell_refresh_runtime_metadata() {
   local rc=$?
   rm -f "$tmp"
   return "$rc"
-}
-
-# One-time 1.3.0 migration: v6 was removed after its final public-path
-# qualification failed. Historical state is stopped and removed before any
-# normal NoBrand action can expose it again. This is migration cleanup only;
-# there is no v6 install, resolver, runner, exporter, or lifecycle path.
-snell_migrate_quic_state_fields() {
-  local id path tmp enabled
-  while IFS= read -r id; do
-    [ -n "$id" ] || continue
-    path="$(snell_state_path "$id")" || return 1
-    if ! jq -e '
-        .protocol == "snell" and (.version == 4 or .version == 5) and
-        ((has("quic_proxy_enabled") | not) or (.quic_proxy_enabled | type == "boolean")) and
-        ((has("managed_udp") | not) or (.managed_udp | type == "boolean")) and
-        (if .version == 4 then
-           ((.quic_proxy_enabled // false) == false and (.managed_udp // false) == false)
-         elif has("quic_proxy_enabled") and has("managed_udp") then
-           .quic_proxy_enabled == .managed_udp
-         else true end)
-      ' "$path" >/dev/null 2>&1; then
-      return 1
-    fi
-    if jq -e 'has("quic_proxy_enabled") and has("managed_udp")' "$path" >/dev/null 2>&1; then
-      continue
-    fi
-    enabled="$(jq -r '
-      if .version == 4 then false
-      elif has("quic_proxy_enabled") then .quic_proxy_enabled
-      elif has("managed_udp") then .managed_udp
-      else false end
-    ' "$path")" || return 1
-    tmp="$(mktemp_file .json)" || return 1
-    if ! jq --argjson enabled "$enabled" --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
-        .quic_proxy_enabled=$enabled |
-        .managed_udp=$enabled |
-        .updated_at=$updated
-      ' "$path" >"$tmp" \
-       || ! nb_atomic_install_file "$tmp" "$path" 0600; then
-      rm -f "$tmp"
-      return 1
-    fi
-    rm -f "$tmp"
-  done < <(snell_instance_ids)
-}
-
-snell_migrate_removed_v6() {
-  local path id file_id port removed=0 failed=0
-  [ -d "$NOBRAND_SNELL_STATE_DIR" ] || {
-    rm -f "$NOBRAND_SNELL_RUNTIME_DIR/snell-v6" \
-      "$NOBRAND_SNELL_RUNTIME_DIR/snell-v6.runtime.json"
-    return 0
-  }
-  for path in "$NOBRAND_SNELL_STATE_DIR"/*.json; do
-    [ -f "$path" ] || continue
-    jq -e '.protocol == "snell" and .version == 6' "$path" >/dev/null 2>&1 || continue
-    id="$(jq -r '.instance_id // empty' "$path")"
-    file_id="$(basename "$path" .json)"
-    [[ "$id" =~ ^s[0-9a-f]{16}$ ]] && [ "$file_id" = "$id" ] \
-      || { failed=1; continue; }
-    port="$(jq -r '.listen_port // empty' "$path")"
-    snell_remove_service "$id" || { failed=1; continue; }
-    if nb_valid_port "$port"; then
-      # Historical NoBrand v6 had TCP-only canonical ownership. Never infer
-      # UDP ownership from a same-number rule that may belong to HY2.
-      nb_firewall_close_pairs "TCP|${port}" || { failed=1; continue; }
-    fi
-    rm -f "$(snell_config_path "$id")" "$path" || { failed=1; continue; }
-    removed=$((removed + 1))
-  done
-  [ "$failed" -eq 0 ] || return 1
-  snell_migrate_quic_state_fields || return 1
-  rm -f "$NOBRAND_SNELL_RUNTIME_DIR/snell-v6" \
-    "$NOBRAND_SNELL_RUNTIME_DIR/snell-v6.runtime.json"
-  [ "$removed" -eq 0 ] || info "Removed ${removed} deprecated Snell v6 instance(s) during 1.3.0 migration"
 }
 
 nobrand_run_snell_action() {
@@ -12079,209 +11206,6 @@ nobrand_run_vless_sudoku_action() {
   esac
 }
 
-mita_socket_paths() {
-  printf '%s\n' /var/run/mita/mita.sock /run/mita/mita.sock /var/run/mita.sock
-}
-
-mita_log_tail() {
-  local f
-  for f in /var/log/mita.err /var/log/mita.log; do
-    if [ -s "$f" ]; then
-      warn "$(t "mita 日志 (${f}):" "mita log (${f}):")"
-      tail -n 8 "$f" 2>/dev/null | while IFS= read -r line; do
-        msg "  $line"
-      done
-    fi
-  done
-}
-
-wait_mita_socket() {
-  local timeout="${1:-45}" i=0 sock
-  while [ "$i" -lt "$timeout" ]; do
-    while IFS= read -r sock; do
-      [ -S "$sock" ] 2>/dev/null && return 0
-    done < <(mita_socket_paths)
-    sleep 1
-    i=$((i + 1))
-  done
-  return 1
-}
-
-ensure_mita_daemon() {
-  if [ "${DRY_RUN:-0}" -eq 1 ]; then
-    msg "[dry-run] ensure mita management daemon"
-    return 0
-  fi
-  local sm
-  sm="$(service_manager)"
-  case "$sm" in
-    systemd)
-      run systemctl enable mita 2>/dev/null || true
-      run systemctl start mita 2>/dev/null || run systemctl restart mita 2>/dev/null || true
-      ;;
-    openrc)
-      run rc-update add mita default 2>/dev/null || true
-      openrc_mita_recover
-      if ! openrc_mita_is_started; then
-        mita_log_tail
-      fi
-      ;;
-    *)
-      run "$(mita_bin)" run >/dev/null 2>&1 &
-      ;;
-  esac
-}
-
-apply_config() {
-  local cfg="$1"
-  STAGE="应用配置"
-  local bin err_file i=0
-  if [ "${DRY_RUN:-0}" -eq 1 ]; then
-    msg "[dry-run] mita apply config $cfg"
-    rm -f "$cfg" 2>/dev/null || true
-    return 0
-  fi
-  bin="$(mita_bin)"
-  err_file="$(mktemp_file .log)"
-  ensure_mita_daemon
-  if ! wait_mita_socket 45; then
-    warn "$(t 'mita 管理进程未就绪，正在重试 apply config...' \
-      'mita management daemon not ready, retrying apply config...')"
-    mita_log_tail
-  fi
-  while [ "$i" -lt 5 ]; do
-    : >"$err_file"
-    if "$bin" apply config "$cfg" 2>"$err_file"; then
-      rm -f "$cfg" "$err_file"
-      return 0
-    fi
-    i=$((i + 1))
-    ensure_mita_daemon
-    wait_mita_socket 10 || true
-    sleep 2
-  done
-  if [ -s "$err_file" ]; then
-    warn "$(t 'mita apply 最后一次错误:' 'Last mita apply error:')"
-    tail -n 8 "$err_file" >&2 || true
-  fi
-  rm -f "$cfg" "$err_file"
-  warn "$(t '应用配置失败；原配置未被脚本降级或删改' \
-    'Failed to apply config; the script did not downgrade or remove any fields')"
-  return 1
-}
-
-collect_ports_from_mita() {
-  local saved_protocol="" saved_port="" saved_port_range=""
-  if [ -f "$MITA_STATE" ]; then
-    state_file_is_secure "$MITA_STATE" || return 1
-    # shellcheck disable=SC1090
-    source "$MITA_STATE" 2>/dev/null || true
-    saved_protocol="$PROTOCOL"
-    saved_port="$PORT"
-    saved_port_range="$PORT_RANGE"
-  else
-    PORT=""
-    PORT_RANGE=""
-    PROTOCOL="TCP"
-  fi
-
-  local desc bin
-  bin="$(mita_bin)"
-  desc="$("$bin" describe config 2>/dev/null || true)"
-  if [ -z "$desc" ]; then
-    if [ -n "$saved_protocol" ]; then
-      PROTOCOL="$saved_protocol"
-      PORT="$saved_port"
-      PORT_RANGE="$saved_port_range"
-    fi
-    return 0
-  fi
-
-  PORT="$(printf '%s' "$desc" | sed -n 's/.*"port"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -n1)"
-  PORT_RANGE="$(printf '%s' "$desc" | sed -n 's/.*"portRange"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)"
-  local tcp_count udp_count
-  tcp_count="$(printf '%s' "$desc" | grep -c '"protocol"[[:space:]]*:[[:space:]]*"TCP"' || true)"
-  udp_count="$(printf '%s' "$desc" | grep -c '"protocol"[[:space:]]*:[[:space:]]*"UDP"' || true)"
-  if [ -n "$saved_protocol" ]; then
-    PROTOCOL="$saved_protocol"
-  elif [ "$tcp_count" -gt 0 ] && [ "$udp_count" -gt 0 ]; then
-    PROTOCOL="BOTH"
-  elif [ "$udp_count" -gt 0 ]; then
-    PROTOCOL="UDP"
-  else
-    PROTOCOL="TCP"
-  fi
-}
-
-# 从 mita describe config 输出解析 MTU；优先 JSON，旧环境无 python3 时用单字段回退。
-extract_mtu_from_describe() {
-  local desc="$1" value=""
-  [ -n "$desc" ] || return 1
-  if command -v python3 >/dev/null 2>&1; then
-    value="$(printf '%s' "$desc" | python3 -c '
-import json, sys
-try:
-    value = json.load(sys.stdin).get("mtu")
-except Exception:
-    raise SystemExit(1)
-if isinstance(value, int):
-    print(value)
-' 2>/dev/null || true)"
-  else
-    value="$(printf '%s' "$desc" \
-      | sed -n 's/.*"mtu"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
-      | head -n1)"
-  fi
-  valid_mtu "$value" || return 1
-  printf '%s' "$value"
-}
-
-# 从 mita describe config 输出解析 portBindings，每行 proto|port_or_range
-extract_bindings_from_describe() {
-  local desc="$1"
-  [ -n "$desc" ] || return 0
-  if command -v python3 >/dev/null 2>&1; then
-    printf '%s' "$desc" | python3 -c '
-import json, sys
-try:
-    data = json.load(sys.stdin)
-except Exception:
-    sys.exit(0)
-for binding in data.get("portBindings", []):
-    proto = binding.get("protocol", "TCP")
-    if "port" in binding:
-        print("{}|{}".format(proto, binding.get("port")))
-    elif binding.get("portRange"):
-        print("{}|{}".format(proto, binding.get("portRange")))
-' 2>/dev/null || true
-    return 0
-  fi
-  printf '%s\n' "$desc" | awk '
-    /"protocol"[[:space:]]*:/ {
-      value=$0
-      sub(/^.*"protocol"[[:space:]]*:[[:space:]]*"/, "", value)
-      sub(/".*$/, "", value)
-      proto=value
-    }
-    /"portRange"[[:space:]]*:/ {
-      value=$0
-      sub(/^.*"portRange"[[:space:]]*:[[:space:]]*"/, "", value)
-      sub(/".*$/, "", value)
-      port=value
-    }
-    /"port"[[:space:]]*:/ {
-      value=$0
-      sub(/^.*"port"[[:space:]]*:[[:space:]]*/, "", value)
-      sub(/[^0-9].*$/, "", value)
-      port=value
-    }
-    /}/ {
-      if (proto != "" && port != "") print proto "|" port
-      proto=""; port=""
-    }
-  '
-}
-
 firewall_owned_has() {
   local key="$1"
   [ -f "$MITA_FIREWALL_OWNED_STATE" ] \
@@ -12516,86 +11440,6 @@ persist_iptables_rules() {
   fi
 }
 
-open_firewall() {
-  STAGE="配置防火墙"
-  local pp proto p proto_lc fw=""
-  # 多用户：放行所有用户端口
-  if [ "${MULTI_USER_MODE:-0}" -eq 1 ] && users_state_exists && [ "$(users_count)" -gt 0 ]; then
-    open_firewall_for_pairs "$(multi_user_port_protocol_pairs)"
-    return 0
-  fi
-  if ! pp="$(port_protocol_pairs | head -n1)" || [ -z "$pp" ]; then
-    return 0
-  fi
-
-  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: active'; then
-    fw=ufw
-  elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
-    fw=firewalld
-  elif command -v iptables >/dev/null 2>&1; then
-    fw=iptables
-  else
-    warn "$(t '未检测到本地防火墙工具，请仅在云安全组放行端口' \
-      'No local firewall tool found; open ports in cloud security group')"
-    return 0
-  fi
-
-  while IFS= read -r pp; do
-    proto="${pp%%|*}"
-    p="${pp#*|}"
-    proto_lc="$(proto_lower "$proto")"
-    firewall_apply_binding "$fw" add "$proto_lc" "$p"
-  done < <(port_protocol_pairs)
-
-  case "$fw" in
-    firewalld) run firewall-cmd --reload || true ;;
-    iptables) persist_iptables_rules ;;
-  esac
-}
-
-close_firewall() {
-  STAGE="清理防火墙规则"
-  local desc bindings bin
-  if users_state_exists && [ "$(users_count)" -gt 0 ]; then
-    close_firewall_for_bindings "$(multi_user_port_protocol_pairs)"
-    return 0
-  fi
-  bin="$(mita_bin)"
-  desc="$("$bin" describe config 2>/dev/null || true)"
-  bindings="$(extract_bindings_from_describe "$desc")"
-  if [ -n "$bindings" ]; then
-    close_firewall_for_bindings "$bindings"
-    return 0
-  fi
-  collect_ports_from_mita
-  local pp proto p proto_lc fw=""
-  if ! pp="$(port_protocol_pairs | head -n1)" || [ -z "$pp" ]; then
-    return 0
-  fi
-
-  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: active'; then
-    fw=ufw
-  elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
-    fw=firewalld
-  elif command -v iptables >/dev/null 2>&1; then
-    fw=iptables
-  else
-    return 0
-  fi
-
-  while IFS= read -r pp; do
-    proto="${pp%%|*}"
-    p="${pp#*|}"
-    proto_lc="$(proto_lower "$proto")"
-    firewall_apply_binding "$fw" del "$proto_lc" "$p"
-  done < <(port_protocol_pairs)
-
-  case "$fw" in
-    firewalld) run firewall-cmd --reload 2>/dev/null || true ;;
-    iptables) persist_iptables_rules ;;
-  esac
-}
-
 cloud_firewall_hint() {
   local specs=() pp proto p
   while IFS= read -r pp; do
@@ -12762,48 +11606,24 @@ client_protocol_label() {
 }
 
 start_mita() {
-  STAGE="启动服务"
+  STAGE="启动 Mieru 专属实例"
   if [ "${DRY_RUN:-0}" -eq 1 ]; then
-    msg "[dry-run] start mita proxy"
+    msg "[dry-run] start dedicated Mieru instances"
     return 0
   fi
-  if users_isolated_mode; then
-    local iid iname iport
-    while IFS=$'\t' read -r iid iname iport; do
-      [ -n "$iid" ] || continue
-      if ! instance_start_proxy "$iid"; then
-        warn "$(t "用户 ${iname} 的专属实例启动失败（${iid}）" \
-          "Dedicated instance for ${iname} failed to start (${iid})")"
-        return 1
-      fi
-    done < <(users_enabled_instance_rows)
-    return 0
-  fi
-  local sm bin _attempt
-  sm="$(service_manager)"
-  bin="$(mita_bin)"
-  if wait_mita_socket 1; then
-    "$bin" stop 2>/dev/null || true
-    sleep 1
-  fi
-  ensure_mita_daemon
-  if ! wait_mita_socket 45; then
-    warn "$(t 'mita 管理套接字未就绪，继续尝试 start...' \
-      'mita management socket not ready, retrying start...')"
-    mita_log_tail
-  fi
-  for _attempt in 1 2 3 4 5; do
-    if "$bin" start 2>/dev/null; then
-      sleep 1
-      return 0
+  users_isolated_mode || {
+    bail "$(t 'schema v3 Mieru 状态必须使用 isolated-v2' \
+      'Schema-v3 Mieru state must use isolated-v2')" || return 1
+  }
+  local iid iname iport
+  while IFS=$'\t' read -r iid iname iport; do
+    [ -n "$iid" ] || continue
+    if ! instance_start_proxy "$iid"; then
+      warn "$(t "用户 ${iname} 的专属实例启动失败（${iid}）" \
+        "Dedicated instance for ${iname} failed to start (${iid})")"
+      return 1
     fi
-    ensure_mita_daemon
-    wait_mita_socket 10 || true
-    sleep 2
-  done
-  warn "$(t "mita start 未成功，请手动执行: $(mita_restart_hint) && mita start" \
-    "mita start failed; run: $(mita_restart_hint) && mita start")"
-  return 1
+  done < <(users_enabled_instance_rows)
 }
 
 verify_mita_running() {
@@ -12813,39 +11633,24 @@ verify_mita_running() {
     msg "[dry-run] verify mita RUNNING"
     return 0
   fi
-  if users_isolated_mode; then
-    local iid iname iport istatus failed=0
-    while IFS=$'\t' read -r iid iname iport; do
-      [ -n "$iid" ] || continue
-      istatus="$(instance_cmd "$iid" status 2>/dev/null || true)"
-      if ! printf '%s' "$istatus" | grep -q 'status is "RUNNING"'; then
-        warn "$(t "用户 ${iname} 的专属实例未处于 RUNNING（${iid}）" \
-          "Dedicated instance for ${iname} is not RUNNING (${iid})")"
-        failed=1
-      fi
-    done < <(users_enabled_instance_rows)
-    [ "$failed" -eq 0 ] || return 1
-    [ "$quiet" -eq 1 ] || \
-      t '所有用户专属 mita 实例运行正常' 'All dedicated mita user instances are running'
-    return 0
-  fi
-  local bin status_out _attempt
-  bin="$(mita_bin)"
-  for _attempt in 1 2 3 4 5; do
-    sleep 2
-    status_out="$("$bin" status 2>/dev/null || true)"
-    if printf '%s' "$status_out" | grep -q 'status is "RUNNING"'; then
-      [ "$quiet" -eq 1 ] || t 'mita 服务运行正常' 'mita service is running'
-      return 0
+  users_isolated_mode || {
+    warn "$(t 'schema v3 Mieru 状态不是 isolated-v2' \
+      'Schema-v3 Mieru state is not isolated-v2')"
+    return 1
+  }
+  local iid iname iport istatus failed=0
+  while IFS=$'\t' read -r iid iname iport; do
+    [ -n "$iid" ] || continue
+    istatus="$(instance_cmd "$iid" status 2>/dev/null || true)"
+    if ! printf '%s' "$istatus" | grep -q 'status is "RUNNING"'; then
+      warn "$(t "用户 ${iname} 的专属实例未处于 RUNNING（${iid}）" \
+        "Dedicated instance for ${iname} is not RUNNING (${iid})")"
+      failed=1
     fi
-    ensure_mita_daemon
-    wait_mita_socket 10 || true
-    "$bin" start 2>/dev/null || true
-  done
-  warn "$(t "mita 未处于 RUNNING 状态，请执行: $(mita_restart_hint) && mita status && mita start" \
-    "mita is not RUNNING; run: $(mita_restart_hint) && mita status && mita start")"
-  [ -n "$status_out" ] && msg "$status_out"
-  return 1
+  done < <(users_enabled_instance_rows)
+  [ "$failed" -eq 0 ] || return 1
+  [ "$quiet" -eq 1 ] || \
+    t '所有用户专属 mita 实例运行正常' 'All dedicated mita user instances are running'
 }
 
 add_op_user() {
@@ -13119,8 +11924,6 @@ export_traffic_pattern_value() {
     if instance_valid_id "$iid"; then
       value="$(instance_cmd "$iid" export traffic-pattern 2>/dev/null | tr -d '\r\n' || true)"
     fi
-  else
-    value="$("$bin" export traffic-pattern 2>/dev/null | tr -d '\r\n' || true)"
   fi
   case "$value" in
     ''|*[!A-Za-z0-9+/=]*) return 0 ;;
@@ -13382,7 +12185,7 @@ print_protocol_outputs() {
   if [ "$DRY_RUN" -ne 1 ]; then
     # v2.1.0 及更早版本的时间戳文件会造成通配符歧义和旧凭据回退，
     # 成功写入稳定文件后清理这些由脚本生成的旧导出。
-    rm -f /root/mieru_client_*.json 2>/dev/null || true
+    rm -f /root/nobrand_mieru_client_*.json 2>/dev/null || true
     case "${PROTOCOL:-TCP}" in
       TCP) rm -f "${current_dir}/${safe_user}_udp.json" 2>/dev/null || true ;;
       UDP) rm -f "${current_dir}/${safe_user}_tcp.json" 2>/dev/null || true ;;
@@ -13528,7 +12331,7 @@ install_fresh_isolated() {
   install_self_script
   admin_lock_acquire || return 1
   tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
-  if ! users_migrate_from_primary; then
+  if ! users_initialize_primary; then
     install_fresh_rollback "$tx"
     admin_lock_release
     die "$(t '创建初始用户状态失败' 'Failed to create the initial user state')" || return 1
@@ -13536,8 +12339,8 @@ install_fresh_isolated() {
   if ! apply_users_config "$tx" 0; then
     install_fresh_rollback "$tx"
     admin_lock_release
-    die "$(t '启动首个用户专属实例失败；未启用旧默认服务' \
-      'Failed to start the first dedicated user instance; the legacy default service was not enabled')" || return 1
+    die "$(t '启动首个用户专属实例失败' \
+      'Failed to start the first dedicated user instance')" || return 1
   fi
   bindings="$(multi_user_port_protocol_pairs)"
   if ! open_firewall_for_pairs "$bindings"; then
@@ -13558,8 +12361,9 @@ install_fresh_isolated() {
 }
 
 mita_preservable_config_exists() {
-  [ -s "$MITA_STATE" ] && return 0
-  users_state_exists && [ "$(users_count)" -gt 0 ]
+  mita_v3_install_state_valid \
+    && users_isolated_mode \
+    && [ "$(users_count 2>/dev/null || printf 0)" -gt 0 ]
 }
 
 # ---------- Snell client exports (Surge / Mihomo / sing-box) ----------
@@ -13668,8 +12472,8 @@ do_install() {
     cur="$(installed_version || true)"
     t "检测到已安装 mita ${cur:-未知版本}" "mita already installed (${cur:-unknown})"
     if mita_preservable_config_exists; then
-      t '如需改端口/密码/协议，请选菜单「重新配置」或执行: install-mita reconfigure' \
-        'To change port/password/protocol, use menu Reconfigure or: install-mita reconfigure'
+      t '如需改端口/密码/协议，请选菜单「重新配置」或执行: nobrand mieru reconfigure' \
+        'To change port/password/protocol, use menu Reconfigure or: nobrand mieru reconfigure'
       if ! confirm '继续重新下载安装包并保留当前用户/节点配置？[y/N]: ' \
         'Re-download the package and keep the current users/node config? [y/N]: ' n; then
         [ "${MENU_MODE:-0}" -eq 1 ] && return 0
@@ -13773,7 +12577,7 @@ do_reconfigure() {
   require_linux
   mita_installed || die "$(t 'mita 未安装，请先执行安装' 'mita is not installed; run install first')"
 
-  local old_bindings new_bindings close_bindings desired_bindings binding_proto binding_port desc bin tx
+  local old_bindings new_bindings close_bindings desired_bindings binding_proto binding_port tx
   local old_port old_port_range old_protocol old_mtu old_mtu_policy old_user old_password
   local old_profile old_traffic old_seed old_low_entropy old_mux old_handshake
   local old_advertise_host old_advertise_port
@@ -13822,13 +12626,9 @@ do_reconfigure() {
   [ "$LOW_ENTROPY_CLI" -eq 0 ] || LOW_ENTROPY_MODE="$requested_low_entropy"
   [ "$MULTIPLEXING_CLI" -eq 0 ] || MULTIPLEXING="$requested_mux"
   [ "$HANDSHAKE_CLI" -eq 0 ] || HANDSHAKE_MODE="$requested_handshake"
-  bin="$(mita_bin)"
-  if users_state_exists && [ "$(users_count)" -gt 0 ]; then
-    old_bindings="$(multi_user_port_protocol_pairs)"
-  else
-    desc="$("$bin" describe config 2>/dev/null || true)"
-    old_bindings="$(extract_bindings_from_describe "$desc")"
-  fi
+  users_isolated_mode || die "$(t 'schema v3 Mieru 状态必须使用 isolated-v2' \
+    'Schema-v3 Mieru state must use isolated-v2')"
+  old_bindings="$(multi_user_port_protocol_pairs)"
 
   if [ "$YES" -eq 1 ]; then
     load_config_from_mita
@@ -13874,36 +12674,32 @@ do_reconfigure() {
       print_summary current
       return 0
     fi
-    if users_state_exists && [ "$(users_count)" -gt 0 ]; then
-      local state_only_auto_host=""
-      admin_lock_acquire || return 1
-      tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
-      if [ "$ADVERTISE_HOST" != "$old_advertise_host" ] \
-         || [ "$ADVERTISE_PORT" != "$old_advertise_port" ]; then
-        if ! users_set_advertise_endpoint "$old_user" "$ADVERTISE_HOST" "$ADVERTISE_PORT"; then
-          users_tx_rollback "$tx" 0
-          admin_lock_release
-          return 1
-        fi
-      fi
-      state_only_auto_host="$(public_ip 2>/dev/null || true)"
-      if ! users_validate_state_file "$MITA_USERS_STATE" "$PROTOCOL" "$state_only_auto_host"; then
-        users_tx_rollback "$tx" 0
-        admin_lock_release
-        die "$(t '客户端展示入口与其它用户冲突' \
-          'Client display endpoint conflicts with another user')"
-      fi
-      users_sync_primary_globals
-      if ! save_install_state; then
+    local state_only_auto_host=""
+    admin_lock_acquire || return 1
+    tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
+    if [ "$ADVERTISE_HOST" != "$old_advertise_host" ] \
+       || [ "$ADVERTISE_PORT" != "$old_advertise_port" ]; then
+      if ! users_set_advertise_endpoint "$old_user" "$ADVERTISE_HOST" "$ADVERTISE_PORT"; then
         users_tx_rollback "$tx" 0
         admin_lock_release
         return 1
       fi
-      users_tx_commit "$tx"
-      admin_lock_release
-    else
-      save_install_state
     fi
+    state_only_auto_host="$(public_ip 2>/dev/null || true)"
+    if ! users_validate_state_file "$MITA_USERS_STATE" "$PROTOCOL" "$state_only_auto_host"; then
+      users_tx_rollback "$tx" 0
+      admin_lock_release
+      die "$(t '客户端展示入口与其它用户冲突' \
+        'Client display endpoint conflicts with another user')"
+    fi
+    users_sync_primary_globals
+    if ! save_install_state; then
+      users_tx_rollback "$tx" 0
+      admin_lock_release
+      return 1
+    fi
+    users_tx_commit "$tx"
+    admin_lock_release
     client_exports_after_reconfigure "$old_user" "$old_protocol" "$old_mtu" \
       "$old_traffic" "$old_seed" "$old_low_entropy" "$old_mux" "$old_handshake" \
       2>/dev/null || true
@@ -13915,14 +12711,10 @@ do_reconfigure() {
   fi
 
   if [ -n "${PORT:-}" ]; then
-    if users_state_exists && [ "$(users_count)" -gt 0 ]; then
-      desired_bindings="$({
-        multi_user_port_protocol_pairs
-        port_required_bindings "$PORT"
-      } | sed '/^[[:space:]]*$/d' | LC_ALL=C sort -u)"
-    else
-      desired_bindings="$(port_required_bindings "$PORT")"
-    fi
+    desired_bindings="$({
+      multi_user_port_protocol_pairs
+      port_required_bindings "$PORT"
+    } | sed '/^[[:space:]]*$/d' | LC_ALL=C sort -u)"
     while IFS='|' read -r binding_proto binding_port; do
       [ -n "$binding_proto" ] && [ -n "$binding_port" ] || continue
       printf '%s\n' "$old_bindings" | grep -qxF "${binding_proto}|${binding_port}" && continue
@@ -13940,14 +12732,13 @@ do_reconfigure() {
   warn_low_entropy_unsupported
   # 多用户：协议全局更新；仅当用户显式改了主用户名/密码/端口时同步「主用户」
   # 主用户 = install-state 中的 USERNAME，找不到则 users[0]
-  if users_state_exists && [ "$(users_count)" -gt 0 ]; then
-    MULTI_USER_MODE=1
-    admin_lock_acquire || return 1
-    tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
-    _U_NAME="$USERNAME" _U_PASS="$PASSWORD" _U_PORT="$PORT" _U_PROTO="$PROTOCOL"
-    _U_ADVERTISE_HOST="$ADVERTISE_HOST" _U_ADVERTISE_PORT="$ADVERTISE_PORT"
-    _U_PRIMARY="${old_user}"
-    users_py_locked '
+  MULTI_USER_MODE=1
+  admin_lock_acquire || return 1
+  tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
+  _U_NAME="$USERNAME" _U_PASS="$PASSWORD" _U_PORT="$PORT" _U_PROTO="$PROTOCOL"
+  _U_ADVERTISE_HOST="$ADVERTISE_HOST" _U_ADVERTISE_PORT="$ADVERTISE_PORT"
+  _U_PRIMARY="${old_user}"
+  users_py_locked '
 import json, os, time
 path = os.environ["MITA_USERS_STATE"]
 d = json.load(open(path))
@@ -13987,118 +12778,61 @@ if users:
 d["protocol"] = proto
 json.dump(d, open(path, "w"), indent=2)
 ' || {
-      local prc=$?
-      users_tx_rollback "$tx" 0
-      admin_lock_release
-      if [ "$prc" -eq 2 ]; then
-        die "$(t '新用户名与其它用户冲突' 'New username conflicts with another user')"
-      elif [ "$prc" -eq 3 ]; then
-        die "$(t '新端口已被其它用户占用' 'New port already used by another user')"
-      fi
-      die "$(t '更新多用户状态失败' 'Failed to update multi-user state')"
-    }
-    if ! users_validate_state_file "$MITA_USERS_STATE" "$PROTOCOL"; then
-      users_tx_rollback "$tx" 0
-      admin_lock_release
-      die "$(t '新协议/端口组合会造成监听端口或客户端展示入口冲突' \
-        'The new protocol/port combination would collide between listeners or client display endpoints')"
-    fi
-    # 协议变更时所有用户 portBindings 随 PROTOCOL 重建；端口仅主用户可能变
-    if ! apply_users_config "$tx"; then
-      PORT="$old_port"; PORT_RANGE="$old_port_range"; PROTOCOL="$old_protocol"
-      MTU="$old_mtu"; MTU_POLICY="$old_mtu_policy"; PROFILE="$old_profile"
-      USERNAME="$old_user"; PASSWORD="$old_password"
-      ADVERTISE_HOST="$old_advertise_host"; ADVERTISE_PORT="$old_advertise_port"
-      TRAFFIC_PATTERN="$old_traffic"; TRAFFIC_SEED="$old_seed"
-      LOW_ENTROPY_MODE="$old_low_entropy"; MULTIPLEXING="$old_mux"; HANDSHAKE_MODE="$old_handshake"
-      if users_isolated_mode; then
-        reconcile_isolated_instances >/dev/null 2>&1 || true
-      fi
-      admin_lock_release
-      return 1
-    fi
-    new_bindings="$(multi_user_port_protocol_pairs)"
-    open_firewall_for_pairs "$new_bindings"
-    if ! verify_mita_running || ! save_install_state; then
-      PORT="$old_port"; PORT_RANGE="$old_port_range"; PROTOCOL="$old_protocol"
-      MTU="$old_mtu"; MTU_POLICY="$old_mtu_policy"; PROFILE="$old_profile"
-      USERNAME="$old_user"; PASSWORD="$old_password"
-      ADVERTISE_HOST="$old_advertise_host"; ADVERTISE_PORT="$old_advertise_port"
-      TRAFFIC_PATTERN="$old_traffic"; TRAFFIC_SEED="$old_seed"
-      LOW_ENTROPY_MODE="$old_low_entropy"; MULTIPLEXING="$old_mux"; HANDSHAKE_MODE="$old_handshake"
-      users_tx_rollback "$tx" 1
-      open_firewall_for_pairs "$old_bindings"
-      close_bindings="$(comm -23 \
-        <(printf '%s\n' "$new_bindings" | sed '/^[[:space:]]*$/d' | LC_ALL=C sort -u) \
-        <(printf '%s\n' "$old_bindings" | sed '/^[[:space:]]*$/d' | LC_ALL=C sort -u))"
-      [ -z "$close_bindings" ] || close_firewall_for_bindings "$close_bindings"
-      admin_lock_release
-      return 1
-    fi
-    users_tx_commit "$tx"
-    client_exports_after_reconfigure "$old_user" "$old_protocol" "$old_mtu" \
-      "$old_traffic" "$old_seed" "$old_low_entropy" "$old_mux" "$old_handshake" \
-      2>/dev/null || true
-    close_bindings="$(comm -23 \
-      <(printf '%s\n' "$old_bindings" | sed '/^[[:space:]]*$/d' | LC_ALL=C sort -u) \
-      <(printf '%s\n' "$new_bindings" | sed '/^[[:space:]]*$/d' | LC_ALL=C sort -u))"
-    [ -z "$close_bindings" ] || close_firewall_for_bindings "$close_bindings"
+    local prc=$?
+    users_tx_rollback "$tx" 0
     admin_lock_release
-  else
-    admin_lock_acquire || return 1
-    tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
-    if ! users_migrate_from_primary; then
-      PORT="$old_port"; PORT_RANGE="$old_port_range"; PROTOCOL="$old_protocol"
-      MTU="$old_mtu"; MTU_POLICY="$old_mtu_policy"; PROFILE="$old_profile"
-      USERNAME="$old_user"; PASSWORD="$old_password"
-      ADVERTISE_HOST="$old_advertise_host"; ADVERTISE_PORT="$old_advertise_port"
-      TRAFFIC_PATTERN="$old_traffic"; TRAFFIC_SEED="$old_seed"
-      LOW_ENTROPY_MODE="$old_low_entropy"; MULTIPLEXING="$old_mux"; HANDSHAKE_MODE="$old_handshake"
-      users_tx_rollback "$tx" 0
-      admin_lock_release
-      return 1
+    if [ "$prc" -eq 2 ]; then
+      die "$(t '新用户名与其它用户冲突' 'New username conflicts with another user')"
+    elif [ "$prc" -eq 3 ]; then
+      die "$(t '新端口已被其它用户占用' 'New port already used by another user')"
     fi
-    if ! apply_users_config "$tx"; then
-      PORT="$old_port"; PORT_RANGE="$old_port_range"; PROTOCOL="$old_protocol"
-      MTU="$old_mtu"; MTU_POLICY="$old_mtu_policy"; PROFILE="$old_profile"
-      USERNAME="$old_user"; PASSWORD="$old_password"
-      ADVERTISE_HOST="$old_advertise_host"; ADVERTISE_PORT="$old_advertise_port"
-      TRAFFIC_PATTERN="$old_traffic"; TRAFFIC_SEED="$old_seed"
-      LOW_ENTROPY_MODE="$old_low_entropy"; MULTIPLEXING="$old_mux"; HANDSHAKE_MODE="$old_handshake"
-      admin_lock_release
-      return 1
-    fi
-    new_bindings="$(multi_user_port_protocol_pairs)"
-    open_firewall_for_pairs "$new_bindings"
-    if ! verify_mita_running || ! save_install_state; then
-      PORT="$old_port"; PORT_RANGE="$old_port_range"; PROTOCOL="$old_protocol"
-      MTU="$old_mtu"; MTU_POLICY="$old_mtu_policy"; PROFILE="$old_profile"
-      USERNAME="$old_user"; PASSWORD="$old_password"
-      ADVERTISE_HOST="$old_advertise_host"; ADVERTISE_PORT="$old_advertise_port"
-      TRAFFIC_PATTERN="$old_traffic"; TRAFFIC_SEED="$old_seed"
-      LOW_ENTROPY_MODE="$old_low_entropy"; MULTIPLEXING="$old_mux"; HANDSHAKE_MODE="$old_handshake"
-      isolated_stop_all
-      users_tx_restore "$tx" >/dev/null 2>&1 || true
-      default_mita_restore || true
-      open_firewall_for_pairs "$old_bindings"
-      close_bindings="$(comm -23 \
-        <(printf '%s\n' "$new_bindings" | sed '/^[[:space:]]*$/d' | LC_ALL=C sort -u) \
-        <(printf '%s\n' "$old_bindings" | sed '/^[[:space:]]*$/d' | LC_ALL=C sort -u))"
-      [ -z "$close_bindings" ] || close_firewall_for_bindings "$close_bindings"
-      users_tx_commit "$tx"
-      admin_lock_release
-      return 1
-    fi
-    users_tx_commit "$tx"
-    client_exports_after_reconfigure "$old_user" "$old_protocol" "$old_mtu" \
-      "$old_traffic" "$old_seed" "$old_low_entropy" "$old_mux" "$old_handshake" \
-      2>/dev/null || true
-    close_bindings="$(comm -23 \
-      <(printf '%s\n' "$old_bindings" | sed '/^[[:space:]]*$/d' | LC_ALL=C sort -u) \
-      <(printf '%s\n' "$new_bindings" | sed '/^[[:space:]]*$/d' | LC_ALL=C sort -u))"
-    [ -z "$close_bindings" ] || close_firewall_for_bindings "$close_bindings"
+    die "$(t '更新多用户状态失败' 'Failed to update multi-user state')"
+  }
+  if ! users_validate_state_file "$MITA_USERS_STATE" "$PROTOCOL"; then
+    users_tx_rollback "$tx" 0
     admin_lock_release
+    die "$(t '新协议/端口组合会造成监听端口或客户端展示入口冲突' \
+      'The new protocol/port combination would collide between listeners or client display endpoints')"
   fi
+  # 协议变更时所有用户 portBindings 随 PROTOCOL 重建；端口仅主用户可能变
+  if ! apply_users_config "$tx"; then
+    PORT="$old_port"; PORT_RANGE="$old_port_range"; PROTOCOL="$old_protocol"
+    MTU="$old_mtu"; MTU_POLICY="$old_mtu_policy"; PROFILE="$old_profile"
+    USERNAME="$old_user"; PASSWORD="$old_password"
+    ADVERTISE_HOST="$old_advertise_host"; ADVERTISE_PORT="$old_advertise_port"
+    TRAFFIC_PATTERN="$old_traffic"; TRAFFIC_SEED="$old_seed"
+    LOW_ENTROPY_MODE="$old_low_entropy"; MULTIPLEXING="$old_mux"; HANDSHAKE_MODE="$old_handshake"
+    reconcile_isolated_instances >/dev/null 2>&1 || true
+    admin_lock_release
+    return 1
+  fi
+  new_bindings="$(multi_user_port_protocol_pairs)"
+  open_firewall_for_pairs "$new_bindings"
+  if ! verify_mita_running || ! save_install_state; then
+    PORT="$old_port"; PORT_RANGE="$old_port_range"; PROTOCOL="$old_protocol"
+    MTU="$old_mtu"; MTU_POLICY="$old_mtu_policy"; PROFILE="$old_profile"
+    USERNAME="$old_user"; PASSWORD="$old_password"
+    ADVERTISE_HOST="$old_advertise_host"; ADVERTISE_PORT="$old_advertise_port"
+    TRAFFIC_PATTERN="$old_traffic"; TRAFFIC_SEED="$old_seed"
+    LOW_ENTROPY_MODE="$old_low_entropy"; MULTIPLEXING="$old_mux"; HANDSHAKE_MODE="$old_handshake"
+    users_tx_rollback "$tx" 1
+    open_firewall_for_pairs "$old_bindings"
+    close_bindings="$(comm -23 \
+      <(printf '%s\n' "$new_bindings" | sed '/^[[:space:]]*$/d' | LC_ALL=C sort -u) \
+      <(printf '%s\n' "$old_bindings" | sed '/^[[:space:]]*$/d' | LC_ALL=C sort -u))"
+    [ -z "$close_bindings" ] || close_firewall_for_bindings "$close_bindings"
+    admin_lock_release
+    return 1
+  fi
+  users_tx_commit "$tx"
+  client_exports_after_reconfigure "$old_user" "$old_protocol" "$old_mtu" \
+    "$old_traffic" "$old_seed" "$old_low_entropy" "$old_mux" "$old_handshake" \
+    2>/dev/null || true
+  close_bindings="$(comm -23 \
+    <(printf '%s\n' "$old_bindings" | sed '/^[[:space:]]*$/d' | LC_ALL=C sort -u) \
+    <(printf '%s\n' "$new_bindings" | sed '/^[[:space:]]*$/d' | LC_ALL=C sort -u))"
+  [ -z "$close_bindings" ] || close_firewall_for_bindings "$close_bindings"
+  admin_lock_release
   msg ""
   t '========== 重新配置完成 ==========' '========== Reconfigure complete =========='
   if users_state_exists && [ "$(users_count)" -gt 1 ]; then
@@ -14112,6 +12846,10 @@ do_upgrade() {
   require_root
   require_linux
   require_cmd curl
+  mita_installed || die "$(t 'mita 未安装，请先执行 fresh install' \
+    'mita is not installed; perform a fresh install first')"
+  mita_v3_install_state_valid || die "$(t 'schema v3 Mieru 安装状态缺失或损坏，拒绝升级' \
+    'Schema-v3 Mieru install state is missing or invalid; refusing upgrade')"
   local pm arch ver url tmp tx
   local requested_channel="$MIERU_CHANNEL" requested_version="$MIERU_VERSION"
   local requested_channel_cli="${MIERU_CHANNEL_CLI:-0}" requested_version_cli="${MIERU_VERSION_CLI:-0}"
@@ -14119,7 +12857,12 @@ do_upgrade() {
   arch="$(detect_arch)"
   ensure_management_dependencies "$pm"
   MIERU_CHANNEL_CLI=0 MIERU_VERSION_CLI=0
-  load_install_state 2>/dev/null || true
+  load_install_state
+  users_isolated_mode || die "$(t 'schema v3 Mieru 状态必须使用 isolated-v2' \
+    'Schema-v3 Mieru state must use isolated-v2')"
+  [ "$(users_count 2>/dev/null || printf 0)" -gt 0 ] \
+    || die "$(t 'schema v3 Mieru 用户状态缺失，拒绝升级' \
+      'Schema-v3 Mieru user state is missing; refusing upgrade')"
   MIERU_CHANNEL_CLI="$requested_channel_cli"; MIERU_VERSION_CLI="$requested_version_cli"
   if [ "$MIERU_CHANNEL_CLI" -eq 1 ]; then
     MIERU_CHANNEL="$requested_channel"
@@ -14133,19 +12876,17 @@ do_upgrade() {
   if version_is_current "$cur" "$ver"; then
     MIERU_VERSION="$ver"
     install_self_script
-    if users_state_exists && [ "$(users_count)" -gt 0 ]; then
-      admin_lock_acquire || return 1
-      tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
-      # 即使二进制已是最新版，也要让运行中的实例重新读取最新 unit/runner。
-      users_isolated_mode && isolated_stop_all
-      if ! apply_users_config "$tx"; then
-        admin_lock_release
-        return 1
-      fi
-      users_tx_commit "$tx"
+    admin_lock_acquire || return 1
+    tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
+    # 即使二进制已是最新版，也要让运行中的实例重新读取最新 unit/runner。
+    isolated_stop_all
+    if ! apply_users_config "$tx"; then
       admin_lock_release
-      verify_mita_running
+      return 1
     fi
+    users_tx_commit "$tx"
+    admin_lock_release
+    verify_mita_running
     [ -f "$MITA_STATE" ] && save_install_state
     t "管理脚本已更新至 v${SCRIPT_VERSION}（mita ${cur} 已满足 $(mieru_channel_label) 目标 ${ver}）" \
       "Manager script updated to v${SCRIPT_VERSION} (mita ${cur} satisfies $(mieru_channel_label) target ${ver})"
@@ -14159,23 +12900,15 @@ do_upgrade() {
   rm -f "$tmp"
   MIERU_VERSION="$ver"
   install_self_script
-  if users_state_exists && [ "$(users_count)" -gt 0 ]; then
-    admin_lock_acquire || return 1
-    tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
-    if users_isolated_mode; then
-      isolated_stop_all
-    else
-      default_mita_stop
-    fi
-    if ! apply_users_config "$tx"; then
-      admin_lock_release
-      return 1
-    fi
-    users_tx_commit "$tx"
+  admin_lock_acquire || return 1
+  tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
+  isolated_stop_all
+  if ! apply_users_config "$tx"; then
     admin_lock_release
-  else
-    run "$(mita_bin)" reload 2>/dev/null || start_mita
+    return 1
   fi
+  users_tx_commit "$tx"
+  admin_lock_release
   verify_mita_running
   [ -f "$MITA_STATE" ] && save_install_state
   t "已升级至 ${ver}（$(mieru_channel_label)）" \
@@ -14183,41 +12916,29 @@ do_upgrade() {
 }
 
 mita_uninstall_target_present() {
-  mita_installed \
-    || installed_by_oneclick \
-    || [ -e "$MITA_LEGACY_MARKER" ] \
-    || [ -d "$MITA_MANAGER_STATE_DIR" ] \
-    || [ -x "$INSTALL_SCRIPT_PATH" ] \
-    || is_mita_wrapper "$MITA_BIN" \
-    || [ -d /etc/mita ] \
+  nb_schema_v3_file_valid || return 1
+  installed_by_oneclick \
+    || [ -s "$MITA_USERS_STATE" ] \
+    || [ -s "$MITA_STATE" ] \
+    || [ -x "$MITA_BIN" ] \
     || [ -e "$MITA_INSTANCE_SYSTEMD_TEMPLATE" ] \
     || [ -e "$MITA_USERS_TIMER" ] \
     || [ -e "$MITA_USERS_SERVICE" ]
 }
 
 stop_mita_for_uninstall() {
-  local bin sm isolated=0
+  local sm
   STAGE="停止 mita 服务"
-  bin="$(mita_bin)"
-  users_isolated_mode && isolated=1
   isolated_stop_all
   tc_clear_owned_filters 2>/dev/null || true
-  if [ "$isolated" -eq 0 ] && [ -x "$bin" ]; then
-    run "$bin" stop >/dev/null 2>&1 || true
-  fi
   sm="$(service_manager)"
   case "$sm" in
     systemd)
-      run systemctl disable --now mita.service 2>/dev/null || true
-      run systemctl disable --now mita-users-scan.timer mita-users-scan.service \
-        mita-tc-restore.service 2>/dev/null || true
+      run systemctl disable --now nobrand-mieru-users-scan.timer \
+        nobrand-mieru-users-scan.service nobrand-mieru-tc-restore.service 2>/dev/null || true
       ;;
-    openrc)
-      run rc-service mita stop 2>/dev/null || true
-      run rc-update del mita default 2>/dev/null || true
-      ;;
+    openrc) ;;
   esac
-  command -v pkill >/dev/null 2>&1 && run pkill -x mita 2>/dev/null || true
 }
 
 remove_mita_common() {
@@ -14225,48 +12946,30 @@ remove_mita_common() {
   local preserve_package="${UNINSTALL_PRESERVE_PACKAGE:-0}"
   local preserve_user="${UNINSTALL_PRESERVE_USER:-0}"
   local preserve_group="${UNINSTALL_PRESERVE_GROUP:-0}"
-  run rm -f /var/log/mita-oneclick-*.log /var/log/mita-oneclick-*.err
-  if [ "$preserve_package" -eq 0 ]; then
-    run rm -f /var/log/mita.log /var/log/mita.err
-  fi
-  run rm -f /root/mieru_client_*.json 2>/dev/null || true
+  local preserve_shared="${UNINSTALL_PRESERVE_SHARED:-0}"
+  run rm -f /var/log/nobrand-mieru-*.log /var/log/nobrand-mieru-*.err
+  run rm -f /root/nobrand_mieru_client_*.json 2>/dev/null || true
   run rm -rf "$MITA_CLIENT_EXPORT_DIR"
   remove_users_scheduler 2>/dev/null || true
   run rm -f "$MITA_LOGROTATE_CONF" 2>/dev/null || true
   run rm -rf "$MITA_INSTANCES_DIR" "$MITA_INSTANCE_RUN_DIR" \
     "$MITA_INSTANCE_METRICS_DIR" "$MITA_USERS_BACKUP_DIR" "$MITA_MANAGER_STATE_DIR"
-  if [ "$preserve_package" -eq 0 ]; then
+  if [ "$preserve_shared" -eq 0 ]; then
     run rm -rf /etc/mita /var/lib/mita /run/mita /var/run/mita /var/run/mita.sock
   fi
   run rm -f "$MITA_USERS_STATE" "$MITA_USERS_LOCK" "$MITA_ADMIN_LOCK" \
     "$MITA_FIREWALL_OWNED_STATE" "$TC_OWNED_STATE" "$MITA_STATE"
-  run rm -f "$MITA_BIN" "$MITA_REAL_BIN" /usr/bin/mita-real "$MITA_MARKER"
+  run rm -f "$MITA_BIN" "$MITA_MARKER"
   run rm -f "$MITA_INSTANCE_SYSTEMD_TEMPLATE" "$MITA_INSTANCE_TMPFILES" \
     "$MITA_INSTANCE_RUNNER" "${MITA_INSTANCE_OPENRC_PREFIX}"*
   run rm -f "$MITA_USERS_LOG" 2>/dev/null || true
-  if [ "$preserve_package" -eq 0 ] \
-     && { ! command -v dpkg >/dev/null 2>&1 || ! dpkg -l mita 2>/dev/null | grep -q '^ii'; }; then
-    run rm -f /usr/bin/mita
-  fi
-  if [ "$preserve_package" -eq 0 ]; then
-    run rm -f /lib/systemd/system/mita.service /usr/lib/systemd/system/mita.service \
-      "$SYSTEMD_SVC" "$OPENRC_SVC"
-  fi
   if [ -d /etc/systemd/system ]; then
-    if [ "$preserve_package" -eq 1 ]; then
-      find /etc/systemd/system -type l \
-        \( -name 'mita-oneclick@*.service' -o -name 'mita-users-scan.timer' \
-           -o -name 'mita-tc-restore.service' \) -delete 2>/dev/null || true
-    else
-      find /etc/systemd/system -type l \
-        \( -name 'mita.service' -o -name 'mita-oneclick@*.service' \
-           -o -name 'mita-users-scan.timer' -o -name 'mita-tc-restore.service' \) \
-        -delete 2>/dev/null || true
-    fi
+    find /etc/systemd/system -type l \
+      \( -name 'nobrand-mieru@*.service' -o -name 'nobrand-mieru-users-scan.timer' \
+         -o -name 'nobrand-mieru-tc-restore.service' \) -delete 2>/dev/null || true
   fi
   run systemctl daemon-reload 2>/dev/null || true
   run systemctl reset-failed 2>/dev/null || true
-  remove_self_script
   if [ "$preserve_user" -eq 0 ] && _has_user mita; then
     run deluser mita 2>/dev/null || run userdel mita 2>/dev/null || true
   fi
@@ -14281,6 +12984,7 @@ verify_mita_uninstalled() {
   local preserve_package="${UNINSTALL_PRESERVE_PACKAGE:-0}"
   local preserve_user="${UNINSTALL_PRESERVE_USER:-0}"
   local preserve_group="${UNINSTALL_PRESERVE_GROUP:-0}"
+  local preserve_shared="${UNINSTALL_PRESERVE_SHARED:-0}"
   if [ "$preserve_package" -eq 0 ] \
      && command -v dpkg-query >/dev/null 2>&1 \
      && dpkg-query -W -f='${db:Status-Abbrev}' mita 2>/dev/null | grep -q .; then
@@ -14299,8 +13003,7 @@ verify_mita_uninstalled() {
     "$MITA_INSTANCES_DIR" "$MITA_INSTANCE_RUN_DIR" "$MITA_INSTANCE_METRICS_DIR" \
     "$MITA_USERS_STATE" "$MITA_USERS_LOCK" "$MITA_USERS_BACKUP_DIR" \
     "$MITA_ADMIN_LOCK" "$MITA_FIREWALL_OWNED_STATE" "$TC_OWNED_STATE" \
-    "$MITA_BIN" "$MITA_REAL_BIN" /usr/bin/mita-real \
-    "$INSTALL_SCRIPT_PATH" "$MITA_MENU_PATH" "$MITA_PROFILE_D" "$MITA_CLIENT_EXPORT_DIR" \
+    "$MITA_BIN" "$MITA_CLIENT_EXPORT_DIR" \
     "$MITA_INSTANCE_SYSTEMD_TEMPLATE" "$MITA_INSTANCE_TMPFILES" "$MITA_INSTANCE_RUNNER" \
     "$MITA_USERS_TIMER" "$MITA_USERS_SERVICE" "$MITA_USERS_CRON" "$MITA_LOGROTATE_CONF" \
     "$MITA_USERS_LOG" \
@@ -14310,10 +13013,8 @@ verify_mita_uninstalled() {
       failed=1
     fi
   done
-  if [ "$preserve_package" -eq 0 ]; then
-    for path in /etc/mita /var/lib/mita /run/mita /var/run/mita /usr/bin/mita \
-      "$SYSTEMD_SVC" /lib/systemd/system/mita.service /usr/lib/systemd/system/mita.service \
-      "$OPENRC_SVC" /var/log/mita.log /var/log/mita.err; do
+  if [ "$preserve_shared" -eq 0 ]; then
+    for path in /etc/mita /var/lib/mita /run/mita /var/run/mita; do
       if [ -e "$path" ] || [ -L "$path" ]; then
         warn "$(t "卸载残留: ${path}" "Uninstall residue: ${path}")"
         failed=1
@@ -14321,27 +13022,20 @@ verify_mita_uninstalled() {
     done
   fi
   for pattern in \
-    "${MITA_INSTANCE_OPENRC_PREFIX}*" '/var/log/mita-oneclick-*.log' \
-    '/var/log/mita-oneclick-*.err' '/root/mieru_client_*.json'; do
+    "${MITA_INSTANCE_OPENRC_PREFIX}*" '/var/log/nobrand-mieru-*.log' \
+    '/var/log/nobrand-mieru-*.err' '/root/nobrand_mieru_client_*.json'; do
     if compgen -G "$pattern" >/dev/null 2>&1; then
       warn "$(t "卸载仍有匹配残留: ${pattern}" "Uninstall residue matches: ${pattern}")"
       failed=1
     fi
   done
-  local systemd_link_names=( -name 'mita-oneclick@*.service' -o -name 'mita-users-scan.timer' \
-    -o -name 'mita-tc-restore.service' )
-  if [ "$preserve_package" -eq 0 ]; then
-    systemd_link_names=( -name 'mita.service' -o "${systemd_link_names[@]}" )
-  fi
+  local systemd_link_names=( -name 'nobrand-mieru@*.service' \
+    -o -name 'nobrand-mieru-users-scan.timer' -o -name 'nobrand-mieru-tc-restore.service' )
   if [ -d /etc/systemd/system ] \
      && find /etc/systemd/system -type l \( "${systemd_link_names[@]}" \) \
        -print -quit 2>/dev/null | grep -q .; then
     warn "$(t '卸载残留: systemd wants 目录仍有 mita 符号链接' \
       'Uninstall residue: systemd wants directories still contain mita symlinks')"
-    failed=1
-  fi
-  if command -v pgrep >/dev/null 2>&1 && pgrep -x mita >/dev/null 2>&1; then
-    warn "$(t '卸载残留: mita 进程仍在运行' 'Uninstall residue: mita process is still running')"
     failed=1
   fi
   if { [ "$preserve_user" -eq 0 ] && _has_user mita; } \
@@ -14368,22 +13062,16 @@ do_uninstall() {
   UNINSTALL_PRESERVE_PACKAGE=0
   UNINSTALL_PRESERVE_USER=0
   UNINSTALL_PRESERVE_GROUP=0
+  UNINSTALL_PRESERVE_SHARED=0
   mita_uninstall_target_present \
     || die "$(t '未检测到 mita 或 OneClick 残留，无需卸载' \
       'No mita or OneClick residue detected; nothing to uninstall')"
   if ! installed_by_oneclick; then
-    warn "$(t '未检测到完整的 OneClick 安装标记；将按残留/官方包清理模式处理' \
-      'Complete OneClick marker not found; residual/official package cleanup mode will be used')"
-    if ! confirm '仍要继续卸载？[y/N]: ' 'Continue uninstall anyway? [y/N]: ' n; then
-      if [ "${MENU_MODE:-0}" -eq 1 ]; then
-        UNINSTALL_CANCELLED=1
-        return 0
-      fi
-      exit 0
-    fi
+    die "$(t '缺少 schema v3 Mieru ownership 标记，拒绝清理未知资源' \
+      'Schema-v3 Mieru ownership marker is missing; refusing to clean unknown resources')"
   fi
-  if ! confirm '确认卸载 mita、OneClick 管理脚本及本项目管理的配置？[y/N]: ' \
-    'Uninstall mita, the OneClick manager, and project-managed configuration? [y/N]: ' n; then
+  if ! confirm '确认仅卸载 NoBrand 3 管理的 Mieru 协议资源？[y/N]: ' \
+    'Uninstall only NoBrand-3-managed Mieru protocol resources? [y/N]: ' n; then
     if [ "${MENU_MODE:-0}" -eq 1 ]; then
       UNINSTALL_CANCELLED=1
       return 0
@@ -14395,6 +13083,7 @@ do_uninstall() {
     [ -f "$MITA_PRESERVE_PACKAGE_MARKER" ] && UNINSTALL_PRESERVE_PACKAGE=1
     [ -f "$MITA_PRESERVE_USER_MARKER" ] && UNINSTALL_PRESERVE_USER=1
     [ -f "$MITA_PRESERVE_GROUP_MARKER" ] && UNINSTALL_PRESERVE_GROUP=1
+    [ -f "$MITA_PRESERVE_SHARED_MARKER" ] && UNINSTALL_PRESERVE_SHARED=1
     warn "$(t '检测到安装前已存在的 mita 包或系统账号；将按记录分别保留外部资源，预存包的公共目录也会保留，并保持服务停止。' \
       'A pre-existing mita package or system account was recorded; each external resource will be preserved separately, including shared directories for a pre-existing package, and left stopped.')"
   fi
@@ -14409,7 +13098,6 @@ do_uninstall() {
   pm="$(detect_pkg_manager)"
   stop_mita_for_uninstall
   STAGE="清理防火墙规则"
-  close_firewall
   firewall_clear_all_owned
   STAGE="卸载 mita 软件包"
   if [ "$UNINSTALL_PRESERVE_PACKAGE" -eq 0 ]; then
@@ -14434,15 +13122,14 @@ do_uninstall() {
     return 1
   fi
   if [ "$UNINSTALL_PRESERVE_EXTERNAL" -eq 1 ]; then
-    t 'OneClick 管理文件已卸载；安装前存在的 mita 外部资源已保留，服务保持停止。' \
-      'OneClick management files were removed; pre-existing mita resources were preserved and left stopped.'
+    t 'NoBrand 管理的 Mieru 文件已卸载；安装前存在的 mita 外部资源已保留。' \
+      'NoBrand-managed Mieru files were removed; pre-existing mita resources were preserved.'
   else
-    t 'mita 及安装脚本已完全卸载' 'mita and install script fully removed'
+    t 'NoBrand 3 管理的 Mieru runtime 与协议资源已卸载' \
+      'The NoBrand-3-managed Mieru runtime and protocol resources were removed'
   fi
-  t '若当前已打开的旧终端仍显示 mita 是函数，请运行:' \
-    'If an already-open shell still reports mita as a function, run:'
-  msg '  unset -f mita 2>/dev/null || true; hash -r'
-  t '新登录终端不会再加载该函数。' 'New login shells will no longer load that function.'
+  t 'Mieru 协议资源已卸载；nobrand/nb 管理命令仍保留。' \
+    'Mieru protocol resources were removed; nobrand/nb management commands remain.'
 }
 
 status_binding_text() {
@@ -14455,8 +13142,7 @@ status_binding_text() {
 }
 
 do_status() {
-  local bin sm status_out recovered=0 iid iname iport
-  bin="$(mita_bin)"
+  local sm status_out iid iname iport
   sm="$(service_manager)"
   if ! mita_installed; then
     t 'mita 未安装' 'mita is not installed'
@@ -14474,73 +13160,30 @@ do_status() {
     "  Tested/Stable Mieru: ${TESTED_MIERU_VERSION}"
   t "  Profile: $(profile_label)" "  Profile: $(profile_label)"
   msg ""
-  if users_isolated_mode; then
-    t '部署模型: 用户专属实例 isolated-v2' 'Deployment: dedicated user instances (isolated-v2)'
-    if [ -z "$(users_enabled_instance_rows 2>/dev/null || true)" ]; then
-      warn "$(t '当前没有启用中的用户；所有专属实例均应处于停止状态' \
-        'No users are enabled; all dedicated instances should be stopped')"
-    fi
-    while IFS=$'\t' read -r iid iname iport; do
-      [ -n "$iid" ] || continue
-      msg ""
-      t "【${iname} / ${iid}】" "[${iname} / ${iid}]"
-      t "  监听: $(status_binding_text "$iport")" \
-        "  Listen: $(status_binding_text "$iport")"
-      case "$sm" in
-        systemd) systemctl status "$(instance_systemd_unit "$iid")" --no-pager 2>/dev/null | head -n 12 || true ;;
-        openrc) rc-service "$(instance_openrc_service "$iid")" status 2>/dev/null || true ;;
-      esac
-      status_out="$(instance_cmd "$iid" status 2>/dev/null || true)"
-      msg "${status_out:-status unavailable}"
-    done < <(users_enabled_instance_rows)
+  users_isolated_mode || {
+    warn "$(t 'schema v3 Mieru 状态不是 isolated-v2' \
+      'Schema-v3 Mieru state is not isolated-v2')"
+    return 1
+  }
+  t '部署模型: 用户专属实例 isolated-v2' 'Deployment: dedicated user instances (isolated-v2)'
+  if [ -z "$(users_enabled_instance_rows 2>/dev/null || true)" ]; then
+    warn "$(t '当前没有启用中的用户；所有专属实例均应处于停止状态' \
+      'No users are enabled; all dedicated instances should be stopped')"
+  fi
+  while IFS=$'\t' read -r iid iname iport; do
+    [ -n "$iid" ] || continue
     msg ""
-    t '状态页已隐藏密码；查看或导出节点配置请使用主菜单「查看节点」' \
-      'Passwords are hidden on the status page; use View node in the main menu to view or export node configuration'
-    return 0
-  fi
-  case "$sm" in
-    systemd) systemctl status mita --no-pager 2>/dev/null || true ;;
-    openrc)
-      openrc_mita_status_line
-      if openrc_mita_is_crashed; then
-        warn "$(t 'mita 处于 crashed 状态，正在自动恢复...' 'mita is crashed; auto-recovering...')"
-        openrc_mita_recover
-        recovered=1
-        openrc_mita_status_line
-      elif ! openrc_mita_is_started; then
-        warn "$(t 'mita 未运行，正在尝试启动...' 'mita is not running; trying to start...')"
-        openrc_mita_recover
-        recovered=1
-        openrc_mita_status_line
-      fi
-      ;;
-    *) true ;;
-  esac
+    t "【${iname} / ${iid}】" "[${iname} / ${iid}]"
+    t "  监听: $(status_binding_text "$iport")" \
+      "  Listen: $(status_binding_text "$iport")"
+    case "$sm" in
+      systemd) systemctl status "$(instance_systemd_unit "$iid")" --no-pager 2>/dev/null | head -n 12 || true ;;
+      openrc) rc-service "$(instance_openrc_service "$iid")" status 2>/dev/null || true ;;
+    esac
+    status_out="$(instance_cmd "$iid" status 2>/dev/null || true)"
+    msg "${status_out:-status unavailable}"
+  done < <(users_enabled_instance_rows)
   msg ""
-  if ! wait_mita_socket 3; then
-    if [ "$recovered" -eq 0 ]; then
-      ensure_mita_daemon
-    fi
-    if ! wait_mita_socket 10; then
-      warn "$(t "mita 守护进程未就绪，请执行: $(mita_restart_hint)" \
-        "mita daemon not ready; run: $(mita_restart_hint)")"
-      warn "$(t "查看日志: $(mita_log_hint)" "Check logs: $(mita_log_hint)")"
-      mita_log_tail
-    fi
-  fi
-  status_out="$("$bin" status 2>/dev/null || true)"
-  if [ -n "$status_out" ]; then
-    msg "$status_out"
-  fi
-  if printf '%s' "$status_out" | grep -qi 'daemon is not running'; then
-    warn "$(t "请执行: $(mita_restart_hint)" "Run: $(mita_restart_hint)")"
-    warn "$(t "查看日志: $(mita_log_hint)" "Check logs: $(mita_log_hint)")"
-  fi
-  msg ""
-  if [ -n "${PORT:-}" ]; then
-    t "监听: $(status_binding_text "$PORT")" \
-      "Listen: $(status_binding_text "$PORT")"
-  fi
   t '状态页已隐藏密码；查看或导出节点配置请使用主菜单「查看节点」' \
     'Passwords are hidden on the status page; use View node in the main menu to view or export node configuration'
 }
@@ -14549,27 +13192,17 @@ do_client_config() {
   require_root
   mita_installed || bail "$(t 'mita 未安装' 'mita is not installed')" || return 1
   repair_mita_binary_paths 2>/dev/null || true
-  if ! users_isolated_mode; then
-    ensure_mita_daemon
-    wait_mita_socket 20 || warn "$(t 'mita 守护进程未就绪，正在尝试继续...' 'mita daemon not ready, trying anyway...')"
-  fi
   load_config_from_mita || return 1
   generate_client_config
 }
 
 rollback_mtu_change() {
-  local restore_mtu="$1" restore_policy="$2" restore_profile="${3:-custom}" rollback_cfg=""
+  local restore_mtu="$1" restore_policy="$2" restore_profile="${3:-custom}"
   MTU="$restore_mtu"
   MTU_POLICY="$restore_policy"
   PROFILE="$restore_profile"
-  if users_isolated_mode; then
-    reconcile_isolated_instances && verify_mita_running
-    return
-  fi
-  rollback_cfg="$(write_server_config 2>/dev/null)" || return 1
-  apply_config "$rollback_cfg" \
-    && start_mita \
-    && verify_mita_running
+  users_isolated_mode || return 1
+  reconcile_isolated_instances && verify_mita_running
 }
 
 do_mtu_config() {
@@ -14579,7 +13212,7 @@ do_mtu_config() {
   repair_mita_binary_paths 2>/dev/null || true
   load_config_from_mita || return 1
 
-  local old_mtu="$MTU" old_policy="$MTU_POLICY" old_profile="$PROFILE" cfg=""
+  local old_mtu="$MTU" old_policy="$MTU_POLICY" old_profile="$PROFILE"
   msg ""
   t "当前 MTU: ${old_mtu}（$(mtu_policy_label)）" \
     "Current MTU: ${old_mtu} ($(mtu_policy_label))"
@@ -14602,25 +13235,13 @@ do_mtu_config() {
   PROFILE=custom
 
   admin_lock_acquire || return 1
-  if users_state_exists && [ "$(users_count)" -gt 0 ]; then
-    MULTI_USER_MODE=1
-    if ! reconcile_isolated_instances || ! verify_mita_running; then
-      warn "$(t "新 MTU ${MTU} 未能正常启动，正在回滚到 ${old_mtu}" \
-        "New MTU ${MTU} failed to start; rolling back to ${old_mtu}")"
-      rollback_mtu_change "$old_mtu" "$old_policy" "$old_profile" || true
-      admin_lock_release
-      return 1
-    fi
-  else
-    MULTI_USER_MODE=0
-    if ! cfg="$(write_server_config)" || ! apply_config "$cfg" \
-        || ! start_mita || ! verify_mita_running; then
-      warn "$(t "新 MTU ${MTU} 未能正常启动，正在回滚到 ${old_mtu}" \
-        "New MTU ${MTU} failed to start; rolling back to ${old_mtu}")"
-      rollback_mtu_change "$old_mtu" "$old_policy" "$old_profile" || true
-      admin_lock_release
-      return 1
-    fi
+  MULTI_USER_MODE=1
+  if ! reconcile_isolated_instances || ! verify_mita_running; then
+    warn "$(t "新 MTU ${MTU} 未能正常启动，正在回滚到 ${old_mtu}" \
+      "New MTU ${MTU} failed to start; rolling back to ${old_mtu}")"
+    rollback_mtu_change "$old_mtu" "$old_policy" "$old_profile" || true
+    admin_lock_release
+    return 1
   fi
   if ! save_install_state; then
     warn "$(t '保存 MTU 状态失败，正在恢复原服务端配置' \
@@ -14759,68 +13380,38 @@ do_start() {
   repair_mita_binary_paths 2>/dev/null || true
   start_mita
   verify_mita_running 1
-  if users_isolated_mode; then
-    t '所有用户专属 mita 实例已启动' 'All dedicated mita user instances started'
-  else
-    t 'mita 服务已启动' 'mita service started'
-  fi
+  t '所有用户专属 mita 实例已启动' 'All dedicated mita user instances started'
 }
 
 do_stop() {
   require_root || return 1
   mita_installed || bail "$(t 'mita 未安装' 'mita is not installed')" || return 1
-  local bin sm iid iname iport
-  if users_isolated_mode; then
-    STAGE="停止专属实例"
-    while IFS=$'\t' read -r iid iname iport; do
-      [ -n "$iid" ] || continue
-      instance_daemon_stop "$iid" 0
-    done < <(users_enabled_instance_rows)
-    t '所有用户专属 mita 实例已停止' 'All dedicated mita user instances stopped'
-    return 0
-  fi
-  bin="$(mita_bin)"
-  sm="$(service_manager)"
-  STAGE="停止服务"
-  run "$bin" stop 2>/dev/null || true
-  case "$sm" in
-    systemd) run systemctl stop mita 2>/dev/null || true ;;
-    openrc) run rc-service mita stop 2>/dev/null || true ;;
-    *) true ;;
-  esac
-  sleep 1
-  t 'mita 服务已停止' 'mita service stopped'
+  users_isolated_mode || bail "$(t 'schema v3 Mieru 状态必须使用 isolated-v2' \
+    'Schema-v3 Mieru state must use isolated-v2')" || return 1
+  local iid iname iport
+  STAGE="停止专属实例"
+  while IFS=$'\t' read -r iid iname iport; do
+    [ -n "$iid" ] || continue
+    instance_daemon_stop "$iid" 0
+  done < <(users_enabled_instance_rows)
+  t '所有用户专属 mita 实例已停止' 'All dedicated mita user instances stopped'
 }
 
 do_restart() {
   require_root || return 1
   mita_installed || bail "$(t 'mita 未安装' 'mita is not installed')" || return 1
   repair_mita_binary_paths 2>/dev/null || true
-  local sm iid iname iport
-  if users_isolated_mode; then
-    STAGE="重启专属实例"
-    while IFS=$'\t' read -r iid iname iport; do
-      [ -n "$iid" ] || continue
-      instance_daemon_stop "$iid" 0
-      instance_start_proxy "$iid" || return 1
-    done < <(users_enabled_instance_rows)
-    verify_mita_running 1
-    t '所有用户专属 mita 实例已重启' 'All dedicated mita user instances restarted'
-    return 0
-  fi
-  sm="$(service_manager)"
-  STAGE="重启服务"
-  case "$sm" in
-    systemd) run systemctl restart mita 2>/dev/null || true ;;
-    openrc)
-      run rc-service mita zap 2>/dev/null || true
-      run rc-service mita restart 2>/dev/null || run rc-service mita start 2>/dev/null || true
-      ;;
-    *) true ;;
-  esac
-  start_mita
+  users_isolated_mode || bail "$(t 'schema v3 Mieru 状态必须使用 isolated-v2' \
+    'Schema-v3 Mieru state must use isolated-v2')" || return 1
+  local iid iname iport
+  STAGE="重启专属实例"
+  while IFS=$'\t' read -r iid iname iport; do
+    [ -n "$iid" ] || continue
+    instance_daemon_stop "$iid" 0
+    instance_start_proxy "$iid" || return 1
+  done < <(users_enabled_instance_rows)
   verify_mita_running 1
-  t 'mita 服务已重启' 'mita service restarted'
+  t '所有用户专属 mita 实例已重启' 'All dedicated mita user instances restarted'
 }
 
 menu_pause() {
@@ -14955,9 +13546,11 @@ show_performance_menu() {
   msg '  6) Traffic Pattern'
   msg '  7) Low Entropy'
   msg '  8) 带宽限制状态'
+  msg '  9) Mieru 版本通道'
+  msg ' 10) 清理并恢复本项目 tc 规则'
   msg '  0) 返回'
   local choice=""
-  read_tty choice "$(t '请选择 [0-8]: ' 'Choose [0-8]: ')" || choice=""
+  read_tty choice "$(t '请选择 [0-10]: ' 'Choose [0-10]: ')" || choice=""
   case "$(printf '%s' "$choice" | tr -d '[:space:]')" in
     1) ACTION=perf ;;
     2) ACTION="profile-config" ;;
@@ -14967,6 +13560,8 @@ show_performance_menu() {
     6) ACTION="traffic-config" ;;
     7) ACTION="low-entropy-config" ;;
     8) ACTION="rate-status" ;;
+    9) ACTION="version-channel" ;;
+    10) ACTION="rate-restore" ;;
     0) return 2 ;;
     *) warn "$(t '无效选择' 'Invalid choice')"; return 1 ;;
   esac
@@ -15014,24 +13609,6 @@ show_backup_menu() {
   esac
 }
 
-show_advanced_menu() {
-  msg ""
-  t '【高级设置】' '[Advanced settings]'
-  msg '  1) Mieru 版本通道'
-  msg '  2) 清理并恢复本项目 tc 规则'
-  msg '  3) 帮助 / 全部 CLI 命令'
-  msg '  0) 返回'
-  local choice=""
-  read_tty choice "$(t '请选择 [0-3]: ' 'Choose [0-3]: ')" || choice=""
-  case "$(printf '%s' "$choice" | tr -d '[:space:]')" in
-    1) ACTION="version-channel" ;;
-    2) ACTION="rate-restore" ;;
-    3) ACTION=help ;;
-    0) return 2 ;;
-    *) warn "$(t '无效选择' 'Invalid choice')"; return 1 ;;
-  esac
-}
-
 show_menu() {
   if [ "${DRY_RUN:-0}" -ne 1 ] \
      && [ "${MENU_SCRIPTS_READY:-0}" -eq 0 ] \
@@ -15050,7 +13627,8 @@ show_menu() {
     version_text="$(t '未安装' 'not installed')"
   fi
   msg ''
-  t '========== Mieru OneClick ==========' '========== Mieru OneClick =========='
+  t '========== NoBrand-OneClick / Mieru ==========' \
+    '========== NoBrand-OneClick / Mieru =========='
   t "作者: ${SCRIPT_AUTHOR} / https://github.com/${SCRIPT_REPO}" \
     "Author: ${SCRIPT_AUTHOR} / https://github.com/${SCRIPT_REPO}"
   t "状态: $([ "$installed" = yes ] && printf '已安装' || printf '未安装')" \
@@ -15079,8 +13657,8 @@ show_menu() {
   msg ' 10) 卸载'
   msg '  0) 退出'
   msg ""
-  t '快捷命令: 直接输入 mita 打开菜单（不区分大小写）' \
-    'Quick command: type mita to open menu (case-insensitive)'
+  t '快捷命令: nobrand mieru（nb mieru 同义）' \
+    'Quick command: nobrand mieru (or nb mieru)'
   msg ""
   local choice=""
   read_tty choice "$(t '请选择 [0-10]: ' 'Choose [0-10]: ')" || choice=""
@@ -15398,7 +13976,7 @@ nobrand_menu_loop() {
     msg '  8) 性能 / BBR / FQ（Mieru 公共网络工具）'
     msg '  9) 备份 / 恢复'
     msg ' 10) 帮助 / CLI'
-    msg ' 11) 卸载 NoBrand Snell/HY2/VLESS/Common（保留 Mieru）'
+    msg ' 11) 卸载 NoBrand-OneClick（全部协议）'
     msg '  0) 退出'
     read_tty choice "$(t '请选择 [0-11]: ' 'Choose [0-11]: ')" || choice=""
     case "$choice" in
@@ -15420,24 +13998,18 @@ nobrand_menu_loop() {
 }
 
 main() {
+  # Help/version are intentionally state-independent. Every other root action
+  # detects legacy/unknown state before it can read or mutate protocol data.
+  case "${ACTION:-menu}" in
+    nobrand-version) nobrand_version; return 0 ;;
+    nobrand-help) nobrand_usage; return 0 ;;
+  esac
   if [ "${DRY_RUN:-0}" -ne 1 ] \
      && [ "$(id -u 2>/dev/null || echo 1)" -eq 0 ]; then
-    ensure_manager_state_layout
-  fi
-  if [ "${NOBRAND_ENTRY:-0}" -eq 1 ] \
-     && [ "${DRY_RUN:-0}" -ne 1 ] \
-     && [ "$(id -u 2>/dev/null || echo 1)" -eq 0 ]; then
-    case "${ACTION:-menu}" in
-      nobrand-version|nobrand-help) ;;
-      *) snell_migrate_removed_v6 || die 'Snell v6 removal migration did not complete safely' ;;
-    esac
+    ensure_manager_state_layout 0
   fi
   if [ -z "$ACTION" ]; then
-    if [ "${NOBRAND_ENTRY:-0}" -eq 1 ]; then
-      nobrand_menu_loop
-    else
-      menu_loop
-    fi
+    nobrand_menu_loop
     exit 0
   fi
   if [ "$ACTION" != "menu" ] && [[ "$ACTION" != nobrand-* ]]; then
@@ -15449,7 +14021,8 @@ main() {
   fi
   if [ "${DRY_RUN:-0}" -ne 1 ] \
      && [ "$(id -u 2>/dev/null || echo 1)" -eq 0 ] \
-     && mita_installed; then
+     && nb_schema_v3_file_valid \
+     && is_mita_elf_binary "$MITA_BIN"; then
     repair_mita_binary_paths 2>/dev/null || true
   fi
   case "$ACTION" in
@@ -15508,8 +14081,6 @@ main() {
     nobrand-hy2) nobrand_run_hy2_action ;;
     nobrand-vless-sudoku) nobrand_run_vless_sudoku_action ;;
     nobrand-mieru-menu) menu_loop ;;
-    nobrand-help) nobrand_usage ;;
-    nobrand-version) nobrand_version ;;
     help) usage; exit 0 ;;
     menu)
       menu_loop

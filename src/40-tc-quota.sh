@@ -92,8 +92,8 @@ print(1 if any(u.get("enabled",True) and int(u.get("bandwidth_mbps") or 0)>0 for
     return 0
   fi
   users_isolated_mode || {
-    warn "$(t '拒绝应用限速：当前尚未迁移到用户专属实例模型' \
-      'Refusing rate limits: deployment has not migrated to dedicated user instances')"
+    warn "$(t '拒绝应用限速：schema v3 必须使用 isolated-v2 用户专属实例' \
+      'Refusing rate limits: schema v3 requires isolated-v2 dedicated instances')"
     return 1
   }
   tc_available || {
@@ -393,8 +393,8 @@ users_scan_calendar_quota_reset() {
   users_isolated_mode || {
     users_tx_rollback "$tx" 1
     admin_lock_release
-    warn "$(t 'calendar 重置要求 isolated-v2，但迁移后模型未生效' \
-      'Calendar reset requires isolated-v2, but migration did not take effect')"
+    warn "$(t 'calendar 重置要求 isolated-v2，但当前模型无效' \
+      'Calendar reset requires isolated-v2, but the current model is invalid')"
     return 1
   }
 
@@ -462,34 +462,30 @@ install_users_scheduler() {
   if command -v systemctl >/dev/null 2>&1 && [ -d /etc/systemd/system ]; then
     cat >"$MITA_USERS_SERVICE" <<EOF
 [Unit]
-Description=mita users expire and calendar quota scan
+Description=NoBrand Mieru users expire and calendar quota scan
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=${script_path} user-scan
+ExecStart=${script_path} mieru user-scan
 Nice=10
 EOF
     cat >"$MITA_USERS_TIMER" <<EOF
 [Unit]
-Description=Run mita users scan every 15 minutes
+Description=Run NoBrand Mieru users scan every 15 minutes
 
 [Timer]
 OnBootSec=2min
 OnUnitActiveSec=15min
 AccuracySec=1min
-Unit=mita-users-scan.service
+Unit=nobrand-mieru-users-scan.service
 
 [Install]
 WantedBy=timers.target
 EOF
     systemctl daemon-reload 2>/dev/null || true
-    systemctl enable --now mita-users-scan.timer 2>/dev/null || true
-    # 清理 v1.9.5 及更早版本创建的、已证明不可作为按用户限速的恢复服务。
-    systemctl disable --now mita-tc-restore.service 2>/dev/null || true
-    rm -f /etc/systemd/system/mita-tc-restore.service 2>/dev/null || true
-    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable --now nobrand-mieru-users-scan.timer 2>/dev/null || true
     install_logrotate_config 2>/dev/null || true
     harden_mita_permissions 2>/dev/null || true
     users_log "scheduler: systemd expiry/quota timer"
@@ -498,8 +494,8 @@ EOF
 
   if [ -d /etc/cron.d ]; then
     cat >"$MITA_USERS_CRON" <<EOF
-# mita multi-user expire / quota scan (every 15 min)
-*/15 * * * * root ${script_path} user-scan >>${MITA_USERS_LOG} 2>&1
+# NoBrand Mieru multi-user expire / quota scan (every 15 min)
+*/15 * * * * root ${script_path} mieru user-scan >>${MITA_USERS_LOG} 2>&1
 EOF
     chmod 0644 "$MITA_USERS_CRON" 2>/dev/null || true
     install_logrotate_config 2>/dev/null || true
@@ -509,15 +505,14 @@ EOF
   fi
   # OpenRC / 无 cron：写入 hint
   install_logrotate_config 2>/dev/null || true
-  warn "$(t '未找到 systemd timer 或 /etc/cron.d，请手动定期执行: install-mita user-scan' \
-    'No systemd timer or /etc/cron.d; run: install-mita user-scan')"
+  warn "$(t '未找到 systemd timer 或 /etc/cron.d，请手动定期执行: nobrand mieru user-scan' \
+    'No systemd timer or /etc/cron.d; run: nobrand mieru user-scan')"
 }
 
 remove_users_scheduler() {
   if [ -f "$MITA_USERS_TIMER" ] || [ -f "$MITA_USERS_SERVICE" ]; then
-    systemctl disable --now mita-users-scan.timer 2>/dev/null || true
-    systemctl disable --now mita-tc-restore.service 2>/dev/null || true
-    rm -f "$MITA_USERS_TIMER" "$MITA_USERS_SERVICE" /etc/systemd/system/mita-tc-restore.service 2>/dev/null || true
+    systemctl disable --now nobrand-mieru-users-scan.timer 2>/dev/null || true
+    rm -f "$MITA_USERS_TIMER" "$MITA_USERS_SERVICE" 2>/dev/null || true
     systemctl daemon-reload 2>/dev/null || true
   fi
   rm -f "$MITA_USERS_CRON" 2>/dev/null || true
