@@ -32,13 +32,13 @@ if valid_advertise_host 'https://cm-entry.example.com'; then
   exit 1
 fi
 
-PORT=17353 ADVERTISE_HOST=192.236.242.173 ADVERTISE_PORT=17353
-if client_endpoint_is_independent 192.236.242.173; then
+PORT=17353 ADVERTISE_HOST=203.0.113.173 ADVERTISE_PORT=17353
+if client_endpoint_is_independent 203.0.113.173; then
   echo 'same public endpoint unexpectedly treated as independent' >&2
   exit 1
 fi
 PORT=30000 ADVERTISE_HOST=cm-entry.example.com ADVERTISE_PORT=10086
-client_endpoint_is_independent 192.236.242.173
+client_endpoint_is_independent 203.0.113.173
 
 installed_version(){ echo 3.35.0; }
 mita_supports_traffic_pattern(){ return 0; }

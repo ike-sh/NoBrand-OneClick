@@ -335,7 +335,7 @@ test "$(profile_label balanced)" = '普通公网'
 test "$(profile_label stealth)" = '强化伪装'
 test "$(profile_label custom)" = '高级自定义'
 grep -q 'profile=default 是上游客户端的 profileName' /work/install-mita.sh
-grep -q 'profile=default.*上游 Mieru 客户端的.*profileName' /work/README.md
+grep -q 'Mieru 保留多用户.*Profile.*client export' /work/README.md
 apply_profile_values iplc
 test "$PROFILE|$PROTOCOL|$MTU|$MULTIPLEXING|$HANDSHAKE_MODE|$TRAFFIC_PATTERN|$LOW_ENTROPY_MODE" = \
   'iplc|TCP|1400|MULTIPLEXING_OFF|HANDSHAKE_NO_WAIT|off|LOW_ENTROPY_MODE_OFF'
@@ -443,8 +443,8 @@ grep -q -- '-> 后端: 198.51.100.40:26000/TCP' <<<"$client_config_output"
 
 # 显式填写的入口若与探测公网 IP/后端端口相同，不显示独立入口或映射。
 (
-  PORT=17353 PROTOCOL=TCP ADVERTISE_HOST=192.236.242.173 ADVERTISE_PORT=17353
-  public_ip(){ echo 192.236.242.173; }
+  PORT=17353 PROTOCOL=TCP ADVERTISE_HOST=203.0.113.173 ADVERTISE_PORT=17353
+  public_ip(){ echo 203.0.113.173; }
   print_protocol_outputs(){ :; }
   same_mapping="$(print_client_endpoint_mapping)"
   test -z "$same_mapping"
@@ -467,11 +467,11 @@ grep -q -- '-> 后端: 198.51.100.40:26000/TCP' <<<"$client_config_output"
     TRAFFIC_PATTERN=off LOW_ENTROPY_MODE=LOW_ENTROPY_MODE_OFF
   }
   users_ensure_loaded(){ :; }
-  public_ip(){ echo 192.236.242.173; }
+  public_ip(){ echo 203.0.113.173; }
   batch_output="$(do_user_export_clients 2>&1)"
   grep -q '【客户端入口映射】' <<<"$batch_output"
   grep -q '客户端: cm-entry.example.com:10086/TCP' <<<"$batch_output"
-  grep -q -- '-> 后端: 192.236.242.173:30000/TCP' <<<"$batch_output"
+  grep -q -- '-> 后端: 203.0.113.173:30000/TCP' <<<"$batch_output"
   python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); s=d["profiles"][0]["servers"][0]; assert s["domainName"]=="cm-entry.example.com" and s["portBindings"][0]["port"]==10086' \
     "$(find "$MITA_CLIENT_EXPORT_DIR" -name 'batch-user_tcp.json' -print -quit)"
 )
@@ -648,13 +648,13 @@ rm -f "$conflict_state" "$conflict_state.norm"
   load_install_state(){ :; }
   users_state_exists(){ return 1; }
   installed_version(){ echo 3.35.0; }
-  detect_public_ip_family(){ [ "$1" = 4 ] && echo 192.236.242.173 || echo 2606:4700:4700::1111; }
+  detect_public_ip_family(){ [ "$1" = 4 ] && echo 203.0.113.173 || echo 2606:4700:4700::1111; }
   perf_sysctl_value(){ [ "$1" = net.ipv4.tcp_congestion_control ] && echo bbr || echo fq; }
   tc_default_iface(){ echo eth-test; }
   mtu_iface_value(){ echo 1500; }
   tc(){ echo 'qdisc fq 0: root'; }
   ps(){ printf '1 0.1 1024 mita mita-real run\n'; }
-  PORT=17353 PROTOCOL=TCP ADVERTISE_HOST=192.236.242.173 ADVERTISE_PORT=17353
+  PORT=17353 PROTOCOL=TCP ADVERTISE_HOST=203.0.113.173 ADVERTISE_PORT=17353
   same_perf_output="$(do_perf)"
   ! grep -q '当前使用独立客户端入口' <<<"$same_perf_output"
   ! grep -q 'An independent client endpoint' <<<"$same_perf_output"
@@ -666,7 +666,7 @@ rm -f "$conflict_state" "$conflict_state.norm"
   grep -q 'Advertised client address: cm-entry.example.com' <<<"$perf_output"
   grep -q '\[INFO\] 当前使用独立客户端入口' <<<"$perf_output"
   grep -q 'Client: cm-entry.example.com:10086' <<<"$perf_output"
-  grep -q 'Backend: 192.236.242.173:30000' <<<"$perf_output"
+  grep -q 'Backend: 203.0.113.173:30000' <<<"$perf_output"
   ! grep -Eq '\[WARN\].*客户端入口|\[FAIL\].*客户端入口' <<<"$perf_output"
   grep -q '本报告为只读' <<<"$perf_output"
   test ! -e /tmp/perf-unexpected-write

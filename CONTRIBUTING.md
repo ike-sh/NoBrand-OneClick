@@ -2,7 +2,7 @@
 
 ## 范围
 
-当前范围只接受 Mieru、Snell v4/v5/v6、Xray-core Hysteria2 与 Plain VLESS + FinalMask + Sudoku/TCP 相关变更。不要加入其它协议、Web panel 或自动迁移 Xray-OneClick 配置。
+当前产品范围只接受 Mieru、Snell v4/v5、Xray-core Hysteria2 与 Plain VLESS + FinalMask + Sudoku/TCP 相关变更。Snell v1、v2、v3、v6 不受支持；v6 只允许维护精确历史状态清理、负向测试与历史文档。不要加入其它协议、Web panel 或自动迁移 Xray-OneClick 配置。
 
 Mieru 是成熟母体。除 Common Core adapter 外，不重写 isolated-v2、多用户、quota、tc、state、export 或卸载逻辑；`/var/lib/mita-oneclick` 继续是 Mieru 权威 state。
 

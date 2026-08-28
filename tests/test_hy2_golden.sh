@@ -38,16 +38,16 @@ assert_contains "$link" 'obfs-password=obfs%20%2B%2F%25' 'URI obfs encoding'
 assert_contains "$link" '#NoBrand%20HY2' 'URI label encoding'
 
 hysteria2_generate_state "$NOBRAND_HY2_STATE_FILE" 0.0.0.0 3622 "$auth" "$sni" "$obfs" \
-  custom 211.136.162.185 16808
+  custom 203.0.113.20 8443
 mihomo="$(hysteria2_export_mihomo)"
 assert_contains "$mihomo" 'type: hysteria2' 'HY2 Mihomo type'
-assert_contains "$mihomo" 'server: "211.136.162.185"' 'HY2 Mihomo Display Endpoint'
-assert_contains "$mihomo" 'port: 16808' 'HY2 Mihomo port'
+assert_contains "$mihomo" 'server: "203.0.113.20"' 'HY2 Mihomo Display Endpoint'
+assert_contains "$mihomo" 'port: 8443' 'HY2 Mihomo port'
 assert_contains "$mihomo" 'skip-cert-verify: true' 'HY2 Mihomo self-signed TLS'
 assert_contains "$mihomo" 'obfs: salamander' 'HY2 Mihomo Salamander'
 singbox="$(hysteria2_export_singbox)"
 jq -e --arg auth "$auth" --arg obfs "$obfs" --arg sni "$sni" '
-  .type=="hysteria2" and .server=="211.136.162.185" and .server_port==16808 and
+  .type=="hysteria2" and .server=="203.0.113.20" and .server_port==8443 and
   .password==$auth and .obfs=={"type":"salamander","password":$obfs} and
   .tls.enabled==true and .tls.server_name==$sni and .tls.insecure==true and .tls.alpn==["h3"]
 ' <<<"$singbox" >/dev/null || fail 'HY2 sing-box exporter golden semantics'

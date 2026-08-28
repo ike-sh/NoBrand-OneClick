@@ -36,7 +36,7 @@ Checked items have direct source, automated, container, or real-machine evidence
 - [x] `SNELL_V6_FINAL_TEST=FAIL` and `SNELL_V6_DECISION=REMOVE` are final; v6 was not retested.
 - [x] The IPLC v6 instance, exact TCP ownership, state/config/service and independent runtime were removed without affecting five retained protocols.
 - [x] QUIC OFF→ON→OFF proves state/firewall semantics, same-process UDP, unchanged service/config/PSK during toggles and final OFF restoration.
-- [x] IPLC exporter → local `.lab` → Debian SHA-256 round trip is identical and all proxy servers use `211.136.162.185`.
+- [x] IPLC exporter → local `<LOCAL_LAB_DIR>` → Debian SHA-256 round trip is identical and all proxy servers use `<PUBLIC_ENTRY_IP>`.
 - [x] Mihomo 1.19.30 and sing-box 1.14.0-rc.1 real config checks pass for every supported generated config.
 - [x] QUIC OFF public connectivity passes 20/20 for both Snell cores; historical sing-box 19/20 and 18/20 failures remain in raw evidence.
 - [x] QUIC ON standard path is 20/20 on Mihomo and final 19/20 on sing-box; this is not labeled QUIC E2E.
@@ -44,15 +44,15 @@ Checked items have direct source, automated, container, or real-machine evidence
 - [x] Raw public baseline is 152.979 Mbps download / 53.209 Mbps upload (median of three runs).
 - [x] Snell v4 completes both-core 3×256 MiB down/up matrices; fallback HTTP 429 and Mieru TLS EOF are classified honestly.
 - [x] Restart recovery retains the Snell v4/Mihomo cold-start 3/5 failure; successful later client restart does not overwrite it.
-- [x] No test used localhost, guest/private addresses as a public qualification PASS or used port 16800 as a proxy/benchmark.
+- [x] No test used localhost, guest/private addresses as a public qualification PASS or used `<SSH_PORT>` as a proxy/benchmark.
 
 ## Security and cleanup
 
 - [x] No credentials, private keys, SSH material, client bundles, PCAPs or runtime binaries are added to the release tree.
-- [x] `.lab/` and `.codex-backup/` remain ignored.
-- [x] No firewall flush, broad service deletion or change to `Xray-OneClick` / `dev-ssh` occurred.
+- [x] Local lab and safety-snapshot directories remain ignored.
+- [x] No firewall flush, broad service deletion or change to the reference worktree / SSH helper configuration occurred.
 - [x] Temporary benchmark HTTP processes/files were precisely removed after PID/cmdline validation; retained scripts/evidence are inert.
-- [x] Final IPLC state has five services, v5 QUIC OFF, no v6 product files, no benchmark listener/firewall residue and public SSH/16800 PASS.
+- [x] Final IPLC state has five services, v5 QUIC OFF, no v6 product files, no benchmark listener/firewall residue and public SSH/`<SSH_PORT>` PASS.
 
 ## Documentation
 

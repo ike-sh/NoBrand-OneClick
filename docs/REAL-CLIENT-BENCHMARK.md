@@ -3,17 +3,17 @@
 Validation date: 2026-08-28 (Asia/Shanghai) / 2026-08-27 UTC
 Server: IPLC Debian guest
 Client: independent Debian host
-Forced public entry: `211.136.162.185`
+Forced public entry: `<PUBLIC_ENTRY_IP>`
 Result vocabulary: `PASS`, `FAIL`, `CLIENT_UNSUPPORTED`, `NOT VERIFIED`, `ENVIRONMENT BLOCKED`
 
-This report is a credential-free summary. Raw configs, client logs, curl CSVs, packet captures and process samples remain mode `0600`/`0700` under `/root/nobrand-lab`; no secret values, binaries, PCAPs or client bundles are committed to the repository.
+This report is a credential-free summary. Raw configs, client logs, curl CSVs, packet captures and process samples remain mode `0600`/`0700` under `<LAB_ROOT>`; no secret values, binaries, PCAPs or client bundles are committed to the repository.
 
 Every tested node followed the same provenance chain:
 
 ```text
 NoBrand authoritative server state
   → NoBrand exporter
-  → unmodified IPLC → local .lab → Debian transfer
+  → unmodified IPLC → local ignored lab directory → Debian transfer
   → SHA-256 equality check
   → official client config check
   → real client process and forced local SOCKS/mixed listener
@@ -21,7 +21,7 @@ NoBrand authoritative server state
   → HTTPS / download / upload
 ```
 
-No proxy or benchmark used port 16800. Localhost, the IPLC guest address and private addresses were never accepted as a public qualification PASS.
+No proxy or benchmark used `<SSH_PORT>`. Localhost, the IPLC guest address and private addresses were never accepted as a public qualification PASS.
 
 ## A. Snell v6 decision
 
@@ -30,7 +30,7 @@ SNELL_V6_FINAL_TEST=FAIL
 SNELL_V6_DECISION=REMOVE
 ```
 
-The single permitted final qualification used the current Surge v6 server, official sing-box 1.14.0-rc.1, a real NoBrand 1.1.0 exporter document and public entry `211.136.162.185:16895`.
+The single permitted final qualification used the current Surge v6 server, official sing-box 1.14.0-rc.1, a real NoBrand 1.1.0 exporter document and public entry `<PUBLIC_ENTRY_IP>:<LEGACY_SNELL_V6_PORT>`.
 
 | Check | Result |
 |---|---:|
@@ -42,7 +42,7 @@ The single permitted final qualification used the current Surge v6 server, offic
 | IPLC client→server payload packets | 38 |
 | IPLC server→client payload packets | 20 |
 
-The instance `lab-snell-v6`, its exact TCP/16895 ownership, config, state, service and independent v6 runtime/metadata were removed. Product CLI/menu/resolver/download/service/config/state/export/Doctor/nodes/backup/restore/upgrade paths now reject v6. The remaining v6 references are limited to exact upgrade migration, negative tests and historical release evidence.
+The instance `<LEGACY_SNELL_V6_INSTANCE>`, its exact TCP ownership, config, state, service and independent v6 runtime/metadata were removed. Product CLI/menu/resolver/download/service/config/state/export/Doctor/nodes/backup/restore/upgrade paths now reject v6. The remaining v6 references are limited to exact upgrade migration, negative tests and historical release evidence.
 
 ## B. Snell v5 QUIC exposure
 
@@ -55,7 +55,7 @@ The official v5 runtime binds same-number TCP and UDP in one process and exposes
 
 The real OFF→ON→OFF sequence passed all state, firewall and listener checks. The ON and OFF toggles did not change the service PID, server-config SHA-256 or PSK SHA-256 and did not restart the service. A later explicit recovery-test restart changed only the PID; QUIC state and same-process listeners persisted.
 
-Final deployed state is QUIC OFF: `quic_proxy_enabled=false`, `managed_udp=false`, TCP/16812 owned, UDP/16812 not NoBrand-owned. The official process still has a local same-process UDP/16812 socket; that is not public ownership and not QUIC E2E evidence.
+Final deployed state is QUIC OFF: `quic_proxy_enabled=false`, `managed_udp=false`, `TCP/<SNELL_V5_PORT>` owned and `UDP/<SNELL_V5_PORT>` not NoBrand-owned. The official process still has a local same-process UDP socket on that port; that is not public ownership and not QUIC E2E evidence.
 
 ## C. Client compatibility
 
@@ -83,7 +83,7 @@ Unsupported combinations were not converted to ordinary VLESS, hand-written Mier
 
 ## D. Real-user connectivity and restart
 
-All server fields were `211.136.162.185`; every client used an isolated 181xx/182xx local listener. Main configs used `MATCH → current node` or the equivalent route final. `api.ipify.org` could not provide a reliable direct/proxy comparison, so `egress_diff=unknown`; client route logs and public-entry captures prove the selected proxy path, with no DIRECT fallback.
+All server fields were `<PUBLIC_ENTRY_IP>`; every client used an isolated `<LOCAL_CLIENT_PORT_RANGE>` listener. Main configs used `MATCH → current node` or the equivalent route final. `api.ipify.org` could not provide a reliable direct/proxy comparison, so `egress_diff=unknown`; client route logs and public-entry captures prove the selected proxy path, with no DIRECT fallback.
 
 ### QUIC OFF / normal five-protocol deployment
 
@@ -97,7 +97,7 @@ All server fields were `211.136.162.185`; every client used an isolated 181xx/18
 | Hysteria2 | UDP | Mihomo | NoBrand exporter | 20/20 | 424 | `PASS` |
 | Hysteria2 | UDP | sing-box | NoBrand exporter | 20/20 | 521 | `PASS` |
 
-The Snell v5/sing-box raw history is intentionally retained: initial cold start 19/20, second run after warm-up 18/20, and 20/20 after exact server restart. Failures were connect timeouts, and logs still showed `outbound/snell[lab-snell-v5]`, never DIRECT.
+The Snell v5/sing-box raw history is intentionally retained: initial cold start 19/20, second run after warm-up 18/20, and 20/20 after exact server restart. Failures were connect timeouts, and logs still showed the selected `<SNELL_V5_INSTANCE>` outbound, never DIRECT.
 
 ### QUIC ON server exposure
 
@@ -157,7 +157,7 @@ The QUIC ON sing-box performance block was not run because its required connecti
 
 ## F. Raw baseline and efficiency
 
-The temporary public iperf3 port was 16899/TCP, marked `LAB_THROUGHPUT_BASELINE`, and was precisely removed after the test. Port 16800 was never used.
+The temporary public iperf3 port was `<BENCHMARK_PORT>/TCP`, marked `LAB_THROUGHPUT_BASELINE`, and was precisely removed after the test. `<SSH_PORT>` was never used.
 
 | Direction | Run 1 | Run 2 | Run 3 | Median |
 |---|---:|---:|---:|---:|
@@ -237,27 +237,27 @@ Snell v5 remains Recommended/Default with QUIC OFF. Snell v4 remains Compatibili
 
 | Protocol | Public Display Endpoint | Transport |
 |---|---|---|
-| Mieru | `211.136.162.185:16842` | TCP |
-| Snell v5 | `211.136.162.185:16812` | TCP; QUIC exposure final OFF |
-| Snell v4 | `211.136.162.185:16872` | TCP |
-| Hysteria2 | `211.136.162.185:16808` | UDP |
-| VLESS/Sudoku | `211.136.162.185:16805` | TCP |
+| Mieru | `<PUBLIC_ENTRY_IP>:<MIERU_PORT>` | TCP |
+| Snell v5 | `<PUBLIC_ENTRY_IP>:<SNELL_V5_PORT>` | TCP; QUIC exposure final OFF |
+| Snell v4 | `<PUBLIC_ENTRY_IP>:<SNELL_V4_PORT>` | TCP |
+| Hysteria2 | `<PUBLIC_ENTRY_IP>:<HY2_PORT>` | UDP |
+| VLESS/Sudoku | `<PUBLIC_ENTRY_IP>:<VLESS_PORT>` | TCP |
 
 Credentials are intentionally omitted.
 
 ## K. Final IPLC listeners
 
 ```text
-16800 = SSH (outer public entry; permanently protected)
-16842/TCP = Mieru
-16812/TCP = Snell v5
-16812/UDP = local official same-process auxiliary socket; NoBrand ownership OFF
-16872/TCP = Snell v4
-16808/UDP = Hysteria2
-16805/TCP = VLESS/Sudoku
+<SSH_PORT> = SSH (outer public entry; permanently protected)
+<MIERU_PORT>/TCP = Mieru
+<SNELL_V5_PORT>/TCP = Snell v5
+<SNELL_V5_PORT>/UDP = local official same-process auxiliary socket; NoBrand ownership OFF
+<SNELL_V4_PORT>/TCP = Snell v4
+<HY2_PORT>/UDP = Hysteria2
+<VLESS_PORT>/TCP = VLESS/Sudoku
 ```
 
-Final audit passed with no benchmark listener/firewall residue, no proxy ownership on 16800, no v6 state/config/runtime, and a valid public SSH banner on `211.136.162.185:16800`.
+Final audit passed with no benchmark listener/firewall residue, no proxy ownership on `<SSH_PORT>`, no v6 state/config/runtime, and public SSH connectivity PASS at `<PUBLIC_ENTRY_IP>:<SSH_PORT>`.
 
 ## L. Release readiness and recommendation
 

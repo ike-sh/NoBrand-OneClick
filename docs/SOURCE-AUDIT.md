@@ -6,14 +6,14 @@
 
 - `ike-sh/mieru-OneClick`
 - 目标仓库初始 commit：`2b3e2371746a0dd0248887a216d3a45d6ac8e95c`
-- 本地没有单独 `D:\code\mieru-OneClick`；目标目录初始就是干净 Source A clone。
+- 本地没有单独的参考项目 worktree；目标目录初始就是干净 Source A clone。
 - 审计全部 `src/`、build、README、CONTRIBUTING 与模块文档。
 
 确认端口链：default-route IPv4 → tail×100 → xx01-xx99 → random circular scan → state/ss/netstat/bind probe。Display Endpoint 只写 users state/client exports，不改 instance/listener/firewall/tc/quota。
 
 ## Xray-OneClick Hysteria2
 
-- 只读仓库：`D:\code\Xray-OneClick`
+- 只读参考仓库：`<REFERENCE_WORKTREE>`
 - 审计 commit：`5b6a049f1c24469c79e233989248deb9ecf3481c`
 - 第一事实来源：`lib/57-hysteria2.sh`，并审计 constants/output/system/path/config/state/network/service/runtime/CLI/menu/tests。
 
@@ -56,7 +56,7 @@ Golden test 固定 UUID/port/password，从上述 reference inbound 构造 expec
 
 确认 v5 official runtime 没有 `quic=true` 一类 server config 字段；同一进程会 bind 同号 TCP/UDP。NoBrand 因而把 QUIC OFF/ON 实现为 state 与 firewall exposure，而不是虚构配置参数：OFF 只拥有 TCP，ON 拥有同号 TCP/UDP，并验证两个 socket 的 PID 都等于 service MainPID。
 
-Snell v6 最后一次强制公网资格测试使用官方 sing-box 1.14.0-rc.1、NoBrand exporter 和 `211.136.162.185:16895`，结果为 3/20 HTTPS，download/upload 均失败，公网双端抓包仍有流量。结论固定为 `SNELL_V6_FINAL_TEST=FAIL`、`SNELL_V6_DECISION=REMOVE`；此测试不得重跑。生产代码只保留 exact historical-state migration，resolver/download/export/status/nodes/Doctor/service/runtime 全部拒绝 v6。
+Snell v6 最后一次强制公网资格测试使用官方 sing-box 1.14.0-rc.1、NoBrand exporter 和 `<PUBLIC_ENTRY_IP>:<LEGACY_SNELL_V6_PORT>`，结果为 3/20 HTTPS，download/upload 均失败，公网双端抓包仍有流量。结论固定为 `SNELL_V6_FINAL_TEST=FAIL`、`SNELL_V6_DECISION=REMOVE`；此测试不得重跑。生产代码只保留 exact historical-state migration，resolver/download/export/status/nodes/Doctor/service/runtime 全部拒绝 v6。
 
 ## Mihomo upstream
 
