@@ -331,21 +331,23 @@ install_instance_runtime() {
     return 1
   }
   run mkdir -p "$MITA_INSTANCES_DIR" "$MITA_INSTANCE_RUN_DIR" \
-    "$MITA_INSTANCE_METRICS_DIR" /usr/local/libexec /var/lib/mita
+    "$MITA_INSTANCE_METRICS_DIR" /usr/local/libexec /var/lib/mita || return 1
   # 配置子目录/文件属于 mita，但父目录必须至少允许 mita 组穿越。
-  run chown root:mita "$MITA_INSTANCES_DIR"
-  run chown mita:mita "$MITA_INSTANCE_RUN_DIR" "$MITA_INSTANCE_METRICS_DIR" /var/lib/mita
-  run chmod 0750 "$MITA_INSTANCES_DIR" "$MITA_INSTANCE_RUN_DIR" "$MITA_INSTANCE_METRICS_DIR"
+  run chown root:mita "$MITA_INSTANCES_DIR" || return 1
+  run chown mita:mita "$MITA_INSTANCE_RUN_DIR" "$MITA_INSTANCE_METRICS_DIR" /var/lib/mita \
+    || return 1
+  run chmod 0750 "$MITA_INSTANCES_DIR" "$MITA_INSTANCE_RUN_DIR" "$MITA_INSTANCE_METRICS_DIR" \
+    || return 1
 
   case "$sm" in
     systemd)
-      run mkdir -p "$(dirname "$MITA_INSTANCE_TMPFILES")"
+      run mkdir -p "$(dirname "$MITA_INSTANCE_TMPFILES")" || return 1
       cat >"$MITA_INSTANCE_TMPFILES" <<EOF
 d ${MITA_INSTANCE_RUN_DIR} 0750 mita mita -
 EOF
-      run chmod 0644 "$MITA_INSTANCE_TMPFILES"
+      run chmod 0644 "$MITA_INSTANCE_TMPFILES" || return 1
       if command -v systemd-tmpfiles >/dev/null 2>&1; then
-        run systemd-tmpfiles --create "$MITA_INSTANCE_TMPFILES"
+        run systemd-tmpfiles --create "$MITA_INSTANCE_TMPFILES" || return 1
       fi
       cat >"$MITA_INSTANCE_SYSTEMD_TEMPLATE" <<EOF
 [Unit]
@@ -369,8 +371,8 @@ NoNewPrivileges=true
 [Install]
 WantedBy=multi-user.target
 EOF
-      run chmod 0644 "$MITA_INSTANCE_SYSTEMD_TEMPLATE"
-      run systemctl daemon-reload
+      run chmod 0644 "$MITA_INSTANCE_SYSTEMD_TEMPLATE" || return 1
+      run systemctl daemon-reload || return 1
       ;;
     openrc)
       if ! command -v unshare >/dev/null 2>&1 \
@@ -396,7 +398,7 @@ exec unshare --mount --propagation private sh -c '
     env MITA_CONFIG_JSON_FILE="\$2" MITA_UDS_PATH="\$3" "\$4" run
 ' sh "\$metrics" "\$cfg" "\$sock" "${bin}"
 EOF
-      run chmod 0755 "$MITA_INSTANCE_RUNNER"
+      run chmod 0755 "$MITA_INSTANCE_RUNNER" || return 1
       ;;
   esac
 }
@@ -480,11 +482,16 @@ PY
     rm -f "$tmp"
     return 0
   fi
-  run mkdir -p "$dir" "$(instance_metrics_dir "$id")" "$MITA_INSTANCE_RUN_DIR"
-  run chown mita:mita "$dir" "$(instance_metrics_dir "$id")" "$MITA_INSTANCE_RUN_DIR"
-  run chmod 0750 "$dir" "$(instance_metrics_dir "$id")" "$MITA_INSTANCE_RUN_DIR"
-  install -o mita -g mita -m 0600 "$tmp" "${final}.new"
-  mv -f "${final}.new" "$final"
+  run mkdir -p "$dir" "$(instance_metrics_dir "$id")" "$MITA_INSTANCE_RUN_DIR" \
+    || { rm -f "$tmp"; return 1; }
+  run chown mita:mita "$dir" "$(instance_metrics_dir "$id")" "$MITA_INSTANCE_RUN_DIR" \
+    || { rm -f "$tmp"; return 1; }
+  run chmod 0750 "$dir" "$(instance_metrics_dir "$id")" "$MITA_INSTANCE_RUN_DIR" \
+    || { rm -f "$tmp"; return 1; }
+  install -o mita -g mita -m 0600 "$tmp" "${final}.new" \
+    || { rm -f "$tmp" "${final}.new"; return 1; }
+  mv -f "${final}.new" "$final" \
+    || { rm -f "$tmp" "${final}.new"; return 1; }
   rm -f "$tmp"
 }
 

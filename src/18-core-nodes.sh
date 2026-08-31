@@ -14,7 +14,7 @@ nobrand_version() {
 
 nobrand_usage() {
   cat <<EOF
-NoBrand-OneClick 3.0.0 — Mieru / Snell v4-v5 / Hysteria2 / VLESS + FinalMask + Sudoku (TCP)
+NoBrand-OneClick 3.1.0 — Mieru / Snell v4-v5 / Hysteria2 / TUIC v5 / VLESS + FinalMask + Sudoku / SSH Tunnel / Port Forward
 
 用法:
   nobrand                         打开统一菜单
@@ -24,9 +24,10 @@ NoBrand-OneClick 3.0.0 — Mieru / Snell v4-v5 / Hysteria2 / VLESS + FinalMask +
   nobrand status                  综合状态
   nobrand nodes [--protocol P]    查看全部或指定协议节点
   nobrand doctor                  综合诊断（默认不输出 secret）
-  nobrand backup create [FILE]    备份 NoBrand 3.0 全部 state 与配置
+  nobrand backup create [FILE]    备份 NoBrand schema-v3 全部 state 与配置
   nobrand backup restore FILE     恢复 NoBrand 备份
-  nobrand uninstall [-y]          统一卸载 Mieru/Snell/HY2/VLESS/Common
+  nobrand uninstall [-y]          统一卸载 Mieru/Snell/HY2/TUIC/VLESS/SSH/Forward/Common
+  nobrand manager install|upgrade 从当前执行的 exact installer 安装/升级统一管理器
 
   nobrand mieru                    打开完整 Mieru 菜单
   nobrand mieru install|reconfigure|upgrade|uninstall|start|stop|restart
@@ -59,6 +60,24 @@ NoBrand-OneClick 3.0.0 — Mieru / Snell v4-v5 / Hysteria2 / VLESS + FinalMask +
   nobrand vless-sudoku set-endpoint
       [--advertise-host HOST --advertise-port PORT | --advertise-auto]
 
+  nobrand tuic install --name NAME --user USER [--port PORT] [--sni SNI]
+      [--channel stable|latest | --runtime-version VERSION]
+      [--advertise-host HOST --advertise-port PORT | --advertise-auto] [-y]
+  nobrand tuic start|stop|restart|status|doctor|show|export|set-endpoint|upgrade-runtime|uninstall
+  nobrand tuic user add|delete|list|show|rotate --name NAME [--user USER]
+
+  nobrand ssh install --user USER
+      [--advertise-host HOST --advertise-port PORT | --advertise-auto] [-y]
+  nobrand ssh status|doctor|show|export|set-endpoint|uninstall
+  nobrand ssh user add|delete|list|show|rotate-key [--user USER]
+  nobrand ssh confirm-admin --token TOKEN
+
+  nobrand forward add --name NAME --backend nftables|realm --protocol TCP|UDP|BOTH
+      --listen 0.0.0.0 --port PORT --target HOST --target-port PORT
+  nobrand forward list|doctor|export
+  nobrand forward show|delete|modify|enable|disable|set-endpoint|switch-backend RULE
+  nobrand forward import FILE
+
 说明:
   - Snell 只支持 v5（默认/推荐）与 v4（兼容）。
   - Snell v5 QUIC 默认关闭；--quic on 才让 NoBrand 管理同号 UDP firewall ownership。
@@ -67,6 +86,13 @@ NoBrand-OneClick 3.0.0 — Mieru / Snell v4-v5 / Hysteria2 / VLESS + FinalMask +
   - 非交互 -y 必须明确给出完整 Display Endpoint 或 --advertise-auto。
   - VLESS Sudoku = plain VLESS + FinalMask(sudoku) + TCP。
   - VLESS Encryption: NOT USED；不调用密钥生成子命令，不保存加密密钥。
+  - TUIC 只支持 v5：official sing-box、UDP/QUIC、每用户独立 UUID + password。
+  - SSH Tunnel 复用现有 sshd；允许 -L/-D/-R TCP forwarding，不允许 shell/exec/TTY/SFTP/SCP。
+  - SSH Tunnel 使用 AllowTcpForwarding=yes，因此可访问服务器自身可达的 TCP destinations；GatewayPorts=no。
+  - SSH Tunnel 不拥有 sshd listener、SSH firewall、host keys 或 admin authentication。
+  - Port Forward: nftables 为 IPv4 kernel NAT；Realm 为 official userspace relay，可使用 IP/domain target。
+  - Forward 的 Display Endpoint 仅为 metadata；xx00 对 nftables/Realm 和 TCP/UDP 均保留。
+  - PROTOCOL_FEATURE_FREEZE=${PROTOCOL_FEATURE_FREEZE}（3.1.0 后仅维护、安全、修复、导出、Doctor、UI 与兼容性改进）。
   - Mieru 官方 runtime 仍名为 mita，但它不是管理命令；管理入口只有 nobrand/nb。
   - v3 state 必须带 schema_version=3；旧 state 不读取、不导入、不删除。
   - 正式安装器: ${NOBRAND_RELEASE_INSTALLER_URL}
@@ -103,6 +129,18 @@ nobrand_install_manager_script() {
   fi
   ln -sfn "$NOBRAND_INSTALL_SCRIPT_PATH" "$NOBRAND_COMMAND_PATH" || return 1
   ln -sfn "$NOBRAND_COMMAND_PATH" "$NOBRAND_SHORT_COMMAND_PATH" || return 1
+  cmp -s "$source_path" "$NOBRAND_INSTALL_SCRIPT_PATH" || return 1
+  [ "$(readlink "$NOBRAND_COMMAND_PATH" 2>/dev/null || true)" = "$NOBRAND_INSTALL_SCRIPT_PATH" ] || return 1
+  [ "$(readlink "$NOBRAND_SHORT_COMMAND_PATH" 2>/dev/null || true)" = "$NOBRAND_COMMAND_PATH" ] || return 1
+}
+
+nobrand_manager_upgrade() {
+  require_root
+  require_linux
+  nobrand_install_manager_script \
+    || die 'NoBrand manager install/upgrade failed; protocol state was not modified'
+  t "NoBrand unified manager 已从当前 exact installer 安装/升级至 v${SCRIPT_VERSION}" \
+    "NoBrand unified manager installed/upgraded from the current exact installer to v${SCRIPT_VERSION}"
 }
 
 nb_mieru_instance_running() {
@@ -158,13 +196,19 @@ nb_all_node_rows() {
       nb_mieru_node_rows
       snell_node_rows
       hysteria2_node_rows
+      tuic_node_rows
       vless_sudoku_node_rows
+      ssh_tunnel_node_rows
+      forward_node_rows
       ;;
     mieru) nb_mieru_node_rows ;;
     snell) snell_node_rows ;;
     hy2|hysteria2) hysteria2_node_rows ;;
+    tuic) tuic_node_rows ;;
     vless-sudoku|sudoku|vless) vless_sudoku_node_rows ;;
-    *) die "--protocol 只支持 mieru、snell、hy2、vless-sudoku" ;;
+    ssh|ssh-tunnel) ssh_tunnel_node_rows ;;
+    forward|port-forward) forward_node_rows ;;
+    *) die "--protocol 只支持 mieru、snell、hy2、tuic、vless-sudoku、ssh、forward" ;;
   esac
 }
 
@@ -189,6 +233,8 @@ nobrand_nodes() {
 nobrand_status() {
   local rows protocol _name _endpoint status _transport
   local mieru_total=0 mieru_running=0 snell_total=0 snell_running=0 hy2_total=0 hy2_running=0
+  local tuic_total=0 tuic_running=0 ssh_total=0 ssh_ready=0
+  local forward_nft_total=0 forward_nft_healthy=0 forward_realm_total=0 forward_realm_healthy=0
   local vless_total=0 vless_running=0 vless_port=""
   rows="$(nb_all_node_rows)"
   while IFS='|' read -r protocol _name _endpoint status _transport; do
@@ -196,6 +242,14 @@ nobrand_status() {
       Mieru/*) mieru_total=$((mieru_total + 1)); [ "$status" != Running ] || mieru_running=$((mieru_running + 1)) ;;
       Snell*) snell_total=$((snell_total + 1)); [ "$status" != Running ] || snell_running=$((snell_running + 1)) ;;
       Hysteria2) hy2_total=$((hy2_total + 1)); [ "$status" != Running ] || hy2_running=$((hy2_running + 1)) ;;
+      'TUIC v5') tuic_total=$((tuic_total + 1)); [ "$status" != Running ] || tuic_running=$((tuic_running + 1)) ;;
+      'SSH Tunnel') ssh_total=$((ssh_total + 1)); [ "$status" != Ready ] || ssh_ready=$((ssh_ready + 1)) ;;
+      'Port Forward/nftables')
+        forward_nft_total=$((forward_nft_total + 1)); [ "$status" != Healthy ] || forward_nft_healthy=$((forward_nft_healthy + 1))
+        ;;
+      'Port Forward/realm')
+        forward_realm_total=$((forward_realm_total + 1)); [ "$status" != Healthy ] || forward_realm_healthy=$((forward_realm_healthy + 1))
+        ;;
       VLESS/Sudoku)
         vless_total=$((vless_total + 1))
         [ "$status" != Running ] || vless_running=$((vless_running + 1))
@@ -211,10 +265,15 @@ nobrand_status() {
   printf 'Hysteria2\n  Installed: %s\n  Running: %s\n' \
     "$([ "$hy2_total" -gt 0 ] && printf yes || printf no)" \
     "$([ "$hy2_running" -gt 0 ] && printf yes || printf no)"
+  printf 'TUIC v5\n  Users: %s\n  Running: %s/%s\n' "$tuic_total" "$tuic_running" "$tuic_total"
   printf 'VLESS/Sudoku\n  Installed: %s\n  Running: %s\n  Port: %s\n' \
     "$([ "$vless_total" -gt 0 ] && printf yes || printf no)" \
     "$([ "$vless_running" -gt 0 ] && printf yes || printf no)" \
     "${vless_port:--}"
+  printf 'SSH Tunnel\n  Users: %s\n  Ready: %s/%s\n  Listener ownership: external sshd\n' \
+    "$ssh_total" "$ssh_ready" "$ssh_total"
+  printf 'Port Forward\n  nftables: %s/%s healthy\n  Realm: %s/%s healthy\n' \
+    "$forward_nft_healthy" "$forward_nft_total" "$forward_realm_healthy" "$forward_realm_total"
 }
 
 nb_doctor_line() {
@@ -245,6 +304,8 @@ nobrand_doctor_common() {
     nb_doctor_line PASS 'firewall=firewalld'
   elif command -v iptables >/dev/null 2>&1; then
     nb_doctor_line PASS 'firewall=iptables'
+  elif command -v nft >/dev/null 2>&1; then
+    nb_doctor_line PASS 'firewall=nftables'
   else
     nb_doctor_line WARN '未检测到本地 firewall backend'
   fi
@@ -277,8 +338,19 @@ nobrand_doctor() {
   msg 'Hysteria2'
   hysteria2_doctor || failed=1
   msg ''
+  msg 'TUIC v5'
+  tuic_doctor_all || failed=1
+  msg ''
   msg 'VLESS + FinalMask + Sudoku (TCP)'
   vless_sudoku_doctor || failed=1
+  msg ''
+  msg 'SSH Tunnel (existing OpenSSH)'
+  ssh_tunnel_doctor || failed=1
+  if [ -s "$NOBRAND_FORWARD_STATE_FILE" ]; then
+    msg ''
+    msg 'Port Forward (nftables / Realm)'
+    forward_doctor || failed=1
+  fi
   [ "$failed" -eq 0 ] || return 1
 }
 
@@ -338,8 +410,147 @@ nobrand_backup_list() {
     -print 2>/dev/null | LC_ALL=C sort -r
 }
 
+# A backup contains authoritative state/config, but deliberately excludes
+# downloaded runtimes and service-manager artifacts.  A restore into a
+# manager-only installation therefore has to rebuild every runtime/service
+# from the restored state before it can start anything.
+nobrand_restore_protocol_runtimes() {
+  local id major need_snell4=0 need_snell5=0 pm
+  if users_state_exists && [ "$(users_count)" -gt 0 ]; then
+    load_install_state || return 1
+    pm="$(detect_pkg_manager)" || return 1
+    ensure_management_dependencies "$pm" || return 1
+    repair_mita_binary_paths || return 1
+    ensure_mita_account || return 1
+    install_instance_runtime || return 1
+  fi
+
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    snell_config_matches_state "$id" || return 1
+    major="$(snell_state_field "$id" version)"
+    case "$major" in
+      4) need_snell4=1 ;;
+      5) need_snell5=1 ;;
+      *) return 1 ;;
+    esac
+  done < <(snell_instance_ids)
+  if [ "$need_snell4" -eq 1 ] || [ "$need_snell5" -eq 1 ] \
+     || hysteria2_state_exists || vless_sudoku_state_exists; then
+    nobrand_prepare_common || return 1
+  fi
+  [ "$need_snell4" -eq 0 ] || snell_install_runtime 4 0 || return 1
+  [ "$need_snell5" -eq 0 ] || snell_install_runtime 5 0 || return 1
+  if [ "$need_snell4" -eq 1 ] || [ "$need_snell5" -eq 1 ]; then
+    snell_install_service_runtime || return 1
+    while IFS= read -r id; do
+      [ -n "$id" ] || continue
+      snell_ensure_openrc_service "$id" || return 1
+    done < <(snell_instance_ids)
+  fi
+
+  if hysteria2_state_exists || vless_sudoku_state_exists; then
+    nobrand_install_xray_runtime 0 || return 1
+    nobrand_xray_validate_managed_configs || return 1
+  fi
+  if hysteria2_state_exists; then
+    nobrand_write_hy2_service || return 1
+  fi
+  if vless_sudoku_state_exists; then
+    nobrand_write_vless_sudoku_service || return 1
+  fi
+  tuic_restore_runtime || return 1
+  forward_realm_restore_runtime || return 1
+}
+
+# The only safe way to synthesize system identities/package resources during
+# a manager-only restore is to prove that those product-owned namespaces are
+# currently empty.  Existing installations use their normal transaction
+# snapshots instead and do not enter this path.
+nobrand_fresh_restore_runtime_preflight() {
+  local staged_state="$1" users_rel staged_users pm path
+  users_rel="${MITA_USERS_STATE#${NOBRAND_STATE_DIR}/}"
+  staged_users="${staged_state}/${users_rel}"
+  for path in \
+    "$NOBRAND_LIB_DIR" \
+    "$MITA_INSTANCE_SYSTEMD_TEMPLATE" "$MITA_INSTANCE_TMPFILES" \
+    "$NOBRAND_SNELL_SYSTEMD_TEMPLATE" "$NOBRAND_HY2_SYSTEMD_SERVICE" \
+    "$NOBRAND_VLESS_SYSTEMD_SERVICE" "$NOBRAND_TUIC_SYSTEMD_TEMPLATE" \
+    "$NOBRAND_REALM_SYSTEMD_SERVICE"; do
+    [ ! -e "$path" ] && [ ! -L "$path" ] || return 1
+  done
+  if [ -s "$staged_users" ] && [ "$(jq '.users | length' "$staged_users" 2>/dev/null || printf 0)" -gt 0 ]; then
+    pm="$(detect_pkg_manager)" || return 1
+    ! mita_package_is_installed "$pm" || return 1
+    ! _has_user mita || return 1
+    ! _has_group mita || return 1
+    ! command -v mita >/dev/null 2>&1 || return 1
+    for path in /etc/mita /var/lib/mita /run/mita /var/run/mita /var/run/mita.sock; do
+      [ ! -e "$path" ] && [ ! -L "$path" ] || return 1
+    done
+  fi
+}
+
+# This cleanup is used only after the fresh-manager preflight above proved
+# that the affected package/accounts/units did not pre-exist.  It must run
+# while restored state still exists so every firewall and service identity is
+# available for exact cleanup.
+nobrand_remove_fresh_restore_protocol_resources() {
+  local id port pairs pm failed=0
+  if users_state_exists && [ "$(users_count)" -gt 0 ]; then
+    isolated_stop_all >/dev/null 2>&1 || failed=1
+    firewall_clear_all_owned >/dev/null 2>&1 || failed=1
+    tc_clear_owned_filters >/dev/null 2>&1 || true
+    pm="$(detect_pkg_manager 2>/dev/null || true)"
+    case "$pm" in
+      deb)
+        if dpkg-query -W mita >/dev/null 2>&1; then
+          dpkg -P mita >/dev/null 2>&1 || failed=1
+        fi
+        ;;
+      rpm)
+        if rpm -q mita >/dev/null 2>&1; then
+          rpm -e mita >/dev/null 2>&1 || failed=1
+        fi
+        ;;
+    esac
+    if ! ( UNINSTALL_PRESERVE_PACKAGE=0 UNINSTALL_PRESERVE_USER=0 \
+           UNINSTALL_PRESERVE_GROUP=0 UNINSTALL_PRESERVE_SHARED=0 \
+           remove_mita_common >/dev/null 2>&1 ); then
+      failed=1
+    fi
+    ! _has_user mita || failed=1
+    ! _has_group mita || failed=1
+  fi
+
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    pairs="$(snell_firewall_pairs "$id" 2>/dev/null || true)"
+    snell_remove_service "$id" >/dev/null 2>&1 || failed=1
+    [ -z "$pairs" ] || nb_firewall_close_pairs "$pairs" >/dev/null 2>&1 || failed=1
+  done < <(snell_instance_ids)
+  rm -f "$NOBRAND_SNELL_SYSTEMD_TEMPLATE" "$NOBRAND_SNELL_RUNNER" || failed=1
+  rm -rf -- "$NOBRAND_SNELL_RUNTIME_DIR" || failed=1
+
+  if hysteria2_state_exists; then
+    port="$(hysteria2_state_field listen_port 2>/dev/null || true)"
+    nobrand_remove_hy2_service >/dev/null 2>&1 || failed=1
+    [ -z "$port" ] || nb_firewall_close_pairs "UDP|${port}" >/dev/null 2>&1 || failed=1
+  fi
+  if vless_sudoku_state_exists; then
+    port="$(vless_sudoku_state_field listen_port 2>/dev/null || true)"
+    nobrand_remove_vless_sudoku_service >/dev/null 2>&1 || failed=1
+    [ -z "$port" ] || nb_firewall_close_pairs "TCP|${port}" >/dev/null 2>&1 || failed=1
+  fi
+  rm -f "$NOBRAND_XRAY_BIN" || failed=1
+  [ "$(nb_service_manager)" != systemd ] || systemctl daemon-reload >/dev/null 2>&1 || failed=1
+  rmdir "$NOBRAND_BIN_DIR" "$NOBRAND_LIB_DIR" 2>/dev/null || true
+  return "$failed"
+}
+
 nobrand_backup_restore() {
-  local source="$1" stage snapshot safe_state safe_config
+  local source="$1" stage snapshot safe_state safe_config ssh_restore_log restore_root
+  local state_root_created=0 config_root_created=0 fresh_manager_restore=0
   [ -f "$source" ] || die "备份不存在: $source"
   safe_state="$(nb_assert_safe_nobrand_root "$NOBRAND_STATE_DIR" NOBRAND_STATE_DIR)" || return 1
   safe_config="$(nb_assert_safe_nobrand_root "$NOBRAND_CONFIG_DIR" NOBRAND_CONFIG_DIR)" || return 1
@@ -355,13 +566,91 @@ nobrand_backup_restore() {
     && grep -qx 'ownership=nobrand-v3' "$stage/manifest.txt" 2>/dev/null \
     && nb_schema_v3_file_valid "$stage/state/state.json" \
     || { rm -rf -- "$stage"; die '备份不是 NoBrand schema v3，拒绝导入旧 state'; }
+  ssh_tunnel_restore_preflight "$stage/state/ssh-tunnel/state.json" \
+    || { rm -rf -- "$stage"; die 'SSH Tunnel restore identity conflict，拒绝覆盖系统用户'; }
+  if [ -s "$stage/state/forward/state.json" ]; then
+    forward_state_valid "$stage/state/forward/state.json" \
+      || { rm -rf -- "$stage"; die 'Port Forward restore state 无效'; }
+  fi
   find "$stage/state" "$stage/config" -type f -name '*.json' -print0 2>/dev/null \
     | while IFS= read -r -d '' file; do jq empty "$file" >/dev/null || exit 1; done \
     || { rm -rf -- "$stage"; die '备份中存在无效 JSON'; }
-  snapshot="$(mktemp_dir)" || { rm -rf -- "$stage"; return 1; }
-  mkdir -p "$snapshot/state" "$snapshot/config"
+  [ -e "$safe_state" ] || [ -L "$safe_state" ] || state_root_created=1
+  [ -e "$safe_config" ] || [ -L "$safe_config" ] || config_root_created=1
+  if [ "$state_root_created" -eq 1 ] && [ "$config_root_created" -eq 1 ]; then
+    fresh_manager_restore=1
+    nobrand_fresh_restore_runtime_preflight "$stage/state" \
+      || { rm -rf -- "$stage"; die 'manager-only restore runtime/system identity conflict'; }
+  fi
+  # A manager-only fresh install intentionally has no protocol state/config
+  # roots yet.  Restore must be able to materialize those two exact NoBrand
+  # namespaces, while still rejecting symlinks, non-directories, or insecure
+  # pre-existing roots before any destructive replacement begins.
+  for restore_root in "$safe_state" "$safe_config"; do
+    if [ -e "$restore_root" ] || [ -L "$restore_root" ]; then
+      [ -d "$restore_root" ] && [ ! -L "$restore_root" ] \
+        || {
+          [ "$state_root_created" -eq 0 ] || rmdir "$safe_state" 2>/dev/null || true
+          [ "$config_root_created" -eq 0 ] || rmdir "$safe_config" 2>/dev/null || true
+          rm -rf -- "$stage"
+          die "恢复根路径不是安全目录: $restore_root"
+        }
+    else
+      mkdir -p "$restore_root" \
+        || {
+          [ "$state_root_created" -eq 0 ] || rmdir "$safe_state" 2>/dev/null || true
+          [ "$config_root_created" -eq 0 ] || rmdir "$safe_config" 2>/dev/null || true
+          rm -rf -- "$stage"
+          die "无法创建恢复根路径: $restore_root"
+        }
+    fi
+    chmod 0700 "$restore_root" \
+      && chown root:root "$restore_root" 2>/dev/null \
+      || {
+        [ "$state_root_created" -eq 0 ] || rmdir "$safe_state" 2>/dev/null || true
+        [ "$config_root_created" -eq 0 ] || rmdir "$safe_config" 2>/dev/null || true
+        rm -rf -- "$stage"
+        die "无法保护恢复根路径: $restore_root"
+      }
+    secure_stat_path "$restore_root" dir \
+      || {
+        [ "$state_root_created" -eq 0 ] || rmdir "$safe_state" 2>/dev/null || true
+        [ "$config_root_created" -eq 0 ] || rmdir "$safe_config" 2>/dev/null || true
+        rm -rf -- "$stage"
+        die "恢复根路径权限不安全: $restore_root"
+      }
+  done
+  snapshot="$(mktemp_dir)" || {
+    [ "$state_root_created" -eq 0 ] || rmdir "$safe_state" 2>/dev/null || true
+    [ "$config_root_created" -eq 0 ] || rmdir "$safe_config" 2>/dev/null || true
+    rm -rf -- "$stage"
+    return 1
+  }
+  mkdir -p "$snapshot/state" "$snapshot/config" "$snapshot/ssh-external" "$snapshot/tuic-external" "$snapshot/forward-external"
   cp -a "$safe_state/." "$snapshot/state/" 2>/dev/null || true
   cp -a "$safe_config/." "$snapshot/config/" 2>/dev/null || true
+  ssh_tunnel_snapshot_external_state "$snapshot/ssh-external" \
+    || {
+      [ "$state_root_created" -eq 0 ] || rmdir "$safe_state" 2>/dev/null || true
+      [ "$config_root_created" -eq 0 ] || rmdir "$safe_config" 2>/dev/null || true
+      rm -rf -- "$stage" "$snapshot"
+      return 1
+    }
+  tuic_snapshot_restore_side_effects "$snapshot/tuic-external" \
+    || {
+      [ "$state_root_created" -eq 0 ] || rmdir "$safe_state" 2>/dev/null || true
+      [ "$config_root_created" -eq 0 ] || rmdir "$safe_config" 2>/dev/null || true
+      rm -rf -- "$stage" "$snapshot"
+      return 1
+    }
+  forward_snapshot_restore_side_effects "$snapshot/forward-external" \
+    || {
+      [ "$state_root_created" -eq 0 ] || rmdir "$safe_state" 2>/dev/null || true
+      [ "$config_root_created" -eq 0 ] || rmdir "$safe_config" 2>/dev/null || true
+      rm -rf -- "$stage" "$snapshot"
+      return 1
+    }
+  ssh_restore_log="$snapshot/ssh-external/created.log"
   nobrand_stop_all_services 2>/dev/null || true
   if ! find "$safe_state" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + \
      || ! find "$safe_config" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + \
@@ -371,13 +660,51 @@ nobrand_backup_restore() {
     find "$safe_config" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + 2>/dev/null || true
     cp -a "$snapshot/state/." "$safe_state/" 2>/dev/null || true
     cp -a "$snapshot/config/." "$safe_config/" 2>/dev/null || true
+    if [ "$state_root_created" -eq 1 ]; then rmdir "$safe_state" 2>/dev/null || true; fi
+    if [ "$config_root_created" -eq 1 ]; then rmdir "$safe_config" 2>/dev/null || true; fi
+    if [ "$state_root_created" -eq 0 ] && [ "$config_root_created" -eq 0 ]; then
+      nb_init_state_layout 2>/dev/null || true
+      nobrand_start_enabled_services 2>/dev/null || true
+    fi
     rm -rf -- "$stage" "$snapshot"
     die '恢复失败，已回滚原 NoBrand state/config'
   fi
   nb_init_state_layout
-  nobrand_start_enabled_services || {
-    warn '配置已恢复，但部分服务未能启动；请运行 nobrand doctor'
-  }
+  if ! nobrand_restore_protocol_runtimes \
+     || ! ssh_tunnel_restore_system_state "$ssh_restore_log" \
+     || ! nobrand_start_enabled_services; then
+    ssh_tunnel_cancel_pending_watchdog 2>/dev/null || true
+    if [ "$fresh_manager_restore" -eq 1 ]; then
+      nobrand_remove_fresh_restore_protocol_resources 2>/dev/null \
+        || warn 'Fresh-manager protocol runtime rollback could not remove every owned resource'
+    fi
+    tuic_remove_restore_attempt_resources 2>/dev/null || true
+    forward_remove_restore_attempt_resources 2>/dev/null || true
+    # Restore target-side effects while restored ownership metadata still
+    # exists.  Clearing state first can make identity-safe cleanup fail-fast.
+    tuic_restore_side_effect_snapshot "$snapshot/tuic-external" 2>/dev/null \
+      || warn 'TUIC restore rollback could not restore every external side effect'
+    forward_restore_side_effect_snapshot "$snapshot/forward-external" 2>/dev/null \
+      || warn 'Forward restore rollback could not restore every external side effect'
+    ssh_tunnel_restore_external_snapshot "$snapshot/ssh-external" "$ssh_restore_log" 2>/dev/null \
+      || warn 'SSH restore rollback could not restore every external side effect'
+    if [ "$fresh_manager_restore" -eq 1 ]; then
+      rmdir "$NOBRAND_SNELL_RUNTIME_DIR" "$NOBRAND_BIN_DIR" "$NOBRAND_LIB_DIR" 2>/dev/null \
+        || true
+    fi
+    find "$safe_state" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + 2>/dev/null || true
+    find "$safe_config" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + 2>/dev/null || true
+    cp -a "$snapshot/state/." "$safe_state/" 2>/dev/null || true
+    cp -a "$snapshot/config/." "$safe_config/" 2>/dev/null || true
+    if [ "$state_root_created" -eq 1 ]; then rmdir "$safe_state" 2>/dev/null || true; fi
+    if [ "$config_root_created" -eq 1 ]; then rmdir "$safe_config" 2>/dev/null || true; fi
+    if [ "$state_root_created" -eq 0 ] && [ "$config_root_created" -eq 0 ]; then
+      nb_init_state_layout 2>/dev/null || true
+      nobrand_start_enabled_services 2>/dev/null || true
+    fi
+    rm -rf -- "$stage" "$snapshot"
+    die 'NoBrand restore service/policy acceptance 失败，state/config 已回滚'
+  fi
   rm -rf -- "$stage" "$snapshot"
   t 'NoBrand 备份恢复完成' 'NoBrand backup restored'
 }
@@ -420,8 +747,8 @@ nobrand_uninstall() {
   ensure_manager_state_layout 0
   nb_schema_v3_file_valid || die '未检测到有效的 NoBrand schema v3 state，拒绝卸载未知资源'
   if [ "${YES:-0}" -ne 1 ]; then
-    confirm '确认完整卸载 NoBrand 3 管理的 Mieru/Snell/HY2/VLESS/Common？[y/N]: ' \
-      'Completely uninstall NoBrand-3-managed Mieru/Snell/HY2/VLESS/Common resources? [y/N]: ' \
+    confirm '确认完整卸载 NoBrand 3 管理的 Mieru/Snell/HY2/TUIC/VLESS/SSH Tunnel/Forward/Common？[y/N]: ' \
+      'Completely uninstall NoBrand-3-managed Mieru/Snell/HY2/TUIC/VLESS/SSH Tunnel/Forward/Common resources? [y/N]: ' \
       n \
       || { t '已取消' 'Cancelled'; return 0; }
   fi
@@ -429,7 +756,26 @@ nobrand_uninstall() {
   safe_config="$(nb_assert_safe_nobrand_root "$NOBRAND_CONFIG_DIR" NOBRAND_CONFIG_DIR)" || return 1
   safe_lib="$(nb_assert_safe_nobrand_root "$NOBRAND_LIB_DIR" NOBRAND_LIB_DIR)" || return 1
   mita_uninstall_target_present && had_mieru=1
+  # Remove the externally shared sshd policy first. With the real watchdog this
+  # is a two-phase operation: no other protocol is touched until a brand-new
+  # administrator SSH session confirms that system access still works.
+  if ssh_tunnel_state_exists; then
+    ssh_tunnel_uninstall unified-uninstall || return 1
+    if ssh_tunnel_state_exists \
+       && [ "$(ssh_tunnel_state_field pending_operation 2>/dev/null || true)" = unified-uninstall ]; then
+      t '统一卸载等待全新管理员 SSH connection 确认；确认前其它协议保持不变' \
+        'Unified uninstall is waiting for a brand-new administrator SSH connection; other protocols remain unchanged until confirmation'
+      return 0
+    fi
+  fi
   admin_lock_acquire || return 1
+  if [ -s "$NOBRAND_FORWARD_STATE_FILE" ] || [ -s "$NOBRAND_REALM_RUNTIME_META" ] \
+     || [ -e "$NOBRAND_REALM_SYSTEMD_SERVICE" ] || [ -e "$NOBRAND_REALM_OPENRC_SERVICE" ]; then
+    forward_uninstall || failed=1
+  elif command -v nft >/dev/null 2>&1 \
+       && nft list table "$NOBRAND_FORWARD_NFT_FAMILY" "$NOBRAND_FORWARD_NFT_TABLE" >/dev/null 2>&1; then
+    forward_remove_owned_nft_table || failed=1
+  fi
   while IFS= read -r id; do
     [ -n "$id" ] || continue
     port="$(snell_state_field "$id" listen_port 2>/dev/null || true)"
@@ -447,6 +793,12 @@ nobrand_uninstall() {
     nobrand_remove_vless_sudoku_service || failed=1
     [ -z "$port" ] || nb_firewall_close_pairs "TCP|${port}" || failed=1
   fi
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    port="$(tuic_state_field "$id" listen_port 2>/dev/null || true)"
+    tuic_remove_service "$id" || failed=1
+    [ -z "$port" ] || nb_firewall_close_pairs "UDP|${port}" || failed=1
+  done < <(tuic_instance_ids)
   # 清理可能由失败事务留下、但仍明确记录为 NoBrand-owned 的 firewall rows。
   if [ -s "$NOBRAND_FIREWALL_OWNED_STATE" ]; then
     while IFS='|' read -r _tool proto row_port; do
@@ -463,6 +815,9 @@ nobrand_uninstall() {
   fi
   case "$NOBRAND_SNELL_SYSTEMD_TEMPLATE" in
     /etc/systemd/system/nobrand-snell@.service) rm -f "$NOBRAND_SNELL_SYSTEMD_TEMPLATE" ;;
+  esac
+  case "$NOBRAND_TUIC_SYSTEMD_TEMPLATE" in
+    /etc/systemd/system/nobrand-tuic@.service) rm -f "$NOBRAND_TUIC_SYSTEMD_TEMPLATE" ;;
   esac
   [ "$(nb_service_manager)" != systemd ] || systemctl daemon-reload 2>/dev/null || true
   admin_lock_release
@@ -484,8 +839,8 @@ nobrand_uninstall() {
   nobrand_remove_owned_command "$NOBRAND_COMMAND_PATH" || failed=1
   nobrand_remove_owned_command "$NOBRAND_INSTALL_SCRIPT_PATH" || failed=1
   [ "$failed" -eq 0 ] || return 1
-  t 'NoBrand 3 的 Mieru/Snell/HY2/VLESS/Common 资源与 nobrand/nb 已完整删除；外部资源未触碰' \
-    'NoBrand 3 Mieru/Snell/HY2/VLESS/Common resources and nobrand/nb were removed; external resources were untouched'
+  t 'NoBrand 3 的 Mieru/Snell/HY2/TUIC/VLESS/SSH Tunnel/Forward/Common 资源与 nobrand/nb 已完整删除；外部资源未触碰' \
+    'NoBrand 3 Mieru/Snell/HY2/TUIC/VLESS/SSH Tunnel/Forward/Common resources and nobrand/nb were removed; external resources were untouched'
 }
 
 nobrand_stop_all_services() {
@@ -498,22 +853,28 @@ nobrand_stop_all_services() {
   hysteria2_state_exists && nobrand_hy2_service_action stop >/dev/null 2>&1 || true
   vless_sudoku_state_exists \
     && nobrand_vless_sudoku_service_action stop >/dev/null 2>&1 || true
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    tuic_service_action "$id" stop >/dev/null 2>&1 || true
+  done < <(tuic_instance_ids)
+  forward_realm_service_action stop >/dev/null 2>&1 || true
 }
 
 nobrand_start_enabled_services() {
-  local id name enabled port pairs failed=0
+  local id enabled port pairs failed=0
   if users_state_exists && [ "$(users_count)" -gt 0 ]; then
-    load_install_state || failed=1
-    install_instance_runtime >/dev/null 2>&1 || failed=1
-    while IFS=$'\t' read -r id name port; do
-      [ -n "$id" ] && [ -n "$name" ] && [ -n "$port" ] || continue
-      write_instance_config "$id" "$name" "$port" >/dev/null 2>&1 || failed=1
-    done < <(users_enabled_instance_rows)
-    reconcile_isolated_instances >/dev/null 2>&1 || failed=1
-    apply_tc_limits >/dev/null 2>&1 || failed=1
-    pairs="$(multi_user_port_protocol_pairs 2>/dev/null || true)"
-    [ -z "$pairs" ] || open_firewall_for_pairs "$pairs" >/dev/null 2>&1 || failed=1
+    if load_install_state \
+       && reconcile_isolated_instances >/dev/null 2>&1 \
+       && apply_tc_limits >/dev/null 2>&1; then
+      pairs="$(multi_user_port_protocol_pairs 2>/dev/null || true)"
+      [ -z "$pairs" ] || open_firewall_for_pairs "$pairs" >/dev/null 2>&1 || failed=1
+    else
+      failed=1
+    fi
   fi
+  tuic_restore_runtime >/dev/null 2>&1 || {
+    [ -z "$(tuic_instance_ids)" ] || failed=1
+  }
   while IFS= read -r id; do
     [ -n "$id" ] || continue
     enabled="$(snell_state_field "$id" enabled 2>/dev/null || printf false)"
@@ -535,6 +896,24 @@ nobrand_start_enabled_services() {
     port="$(vless_sudoku_state_field listen_port)"
     nobrand_vless_sudoku_service_action start >/dev/null 2>&1 \
       && nb_wait_for_listener TCP "$port" 25 || failed=1
+  fi
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    enabled="$(tuic_state_field "$id" enabled 2>/dev/null || printf false)"
+    [ "$enabled" = true ] || continue
+    port="$(tuic_state_field "$id" listen_port)"
+    tuic_install_service_runtime >/dev/null 2>&1 \
+      && tuic_ensure_openrc_service "$id" >/dev/null 2>&1 \
+      && tuic_validate_config "$(tuic_config_file "$id")" \
+      && nb_firewall_open_pairs "UDP|${port}" >/dev/null 2>&1 \
+      && tuic_service_action "$id" start >/dev/null 2>&1 \
+      && nb_wait_for_listener UDP "$port" 25 \
+      && tuic_listener_owned_by_service "$id" "$port" || failed=1
+  done < <(tuic_instance_ids)
+  if [ -s "$NOBRAND_FORWARD_STATE_FILE" ]; then
+    forward_realm_restore_runtime >/dev/null 2>&1 \
+      && forward_apply_nft_state "$NOBRAND_FORWARD_STATE_FILE" >/dev/null 2>&1 \
+      && forward_realm_apply_state "$NOBRAND_FORWARD_STATE_FILE" >/dev/null 2>&1 || failed=1
   fi
   return "$failed"
 }

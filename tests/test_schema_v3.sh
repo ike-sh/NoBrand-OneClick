@@ -17,13 +17,25 @@ nb_init_state_layout
 nb_schema_v3_file_valid || fail 'fresh state marker must be exact schema v3'
 assert_eq 700 "$(stat -c %a "$NOBRAND_STATE_DIR")" 'schema-v3 state root mode'
 assert_eq 600 "$(stat -c %a "$NOBRAND_REGISTRY_FILE")" 'schema-v3 state marker mode'
-assert_eq 700 "$(stat -c %a "$NOBRAND_CONFIG_DIR")" 'schema-v3 config root mode'
+assert_eq 711 "$(stat -c %a "$NOBRAND_CONFIG_DIR")" 'schema-v3 config root is traversable but not listable'
+assert_eq 711 "$(stat -c %a "$NOBRAND_SSH_CONFIG_DIR")" 'SSH config root is traversable but not listable'
+assert_eq 755 "$(stat -c %a "$NOBRAND_SSH_AUTHORIZED_KEYS_DIR")" 'sshd can traverse authorized-keys directory'
+assert_eq 700 "$(stat -c %a "$NOBRAND_TUIC_CONFIG_DIR")" 'TUIC secret config directory remains private'
 assert_eq 755 "$(stat -c %a "$NOBRAND_LIB_DIR")" 'runtime library root is service-traversable'
 assert_eq 755 "$(stat -c %a "$NOBRAND_BIN_DIR")" 'runtime binary directory is service-traversable'
 assert_eq 755 "$(stat -c %a "$NOBRAND_SNELL_RUNTIME_DIR")" 'Snell runtime directory is service-traversable'
 
 mkdir -p "$(dirname "$NOBRAND_INSTALL_SCRIPT_PATH")"
-nobrand_install_manager_script
+mkdir -p "$NOBRAND_SNELL_STATE_DIR" "$NOBRAND_SNELL_CONFIG_DIR"
+printf '%s\n' '{"schema_version":3,"protocol":"snell","psk":"preserve-manager-upgrade"}' \
+  >"$NOBRAND_SNELL_STATE_DIR/preserve.json"
+printf '%s\n' '[snell-server]' 'psk = preserve-manager-upgrade' \
+  >"$NOBRAND_SNELL_CONFIG_DIR/preserve.conf"
+protocol_state_before="$(find "$NOBRAND_STATE_DIR" "$NOBRAND_CONFIG_DIR" -type f -print0 | sort -z | xargs -0 sha256sum)"
+require_root() { :; }
+nobrand_manager_upgrade >/dev/null
+protocol_state_after="$(find "$NOBRAND_STATE_DIR" "$NOBRAND_CONFIG_DIR" -type f -print0 | sort -z | xargs -0 sha256sum)"
+assert_eq "$protocol_state_before" "$protocol_state_after" 'manager-only upgrade preserves protocol state byte-for-byte'
 assert_eq "$NOBRAND_INSTALL_SCRIPT_PATH" "$(readlink "$NOBRAND_COMMAND_PATH")" 'nobrand targets canonical installer'
 assert_eq "$NOBRAND_COMMAND_PATH" "$(readlink "$NOBRAND_SHORT_COMMAND_PATH")" 'nb targets nobrand'
 [ ! -e "$fixture/commands/mita" ] || fail 'Mita management wrapper must not be installed'
@@ -33,8 +45,8 @@ legacy="$NOBRAND_LEGACY_MIERU_STATE_DIR"
 mkdir -p "$legacy"
 printf 'do-not-read-or-change\n' >"$legacy/users.json"
 legacy_hash="$(sha256sum "$legacy/users.json")"
-NOBRAND_LEGACY_MIERU_STATE_DIR="$legacy" bash "$TEST_ROOT/install-nobrand.sh" --version   | grep -qx 'NoBrand-OneClick 3.0.0' || fail 'version must bypass legacy state'
-NOBRAND_LEGACY_MIERU_STATE_DIR="$legacy" bash "$TEST_ROOT/install-nobrand.sh" --help   | grep -q 'NoBrand-OneClick 3.0.0' || fail 'help must bypass legacy state'
+NOBRAND_LEGACY_MIERU_STATE_DIR="$legacy" bash "$TEST_ROOT/install-nobrand.sh" --version   | grep -qx 'NoBrand-OneClick 3.1.0' || fail 'version must bypass legacy state'
+NOBRAND_LEGACY_MIERU_STATE_DIR="$legacy" bash "$TEST_ROOT/install-nobrand.sh" --help   | grep -q 'NoBrand-OneClick 3.1.0' || fail 'help must bypass legacy state'
 if NOBRAND_LEGACY_MIERU_STATE_DIR="$legacy"    NOBRAND_STATE_DIR="$fixture/unused-state"    bash "$TEST_ROOT/install-nobrand.sh" status >/dev/null 2>&1; then
   fail 'stateful action must fail closed when a legacy Mieru root exists'
 fi

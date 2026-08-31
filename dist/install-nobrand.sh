@@ -7,7 +7,7 @@
 # The menu intentionally mutates globals inside isolated action subshells; the
 # parent only consumes exit codes, so SC2030/SC2031 are false positives here.
 # shellcheck disable=SC2030,SC2031
-# NoBrand-OneClick — Mieru / Snell / Hysteria2 / Plain VLESS Sudoku 工具箱
+# NoBrand-OneClick — Mieru / Snell / Hysteria2 / TUIC v5 / Plain VLESS Sudoku / SSH Tunnel
 # 作者: ike / https://github.com/ike-sh/NoBrand-OneClick
 # Mieru 母体代码源自 ike-sh/mieru-OneClick (MIT)；Hysteria2 与 VLESS
 # FinalMask/Sudoku 逻辑参考 ike-sh/Xray-OneClick (GPL-3.0)。本融合项目按
@@ -15,7 +15,7 @@
 set -euo pipefail
 umask 077
 
-SCRIPT_VERSION="3.0.0"
+SCRIPT_VERSION="3.1.0"
 SCRIPT_AUTHOR="ike"
 SCRIPT_NAME="NoBrand-OneClick"
 SCRIPT_REPO="ike-sh/NoBrand-OneClick"
@@ -113,6 +113,68 @@ NOBRAND_VLESS_SERVICE_NAME="nobrand-vless-sudoku"
 NOBRAND_VLESS_SYSTEMD_SERVICE="${NOBRAND_VLESS_SYSTEMD_SERVICE:-/etc/systemd/system/nobrand-vless-sudoku.service}"
 NOBRAND_VLESS_OPENRC_SERVICE="${NOBRAND_VLESS_OPENRC_SERVICE:-/etc/init.d/nobrand-vless-sudoku}"
 NOBRAND_VLESS_TAG="nobrand-vless-sudoku-in"
+
+# TUIC v5 is the only supported TUIC generation. The tested runtime is an
+# official, non-prerelease sing-box release; NoBrand never uses a system
+# sing-box binary or config.
+TUIC_PROTOCOL_VERSION=5
+TUIC_V5_SUPPORTED=true
+TUIC_V1_SUPPORTED=false
+TUIC_V2_SUPPORTED=false
+TUIC_V3_SUPPORTED=false
+TUIC_V4_SUPPORTED=false
+TESTED_SING_BOX_SERVER_VERSION="1.13.20"
+TESTED_SING_BOX_AMD64_SHA256="646bc01bf128c32a12eb50d8690e387bba7504da7b1d65c704bd53916e38595a"
+TESTED_SING_BOX_ARM64_SHA256="7f8187b1d1d30258cd4fa70892eaa232649f8f28b294078eeac719579e14cf42"
+TESTED_SING_BOX_AMD64_MUSL_SHA256="ea5c79f74d88db43b58debbd510aac03e8c9432ed6de51b34f67271dddb5d05e"
+TESTED_SING_BOX_ARM64_MUSL_SHA256="ab37923ee950695edf25733c10e7381b368ab9069617727be06ebd1b1b0e031a"
+NOBRAND_SING_BOX_RELEASE_API="https://api.github.com/repos/SagerNet/sing-box/releases"
+NOBRAND_SING_BOX_BIN="${NOBRAND_SING_BOX_BIN:-${NOBRAND_BIN_DIR}/sing-box}"
+NOBRAND_SING_BOX_RUNTIME_META="${NOBRAND_SING_BOX_RUNTIME_META:-${NOBRAND_STATE_DIR}/tuic/runtime.json}"
+NOBRAND_TUIC_STATE_DIR="${NOBRAND_TUIC_STATE_DIR:-${NOBRAND_STATE_DIR}/tuic/instances}"
+NOBRAND_TUIC_CONFIG_DIR="${NOBRAND_TUIC_CONFIG_DIR:-${NOBRAND_CONFIG_DIR}/tuic/instances}"
+NOBRAND_TUIC_SYSTEMD_TEMPLATE="${NOBRAND_TUIC_SYSTEMD_TEMPLATE:-/etc/systemd/system/nobrand-tuic@.service}"
+NOBRAND_TUIC_OPENRC_PREFIX="${NOBRAND_TUIC_OPENRC_PREFIX:-/etc/init.d/nobrand-tuic-}"
+
+# SSH Tunnel is a policy/account layer around the existing system sshd. It
+# owns no listener, host key, package, firewall entry, or administrator key.
+NOBRAND_SSH_GROUP="${NOBRAND_SSH_GROUP:-nobrand-ssh-tunnel}"
+NOBRAND_SSH_STATE_DIR="${NOBRAND_SSH_STATE_DIR:-${NOBRAND_STATE_DIR}/ssh-tunnel}"
+NOBRAND_SSH_STATE_FILE="${NOBRAND_SSH_STATE_FILE:-${NOBRAND_SSH_STATE_DIR}/state.json}"
+NOBRAND_SSH_KEYS_DIR="${NOBRAND_SSH_KEYS_DIR:-${NOBRAND_SSH_STATE_DIR}/keys}"
+NOBRAND_SSH_WATCHDOG_DIR="${NOBRAND_SSH_WATCHDOG_DIR:-${NOBRAND_SSH_STATE_DIR}/watchdog}"
+NOBRAND_SSH_CONFIG_DIR="${NOBRAND_SSH_CONFIG_DIR:-${NOBRAND_CONFIG_DIR}/ssh-tunnel}"
+NOBRAND_SSH_AUTHORIZED_KEYS_DIR="${NOBRAND_SSH_AUTHORIZED_KEYS_DIR:-${NOBRAND_SSH_CONFIG_DIR}/authorized_keys}"
+NOBRAND_SSH_ACCOUNT_MARKER_DIR="${NOBRAND_SSH_ACCOUNT_MARKER_DIR:-${NOBRAND_SSH_CONFIG_DIR}/accounts}"
+NOBRAND_SSH_GROUP_MARKER="${NOBRAND_SSH_GROUP_MARKER:-${NOBRAND_SSH_ACCOUNT_MARKER_DIR}/.group.json}"
+NOBRAND_SSH_CONFIG_MAIN="${NOBRAND_SSH_CONFIG_MAIN:-/etc/ssh/sshd_config}"
+NOBRAND_SSH_CONFIG_DROPIN="${NOBRAND_SSH_CONFIG_DROPIN:-/etc/ssh/sshd_config.d/90-nobrand-ssh-tunnel.conf}"
+NOBRAND_SSH_BLOCK_BEGIN="# BEGIN NOBRAND SSH TUNNEL"
+NOBRAND_SSH_BLOCK_END="# END NOBRAND SSH TUNNEL"
+
+# Port Forward is a schema-v3 optional network feature. nftables state is
+# confined to one NoBrand-owned table; Realm is installed to the private
+# runtime directory and never replaces a system Realm installation.
+NOBRAND_FORWARD_STATE_DIR="${NOBRAND_FORWARD_STATE_DIR:-${NOBRAND_STATE_DIR}/forward}"
+NOBRAND_FORWARD_STATE_FILE="${NOBRAND_FORWARD_STATE_FILE:-${NOBRAND_FORWARD_STATE_DIR}/state.json}"
+NOBRAND_FORWARD_CONFIG_DIR="${NOBRAND_FORWARD_CONFIG_DIR:-${NOBRAND_CONFIG_DIR}/forward}"
+NOBRAND_FORWARD_REALM_CONFIG="${NOBRAND_FORWARD_REALM_CONFIG:-${NOBRAND_FORWARD_CONFIG_DIR}/realm.toml}"
+NOBRAND_FORWARD_NFT_RULESET="${NOBRAND_FORWARD_NFT_RULESET:-${NOBRAND_FORWARD_CONFIG_DIR}/nftables.nft}"
+NOBRAND_FORWARD_SYSCTL_STATE="${NOBRAND_FORWARD_SYSCTL_STATE:-${NOBRAND_FORWARD_STATE_DIR}/sysctl.json}"
+NOBRAND_FORWARD_SYSCTL_FRAGMENT="${NOBRAND_FORWARD_SYSCTL_FRAGMENT:-/etc/sysctl.d/90-nobrand-forward.conf}"
+NOBRAND_FORWARD_LOCK="${NOBRAND_FORWARD_LOCK:-${NOBRAND_LOCK_DIR}/forward.lock}"
+NOBRAND_FORWARD_NFT_FAMILY="ip"
+NOBRAND_FORWARD_NFT_TABLE="nobrand_forward_v4"
+NOBRAND_REALM_BIN="${NOBRAND_REALM_BIN:-${NOBRAND_BIN_DIR}/realm}"
+NOBRAND_REALM_RUNTIME_META="${NOBRAND_REALM_RUNTIME_META:-${NOBRAND_FORWARD_STATE_DIR}/realm-runtime.json}"
+NOBRAND_REALM_SERVICE_NAME="nobrand-realm"
+NOBRAND_REALM_SYSTEMD_SERVICE="${NOBRAND_REALM_SYSTEMD_SERVICE:-/etc/systemd/system/nobrand-realm.service}"
+NOBRAND_REALM_OPENRC_SERVICE="${NOBRAND_REALM_OPENRC_SERVICE:-/etc/init.d/nobrand-realm}"
+NOBRAND_REALM_RELEASE_API="https://api.github.com/repos/zhboner/realm/releases"
+TESTED_REALM_VERSION="2.9.6"
+TESTED_REALM_AMD64_MUSL_SHA256="b1cc335547bea8bb2a88178bef12ec7f2363e36200e7ea1d4e1e67627929bf65"
+TESTED_REALM_ARM64_MUSL_SHA256="f4c0318dd86854da483dcb7645b4f39cae2cc3f91c688fef969d53220b949488"
+PROTOCOL_FEATURE_FREEZE=true
 
 # Xray-OneClick 57-hysteria2.sh 的原始候选集合，顺序也是非交互默认语义。
 NOBRAND_HY2_SNI_CANDIDATES=(
@@ -230,7 +292,54 @@ VLESS_SUDOKU_UUID=""
 VLESS_SUDOKU_PASSWORD=""
 VLESS_SUDOKU_LISTEN="0.0.0.0"
 VLESS_SUDOKU_CLIENT_SOCKS_PORT="${VLESS_SUDOKU_CLIENT_SOCKS_PORT:-18080}"
+TUIC_ACTION=""
+TUIC_NAME=""
+TUIC_USER=""
+TUIC_SNI=""
+TUIC_CHANNEL="stable"
+TUIC_VERSION=""
+TUIC_USER_ACTION=""
+TUIC_RUNTIME_RESOLVED_VERSION=""
+TUIC_RUNTIME_RESOLVED_URL=""
+TUIC_RUNTIME_RESOLVED_SHA256=""
+TUIC_RUNTIME_RESOLVED_ASSET=""
+SSH_TUNNEL_ACTION=""
+SSH_TUNNEL_USER_ACTION=""
+SSH_TUNNEL_USER=""
+SSH_TUNNEL_WATCHDOG_TOKEN=""
 ADVERTISE_AUTO_REQUESTED=0
+FORWARD_ACTION=""
+FORWARD_RULE_ID=""
+FORWARD_NAME=""
+FORWARD_NOTE=""
+FORWARD_BACKEND=""
+FORWARD_PROTOCOL=""
+FORWARD_LISTEN_HOST=""
+FORWARD_LISTEN_PORT=""
+FORWARD_TARGET_HOST=""
+FORWARD_TARGET_PORT=""
+FORWARD_SOURCE_MODE="masquerade"
+FORWARD_SOURCE_MODE_CLI=0
+FORWARD_ADVANCED_CLI=0
+FORWARD_IMPORT_FILE=""
+FORWARD_EXPORT_FILE=""
+FORWARD_THROUGH=""
+FORWARD_INTERFACE=""
+FORWARD_LISTEN_INTERFACE=""
+FORWARD_TCP_TIMEOUT="5"
+FORWARD_UDP_TIMEOUT="30"
+FORWARD_PROXY_SEND="false"
+FORWARD_PROXY_ACCEPT="false"
+FORWARD_PROXY_VERSION="2"
+FORWARD_PROXY_ACCEPT_TIMEOUT="5"
+FORWARD_DNS_MODE="system"
+FORWARD_DNS_PROTOCOL="tcp_and_udp"
+FORWARD_DNS_NAMESERVERS=""
+FORWARD_LISTEN_TRANSPORT=""
+FORWARD_REMOTE_TRANSPORT=""
+FORWARD_EXTRA_TARGETS=""
+FORWARD_BALANCE="off"
+FORWARD_WEIGHTS=""
 
 if [ -z "${BASH_VERSION:-}" ]; then
   echo "[错误] 请使用 bash 运行此脚本" >&2
@@ -427,8 +536,8 @@ parse_nobrand_snell_args() {
     add|create) SNELL_ACTION=install ;;
     list|nodes) SNELL_ACTION=show ;;
     delete|uninstall) SNELL_ACTION=remove ;;
-    endpoint) SNELL_ACTION=set-endpoint ;;
-    quic|set-quic) SNELL_ACTION=set-quic ;;
+    endpoint) SNELL_ACTION="set-endpoint" ;;
+    quic|set-quic) SNELL_ACTION="set-quic" ;;
     menu|install|show|set-endpoint|remove|start|stop|restart|status|doctor|upgrade) ;;
     help|-h|--help) SNELL_ACTION=help ;;
     *) die "未知 Snell 操作: $SNELL_ACTION" ;;
@@ -526,7 +635,7 @@ parse_nobrand_vless_sudoku_args() {
     add|create|reconfigure) VLESS_SUDOKU_ACTION=install ;;
     nodes) VLESS_SUDOKU_ACTION=show ;;
     delete|uninstall) VLESS_SUDOKU_ACTION=remove ;;
-    endpoint) VLESS_SUDOKU_ACTION=set-endpoint ;;
+    endpoint) VLESS_SUDOKU_ACTION="set-endpoint" ;;
     menu|install|show|set-endpoint|remove|start|stop|restart|status|doctor|smoke|upgrade) ;;
     help|-h|--help) VLESS_SUDOKU_ACTION=help ;;
     *) die "未知 VLESS Sudoku 操作: $VLESS_SUDOKU_ACTION" ;;
@@ -542,6 +651,242 @@ parse_nobrand_vless_sudoku_args() {
     shift "$consumed"
   done
   ACTION="nobrand-vless-sudoku"
+  NOBRAND_ARGS_HANDLED=1
+}
+
+parse_nobrand_tuic_args() {
+  local consumed rc
+  TUIC_ACTION="${1:-menu}"
+  [ "$#" -eq 0 ] || shift
+  if [ "$TUIC_ACTION" = user ]; then
+    TUIC_USER_ACTION="${1:-list}"
+    [ "$#" -eq 0 ] || shift
+    case "$TUIC_USER_ACTION" in
+      add|create) TUIC_ACTION="user-add" ;;
+      delete|del|remove) TUIC_ACTION="user-delete" ;;
+      list) TUIC_ACTION="user-list" ;;
+      show|export) TUIC_ACTION="user-show" ;;
+      rotate|rotate-key) TUIC_ACTION="user-rotate" ;;
+      *) die "未知 TUIC user 操作: $TUIC_USER_ACTION" ;;
+    esac
+  else
+    case "$TUIC_ACTION" in
+      add|create) TUIC_ACTION=install ;;
+      remove|delete) TUIC_ACTION=uninstall ;;
+      endpoint) TUIC_ACTION="set-endpoint" ;;
+      upgrade) TUIC_ACTION="upgrade-runtime" ;;
+      menu|install|start|stop|restart|status|doctor|show|export|set-endpoint|upgrade-runtime|uninstall) ;;
+      help|-h|--help) TUIC_ACTION=help ;;
+      *) die "未知 TUIC 操作: $TUIC_ACTION" ;;
+    esac
+  fi
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --name)
+        TUIC_NAME="${2:-}"
+        [ -n "$TUIC_NAME" ] && [[ "$TUIC_NAME" != --* ]] || die '--name 需要 TUIC instance name'
+        shift 2
+        ;;
+      --user)
+        TUIC_USER="${2:-}"
+        [ -n "$TUIC_USER" ] && [[ "$TUIC_USER" != --* ]] || die '--user 需要 TUIC user name'
+        shift 2
+        ;;
+      --sni)
+        TUIC_SNI="${2:-}"
+        [ -n "$TUIC_SNI" ] && [[ "$TUIC_SNI" != --* ]] || die '--sni 需要 domain 或 IPv4'
+        shift 2
+        ;;
+      --channel)
+        TUIC_CHANNEL="${2:-}"
+        [ -n "$TUIC_CHANNEL" ] && [[ "$TUIC_CHANNEL" != --* ]] || die '--channel 需要 stable、latest 或 pinned'
+        shift 2
+        ;;
+      --runtime-version|--version)
+        TUIC_VERSION="${2:-}"
+        TUIC_CHANNEL=pinned
+        [ -n "$TUIC_VERSION" ] && [[ "$TUIC_VERSION" != --* ]] || die '--runtime-version 需要精确版本'
+        shift 2
+        ;;
+      *)
+        consumed=0 rc=0
+        parse_nobrand_common_option "$1" "${2:-}" || rc=$?
+        case "$rc" in
+          0) consumed=1 ;;
+          2) consumed=2 ;;
+          *) die "未知 TUIC 参数: $1" ;;
+        esac
+        shift "$consumed"
+        ;;
+    esac
+  done
+  case "$TUIC_CHANNEL" in stable|latest|pinned) ;; *) die 'TUIC channel 只支持 stable、latest、pinned' ;; esac
+  ACTION="nobrand-tuic"
+  NOBRAND_ARGS_HANDLED=1
+}
+
+parse_nobrand_ssh_args() {
+  local consumed rc
+  SSH_TUNNEL_ACTION="${1:-menu}"
+  [ "$#" -eq 0 ] || shift
+  if [ "$SSH_TUNNEL_ACTION" = user ]; then
+    SSH_TUNNEL_USER_ACTION="${1:-list}"
+    [ "$#" -eq 0 ] || shift
+    case "$SSH_TUNNEL_USER_ACTION" in
+      add|create) SSH_TUNNEL_ACTION="user-add" ;;
+      delete|del|remove) SSH_TUNNEL_ACTION="user-delete" ;;
+      list) SSH_TUNNEL_ACTION="user-list" ;;
+      show) SSH_TUNNEL_ACTION="user-show" ;;
+      export) SSH_TUNNEL_ACTION="user-export" ;;
+      rotate|rotate-key) SSH_TUNNEL_ACTION="user-rotate-key" ;;
+      *) die "未知 SSH Tunnel user 操作: $SSH_TUNNEL_USER_ACTION" ;;
+    esac
+  else
+    case "$SSH_TUNNEL_ACTION" in
+      add|create) SSH_TUNNEL_ACTION=install ;;
+      remove|delete) SSH_TUNNEL_ACTION=uninstall ;;
+      endpoint) SSH_TUNNEL_ACTION="set-endpoint" ;;
+      menu|install|status|doctor|show|export|set-endpoint|confirm-admin|uninstall) ;;
+      help|-h|--help) SSH_TUNNEL_ACTION=help ;;
+      *) die "未知 SSH Tunnel 操作: $SSH_TUNNEL_ACTION" ;;
+    esac
+  fi
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --user)
+        SSH_TUNNEL_USER="${2:-}"
+        [ -n "$SSH_TUNNEL_USER" ] && [[ "$SSH_TUNNEL_USER" != --* ]] || die '--user 需要 SSH Tunnel user label'
+        shift 2
+        ;;
+      --token)
+        SSH_TUNNEL_WATCHDOG_TOKEN="${2:-}"
+        [ -n "$SSH_TUNNEL_WATCHDOG_TOKEN" ] && [[ "$SSH_TUNNEL_WATCHDOG_TOKEN" != --* ]] \
+          || die '--token 需要 watchdog token'
+        shift 2
+        ;;
+      *)
+        consumed=0 rc=0
+        parse_nobrand_common_option "$1" "${2:-}" || rc=$?
+        case "$rc" in
+          0) consumed=1 ;;
+          2) consumed=2 ;;
+          *) die "未知 SSH Tunnel 参数: $1" ;;
+        esac
+        shift "$consumed"
+        ;;
+    esac
+  done
+  ACTION="nobrand-ssh-tunnel"
+  NOBRAND_ARGS_HANDLED=1
+}
+
+parse_nobrand_forward_args() {
+  local value
+  FORWARD_ACTION="${1:-menu}"
+  [ "$#" -eq 0 ] || shift
+  case "$FORWARD_ACTION" in
+    create) FORWARD_ACTION=add ;;
+    remove) FORWARD_ACTION=delete ;;
+    endpoint) FORWARD_ACTION=set-endpoint ;;
+    switch) FORWARD_ACTION=switch-backend ;;
+    menu|add|delete|modify|list|show|enable|disable|set-endpoint|switch-backend|doctor|export|import|upgrade-runtime|uninstall) ;;
+    help|-h|--help) FORWARD_ACTION=help ;;
+    *) die "未知 Port Forward 操作: $FORWARD_ACTION" ;;
+  esac
+  if [ "$#" -gt 0 ] && [[ "$1" != --* ]]; then
+    case "$FORWARD_ACTION" in
+      delete|modify|show|enable|disable|set-endpoint|switch-backend)
+        FORWARD_RULE_ID="$1"; shift ;;
+      export) FORWARD_EXPORT_FILE="$1"; shift ;;
+      import) FORWARD_IMPORT_FILE="$1"; shift ;;
+    esac
+  fi
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --id|--rule|--rule-id)
+        FORWARD_RULE_ID="${2:-}"
+        [ -n "$FORWARD_RULE_ID" ] && [[ "$FORWARD_RULE_ID" != --* ]] || die "$1 需要 rule ID 或 name"
+        shift 2
+        ;;
+      --name)
+        FORWARD_NAME="${2:-}"
+        [ -n "$FORWARD_NAME" ] && [[ "$FORWARD_NAME" != --* ]] || die '--name 需要规则名'
+        shift 2
+        ;;
+      --note)
+        FORWARD_NOTE="${2:-}"
+        [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--note 需要说明文字'
+        shift 2
+        ;;
+      --backend)
+        FORWARD_BACKEND="$(printf '%s' "${2:-}" | tr '[:upper:]' '[:lower:]')"
+        [ -n "$FORWARD_BACKEND" ] && [[ "$FORWARD_BACKEND" != --* ]] || die '--backend 需要 nftables 或 realm'
+        shift 2
+        ;;
+      --protocol)
+        FORWARD_PROTOCOL="${2:-}"
+        [ -n "$FORWARD_PROTOCOL" ] && [[ "$FORWARD_PROTOCOL" != --* ]] || die '--protocol 需要 TCP、UDP 或 BOTH'
+        shift 2
+        ;;
+      --listen|--listen-host)
+        FORWARD_LISTEN_HOST="${2:-}"
+        [ -n "$FORWARD_LISTEN_HOST" ] && [[ "$FORWARD_LISTEN_HOST" != --* ]] || die "$1 需要监听地址"
+        shift 2
+        ;;
+      --port|--listen-port)
+        FORWARD_LISTEN_PORT="${2:-}"
+        [ -n "$FORWARD_LISTEN_PORT" ] && [[ "$FORWARD_LISTEN_PORT" != --* ]] || die "$1 需要监听端口"
+        shift 2
+        ;;
+      --target)
+        FORWARD_TARGET_HOST="${2:-}"
+        [ -n "$FORWARD_TARGET_HOST" ] && [[ "$FORWARD_TARGET_HOST" != --* ]] || die '--target 需要 IPv4、IPv6 或域名'
+        shift 2
+        ;;
+      --target-port)
+        FORWARD_TARGET_PORT="${2:-}"
+        [ -n "$FORWARD_TARGET_PORT" ] && [[ "$FORWARD_TARGET_PORT" != --* ]] || die '--target-port 需要端口'
+        shift 2
+        ;;
+      --source-mode)
+        FORWARD_SOURCE_MODE="$(printf '%s' "${2:-}" | tr '[:upper:]' '[:lower:]')"
+        [ -n "$FORWARD_SOURCE_MODE" ] && [[ "$FORWARD_SOURCE_MODE" != --* ]] || die '--source-mode 需要 masquerade 或 preserve'
+        FORWARD_SOURCE_MODE_CLI=1
+        shift 2
+        ;;
+      --through) FORWARD_THROUGH="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--through 需要 outgoing IP'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
+      --interface) FORWARD_INTERFACE="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--interface 需要 interface'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
+      --listen-interface) FORWARD_LISTEN_INTERFACE="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--listen-interface 需要 interface'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
+      --tcp-timeout) FORWARD_TCP_TIMEOUT="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--tcp-timeout 需要秒数'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
+      --udp-timeout) FORWARD_UDP_TIMEOUT="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--udp-timeout 需要秒数'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
+      --proxy-send) FORWARD_PROXY_SEND="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--proxy-send 需要 true 或 false'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
+      --proxy-accept) FORWARD_PROXY_ACCEPT="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--proxy-accept 需要 true 或 false'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
+      --proxy-version) FORWARD_PROXY_VERSION="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--proxy-version 需要 1 或 2'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
+      --proxy-accept-timeout) FORWARD_PROXY_ACCEPT_TIMEOUT="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--proxy-accept-timeout 需要秒数'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
+      --dns-mode) FORWARD_DNS_MODE="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--dns-mode 需要 Realm DNS mode'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
+      --dns-protocol) FORWARD_DNS_PROTOCOL="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--dns-protocol 需要 tcp、udp 或 tcp_and_udp'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
+      --dns-nameservers) FORWARD_DNS_NAMESERVERS="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--dns-nameservers 需要逗号分隔地址'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
+      --listen-transport) FORWARD_LISTEN_TRANSPORT="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--listen-transport 需要 Realm transport string'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
+      --remote-transport) FORWARD_REMOTE_TRANSPORT="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--remote-transport 需要 Realm transport string'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
+      --extra-targets) FORWARD_EXTRA_TARGETS="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--extra-targets 需要逗号分隔 host:port'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
+      --balance) FORWARD_BALANCE="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--balance 需要 off、roundrobin 或 iphash'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
+      --weights) FORWARD_WEIGHTS="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--weights 需要逗号分隔权重'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
+      --file)
+        value="${2:-}"
+        [ -n "$value" ] && [[ "$value" != --* ]] || die '--file 需要路径'
+        [ "$FORWARD_ACTION" = import ] && FORWARD_IMPORT_FILE="$value" || FORWARD_EXPORT_FILE="$value"
+        shift 2
+        ;;
+      --advertise-host|--advertise-port|--advertise-auto|--yes|-y|--dry-run)
+        local consumed=0 rc=0
+        parse_nobrand_common_option "$1" "${2:-}" || rc=$?
+        case "$rc" in 0) consumed=1 ;; 2) consumed=2 ;; *) die "未知 Forward 参数: $1" ;; esac
+        shift "$consumed"
+        ;;
+      *) die "未知 Forward 参数: $1" ;;
+    esac
+  done
+  ACTION="nobrand-forward"
   NOBRAND_ARGS_HANDLED=1
 }
 
@@ -572,9 +917,32 @@ detect_nobrand_entry() {
       shift
       parse_nobrand_vless_sudoku_args "$@"
       ;;
+    tuic)
+      shift
+      parse_nobrand_tuic_args "$@"
+      ;;
+    ssh|ssh-tunnel)
+      shift
+      parse_nobrand_ssh_args "$@"
+      ;;
+    forward|port-forward)
+      shift
+      parse_nobrand_forward_args "$@"
+      ;;
+    manager)
+      shift
+      NOBRAND_MANAGER_ACTION="${1:-}"
+      [ "$#" -eq 0 ] || shift
+      case "$NOBRAND_MANAGER_ACTION" in
+        install|upgrade) ;;
+        *) die 'manager 只支持 install 或 upgrade' ;;
+      esac
+      [ "$#" -eq 0 ] || die 'manager install/upgrade 不接受额外参数'
+      ACTION="nobrand-manager-upgrade"; NOBRAND_ARGS_HANDLED=1
+      ;;
     status)
       [ "$#" -eq 1 ] || die 'status 不接受参数'
-      ACTION=nobrand-status; NOBRAND_ARGS_HANDLED=1
+      ACTION="nobrand-status"; NOBRAND_ARGS_HANDLED=1
       ;;
     nodes)
       shift
@@ -583,17 +951,17 @@ detect_nobrand_entry() {
           --protocol)
             NOBRAND_PROTOCOL_FILTER="${2:-}"
             [ -n "$NOBRAND_PROTOCOL_FILTER" ] \
-              || die "--protocol 需要 mieru、snell、hy2 或 vless-sudoku"
+              || die "--protocol 需要 mieru、snell、hy2、tuic、vless-sudoku 或 ssh"
             shift 2
             ;;
           *) die "未知 nodes 参数: $1" ;;
         esac
       done
-      ACTION=nobrand-nodes; NOBRAND_ARGS_HANDLED=1
+      ACTION="nobrand-nodes"; NOBRAND_ARGS_HANDLED=1
       ;;
     doctor)
       [ "$#" -eq 1 ] || die 'doctor 不接受参数'
-      ACTION=nobrand-doctor; NOBRAND_ARGS_HANDLED=1
+      ACTION="nobrand-doctor"; NOBRAND_ARGS_HANDLED=1
       ;;
     backup)
       shift
@@ -605,7 +973,7 @@ detect_nobrand_entry() {
         shift
       fi
       [ "$#" -eq 0 ] || die "backup 参数过多"
-      ACTION=nobrand-backup; NOBRAND_ARGS_HANDLED=1
+      ACTION="nobrand-backup"; NOBRAND_ARGS_HANDLED=1
       ;;
     uninstall|remove)
       shift
@@ -615,11 +983,11 @@ detect_nobrand_entry() {
           *) die "未知 uninstall 参数: $1" ;;
         esac
       done
-      ACTION=nobrand-uninstall; NOBRAND_ARGS_HANDLED=1
+      ACTION="nobrand-uninstall"; NOBRAND_ARGS_HANDLED=1
       ;;
     network|bbr)
       [ "$#" -eq 1 ] || die 'network/bbr 不接受参数'
-      ACTION=nobrand-network; NOBRAND_ARGS_HANDLED=1
+      ACTION="nobrand-network"; NOBRAND_ARGS_HANDLED=1
       ;;
     menu)
       [ "$#" -eq 1 ] || die 'menu 不接受参数'
@@ -627,11 +995,11 @@ detect_nobrand_entry() {
       ;;
     help|-h|--help)
       [ "$#" -eq 1 ] || die 'help 不接受参数'
-      ACTION=nobrand-help; NOBRAND_ARGS_HANDLED=1
+      ACTION="nobrand-help"; NOBRAND_ARGS_HANDLED=1
       ;;
     version|--version)
       [ "$#" -eq 1 ] || die 'version 不接受参数'
-      ACTION=nobrand-version; NOBRAND_ARGS_HANDLED=1
+      ACTION="nobrand-version"; NOBRAND_ARGS_HANDLED=1
       ;;
     *) die "未知 NoBrand 操作: $1（使用 --help 查看帮助）" ;;
   esac
@@ -651,48 +1019,48 @@ while [ "$NOBRAND_ARGS_HANDLED" -eq 0 ] && [ $# -gt 0 ]; do
     --upgrade) ACTION=upgrade ;;
     --uninstall) ACTION=uninstall ;;
     --status) ACTION=status ;;
-    --client-config|--show) ACTION=client-config ;;
+    --client-config|--show) ACTION="client-config" ;;
     --mtu-config|--set-mtu) ACTION="mtu-config" ;;
     --start) ACTION=start ;;
     --stop) ACTION=stop ;;
     --restart) ACTION=restart ;;
-    --users|--user-list) ACTION=user-list ;;
-    --user-add) ACTION=user-add ;;
+    --users|--user-list) ACTION="user-list" ;;
+    --user-add) ACTION="user-add" ;;
     --user-del|--user-delete)
-      ACTION=user-del
+      ACTION="user-del"
       USER_DEL_NAME="${2:-}"
       [ -n "$USER_DEL_NAME" ] || die "--user-del 需要用户名"
       shift
       ;;
     --user-show)
-      ACTION=user-show
+      ACTION="user-show"
       USER_SHOW_NAME="${2:-}"
       [ -n "$USER_SHOW_NAME" ] || die "--user-show 需要用户名"
       shift
       ;;
-    --user-set-quota) ACTION=user-set-quota ;;
-    --user-set-expire) ACTION=user-set-expire ;;
-    --user-set-endpoint) ACTION=user-set-endpoint ;;
+    --user-set-quota) ACTION="user-set-quota" ;;
+    --user-set-expire) ACTION="user-set-expire" ;;
+    --user-set-endpoint) ACTION="user-set-endpoint" ;;
     --user-enable)
-      ACTION=user-enable
+      ACTION="user-enable"
       USER_SHOW_NAME="${2:-}"
       [ -n "$USER_SHOW_NAME" ] || die "--user-enable 需要用户名"
       shift
       ;;
     --user-disable)
-      ACTION=user-disable
+      ACTION="user-disable"
       USER_SHOW_NAME="${2:-}"
       [ -n "$USER_SHOW_NAME" ] || die "--user-disable 需要用户名"
       shift
       ;;
-    --user-scan) ACTION=user-scan ;;
-    --user-quota-reset) ACTION=user-quota-reset ;;
-    --user-set-rate|--user-set-bandwidth) ACTION=user-set-rate ;;
-    --rate-status|--tc-status) ACTION=rate-status ;;
-    --rate-restore|--tc-restore) ACTION=rate-restore ;;
-    --user-usage|--usage) ACTION=user-usage ;;
+    --user-scan) ACTION="user-scan" ;;
+    --user-quota-reset) ACTION="user-quota-reset" ;;
+    --user-set-rate|--user-set-bandwidth) ACTION="user-set-rate" ;;
+    --rate-status|--tc-status) ACTION="rate-status" ;;
+    --rate-restore|--tc-restore) ACTION="rate-restore" ;;
+    --user-usage|--usage) ACTION="user-usage" ;;
     --user-export-clients)
-      ACTION=user-export-clients
+      ACTION="user-export-clients"
       if [ -n "${2:-}" ] && [[ "${2}" != --* ]]; then
         MITA_CLIENT_EXPORT_DIR="${2}"
         shift
@@ -701,15 +1069,15 @@ while [ "$NOBRAND_ARGS_HANDLED" -eq 0 ] && [ $# -gt 0 ]; do
     --doctor|--verify) ACTION=doctor ;;
     --perf) ACTION=perf ;;
     --profile-config) ACTION="profile-config" ;;
-    --user-backup) ACTION=user-backup ;;
+    --user-backup) ACTION="user-backup" ;;
     --user-restore)
-      ACTION=user-restore
+      ACTION="user-restore"
       USER_RESTORE_FILE="${2:-}"
       [ -n "$USER_RESTORE_FILE" ] || die "--user-restore 需要备份文件路径"
       shift
       ;;
     --user-export)
-      ACTION=user-export
+      ACTION="user-export"
       if [ -n "${2:-}" ] && [[ "${2}" != --* ]]; then
         USER_EXPORT_FILE="${2}"
         shift
@@ -718,26 +1086,26 @@ while [ "$NOBRAND_ARGS_HANDLED" -eq 0 ] && [ $# -gt 0 ]; do
       fi
       ;;
     --user-import)
-      ACTION=user-import
+      ACTION="user-import"
       USER_RESTORE_FILE="${2:-}"
       [ -n "$USER_RESTORE_FILE" ] || die "--user-import 需要文件路径"
       shift
       ;;
     install|upgrade|uninstall|status|reconfigure|client-config|show|mtu|mtu-config|set-mtu|profile|profile-config|perf|menu|start|stop|restart|配置|节点|users|user-list|user-add|user-del|user-delete|user-show|user-manage|user-set-endpoint|user-set-quota|user-set-expire|user-enable|user-disable|user-scan|user-quota-reset|user-set-rate|user-set-bandwidth|rate-status|rate-restore|tc-status|tc-restore|user-backup|user-restore|user-export|user-import|user-usage|usage|user-export-clients|doctor|verify|help)
       [ -z "$ACTION" ] && ACTION="$_arg_lc"
-      [ "$_arg_lc" = show ] && ACTION=client-config
+      [ "$_arg_lc" = show ] && ACTION="client-config"
       { [ "$_arg_lc" = mtu ] || [ "$_arg_lc" = set-mtu ]; } && ACTION="mtu-config"
       [ "$_arg_lc" = profile ] && ACTION="profile-config"
       [ "$_arg_lc" = menu ] && ACTION=""
-      [ "$_arg_lc" = 配置 ] && ACTION=client-config
-      [ "$_arg_lc" = 节点 ] && ACTION=client-config
-      [ "$_arg_lc" = users ] && ACTION=user-list
-      [ "$_arg_lc" = user-delete ] && ACTION=user-del
-      [ "$_arg_lc" = user-manage ] && ACTION=user-manage
-      [ "$_arg_lc" = user-set-bandwidth ] && ACTION=user-set-rate
-      [ "$_arg_lc" = tc-status ] && ACTION=rate-status
-      [ "$_arg_lc" = tc-restore ] && ACTION=rate-restore
-      [ "$_arg_lc" = usage ] && ACTION=user-usage
+      [ "$_arg_lc" = 配置 ] && ACTION="client-config"
+      [ "$_arg_lc" = 节点 ] && ACTION="client-config"
+      [ "$_arg_lc" = users ] && ACTION="user-list"
+      [ "$_arg_lc" = user-delete ] && ACTION="user-del"
+      [ "$_arg_lc" = user-manage ] && ACTION="user-manage"
+      [ "$_arg_lc" = user-set-bandwidth ] && ACTION="user-set-rate"
+      [ "$_arg_lc" = tc-status ] && ACTION="rate-status"
+      [ "$_arg_lc" = tc-restore ] && ACTION="rate-restore"
+      [ "$_arg_lc" = usage ] && ACTION="user-usage"
       [ "$_arg_lc" = verify ] && ACTION=doctor
       [ "$_arg_lc" = help ] && ACTION=help
       # 裸子命令后的位置参数：user-del bob / user-restore /path.json
@@ -992,8 +1360,16 @@ nb_legacy_state_detected() {
 
 nb_fail_legacy_state() {
   die "$(t \
-    '检测到旧版安装数据。NoBrand-OneClick 3.0.0 不提供旧用户自动迁移；请先备份并清理旧安装后重新部署。' \
-    'Legacy installation data was detected. NoBrand-OneClick 3.0.0 does not migrate old users; back it up, clean the old installation, then deploy fresh.')"
+    '检测到旧版安装数据。NoBrand-OneClick 3.1.0 不提供旧用户自动迁移；请先备份并清理旧安装后重新部署。' \
+    'Legacy installation data was detected. NoBrand-OneClick 3.1.0 does not migrate old users; back it up, clean the old installation, then deploy fresh.')"
+}
+
+nb_validate_authoritative_state_boundary() {
+  nb_legacy_state_detected && nb_fail_legacy_state
+  if [ -e "$NOBRAND_STATE_DIR" ]; then
+    [ -d "$NOBRAND_STATE_DIR" ] && [ ! -L "$NOBRAND_STATE_DIR" ] || nb_fail_legacy_state
+    nb_schema_v3_file_valid || nb_fail_legacy_state
+  fi
 }
 
 nb_write_schema_v3_file() {
@@ -1821,6 +2197,8 @@ nb_registry_rows() {
   NOBRAND_SNELL_STATE_DIR="$NOBRAND_SNELL_STATE_DIR" \
   NOBRAND_HY2_STATE_FILE="$NOBRAND_HY2_STATE_FILE" \
   NOBRAND_VLESS_STATE_FILE="$NOBRAND_VLESS_STATE_FILE" \
+  NOBRAND_TUIC_STATE_DIR="$NOBRAND_TUIC_STATE_DIR" \
+  NOBRAND_FORWARD_STATE_FILE="$NOBRAND_FORWARD_STATE_FILE" \
   MITA_USERS_STATE="$MITA_USERS_STATE" \
   python3 - <<'PY'
 import glob
@@ -1865,6 +2243,39 @@ if vless_path and os.path.isfile(vless_path):
         state = json.load(open(vless_path, encoding="utf-8"))
         emit("vless-sudoku:default", "TCP", state.get("listen_port"),
              state.get("advertise_host"), state.get("advertise_port"))
+    except Exception:
+        pass
+
+tuic_dir = os.environ.get("NOBRAND_TUIC_STATE_DIR", "")
+for path in sorted(glob.glob(os.path.join(tuic_dir, "*", "state.json"))):
+    try:
+        state = json.load(open(path, encoding="utf-8"))
+        instance_id = str(state.get("instance_id") or "")
+        if (state.get("schema_version") != 3 or state.get("ownership") != "nobrand-v3"
+                or state.get("protocol") != "tuic" or state.get("tuic_version") != 5
+                or os.path.basename(os.path.dirname(path)) != instance_id):
+            continue
+        emit("tuic:" + instance_id, "UDP", state.get("listen_port"),
+             state.get("advertise_host"), state.get("advertise_port"))
+    except Exception:
+        pass
+
+forward_path = os.environ.get("NOBRAND_FORWARD_STATE_FILE", "")
+if forward_path and os.path.isfile(forward_path):
+    try:
+        state = json.load(open(forward_path, encoding="utf-8"))
+        if (state.get("schema_version") == 3 and state.get("ownership") == "nobrand-v3"
+                and state.get("feature") == "port-forward"):
+            for rule in sorted(state.get("rules") or [], key=lambda item: str(item.get("rule_id") or "")):
+                rule_id = str(rule.get("rule_id") or "")
+                protocol = str(rule.get("protocol") or "").lower()
+                owner = "forward:" + rule_id
+                if protocol in ("tcp", "both"):
+                    emit(owner, "TCP", rule.get("listen_port"), rule.get("display_host"),
+                         rule.get("display_port"))
+                if protocol in ("udp", "both"):
+                    emit(owner, "UDP", rule.get("listen_port"), rule.get("display_host"),
+                         rule.get("display_port"))
     except Exception:
         pass
 
@@ -1984,17 +2395,29 @@ nb_init_state_layout() {
   mkdir -p "$NOBRAND_BACKUP_DIR" "$NOBRAND_LOCK_DIR" \
     "$MITA_MANAGER_STATE_DIR" "$MITA_USERS_BACKUP_DIR" \
     "$NOBRAND_SNELL_STATE_DIR" "$NOBRAND_HY2_STATE_DIR" \
-    "$NOBRAND_VLESS_STATE_DIR" \
+    "$NOBRAND_VLESS_STATE_DIR" "$NOBRAND_TUIC_STATE_DIR" \
+    "$NOBRAND_SSH_STATE_DIR" "$NOBRAND_SSH_KEYS_DIR" "$NOBRAND_SSH_WATCHDOG_DIR" \
+    "$NOBRAND_FORWARD_STATE_DIR" \
     "$NOBRAND_CONFIG_DIR" "$NOBRAND_SNELL_CONFIG_DIR" "$NOBRAND_HY2_CONFIG_DIR" \
-    "$NOBRAND_VLESS_CONFIG_DIR" \
+    "$NOBRAND_VLESS_CONFIG_DIR" "$NOBRAND_TUIC_CONFIG_DIR" "$NOBRAND_FORWARD_CONFIG_DIR" \
+    "$NOBRAND_SSH_CONFIG_DIR" "$NOBRAND_SSH_AUTHORIZED_KEYS_DIR" \
+    "$NOBRAND_SSH_ACCOUNT_MARKER_DIR" \
     "$NOBRAND_BIN_DIR" "$NOBRAND_SNELL_RUNTIME_DIR" "$NOBRAND_LIB_DIR" \
     || return 1
   chmod 0700 "$NOBRAND_STATE_DIR" "$NOBRAND_BACKUP_DIR" "$NOBRAND_LOCK_DIR" \
     "$MITA_MANAGER_STATE_DIR" "$MITA_USERS_BACKUP_DIR" \
     "$NOBRAND_SNELL_STATE_DIR" "$NOBRAND_HY2_STATE_DIR" \
-    "$NOBRAND_VLESS_STATE_DIR" \
-    "$NOBRAND_CONFIG_DIR" "$NOBRAND_SNELL_CONFIG_DIR" "$NOBRAND_HY2_CONFIG_DIR" \
-    "$NOBRAND_VLESS_CONFIG_DIR" || return 1
+    "$NOBRAND_VLESS_STATE_DIR" "$NOBRAND_TUIC_STATE_DIR" \
+    "$NOBRAND_SSH_STATE_DIR" "$NOBRAND_SSH_KEYS_DIR" "$NOBRAND_SSH_WATCHDOG_DIR" \
+    "$NOBRAND_FORWARD_STATE_DIR" \
+    "$NOBRAND_SNELL_CONFIG_DIR" "$NOBRAND_HY2_CONFIG_DIR" \
+    "$NOBRAND_VLESS_CONFIG_DIR" "$NOBRAND_TUIC_CONFIG_DIR" "$NOBRAND_FORWARD_CONFIG_DIR" \
+    "$NOBRAND_SSH_ACCOUNT_MARKER_DIR" || return 1
+  # sshd reads AuthorizedKeysFile after switching to the target identity. Keep
+  # the shared and SSH config roots traversable but not listable; every other
+  # protocol config directory and all secret/state directories remain 0700.
+  chmod 0711 "$NOBRAND_CONFIG_DIR" "$NOBRAND_SSH_CONFIG_DIR" || return 1
+  chmod 0755 "$NOBRAND_SSH_AUTHORIZED_KEYS_DIR" || return 1
   # Protocol services can run as dedicated unprivileged users (Mieru uses the
   # mita account). Runtime directories contain only managed executables/assets
   # and must remain traversable; secrets stay in the 0700 state/config roots.
@@ -2217,7 +2640,7 @@ nobrand_version() {
 
 nobrand_usage() {
   cat <<EOF
-NoBrand-OneClick 3.0.0 — Mieru / Snell v4-v5 / Hysteria2 / VLESS + FinalMask + Sudoku (TCP)
+NoBrand-OneClick 3.1.0 — Mieru / Snell v4-v5 / Hysteria2 / TUIC v5 / VLESS + FinalMask + Sudoku / SSH Tunnel / Port Forward
 
 用法:
   nobrand                         打开统一菜单
@@ -2227,9 +2650,10 @@ NoBrand-OneClick 3.0.0 — Mieru / Snell v4-v5 / Hysteria2 / VLESS + FinalMask +
   nobrand status                  综合状态
   nobrand nodes [--protocol P]    查看全部或指定协议节点
   nobrand doctor                  综合诊断（默认不输出 secret）
-  nobrand backup create [FILE]    备份 NoBrand 3.0 全部 state 与配置
+  nobrand backup create [FILE]    备份 NoBrand schema-v3 全部 state 与配置
   nobrand backup restore FILE     恢复 NoBrand 备份
-  nobrand uninstall [-y]          统一卸载 Mieru/Snell/HY2/VLESS/Common
+  nobrand uninstall [-y]          统一卸载 Mieru/Snell/HY2/TUIC/VLESS/SSH/Forward/Common
+  nobrand manager install|upgrade 从当前执行的 exact installer 安装/升级统一管理器
 
   nobrand mieru                    打开完整 Mieru 菜单
   nobrand mieru install|reconfigure|upgrade|uninstall|start|stop|restart
@@ -2262,6 +2686,24 @@ NoBrand-OneClick 3.0.0 — Mieru / Snell v4-v5 / Hysteria2 / VLESS + FinalMask +
   nobrand vless-sudoku set-endpoint
       [--advertise-host HOST --advertise-port PORT | --advertise-auto]
 
+  nobrand tuic install --name NAME --user USER [--port PORT] [--sni SNI]
+      [--channel stable|latest | --runtime-version VERSION]
+      [--advertise-host HOST --advertise-port PORT | --advertise-auto] [-y]
+  nobrand tuic start|stop|restart|status|doctor|show|export|set-endpoint|upgrade-runtime|uninstall
+  nobrand tuic user add|delete|list|show|rotate --name NAME [--user USER]
+
+  nobrand ssh install --user USER
+      [--advertise-host HOST --advertise-port PORT | --advertise-auto] [-y]
+  nobrand ssh status|doctor|show|export|set-endpoint|uninstall
+  nobrand ssh user add|delete|list|show|rotate-key [--user USER]
+  nobrand ssh confirm-admin --token TOKEN
+
+  nobrand forward add --name NAME --backend nftables|realm --protocol TCP|UDP|BOTH
+      --listen 0.0.0.0 --port PORT --target HOST --target-port PORT
+  nobrand forward list|doctor|export
+  nobrand forward show|delete|modify|enable|disable|set-endpoint|switch-backend RULE
+  nobrand forward import FILE
+
 说明:
   - Snell 只支持 v5（默认/推荐）与 v4（兼容）。
   - Snell v5 QUIC 默认关闭；--quic on 才让 NoBrand 管理同号 UDP firewall ownership。
@@ -2270,6 +2712,13 @@ NoBrand-OneClick 3.0.0 — Mieru / Snell v4-v5 / Hysteria2 / VLESS + FinalMask +
   - 非交互 -y 必须明确给出完整 Display Endpoint 或 --advertise-auto。
   - VLESS Sudoku = plain VLESS + FinalMask(sudoku) + TCP。
   - VLESS Encryption: NOT USED；不调用密钥生成子命令，不保存加密密钥。
+  - TUIC 只支持 v5：official sing-box、UDP/QUIC、每用户独立 UUID + password。
+  - SSH Tunnel 复用现有 sshd；允许 -L/-D/-R TCP forwarding，不允许 shell/exec/TTY/SFTP/SCP。
+  - SSH Tunnel 使用 AllowTcpForwarding=yes，因此可访问服务器自身可达的 TCP destinations；GatewayPorts=no。
+  - SSH Tunnel 不拥有 sshd listener、SSH firewall、host keys 或 admin authentication。
+  - Port Forward: nftables 为 IPv4 kernel NAT；Realm 为 official userspace relay，可使用 IP/domain target。
+  - Forward 的 Display Endpoint 仅为 metadata；xx00 对 nftables/Realm 和 TCP/UDP 均保留。
+  - PROTOCOL_FEATURE_FREEZE=${PROTOCOL_FEATURE_FREEZE}（3.1.0 后仅维护、安全、修复、导出、Doctor、UI 与兼容性改进）。
   - Mieru 官方 runtime 仍名为 mita，但它不是管理命令；管理入口只有 nobrand/nb。
   - v3 state 必须带 schema_version=3；旧 state 不读取、不导入、不删除。
   - 正式安装器: ${NOBRAND_RELEASE_INSTALLER_URL}
@@ -2306,6 +2755,18 @@ nobrand_install_manager_script() {
   fi
   ln -sfn "$NOBRAND_INSTALL_SCRIPT_PATH" "$NOBRAND_COMMAND_PATH" || return 1
   ln -sfn "$NOBRAND_COMMAND_PATH" "$NOBRAND_SHORT_COMMAND_PATH" || return 1
+  cmp -s "$source_path" "$NOBRAND_INSTALL_SCRIPT_PATH" || return 1
+  [ "$(readlink "$NOBRAND_COMMAND_PATH" 2>/dev/null || true)" = "$NOBRAND_INSTALL_SCRIPT_PATH" ] || return 1
+  [ "$(readlink "$NOBRAND_SHORT_COMMAND_PATH" 2>/dev/null || true)" = "$NOBRAND_COMMAND_PATH" ] || return 1
+}
+
+nobrand_manager_upgrade() {
+  require_root
+  require_linux
+  nobrand_install_manager_script \
+    || die 'NoBrand manager install/upgrade failed; protocol state was not modified'
+  t "NoBrand unified manager 已从当前 exact installer 安装/升级至 v${SCRIPT_VERSION}" \
+    "NoBrand unified manager installed/upgraded from the current exact installer to v${SCRIPT_VERSION}"
 }
 
 nb_mieru_instance_running() {
@@ -2361,13 +2822,19 @@ nb_all_node_rows() {
       nb_mieru_node_rows
       snell_node_rows
       hysteria2_node_rows
+      tuic_node_rows
       vless_sudoku_node_rows
+      ssh_tunnel_node_rows
+      forward_node_rows
       ;;
     mieru) nb_mieru_node_rows ;;
     snell) snell_node_rows ;;
     hy2|hysteria2) hysteria2_node_rows ;;
+    tuic) tuic_node_rows ;;
     vless-sudoku|sudoku|vless) vless_sudoku_node_rows ;;
-    *) die "--protocol 只支持 mieru、snell、hy2、vless-sudoku" ;;
+    ssh|ssh-tunnel) ssh_tunnel_node_rows ;;
+    forward|port-forward) forward_node_rows ;;
+    *) die "--protocol 只支持 mieru、snell、hy2、tuic、vless-sudoku、ssh、forward" ;;
   esac
 }
 
@@ -2392,6 +2859,8 @@ nobrand_nodes() {
 nobrand_status() {
   local rows protocol _name _endpoint status _transport
   local mieru_total=0 mieru_running=0 snell_total=0 snell_running=0 hy2_total=0 hy2_running=0
+  local tuic_total=0 tuic_running=0 ssh_total=0 ssh_ready=0
+  local forward_nft_total=0 forward_nft_healthy=0 forward_realm_total=0 forward_realm_healthy=0
   local vless_total=0 vless_running=0 vless_port=""
   rows="$(nb_all_node_rows)"
   while IFS='|' read -r protocol _name _endpoint status _transport; do
@@ -2399,6 +2868,14 @@ nobrand_status() {
       Mieru/*) mieru_total=$((mieru_total + 1)); [ "$status" != Running ] || mieru_running=$((mieru_running + 1)) ;;
       Snell*) snell_total=$((snell_total + 1)); [ "$status" != Running ] || snell_running=$((snell_running + 1)) ;;
       Hysteria2) hy2_total=$((hy2_total + 1)); [ "$status" != Running ] || hy2_running=$((hy2_running + 1)) ;;
+      'TUIC v5') tuic_total=$((tuic_total + 1)); [ "$status" != Running ] || tuic_running=$((tuic_running + 1)) ;;
+      'SSH Tunnel') ssh_total=$((ssh_total + 1)); [ "$status" != Ready ] || ssh_ready=$((ssh_ready + 1)) ;;
+      'Port Forward/nftables')
+        forward_nft_total=$((forward_nft_total + 1)); [ "$status" != Healthy ] || forward_nft_healthy=$((forward_nft_healthy + 1))
+        ;;
+      'Port Forward/realm')
+        forward_realm_total=$((forward_realm_total + 1)); [ "$status" != Healthy ] || forward_realm_healthy=$((forward_realm_healthy + 1))
+        ;;
       VLESS/Sudoku)
         vless_total=$((vless_total + 1))
         [ "$status" != Running ] || vless_running=$((vless_running + 1))
@@ -2414,10 +2891,15 @@ nobrand_status() {
   printf 'Hysteria2\n  Installed: %s\n  Running: %s\n' \
     "$([ "$hy2_total" -gt 0 ] && printf yes || printf no)" \
     "$([ "$hy2_running" -gt 0 ] && printf yes || printf no)"
+  printf 'TUIC v5\n  Users: %s\n  Running: %s/%s\n' "$tuic_total" "$tuic_running" "$tuic_total"
   printf 'VLESS/Sudoku\n  Installed: %s\n  Running: %s\n  Port: %s\n' \
     "$([ "$vless_total" -gt 0 ] && printf yes || printf no)" \
     "$([ "$vless_running" -gt 0 ] && printf yes || printf no)" \
     "${vless_port:--}"
+  printf 'SSH Tunnel\n  Users: %s\n  Ready: %s/%s\n  Listener ownership: external sshd\n' \
+    "$ssh_total" "$ssh_ready" "$ssh_total"
+  printf 'Port Forward\n  nftables: %s/%s healthy\n  Realm: %s/%s healthy\n' \
+    "$forward_nft_healthy" "$forward_nft_total" "$forward_realm_healthy" "$forward_realm_total"
 }
 
 nb_doctor_line() {
@@ -2448,6 +2930,8 @@ nobrand_doctor_common() {
     nb_doctor_line PASS 'firewall=firewalld'
   elif command -v iptables >/dev/null 2>&1; then
     nb_doctor_line PASS 'firewall=iptables'
+  elif command -v nft >/dev/null 2>&1; then
+    nb_doctor_line PASS 'firewall=nftables'
   else
     nb_doctor_line WARN '未检测到本地 firewall backend'
   fi
@@ -2480,8 +2964,19 @@ nobrand_doctor() {
   msg 'Hysteria2'
   hysteria2_doctor || failed=1
   msg ''
+  msg 'TUIC v5'
+  tuic_doctor_all || failed=1
+  msg ''
   msg 'VLESS + FinalMask + Sudoku (TCP)'
   vless_sudoku_doctor || failed=1
+  msg ''
+  msg 'SSH Tunnel (existing OpenSSH)'
+  ssh_tunnel_doctor || failed=1
+  if [ -s "$NOBRAND_FORWARD_STATE_FILE" ]; then
+    msg ''
+    msg 'Port Forward (nftables / Realm)'
+    forward_doctor || failed=1
+  fi
   [ "$failed" -eq 0 ] || return 1
 }
 
@@ -2541,8 +3036,147 @@ nobrand_backup_list() {
     -print 2>/dev/null | LC_ALL=C sort -r
 }
 
+# A backup contains authoritative state/config, but deliberately excludes
+# downloaded runtimes and service-manager artifacts.  A restore into a
+# manager-only installation therefore has to rebuild every runtime/service
+# from the restored state before it can start anything.
+nobrand_restore_protocol_runtimes() {
+  local id major need_snell4=0 need_snell5=0 pm
+  if users_state_exists && [ "$(users_count)" -gt 0 ]; then
+    load_install_state || return 1
+    pm="$(detect_pkg_manager)" || return 1
+    ensure_management_dependencies "$pm" || return 1
+    repair_mita_binary_paths || return 1
+    ensure_mita_account || return 1
+    install_instance_runtime || return 1
+  fi
+
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    snell_config_matches_state "$id" || return 1
+    major="$(snell_state_field "$id" version)"
+    case "$major" in
+      4) need_snell4=1 ;;
+      5) need_snell5=1 ;;
+      *) return 1 ;;
+    esac
+  done < <(snell_instance_ids)
+  if [ "$need_snell4" -eq 1 ] || [ "$need_snell5" -eq 1 ] \
+     || hysteria2_state_exists || vless_sudoku_state_exists; then
+    nobrand_prepare_common || return 1
+  fi
+  [ "$need_snell4" -eq 0 ] || snell_install_runtime 4 0 || return 1
+  [ "$need_snell5" -eq 0 ] || snell_install_runtime 5 0 || return 1
+  if [ "$need_snell4" -eq 1 ] || [ "$need_snell5" -eq 1 ]; then
+    snell_install_service_runtime || return 1
+    while IFS= read -r id; do
+      [ -n "$id" ] || continue
+      snell_ensure_openrc_service "$id" || return 1
+    done < <(snell_instance_ids)
+  fi
+
+  if hysteria2_state_exists || vless_sudoku_state_exists; then
+    nobrand_install_xray_runtime 0 || return 1
+    nobrand_xray_validate_managed_configs || return 1
+  fi
+  if hysteria2_state_exists; then
+    nobrand_write_hy2_service || return 1
+  fi
+  if vless_sudoku_state_exists; then
+    nobrand_write_vless_sudoku_service || return 1
+  fi
+  tuic_restore_runtime || return 1
+  forward_realm_restore_runtime || return 1
+}
+
+# The only safe way to synthesize system identities/package resources during
+# a manager-only restore is to prove that those product-owned namespaces are
+# currently empty.  Existing installations use their normal transaction
+# snapshots instead and do not enter this path.
+nobrand_fresh_restore_runtime_preflight() {
+  local staged_state="$1" users_rel staged_users pm path
+  users_rel="${MITA_USERS_STATE#${NOBRAND_STATE_DIR}/}"
+  staged_users="${staged_state}/${users_rel}"
+  for path in \
+    "$NOBRAND_LIB_DIR" \
+    "$MITA_INSTANCE_SYSTEMD_TEMPLATE" "$MITA_INSTANCE_TMPFILES" \
+    "$NOBRAND_SNELL_SYSTEMD_TEMPLATE" "$NOBRAND_HY2_SYSTEMD_SERVICE" \
+    "$NOBRAND_VLESS_SYSTEMD_SERVICE" "$NOBRAND_TUIC_SYSTEMD_TEMPLATE" \
+    "$NOBRAND_REALM_SYSTEMD_SERVICE"; do
+    [ ! -e "$path" ] && [ ! -L "$path" ] || return 1
+  done
+  if [ -s "$staged_users" ] && [ "$(jq '.users | length' "$staged_users" 2>/dev/null || printf 0)" -gt 0 ]; then
+    pm="$(detect_pkg_manager)" || return 1
+    ! mita_package_is_installed "$pm" || return 1
+    ! _has_user mita || return 1
+    ! _has_group mita || return 1
+    ! command -v mita >/dev/null 2>&1 || return 1
+    for path in /etc/mita /var/lib/mita /run/mita /var/run/mita /var/run/mita.sock; do
+      [ ! -e "$path" ] && [ ! -L "$path" ] || return 1
+    done
+  fi
+}
+
+# This cleanup is used only after the fresh-manager preflight above proved
+# that the affected package/accounts/units did not pre-exist.  It must run
+# while restored state still exists so every firewall and service identity is
+# available for exact cleanup.
+nobrand_remove_fresh_restore_protocol_resources() {
+  local id port pairs pm failed=0
+  if users_state_exists && [ "$(users_count)" -gt 0 ]; then
+    isolated_stop_all >/dev/null 2>&1 || failed=1
+    firewall_clear_all_owned >/dev/null 2>&1 || failed=1
+    tc_clear_owned_filters >/dev/null 2>&1 || true
+    pm="$(detect_pkg_manager 2>/dev/null || true)"
+    case "$pm" in
+      deb)
+        if dpkg-query -W mita >/dev/null 2>&1; then
+          dpkg -P mita >/dev/null 2>&1 || failed=1
+        fi
+        ;;
+      rpm)
+        if rpm -q mita >/dev/null 2>&1; then
+          rpm -e mita >/dev/null 2>&1 || failed=1
+        fi
+        ;;
+    esac
+    if ! ( UNINSTALL_PRESERVE_PACKAGE=0 UNINSTALL_PRESERVE_USER=0 \
+           UNINSTALL_PRESERVE_GROUP=0 UNINSTALL_PRESERVE_SHARED=0 \
+           remove_mita_common >/dev/null 2>&1 ); then
+      failed=1
+    fi
+    ! _has_user mita || failed=1
+    ! _has_group mita || failed=1
+  fi
+
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    pairs="$(snell_firewall_pairs "$id" 2>/dev/null || true)"
+    snell_remove_service "$id" >/dev/null 2>&1 || failed=1
+    [ -z "$pairs" ] || nb_firewall_close_pairs "$pairs" >/dev/null 2>&1 || failed=1
+  done < <(snell_instance_ids)
+  rm -f "$NOBRAND_SNELL_SYSTEMD_TEMPLATE" "$NOBRAND_SNELL_RUNNER" || failed=1
+  rm -rf -- "$NOBRAND_SNELL_RUNTIME_DIR" || failed=1
+
+  if hysteria2_state_exists; then
+    port="$(hysteria2_state_field listen_port 2>/dev/null || true)"
+    nobrand_remove_hy2_service >/dev/null 2>&1 || failed=1
+    [ -z "$port" ] || nb_firewall_close_pairs "UDP|${port}" >/dev/null 2>&1 || failed=1
+  fi
+  if vless_sudoku_state_exists; then
+    port="$(vless_sudoku_state_field listen_port 2>/dev/null || true)"
+    nobrand_remove_vless_sudoku_service >/dev/null 2>&1 || failed=1
+    [ -z "$port" ] || nb_firewall_close_pairs "TCP|${port}" >/dev/null 2>&1 || failed=1
+  fi
+  rm -f "$NOBRAND_XRAY_BIN" || failed=1
+  [ "$(nb_service_manager)" != systemd ] || systemctl daemon-reload >/dev/null 2>&1 || failed=1
+  rmdir "$NOBRAND_BIN_DIR" "$NOBRAND_LIB_DIR" 2>/dev/null || true
+  return "$failed"
+}
+
 nobrand_backup_restore() {
-  local source="$1" stage snapshot safe_state safe_config
+  local source="$1" stage snapshot safe_state safe_config ssh_restore_log restore_root
+  local state_root_created=0 config_root_created=0 fresh_manager_restore=0
   [ -f "$source" ] || die "备份不存在: $source"
   safe_state="$(nb_assert_safe_nobrand_root "$NOBRAND_STATE_DIR" NOBRAND_STATE_DIR)" || return 1
   safe_config="$(nb_assert_safe_nobrand_root "$NOBRAND_CONFIG_DIR" NOBRAND_CONFIG_DIR)" || return 1
@@ -2558,13 +3192,91 @@ nobrand_backup_restore() {
     && grep -qx 'ownership=nobrand-v3' "$stage/manifest.txt" 2>/dev/null \
     && nb_schema_v3_file_valid "$stage/state/state.json" \
     || { rm -rf -- "$stage"; die '备份不是 NoBrand schema v3，拒绝导入旧 state'; }
+  ssh_tunnel_restore_preflight "$stage/state/ssh-tunnel/state.json" \
+    || { rm -rf -- "$stage"; die 'SSH Tunnel restore identity conflict，拒绝覆盖系统用户'; }
+  if [ -s "$stage/state/forward/state.json" ]; then
+    forward_state_valid "$stage/state/forward/state.json" \
+      || { rm -rf -- "$stage"; die 'Port Forward restore state 无效'; }
+  fi
   find "$stage/state" "$stage/config" -type f -name '*.json' -print0 2>/dev/null \
     | while IFS= read -r -d '' file; do jq empty "$file" >/dev/null || exit 1; done \
     || { rm -rf -- "$stage"; die '备份中存在无效 JSON'; }
-  snapshot="$(mktemp_dir)" || { rm -rf -- "$stage"; return 1; }
-  mkdir -p "$snapshot/state" "$snapshot/config"
+  [ -e "$safe_state" ] || [ -L "$safe_state" ] || state_root_created=1
+  [ -e "$safe_config" ] || [ -L "$safe_config" ] || config_root_created=1
+  if [ "$state_root_created" -eq 1 ] && [ "$config_root_created" -eq 1 ]; then
+    fresh_manager_restore=1
+    nobrand_fresh_restore_runtime_preflight "$stage/state" \
+      || { rm -rf -- "$stage"; die 'manager-only restore runtime/system identity conflict'; }
+  fi
+  # A manager-only fresh install intentionally has no protocol state/config
+  # roots yet.  Restore must be able to materialize those two exact NoBrand
+  # namespaces, while still rejecting symlinks, non-directories, or insecure
+  # pre-existing roots before any destructive replacement begins.
+  for restore_root in "$safe_state" "$safe_config"; do
+    if [ -e "$restore_root" ] || [ -L "$restore_root" ]; then
+      [ -d "$restore_root" ] && [ ! -L "$restore_root" ] \
+        || {
+          [ "$state_root_created" -eq 0 ] || rmdir "$safe_state" 2>/dev/null || true
+          [ "$config_root_created" -eq 0 ] || rmdir "$safe_config" 2>/dev/null || true
+          rm -rf -- "$stage"
+          die "恢复根路径不是安全目录: $restore_root"
+        }
+    else
+      mkdir -p "$restore_root" \
+        || {
+          [ "$state_root_created" -eq 0 ] || rmdir "$safe_state" 2>/dev/null || true
+          [ "$config_root_created" -eq 0 ] || rmdir "$safe_config" 2>/dev/null || true
+          rm -rf -- "$stage"
+          die "无法创建恢复根路径: $restore_root"
+        }
+    fi
+    chmod 0700 "$restore_root" \
+      && chown root:root "$restore_root" 2>/dev/null \
+      || {
+        [ "$state_root_created" -eq 0 ] || rmdir "$safe_state" 2>/dev/null || true
+        [ "$config_root_created" -eq 0 ] || rmdir "$safe_config" 2>/dev/null || true
+        rm -rf -- "$stage"
+        die "无法保护恢复根路径: $restore_root"
+      }
+    secure_stat_path "$restore_root" dir \
+      || {
+        [ "$state_root_created" -eq 0 ] || rmdir "$safe_state" 2>/dev/null || true
+        [ "$config_root_created" -eq 0 ] || rmdir "$safe_config" 2>/dev/null || true
+        rm -rf -- "$stage"
+        die "恢复根路径权限不安全: $restore_root"
+      }
+  done
+  snapshot="$(mktemp_dir)" || {
+    [ "$state_root_created" -eq 0 ] || rmdir "$safe_state" 2>/dev/null || true
+    [ "$config_root_created" -eq 0 ] || rmdir "$safe_config" 2>/dev/null || true
+    rm -rf -- "$stage"
+    return 1
+  }
+  mkdir -p "$snapshot/state" "$snapshot/config" "$snapshot/ssh-external" "$snapshot/tuic-external" "$snapshot/forward-external"
   cp -a "$safe_state/." "$snapshot/state/" 2>/dev/null || true
   cp -a "$safe_config/." "$snapshot/config/" 2>/dev/null || true
+  ssh_tunnel_snapshot_external_state "$snapshot/ssh-external" \
+    || {
+      [ "$state_root_created" -eq 0 ] || rmdir "$safe_state" 2>/dev/null || true
+      [ "$config_root_created" -eq 0 ] || rmdir "$safe_config" 2>/dev/null || true
+      rm -rf -- "$stage" "$snapshot"
+      return 1
+    }
+  tuic_snapshot_restore_side_effects "$snapshot/tuic-external" \
+    || {
+      [ "$state_root_created" -eq 0 ] || rmdir "$safe_state" 2>/dev/null || true
+      [ "$config_root_created" -eq 0 ] || rmdir "$safe_config" 2>/dev/null || true
+      rm -rf -- "$stage" "$snapshot"
+      return 1
+    }
+  forward_snapshot_restore_side_effects "$snapshot/forward-external" \
+    || {
+      [ "$state_root_created" -eq 0 ] || rmdir "$safe_state" 2>/dev/null || true
+      [ "$config_root_created" -eq 0 ] || rmdir "$safe_config" 2>/dev/null || true
+      rm -rf -- "$stage" "$snapshot"
+      return 1
+    }
+  ssh_restore_log="$snapshot/ssh-external/created.log"
   nobrand_stop_all_services 2>/dev/null || true
   if ! find "$safe_state" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + \
      || ! find "$safe_config" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + \
@@ -2574,13 +3286,51 @@ nobrand_backup_restore() {
     find "$safe_config" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + 2>/dev/null || true
     cp -a "$snapshot/state/." "$safe_state/" 2>/dev/null || true
     cp -a "$snapshot/config/." "$safe_config/" 2>/dev/null || true
+    if [ "$state_root_created" -eq 1 ]; then rmdir "$safe_state" 2>/dev/null || true; fi
+    if [ "$config_root_created" -eq 1 ]; then rmdir "$safe_config" 2>/dev/null || true; fi
+    if [ "$state_root_created" -eq 0 ] && [ "$config_root_created" -eq 0 ]; then
+      nb_init_state_layout 2>/dev/null || true
+      nobrand_start_enabled_services 2>/dev/null || true
+    fi
     rm -rf -- "$stage" "$snapshot"
     die '恢复失败，已回滚原 NoBrand state/config'
   fi
   nb_init_state_layout
-  nobrand_start_enabled_services || {
-    warn '配置已恢复，但部分服务未能启动；请运行 nobrand doctor'
-  }
+  if ! nobrand_restore_protocol_runtimes \
+     || ! ssh_tunnel_restore_system_state "$ssh_restore_log" \
+     || ! nobrand_start_enabled_services; then
+    ssh_tunnel_cancel_pending_watchdog 2>/dev/null || true
+    if [ "$fresh_manager_restore" -eq 1 ]; then
+      nobrand_remove_fresh_restore_protocol_resources 2>/dev/null \
+        || warn 'Fresh-manager protocol runtime rollback could not remove every owned resource'
+    fi
+    tuic_remove_restore_attempt_resources 2>/dev/null || true
+    forward_remove_restore_attempt_resources 2>/dev/null || true
+    # Restore target-side effects while restored ownership metadata still
+    # exists.  Clearing state first can make identity-safe cleanup fail-fast.
+    tuic_restore_side_effect_snapshot "$snapshot/tuic-external" 2>/dev/null \
+      || warn 'TUIC restore rollback could not restore every external side effect'
+    forward_restore_side_effect_snapshot "$snapshot/forward-external" 2>/dev/null \
+      || warn 'Forward restore rollback could not restore every external side effect'
+    ssh_tunnel_restore_external_snapshot "$snapshot/ssh-external" "$ssh_restore_log" 2>/dev/null \
+      || warn 'SSH restore rollback could not restore every external side effect'
+    if [ "$fresh_manager_restore" -eq 1 ]; then
+      rmdir "$NOBRAND_SNELL_RUNTIME_DIR" "$NOBRAND_BIN_DIR" "$NOBRAND_LIB_DIR" 2>/dev/null \
+        || true
+    fi
+    find "$safe_state" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + 2>/dev/null || true
+    find "$safe_config" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + 2>/dev/null || true
+    cp -a "$snapshot/state/." "$safe_state/" 2>/dev/null || true
+    cp -a "$snapshot/config/." "$safe_config/" 2>/dev/null || true
+    if [ "$state_root_created" -eq 1 ]; then rmdir "$safe_state" 2>/dev/null || true; fi
+    if [ "$config_root_created" -eq 1 ]; then rmdir "$safe_config" 2>/dev/null || true; fi
+    if [ "$state_root_created" -eq 0 ] && [ "$config_root_created" -eq 0 ]; then
+      nb_init_state_layout 2>/dev/null || true
+      nobrand_start_enabled_services 2>/dev/null || true
+    fi
+    rm -rf -- "$stage" "$snapshot"
+    die 'NoBrand restore service/policy acceptance 失败，state/config 已回滚'
+  fi
   rm -rf -- "$stage" "$snapshot"
   t 'NoBrand 备份恢复完成' 'NoBrand backup restored'
 }
@@ -2623,8 +3373,8 @@ nobrand_uninstall() {
   ensure_manager_state_layout 0
   nb_schema_v3_file_valid || die '未检测到有效的 NoBrand schema v3 state，拒绝卸载未知资源'
   if [ "${YES:-0}" -ne 1 ]; then
-    confirm '确认完整卸载 NoBrand 3 管理的 Mieru/Snell/HY2/VLESS/Common？[y/N]: ' \
-      'Completely uninstall NoBrand-3-managed Mieru/Snell/HY2/VLESS/Common resources? [y/N]: ' \
+    confirm '确认完整卸载 NoBrand 3 管理的 Mieru/Snell/HY2/TUIC/VLESS/SSH Tunnel/Forward/Common？[y/N]: ' \
+      'Completely uninstall NoBrand-3-managed Mieru/Snell/HY2/TUIC/VLESS/SSH Tunnel/Forward/Common resources? [y/N]: ' \
       n \
       || { t '已取消' 'Cancelled'; return 0; }
   fi
@@ -2632,7 +3382,26 @@ nobrand_uninstall() {
   safe_config="$(nb_assert_safe_nobrand_root "$NOBRAND_CONFIG_DIR" NOBRAND_CONFIG_DIR)" || return 1
   safe_lib="$(nb_assert_safe_nobrand_root "$NOBRAND_LIB_DIR" NOBRAND_LIB_DIR)" || return 1
   mita_uninstall_target_present && had_mieru=1
+  # Remove the externally shared sshd policy first. With the real watchdog this
+  # is a two-phase operation: no other protocol is touched until a brand-new
+  # administrator SSH session confirms that system access still works.
+  if ssh_tunnel_state_exists; then
+    ssh_tunnel_uninstall unified-uninstall || return 1
+    if ssh_tunnel_state_exists \
+       && [ "$(ssh_tunnel_state_field pending_operation 2>/dev/null || true)" = unified-uninstall ]; then
+      t '统一卸载等待全新管理员 SSH connection 确认；确认前其它协议保持不变' \
+        'Unified uninstall is waiting for a brand-new administrator SSH connection; other protocols remain unchanged until confirmation'
+      return 0
+    fi
+  fi
   admin_lock_acquire || return 1
+  if [ -s "$NOBRAND_FORWARD_STATE_FILE" ] || [ -s "$NOBRAND_REALM_RUNTIME_META" ] \
+     || [ -e "$NOBRAND_REALM_SYSTEMD_SERVICE" ] || [ -e "$NOBRAND_REALM_OPENRC_SERVICE" ]; then
+    forward_uninstall || failed=1
+  elif command -v nft >/dev/null 2>&1 \
+       && nft list table "$NOBRAND_FORWARD_NFT_FAMILY" "$NOBRAND_FORWARD_NFT_TABLE" >/dev/null 2>&1; then
+    forward_remove_owned_nft_table || failed=1
+  fi
   while IFS= read -r id; do
     [ -n "$id" ] || continue
     port="$(snell_state_field "$id" listen_port 2>/dev/null || true)"
@@ -2650,6 +3419,12 @@ nobrand_uninstall() {
     nobrand_remove_vless_sudoku_service || failed=1
     [ -z "$port" ] || nb_firewall_close_pairs "TCP|${port}" || failed=1
   fi
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    port="$(tuic_state_field "$id" listen_port 2>/dev/null || true)"
+    tuic_remove_service "$id" || failed=1
+    [ -z "$port" ] || nb_firewall_close_pairs "UDP|${port}" || failed=1
+  done < <(tuic_instance_ids)
   # 清理可能由失败事务留下、但仍明确记录为 NoBrand-owned 的 firewall rows。
   if [ -s "$NOBRAND_FIREWALL_OWNED_STATE" ]; then
     while IFS='|' read -r _tool proto row_port; do
@@ -2666,6 +3441,9 @@ nobrand_uninstall() {
   fi
   case "$NOBRAND_SNELL_SYSTEMD_TEMPLATE" in
     /etc/systemd/system/nobrand-snell@.service) rm -f "$NOBRAND_SNELL_SYSTEMD_TEMPLATE" ;;
+  esac
+  case "$NOBRAND_TUIC_SYSTEMD_TEMPLATE" in
+    /etc/systemd/system/nobrand-tuic@.service) rm -f "$NOBRAND_TUIC_SYSTEMD_TEMPLATE" ;;
   esac
   [ "$(nb_service_manager)" != systemd ] || systemctl daemon-reload 2>/dev/null || true
   admin_lock_release
@@ -2687,8 +3465,8 @@ nobrand_uninstall() {
   nobrand_remove_owned_command "$NOBRAND_COMMAND_PATH" || failed=1
   nobrand_remove_owned_command "$NOBRAND_INSTALL_SCRIPT_PATH" || failed=1
   [ "$failed" -eq 0 ] || return 1
-  t 'NoBrand 3 的 Mieru/Snell/HY2/VLESS/Common 资源与 nobrand/nb 已完整删除；外部资源未触碰' \
-    'NoBrand 3 Mieru/Snell/HY2/VLESS/Common resources and nobrand/nb were removed; external resources were untouched'
+  t 'NoBrand 3 的 Mieru/Snell/HY2/TUIC/VLESS/SSH Tunnel/Forward/Common 资源与 nobrand/nb 已完整删除；外部资源未触碰' \
+    'NoBrand 3 Mieru/Snell/HY2/TUIC/VLESS/SSH Tunnel/Forward/Common resources and nobrand/nb were removed; external resources were untouched'
 }
 
 nobrand_stop_all_services() {
@@ -2701,22 +3479,28 @@ nobrand_stop_all_services() {
   hysteria2_state_exists && nobrand_hy2_service_action stop >/dev/null 2>&1 || true
   vless_sudoku_state_exists \
     && nobrand_vless_sudoku_service_action stop >/dev/null 2>&1 || true
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    tuic_service_action "$id" stop >/dev/null 2>&1 || true
+  done < <(tuic_instance_ids)
+  forward_realm_service_action stop >/dev/null 2>&1 || true
 }
 
 nobrand_start_enabled_services() {
-  local id name enabled port pairs failed=0
+  local id enabled port pairs failed=0
   if users_state_exists && [ "$(users_count)" -gt 0 ]; then
-    load_install_state || failed=1
-    install_instance_runtime >/dev/null 2>&1 || failed=1
-    while IFS=$'\t' read -r id name port; do
-      [ -n "$id" ] && [ -n "$name" ] && [ -n "$port" ] || continue
-      write_instance_config "$id" "$name" "$port" >/dev/null 2>&1 || failed=1
-    done < <(users_enabled_instance_rows)
-    reconcile_isolated_instances >/dev/null 2>&1 || failed=1
-    apply_tc_limits >/dev/null 2>&1 || failed=1
-    pairs="$(multi_user_port_protocol_pairs 2>/dev/null || true)"
-    [ -z "$pairs" ] || open_firewall_for_pairs "$pairs" >/dev/null 2>&1 || failed=1
+    if load_install_state \
+       && reconcile_isolated_instances >/dev/null 2>&1 \
+       && apply_tc_limits >/dev/null 2>&1; then
+      pairs="$(multi_user_port_protocol_pairs 2>/dev/null || true)"
+      [ -z "$pairs" ] || open_firewall_for_pairs "$pairs" >/dev/null 2>&1 || failed=1
+    else
+      failed=1
+    fi
   fi
+  tuic_restore_runtime >/dev/null 2>&1 || {
+    [ -z "$(tuic_instance_ids)" ] || failed=1
+  }
   while IFS= read -r id; do
     [ -n "$id" ] || continue
     enabled="$(snell_state_field "$id" enabled 2>/dev/null || printf false)"
@@ -2738,6 +3522,24 @@ nobrand_start_enabled_services() {
     port="$(vless_sudoku_state_field listen_port)"
     nobrand_vless_sudoku_service_action start >/dev/null 2>&1 \
       && nb_wait_for_listener TCP "$port" 25 || failed=1
+  fi
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    enabled="$(tuic_state_field "$id" enabled 2>/dev/null || printf false)"
+    [ "$enabled" = true ] || continue
+    port="$(tuic_state_field "$id" listen_port)"
+    tuic_install_service_runtime >/dev/null 2>&1 \
+      && tuic_ensure_openrc_service "$id" >/dev/null 2>&1 \
+      && tuic_validate_config "$(tuic_config_file "$id")" \
+      && nb_firewall_open_pairs "UDP|${port}" >/dev/null 2>&1 \
+      && tuic_service_action "$id" start >/dev/null 2>&1 \
+      && nb_wait_for_listener UDP "$port" 25 \
+      && tuic_listener_owned_by_service "$id" "$port" || failed=1
+  done < <(tuic_instance_ids)
+  if [ -s "$NOBRAND_FORWARD_STATE_FILE" ]; then
+    forward_realm_restore_runtime >/dev/null 2>&1 \
+      && forward_apply_nft_state "$NOBRAND_FORWARD_STATE_FILE" >/dev/null 2>&1 \
+      && forward_realm_apply_state "$NOBRAND_FORWARD_STATE_FILE" >/dev/null 2>&1 || failed=1
   fi
   return "$failed"
 }
@@ -3047,7 +3849,7 @@ verify_package_sha256() {
 
 install_alpine_deps() {
   STAGE="安装 Alpine 依赖"
-  run apk add --no-cache bash curl tar ca-certificates iptables iproute2 python3 util-linux
+  run apk add --no-cache bash curl tar ca-certificates jq iptables iproute2 python3 procps-ng util-linux
   if [ "$(service_manager)" = openrc ]; then
     run apk add --no-cache openrc 2>/dev/null || true
   fi
@@ -3058,18 +3860,24 @@ ensure_management_dependencies() {
   STAGE="安装管理依赖"
   case "$pm" in
     deb)
-      command -v python3 >/dev/null 2>&1 && command -v tc >/dev/null 2>&1 \
-        && command -v unshare >/dev/null 2>&1 && command -v setpriv >/dev/null 2>&1 && return 0
+      command -v curl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 \
+        && command -v tar >/dev/null 2>&1 && command -v sha256sum >/dev/null 2>&1 \
+        && command -v python3 >/dev/null 2>&1 && command -v tc >/dev/null 2>&1 \
+        && command -v sysctl >/dev/null 2>&1 && command -v unshare >/dev/null 2>&1 \
+        && command -v setpriv >/dev/null 2>&1 && return 0
       run apt-get update
-      run apt-get install -y python3 iproute2 util-linux
+      run apt-get install -y curl ca-certificates jq tar coreutils python3 iproute2 procps util-linux
       ;;
     rpm)
-      command -v python3 >/dev/null 2>&1 && command -v tc >/dev/null 2>&1 \
-        && command -v unshare >/dev/null 2>&1 && command -v setpriv >/dev/null 2>&1 && return 0
+      command -v curl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 \
+        && command -v tar >/dev/null 2>&1 && command -v sha256sum >/dev/null 2>&1 \
+        && command -v python3 >/dev/null 2>&1 && command -v tc >/dev/null 2>&1 \
+        && command -v sysctl >/dev/null 2>&1 && command -v unshare >/dev/null 2>&1 \
+        && command -v setpriv >/dev/null 2>&1 && return 0
       if command -v dnf >/dev/null 2>&1; then
-        run dnf install -y python3 iproute util-linux
+        run dnf install -y curl ca-certificates jq tar coreutils python3 iproute procps-ng util-linux
       else
-        run yum install -y python3 iproute util-linux
+        run yum install -y curl ca-certificates jq tar coreutils python3 iproute procps-ng util-linux
       fi
       ;;
     alpine) install_alpine_deps ;;
@@ -4161,6 +4969,347 @@ nobrand_remove_vless_sudoku_service() {
   esac
 }
 
+# ---------- official sing-box runtime and isolated TUIC services ----------
+
+tuic_normalize_channel() {
+  case "${1:-stable}" in
+    stable|latest|pinned) printf '%s' "${1:-stable}" ;;
+    *) return 1 ;;
+  esac
+}
+
+tuic_runtime_asset_name() {
+  local version="$1" arch suffix=""
+  case "$(uname -m)" in
+    x86_64|amd64) arch=amd64 ;;
+    aarch64|arm64) arch=arm64 ;;
+    *) return 1 ;;
+  esac
+  [ ! -f /etc/alpine-release ] || suffix=-musl
+  printf 'sing-box-%s-linux-%s%s.tar.gz' "$version" "$arch" "$suffix"
+}
+
+tuic_tested_runtime_sha256() {
+  local asset="$1"
+  case "$asset" in
+    sing-box-1.13.20-linux-amd64.tar.gz) printf '%s' "$TESTED_SING_BOX_AMD64_SHA256" ;;
+    sing-box-1.13.20-linux-arm64.tar.gz) printf '%s' "$TESTED_SING_BOX_ARM64_SHA256" ;;
+    sing-box-1.13.20-linux-amd64-musl.tar.gz) printf '%s' "$TESTED_SING_BOX_AMD64_MUSL_SHA256" ;;
+    sing-box-1.13.20-linux-arm64-musl.tar.gz) printf '%s' "$TESTED_SING_BOX_ARM64_MUSL_SHA256" ;;
+    *) return 1 ;;
+  esac
+}
+
+tuic_valid_runtime_version() {
+  [[ "${1:-}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+}
+
+tuic_resolve_runtime() {
+  local channel version api response tag asset url digest stable_digest
+  channel="$(tuic_normalize_channel "${1:-stable}")" || return 1
+  version="${2:-}"
+  case "$channel" in
+    stable) version="$TESTED_SING_BOX_SERVER_VERSION"; api="${NOBRAND_SING_BOX_RELEASE_API}/tags/v${version}" ;;
+    latest) api="${NOBRAND_SING_BOX_RELEASE_API}/latest" ;;
+    pinned)
+      tuic_valid_runtime_version "$version" || return 1
+      api="${NOBRAND_SING_BOX_RELEASE_API}/tags/v${version}"
+      ;;
+  esac
+  response="$(curl -fsSL --connect-timeout 10 --max-time 60 \
+    -H 'Accept: application/vnd.github+json' -H 'User-Agent: NoBrand-OneClick' "$api")" || return 1
+  jq -e '.draft==false and .prerelease==false' <<<"$response" >/dev/null || return 1
+  tag="$(jq -r .tag_name <<<"$response")"
+  [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+  version="${tag#v}"
+  asset="$(tuic_runtime_asset_name "$version")" || return 1
+  url="$(jq -r --arg asset "$asset" '.assets[] | select(.name==$asset) | .browser_download_url' \
+    <<<"$response" | head -n1)"
+  digest="$(jq -r --arg asset "$asset" '.assets[] | select(.name==$asset) | .digest // empty' \
+    <<<"$response" | head -n1)"
+  digest="${digest#sha256:}"
+  [ -n "$url" ] && [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+  if [ "$channel" = stable ]; then
+    stable_digest="$(tuic_tested_runtime_sha256 "$asset")" || return 1
+    [ "$digest" = "$stable_digest" ] || return 1
+  fi
+  TUIC_RUNTIME_RESOLVED_VERSION="$version"
+  TUIC_RUNTIME_RESOLVED_URL="$url"
+  TUIC_RUNTIME_RESOLVED_SHA256="$digest"
+  TUIC_RUNTIME_RESOLVED_ASSET="$asset"
+}
+
+tuic_runtime_version() {
+  local binary="${1:-$NOBRAND_SING_BOX_BIN}"
+  [ -x "$binary" ] || return 1
+  "$binary" version 2>/dev/null | awk '$1=="sing-box" && $2=="version" {print $3; exit}'
+}
+
+tuic_download_runtime_candidate() {
+  local output="$1" channel="${2:-stable}" requested_version="${3:-}" archive extract_dir binary actual_sha actual_version
+  tuic_resolve_runtime "$channel" "$requested_version" || return 1
+  archive="$(mktemp_file .sing-box.tar.gz)" || return 1
+  extract_dir="$(mktemp_dir)" || return 1
+  curl -fL --connect-timeout 10 --max-time 300 -H 'User-Agent: NoBrand-OneClick' \
+    "$TUIC_RUNTIME_RESOLVED_URL" -o "$archive" || return 1
+  actual_sha="$(nobrand_sha256_file "$archive")" || return 1
+  [ "$actual_sha" = "$TUIC_RUNTIME_RESOLVED_SHA256" ] || {
+    warn 'official sing-box release digest mismatch'
+    return 1
+  }
+  tar --no-same-owner -C "$extract_dir" -xzf "$archive" || return 1
+  binary="$(find "$extract_dir" -mindepth 2 -maxdepth 2 -type f -name sing-box -print -quit)"
+  [ -n "$binary" ] && [ -f "$binary" ] || return 1
+  install -m 0755 "$binary" "$output" || return 1
+  actual_version="$(tuic_runtime_version "$output")" || return 1
+  [ "$actual_version" = "$TUIC_RUNTIME_RESOLVED_VERSION" ] || return 1
+  rm -f "$archive"
+  rm -rf -- "$extract_dir"
+}
+
+tuic_generate_runtime_metadata() {
+  local output="$1" channel="$2" version="$3"
+  jq -n --arg version "$version" --arg channel "$channel" \
+    --arg asset "$TUIC_RUNTIME_RESOLVED_ASSET" --arg source "$TUIC_RUNTIME_RESOLVED_URL" \
+    --arg sha256 "$TUIC_RUNTIME_RESOLVED_SHA256" --arg installed "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+    {ownership:"nobrand-v3",consumer:"tuic-v5",version:$version,channel:$channel,
+     asset:$asset,source_url:$source,sha256:$sha256,installed_at:$installed}
+  ' >"$output"
+}
+
+tuic_runtime_metadata_valid() {
+  local expected_version="${1:-}" expected_channel="${2:-}"
+  [ -s "$NOBRAND_SING_BOX_RUNTIME_META" ] || return 1
+  jq -e --arg version "$expected_version" --arg channel "$expected_channel" '
+    .ownership=="nobrand-v3" and .consumer=="tuic-v5"
+    and ($version=="" or .version==$version)
+    and ($channel=="" or .channel==$channel)
+    and (.sha256|test("^[0-9a-f]{64}$"))
+  ' "$NOBRAND_SING_BOX_RUNTIME_META" >/dev/null
+}
+
+tuic_snapshot_runtime_files() {
+  local snapshot="$1"
+  mkdir -p "$snapshot" || return 1
+  if [ -e "$NOBRAND_SING_BOX_BIN" ]; then
+    cp -a "$NOBRAND_SING_BOX_BIN" "$snapshot/binary"
+  else
+    : >"$snapshot/binary.absent"
+  fi
+  if [ -e "$NOBRAND_SING_BOX_RUNTIME_META" ]; then
+    cp -a "$NOBRAND_SING_BOX_RUNTIME_META" "$snapshot/metadata"
+  else
+    : >"$snapshot/metadata.absent"
+  fi
+}
+
+tuic_restore_runtime_files() {
+  local snapshot="$1"
+  if [ -e "$snapshot/binary" ]; then
+    mkdir -p "$(dirname "$NOBRAND_SING_BOX_BIN")" || return 1
+    nb_atomic_install_file "$snapshot/binary" "$NOBRAND_SING_BOX_BIN" 0755 || return 1
+  else
+    rm -f "$NOBRAND_SING_BOX_BIN"
+  fi
+  if [ -e "$snapshot/metadata" ]; then
+    mkdir -p "$(dirname "$NOBRAND_SING_BOX_RUNTIME_META")" || return 1
+    nb_atomic_install_file "$snapshot/metadata" "$NOBRAND_SING_BOX_RUNTIME_META" 0600 || return 1
+  else
+    rm -f "$NOBRAND_SING_BOX_RUNTIME_META"
+  fi
+}
+
+tuic_snapshot_restore_side_effects() {
+  local snapshot="$1"
+  mkdir -p "$snapshot/runtime" || return 1
+  tuic_snapshot_runtime_files "$snapshot/runtime" || return 1
+  if [ -e "$NOBRAND_TUIC_SYSTEMD_TEMPLATE" ]; then
+    cp -a "$NOBRAND_TUIC_SYSTEMD_TEMPLATE" "$snapshot/systemd-template" || return 1
+  else
+    : >"$snapshot/systemd-template.absent" || return 1
+  fi
+}
+
+tuic_remove_restore_attempt_resources() {
+  local id port failed=0
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    port="$(tuic_state_field "$id" listen_port 2>/dev/null || true)"
+    tuic_remove_service "$id" || failed=1
+    [ -z "$port" ] || nb_firewall_close_pairs "UDP|${port}" || failed=1
+  done < <(tuic_instance_ids)
+  [ "$failed" -eq 0 ]
+}
+
+tuic_restore_side_effect_snapshot() {
+  local snapshot="$1" failed=0
+  tuic_restore_runtime_files "$snapshot/runtime" || failed=1
+  if [ -e "$snapshot/systemd-template" ]; then
+    mkdir -p "$(dirname "$NOBRAND_TUIC_SYSTEMD_TEMPLATE")" || failed=1
+    cp -a "$snapshot/systemd-template" "$NOBRAND_TUIC_SYSTEMD_TEMPLATE" || failed=1
+  else
+    rm -f "$NOBRAND_TUIC_SYSTEMD_TEMPLATE" || failed=1
+  fi
+  [ "$(nb_service_manager)" != systemd ] || systemctl daemon-reload >/dev/null 2>&1 || failed=1
+  [ "$failed" -eq 0 ]
+}
+
+tuic_install_runtime() {
+  local channel="${1:-stable}" requested_version="${2:-}" candidate snapshot metadata_tmp version
+  candidate="$(mktemp_file .sing-box)" || return 1
+  tuic_download_runtime_candidate "$candidate" "$channel" "$requested_version" || return 1
+  snapshot="$(mktemp_dir)" || return 1
+  tuic_snapshot_runtime_files "$snapshot" || return 1
+  mkdir -p "$NOBRAND_BIN_DIR" "$(dirname "$NOBRAND_SING_BOX_RUNTIME_META")" || {
+    tuic_restore_runtime_files "$snapshot" || true
+    return 1
+  }
+  chmod 0755 "$NOBRAND_BIN_DIR" || {
+    tuic_restore_runtime_files "$snapshot" || true
+    return 1
+  }
+  if ! nb_atomic_install_file "$candidate" "$NOBRAND_SING_BOX_BIN" 0755; then
+    tuic_restore_runtime_files "$snapshot" || true
+    return 1
+  fi
+  version="$(tuic_runtime_version)" || {
+    tuic_restore_runtime_files "$snapshot" || true
+    return 1
+  }
+  metadata_tmp="$(mktemp_file .tuic-runtime-meta)" || {
+    tuic_restore_runtime_files "$snapshot" || true
+    return 1
+  }
+  tuic_generate_runtime_metadata "$metadata_tmp" "$channel" "$version" \
+    && nb_atomic_install_file "$metadata_tmp" "$NOBRAND_SING_BOX_RUNTIME_META" 0600 \
+    || {
+      tuic_restore_runtime_files "$snapshot" || true
+      return 1
+    }
+  rm -f "$candidate" "$metadata_tmp"
+  rm -rf -- "$snapshot"
+}
+
+tuic_validate_config() {
+  local config="$1" binary="${2:-$NOBRAND_SING_BOX_BIN}"
+  [ -x "$binary" ] && "$binary" check -c "$config" >/dev/null
+}
+
+tuic_systemd_unit() { printf 'nobrand-tuic@%s.service' "$1"; }
+tuic_openrc_service() { printf 'nobrand-tuic-%s' "$1"; }
+
+tuic_install_service_runtime() {
+  local manager tmp
+  manager="$(nb_service_manager)"
+  case "$manager" in
+    systemd)
+      tmp="$(mktemp_file .tuic-service)" || return 1
+      cat >"$tmp" <<EOF
+[Unit]
+Description=NoBrand TUIC v5 instance %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=${NOBRAND_SING_BOX_BIN} run -c ${NOBRAND_TUIC_CONFIG_DIR}/%i/config.json
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadOnlyPaths=${NOBRAND_TUIC_CONFIG_DIR} ${NOBRAND_SING_BOX_BIN}
+
+[Install]
+WantedBy=multi-user.target
+EOF
+      nb_atomic_install_file "$tmp" "$NOBRAND_TUIC_SYSTEMD_TEMPLATE" 0644 || return 1
+      systemctl daemon-reload
+      ;;
+    openrc) ;;
+    *) return 1 ;;
+  esac
+}
+
+tuic_ensure_openrc_service() {
+  local id="$1" path tmp
+  [ "$(nb_service_manager)" = openrc ] || return 0
+  path="${NOBRAND_TUIC_OPENRC_PREFIX}${id}"
+  tmp="$(mktemp_file .tuic-openrc)" || return 1
+  cat >"$tmp" <<EOF
+#!/sbin/openrc-run
+name="NoBrand TUIC v5 ${id}"
+command="${NOBRAND_SING_BOX_BIN}"
+command_args="run -c ${NOBRAND_TUIC_CONFIG_DIR}/${id}/config.json"
+command_background="yes"
+pidfile="/run/nobrand-tuic-${id}.pid"
+output_log="/var/log/nobrand-tuic-${id}.log"
+error_log="/var/log/nobrand-tuic-${id}.err"
+depend() { use net; after firewall; }
+EOF
+  nb_atomic_install_file "$tmp" "$path" 0755 || return 1
+  rc-update add "$(tuic_openrc_service "$id")" default >/dev/null 2>&1
+}
+
+tuic_service_action() {
+  local id="$1" action="$2" manager
+  manager="$(nb_service_manager)"
+  case "$manager" in
+    systemd)
+      [ "$action" != start ] || systemctl enable "$(tuic_systemd_unit "$id")" >/dev/null 2>&1
+      systemctl "$action" "$(tuic_systemd_unit "$id")"
+      ;;
+    openrc)
+      tuic_ensure_openrc_service "$id" || return 1
+      rc-service "$(tuic_openrc_service "$id")" "$action"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+tuic_service_active() {
+  local id="$1"
+  nb_service_is_active "$(tuic_systemd_unit "$id")" "$(tuic_openrc_service "$id")"
+}
+
+tuic_service_pid() {
+  local id="$1" manager pid_file
+  manager="$(nb_service_manager)"
+  case "$manager" in
+    systemd) systemctl show -p MainPID --value "$(tuic_systemd_unit "$id")" 2>/dev/null ;;
+    openrc)
+      pid_file="/run/nobrand-tuic-${id}.pid"
+      [ -s "$pid_file" ] && cat "$pid_file"
+      ;;
+  esac
+}
+
+tuic_listener_owned_by_service() {
+  local id="$1" port="$2" expected pid
+  expected="$(tuic_service_pid "$id" 2>/dev/null || true)"
+  [[ "$expected" =~ ^[0-9]+$ ]] && [ "$expected" -gt 1 ] || return 1
+  while IFS= read -r pid; do
+    [ "$pid" = "$expected" ] && return 0
+  done < <(nb_port_listener_pids UDP "$port")
+  return 1
+}
+
+tuic_remove_service() {
+  local id="$1" manager
+  manager="$(nb_service_manager)"
+  case "$manager" in
+    systemd)
+      systemctl disable --now "$(tuic_systemd_unit "$id")" >/dev/null 2>&1 || true
+      ;;
+    openrc)
+      rc-service "$(tuic_openrc_service "$id")" stop >/dev/null 2>&1 || true
+      rc-update del "$(tuic_openrc_service "$id")" default >/dev/null 2>&1 || true
+      rm -f "${NOBRAND_TUIC_OPENRC_PREFIX}${id}"
+      ;;
+  esac
+}
+
 random_token() {
   if command -v openssl >/dev/null 2>&1; then
     openssl rand -base64 12 | tr -dc 'a-zA-Z0-9' | head -c 10
@@ -4820,21 +5969,23 @@ install_instance_runtime() {
     return 1
   }
   run mkdir -p "$MITA_INSTANCES_DIR" "$MITA_INSTANCE_RUN_DIR" \
-    "$MITA_INSTANCE_METRICS_DIR" /usr/local/libexec /var/lib/mita
+    "$MITA_INSTANCE_METRICS_DIR" /usr/local/libexec /var/lib/mita || return 1
   # 配置子目录/文件属于 mita，但父目录必须至少允许 mita 组穿越。
-  run chown root:mita "$MITA_INSTANCES_DIR"
-  run chown mita:mita "$MITA_INSTANCE_RUN_DIR" "$MITA_INSTANCE_METRICS_DIR" /var/lib/mita
-  run chmod 0750 "$MITA_INSTANCES_DIR" "$MITA_INSTANCE_RUN_DIR" "$MITA_INSTANCE_METRICS_DIR"
+  run chown root:mita "$MITA_INSTANCES_DIR" || return 1
+  run chown mita:mita "$MITA_INSTANCE_RUN_DIR" "$MITA_INSTANCE_METRICS_DIR" /var/lib/mita \
+    || return 1
+  run chmod 0750 "$MITA_INSTANCES_DIR" "$MITA_INSTANCE_RUN_DIR" "$MITA_INSTANCE_METRICS_DIR" \
+    || return 1
 
   case "$sm" in
     systemd)
-      run mkdir -p "$(dirname "$MITA_INSTANCE_TMPFILES")"
+      run mkdir -p "$(dirname "$MITA_INSTANCE_TMPFILES")" || return 1
       cat >"$MITA_INSTANCE_TMPFILES" <<EOF
 d ${MITA_INSTANCE_RUN_DIR} 0750 mita mita -
 EOF
-      run chmod 0644 "$MITA_INSTANCE_TMPFILES"
+      run chmod 0644 "$MITA_INSTANCE_TMPFILES" || return 1
       if command -v systemd-tmpfiles >/dev/null 2>&1; then
-        run systemd-tmpfiles --create "$MITA_INSTANCE_TMPFILES"
+        run systemd-tmpfiles --create "$MITA_INSTANCE_TMPFILES" || return 1
       fi
       cat >"$MITA_INSTANCE_SYSTEMD_TEMPLATE" <<EOF
 [Unit]
@@ -4858,8 +6009,8 @@ NoNewPrivileges=true
 [Install]
 WantedBy=multi-user.target
 EOF
-      run chmod 0644 "$MITA_INSTANCE_SYSTEMD_TEMPLATE"
-      run systemctl daemon-reload
+      run chmod 0644 "$MITA_INSTANCE_SYSTEMD_TEMPLATE" || return 1
+      run systemctl daemon-reload || return 1
       ;;
     openrc)
       if ! command -v unshare >/dev/null 2>&1 \
@@ -4885,7 +6036,7 @@ exec unshare --mount --propagation private sh -c '
     env MITA_CONFIG_JSON_FILE="\$2" MITA_UDS_PATH="\$3" "\$4" run
 ' sh "\$metrics" "\$cfg" "\$sock" "${bin}"
 EOF
-      run chmod 0755 "$MITA_INSTANCE_RUNNER"
+      run chmod 0755 "$MITA_INSTANCE_RUNNER" || return 1
       ;;
   esac
 }
@@ -4969,11 +6120,16 @@ PY
     rm -f "$tmp"
     return 0
   fi
-  run mkdir -p "$dir" "$(instance_metrics_dir "$id")" "$MITA_INSTANCE_RUN_DIR"
-  run chown mita:mita "$dir" "$(instance_metrics_dir "$id")" "$MITA_INSTANCE_RUN_DIR"
-  run chmod 0750 "$dir" "$(instance_metrics_dir "$id")" "$MITA_INSTANCE_RUN_DIR"
-  install -o mita -g mita -m 0600 "$tmp" "${final}.new"
-  mv -f "${final}.new" "$final"
+  run mkdir -p "$dir" "$(instance_metrics_dir "$id")" "$MITA_INSTANCE_RUN_DIR" \
+    || { rm -f "$tmp"; return 1; }
+  run chown mita:mita "$dir" "$(instance_metrics_dir "$id")" "$MITA_INSTANCE_RUN_DIR" \
+    || { rm -f "$tmp"; return 1; }
+  run chmod 0750 "$dir" "$(instance_metrics_dir "$id")" "$MITA_INSTANCE_RUN_DIR" \
+    || { rm -f "$tmp"; return 1; }
+  install -o mita -g mita -m 0600 "$tmp" "${final}.new" \
+    || { rm -f "$tmp" "${final}.new"; return 1; }
+  mv -f "${final}.new" "$final" \
+    || { rm -f "$tmp" "${final}.new"; return 1; }
   rm -f "$tmp"
 }
 
@@ -11206,6 +12362,851 @@ nobrand_run_vless_sudoku_action() {
   esac
 }
 
+# ---------- TUIC v5: named instance, one QUIC listener, multiple users ----------
+
+tuic_protocol_scope_valid() {
+  [ "$TUIC_PROTOCOL_VERSION" = 5 ] \
+    && [ "$TUIC_V5_SUPPORTED" = true ] \
+    && [ "$TUIC_V1_SUPPORTED" = false ] \
+    && [ "$TUIC_V2_SUPPORTED" = false ] \
+    && [ "$TUIC_V3_SUPPORTED" = false ] \
+    && [ "$TUIC_V4_SUPPORTED" = false ]
+}
+
+tuic_valid_name() {
+  local value="${1:-}"
+  [ -n "$value" ] && [ "$(printf '%s' "$value" | wc -c | tr -d '[:space:]')" -le 64 ] \
+    && ! has_control_chars "$value" && [[ "$value" != *'|'* ]]
+}
+
+tuic_generate_instance_id() {
+  local value
+  value="$(openssl rand -hex 8 2>/dev/null || true)"
+  [ -n "$value" ] || value="$(printf '%08x%08x' "$RANDOM" "$RANDOM")"
+  printf 't%s' "$value"
+}
+
+tuic_generate_user_id() {
+  local value
+  value="$(openssl rand -hex 8 2>/dev/null || true)"
+  [ -n "$value" ] || value="$(printf '%08x%08x' "$RANDOM" "$RANDOM")"
+  printf 'u%s' "$value"
+}
+
+tuic_instance_ids() {
+  local path id
+  for path in "$NOBRAND_TUIC_STATE_DIR"/*/state.json; do
+    [ -f "$path" ] || continue
+    id="$(basename "$(dirname "$path")")"
+    [[ "$id" =~ ^t[0-9a-f]{16}$ ]] || continue
+    jq -e --arg id "$id" '
+      .schema_version==3 and .ownership=="nobrand-v3" and .protocol=="tuic"
+      and .tuic_version==5 and .instance_id==$id
+    ' "$path" >/dev/null 2>&1 || continue
+    printf '%s\n' "$id"
+  done
+}
+
+tuic_state_file() { printf '%s/%s/state.json' "$NOBRAND_TUIC_STATE_DIR" "$1"; }
+tuic_instance_config_dir() { printf '%s/%s' "$NOBRAND_TUIC_CONFIG_DIR" "$1"; }
+tuic_config_file() { printf '%s/config.json' "$(tuic_instance_config_dir "$1")"; }
+tuic_cert_file() { printf '%s/tuic-cert.pem' "$(tuic_instance_config_dir "$1")"; }
+tuic_key_file() { printf '%s/tuic-key.pem' "$(tuic_instance_config_dir "$1")"; }
+
+tuic_state_exists() {
+  local id="$1" state
+  state="$(tuic_state_file "$id")"
+  [ -s "$state" ] && jq -e --arg id "$id" '
+    .schema_version==3 and .ownership=="nobrand-v3" and .protocol=="tuic"
+    and .tuic_version==5 and .instance_id==$id
+  ' "$state" >/dev/null 2>&1
+}
+
+tuic_state_field() {
+  local id="$1" field="$2" state
+  state="$(tuic_state_file "$id")"
+  tuic_state_exists "$id" || return 1
+  jq -r --arg field "$field" 'if has($field) and .[$field]!=null then .[$field] else empty end' "$state"
+}
+
+tuic_find_id_by_name() {
+  local name="$1" id matched=""
+  while IFS= read -r id; do
+    [ "$(tuic_state_field "$id" name 2>/dev/null || true)" = "$name" ] || continue
+    [ -z "$matched" ] || return 1
+    matched="$id"
+  done < <(tuic_instance_ids)
+  [ -n "$matched" ] || return 1
+  printf '%s' "$matched"
+}
+
+tuic_resolve_instance_id() {
+  local selector="${1:-}" ids id
+  if [[ "$selector" =~ ^t[0-9a-f]{16}$ ]] && tuic_state_exists "$selector"; then
+    printf '%s' "$selector"
+    return 0
+  fi
+  [ -z "$selector" ] || tuic_find_id_by_name "$selector"
+  [ -n "$selector" ] && return $?
+  ids="$(tuic_instance_ids)"
+  [ "$(printf '%s\n' "$ids" | sed '/^$/d' | wc -l | tr -d '[:space:]')" -eq 1 ] || return 1
+  id="$(printf '%s\n' "$ids" | sed '/^$/d')"
+  printf '%s' "$id"
+}
+
+tuic_resolve_user_json() {
+  local id="$1" selector="${2:-}" state
+  state="$(tuic_state_file "$id")"
+  tuic_state_exists "$id" || return 1
+  if [ -z "$selector" ]; then
+    [ "$(jq '.users|length' "$state")" -eq 1 ] || return 1
+    jq -c '.users[0]' "$state"
+    return 0
+  fi
+  jq -ce --arg selector "$selector" '
+    [.users[] | select(.user_id==$selector or .name==$selector or .uuid==$selector)]
+    | if length==1 then .[0] else empty end
+  ' "$state"
+}
+
+tuic_generate_uuid() {
+  if command -v uuidgen >/dev/null 2>&1; then
+    uuidgen | tr '[:upper:]' '[:lower:]'
+  elif [ -r /proc/sys/kernel/random/uuid ]; then
+    tr '[:upper:]' '[:lower:]' </proc/sys/kernel/random/uuid
+  else
+    local hex
+    hex="$(openssl rand -hex 16)" || return 1
+    printf '%s-%s-4%s-%x%s-%s' "${hex:0:8}" "${hex:8:4}" "${hex:13:3}" \
+      "$((0x${hex:16:1} % 4 + 8))" "${hex:17:3}" "${hex:20:12}"
+  fi
+}
+
+tuic_generate_password() {
+  openssl rand -hex 24
+}
+
+tuic_user_json() {
+  local user_id="$1" name="$2" uuid="$3" password="$4" created_at="${5:-}"
+  [ -n "$created_at" ] || created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  jq -n --arg user_id "$user_id" --arg name "$name" --arg uuid "$uuid" \
+    --arg password "$password" --arg created "$created_at" '
+    {user_id:$user_id,name:$name,uuid:$uuid,password:$password,created_at:$created}
+  '
+}
+
+tuic_generate_certificate() {
+  local cert="$1" key="$2" sni="$3" tmp_cert tmp_key
+  command -v openssl >/dev/null 2>&1 || return 1
+  mkdir -p "$(dirname "$cert")" || return 1
+  chmod 0700 "$(dirname "$cert")" || return 1
+  tmp_key="$(mktemp "${key}.tmp.XXXXXX")" || return 1
+  tmp_cert="$(mktemp "${cert}.tmp.XXXXXX")" || return 1
+  openssl ecparam -genkey -name prime256v1 -out "$tmp_key" 2>/dev/null \
+    && openssl req -new -x509 -days 3650 -key "$tmp_key" -out "$tmp_cert" \
+      -subj "/CN=${sni}" 2>/dev/null \
+    && chmod 0600 "$tmp_key" \
+    && chmod 0644 "$tmp_cert" \
+    && mv -f "$tmp_key" "$key" \
+    && mv -f "$tmp_cert" "$cert" \
+    || { rm -f "$tmp_key" "$tmp_cert"; return 1; }
+}
+
+tuic_generate_server_config() {
+  local output="$1" instance_id="$2" listen="$3" port="$4" cert="$5" key="$6" sni="$7" users="$8"
+  jq -n --arg tag "nobrand-tuic-${instance_id}-in" --arg listen "$listen" --arg port "$port" \
+    --arg cert "$cert" --arg key "$key" --arg sni "$sni" --argjson users "$users" '
+    {
+      log:{level:"warn",timestamp:true},
+      inbounds:[{
+        type:"tuic",tag:$tag,listen:$listen,listen_port:($port|tonumber),
+        users:[$users[] | {name:.name,uuid:.uuid,password:.password}],
+        congestion_control:"cubic",zero_rtt_handshake:false,
+        tls:{enabled:true,server_name:$sni,alpn:["h3"],certificate_path:$cert,key_path:$key}
+      }],
+      outbounds:[{type:"direct",tag:"direct"}]
+    }
+  ' >"$output"
+}
+
+tuic_certificate_fingerprint() {
+  local cert="$1"
+  openssl x509 -in "$cert" -noout -fingerprint -sha256 2>/dev/null | sed 's/^sha256 Fingerprint=//;s/^SHA256 Fingerprint=//'
+}
+
+tuic_certificate_not_after() {
+  openssl x509 -in "$1" -noout -enddate 2>/dev/null | sed 's/^notAfter=//'
+}
+
+tuic_generate_state() {
+  local output="$1" instance_id="$2" name="$3" listen="$4" port="$5" mode="$6"
+  local advertise_host="$7" advertise_port="$8" sni="$9" channel="${10}" runtime_version="${11}"
+  local cert="${12}" key="${13}" users="${14}" created_at="${15:-}" updated_at fingerprint not_after
+  [ -n "$created_at" ] || created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  updated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  fingerprint="$(tuic_certificate_fingerprint "$cert" 2>/dev/null || true)"
+  not_after="$(tuic_certificate_not_after "$cert" 2>/dev/null || true)"
+  jq -n --arg instance_id "$instance_id" --arg name "$name" --arg listen "$listen" \
+    --arg port "$port" --arg mode "$mode" --arg advertise_host "$advertise_host" \
+    --arg advertise_port "$advertise_port" --arg sni "$sni" --arg channel "$channel" \
+    --arg runtime "$runtime_version" --arg cert "$cert" --arg key "$key" \
+    --arg fingerprint "$fingerprint" --arg not_after "$not_after" --argjson users "$users" \
+    --arg created "$created_at" --arg updated "$updated_at" '
+    {
+      schema_version:3,ownership:"nobrand-v3",protocol:"tuic",tuic_version:5,
+      instance_id:$instance_id,name:$name,listen_host:$listen,listen_port:($port|tonumber),transport:"udp",
+      advertise_mode:$mode,advertise_host:$advertise_host,
+      advertise_port:(if $advertise_port=="" then "" else ($advertise_port|tonumber) end),
+      sni:$sni,congestion_control:"cubic",zero_rtt_handshake:false,udp_relay_mode:"native",
+      runtime_channel:$channel,runtime_version:$runtime,
+      tls:{type:"self-signed",curve:"P-256",alpn:["h3"],certificate_path:$cert,key_path:$key,
+           fingerprint_sha256:$fingerprint,not_after:$not_after},
+      users:$users,enabled:true,created_at:$created,updated_at:$updated
+    }
+  ' >"$output"
+}
+
+tuic_config_matches_state() {
+  local id="$1" state config
+  state="$(tuic_state_file "$id")"
+  config="$(tuic_config_file "$id")"
+  tuic_state_exists "$id" && jq empty "$config" >/dev/null 2>&1 || return 1
+  jq -e --slurpfile state "$state" '
+    .inbounds|length==1
+    and .[0].type=="tuic"
+    and .[0].listen_port==$state[0].listen_port
+    and .[0].congestion_control=="cubic"
+    and .[0].zero_rtt_handshake==false
+    and .[0].tls.certificate_path==$state[0].tls.certificate_path
+    and .[0].tls.key_path==$state[0].tls.key_path
+    and ([.[0].users[]|{name,uuid,password}] == [$state[0].users[]|{name,uuid,password}])
+  ' "$config" >/dev/null
+}
+
+tuic_effective_endpoint() {
+  local id="$1" mode host port listen_port
+  mode="$(tuic_state_field "$id" advertise_mode)"
+  host="$(tuic_state_field "$id" advertise_host)"
+  port="$(tuic_state_field "$id" advertise_port)"
+  listen_port="$(tuic_state_field "$id" listen_port)"
+  printf '%s|%s' "$(nb_effective_advertise_host "$mode" "$host")" \
+    "$(nb_effective_advertise_port "$mode" "$port" "$listen_port")"
+}
+
+tuic_export_mihomo() {
+  local id="$1" selector="${2:-}" user_json endpoint host port name uuid password sni
+  user_json="$(tuic_resolve_user_json "$id" "$selector")" || return 1
+  endpoint="$(tuic_effective_endpoint "$id")"
+  host="${endpoint%%|*}" port="${endpoint#*|}"
+  name="$(jq -r .name <<<"$user_json")"
+  uuid="$(jq -r .uuid <<<"$user_json")"
+  password="$(jq -r .password <<<"$user_json")"
+  sni="$(tuic_state_field "$id" sni)"
+  cat <<EOF
+mixed-port: 7890
+allow-lan: false
+mode: global
+log-level: warning
+proxies:
+  - name: "NoBrand-TUIC-${name}"
+    type: tuic
+    server: "${host}"
+    port: ${port}
+    uuid: ${uuid}
+    password: ${password}
+    sni: "${sni}"
+    alpn: [h3]
+    skip-cert-verify: true
+    reduce-rtt: false
+    udp-relay-mode: native
+    congestion-controller: cubic
+    max-udp-relay-packet-size: 1400
+proxy-groups:
+  - name: NOBRAND
+    type: select
+    proxies: ["NoBrand-TUIC-${name}"]
+rules:
+  - MATCH,NOBRAND
+EOF
+}
+
+tuic_export_singbox() {
+  local id="$1" selector="${2:-}" user_json endpoint host port name uuid password sni
+  user_json="$(tuic_resolve_user_json "$id" "$selector")" || return 1
+  endpoint="$(tuic_effective_endpoint "$id")"
+  host="${endpoint%%|*}" port="${endpoint#*|}"
+  name="$(jq -r .name <<<"$user_json")"
+  uuid="$(jq -r .uuid <<<"$user_json")"
+  password="$(jq -r .password <<<"$user_json")"
+  sni="$(tuic_state_field "$id" sni)"
+  jq -n --arg tag "nobrand-tuic-${name}" --arg host "$host" --arg port "$port" \
+    --arg uuid "$uuid" --arg password "$password" --arg sni "$sni" '
+    {
+      log:{level:"warn",timestamp:true},
+      inbounds:[{type:"mixed",tag:"mixed-in",listen:"127.0.0.1",listen_port:1080}],
+      outbounds:[{
+        type:"tuic",tag:$tag,server:$host,server_port:($port|tonumber),uuid:$uuid,password:$password,
+        congestion_control:"cubic",udp_relay_mode:"native",zero_rtt_handshake:false,
+        tls:{enabled:true,server_name:$sni,insecure:true,alpn:["h3"]}
+      }],
+      route:{final:$tag}
+    }
+  '
+}
+
+# No current TUIC v5 specification defines a standardized URI. Exporters must
+# not manufacture one; Mihomo YAML and sing-box JSON are the canonical outputs.
+tuic_build_uri() { return 1; }
+
+tuic_set_endpoint_state() {
+  local id="$1" host="$2" port="$3" mode=custom state tmp
+  state="$(tuic_state_file "$id")"
+  tuic_state_exists "$id" || return 1
+  if [ -z "$host" ]; then
+    mode=auto
+    port=""
+  else
+    nb_validate_advertise_endpoint "$host" "$port" UDP || return 1
+    port="$(normalize_uint "$port")"
+  fi
+  tmp="$(mktemp_file .tuic-state)" || return 1
+  jq --arg mode "$mode" --arg host "$host" --arg port "$port" \
+    --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+    .advertise_mode=$mode | .advertise_host=$host
+    | .advertise_port=(if $port=="" then "" else ($port|tonumber) end) | .updated_at=$updated
+  ' "$state" >"$tmp" && nb_atomic_install_file "$tmp" "$state" 0600
+  rm -f "$tmp"
+}
+
+tuic_collect_install_requests() {
+  local old_port="" owner
+  tuic_protocol_scope_valid || die 'TUIC protocol scope constants invalid'
+  TUIC_NAME="${TUIC_NAME:-primary}"
+  tuic_valid_name "$TUIC_NAME" || die 'TUIC instance name 无效'
+  tuic_find_id_by_name "$TUIC_NAME" >/dev/null 2>&1 \
+    && { t "TUIC instance 已存在: ${TUIC_NAME}" "TUIC instance already exists: ${TUIC_NAME}"; return 2; }
+  if [ -z "${PORT:-}" ]; then
+    PORT="$(nb_select_available_port UDP)" || die '未找到可用 TUIC UDP port'
+    PORT_AUTO_SELECTED=1
+  else
+    nb_valid_port "$PORT" || die 'TUIC port 必须是 1025-65535'
+    PORT="$(normalize_uint "$PORT")"
+    nb_port_is_tail_base_reserved "$PORT" && die 'TUIC 禁止使用保留 xx00 port'
+    nb_port_available_for_transport "$PORT" UDP || {
+      owner="$(nb_registry_port_owner UDP "$PORT" 2>/dev/null || true)"
+      die "TUIC UDP/${PORT} 已占用${owner:+ by ${owner}}"
+    }
+  fi
+  if [ -z "${ADVERTISE_HOST:-}" ]; then
+    nb_require_explicit_endpoint_noninteractive
+  else
+    nb_validate_advertise_endpoint "$ADVERTISE_HOST" "$ADVERTISE_PORT" UDP || die 'TUIC Display Endpoint 无效'
+  fi
+  if [ -z "${TUIC_SNI:-}" ]; then TUIC_SNI=www.microsoft.com; fi
+  hysteria2_valid_sni "$TUIC_SNI" || die 'TUIC SNI 必须是有效 domain 或 IPv4'
+  TUIC_CHANNEL="$(tuic_normalize_channel "${TUIC_CHANNEL:-stable}")" || die 'TUIC runtime channel 无效'
+  if [ "$TUIC_CHANNEL" = pinned ]; then
+    tuic_valid_runtime_version "$TUIC_VERSION" || die 'pinned TUIC runtime 需要精确稳定版本'
+  fi
+  TUIC_USER="${TUIC_USER:-default}"
+  tuic_valid_name "$TUIC_USER" || die 'TUIC user name 无效'
+  [ -z "$old_port" ] || true
+}
+
+tuic_install_rollback() {
+  local id="$1" port="$2"
+  tuic_remove_service "$id" >/dev/null 2>&1 || true
+  nb_firewall_close_pairs "UDP|${port}" >/dev/null 2>&1 || true
+  find "$NOBRAND_TUIC_STATE_DIR/$id" -mindepth 1 -maxdepth 1 -delete 2>/dev/null || true
+  find "$NOBRAND_TUIC_CONFIG_DIR/$id" -mindepth 1 -maxdepth 1 -delete 2>/dev/null || true
+  rmdir "$NOBRAND_TUIC_STATE_DIR/$id" "$NOBRAND_TUIC_CONFIG_DIR/$id" 2>/dev/null || true
+}
+
+tuic_prepare_runtime_for_install() {
+  local channel="$1" requested_version="${2:-}" first_id current id state_version
+  first_id="$(tuic_instance_ids | head -n1)"
+  if [ -z "$first_id" ]; then
+    tuic_install_runtime "$channel" "$requested_version"
+    return
+  fi
+  current="$(tuic_runtime_version)" || die '现有 NoBrand TUIC runtime 缺失或不可执行'
+  tuic_runtime_metadata_valid "$current" "" || die '现有 NoBrand TUIC runtime ownership metadata 无效'
+  while IFS= read -r id; do
+    state_version="$(tuic_state_field "$id" runtime_version)"
+    [ "$state_version" = "$current" ] \
+      || die "TUIC instance ${id} runtime state 不一致，拒绝隐式替换共享 runtime"
+  done < <(tuic_instance_ids)
+  tuic_resolve_runtime "$channel" "$requested_version" || die '无法解析 official sing-box runtime'
+  [ "$TUIC_RUNTIME_RESOLVED_VERSION" = "$current" ] \
+    || die '新增 TUIC instance 不会隐式升级共享 runtime；请先执行 nobrand tuic upgrade-runtime'
+}
+
+tuic_install_transaction_rollback() {
+  local id="$1" port="$2" runtime_snapshot="$3" template_preexisting="$4"
+  tuic_install_rollback "$id" "$port"
+  tuic_restore_runtime_files "$runtime_snapshot" || warn 'TUIC install runtime rollback failed'
+  if [ "$template_preexisting" -eq 0 ] && [ -z "$(tuic_instance_ids)" ]; then
+    case "$NOBRAND_TUIC_SYSTEMD_TEMPLATE" in
+      /etc/systemd/system/nobrand-tuic@.service) rm -f "$NOBRAND_TUIC_SYSTEMD_TEMPLATE" ;;
+    esac
+    [ "$(nb_service_manager)" != systemd ] || systemctl daemon-reload >/dev/null 2>&1 || true
+  fi
+}
+
+install_tuic() {
+  local collect_rc=0 id="" user_id uuid password users cert key config state config_tmp="" state_tmp=""
+  local mode runtime_version runtime_snapshot template_preexisting=0
+  require_root
+  require_linux
+  nobrand_prepare_common
+  tuic_collect_install_requests || collect_rc=$?
+  [ "$collect_rc" -eq 0 ] || { [ "$collect_rc" -eq 2 ] && return 0; return "$collect_rc"; }
+  runtime_snapshot="$(mktemp_dir)" || return 1
+  tuic_snapshot_runtime_files "$runtime_snapshot" || return 1
+  [ ! -e "$NOBRAND_TUIC_SYSTEMD_TEMPLATE" ] || template_preexisting=1
+  tuic_prepare_runtime_for_install "$TUIC_CHANNEL" "$TUIC_VERSION" \
+    || { rm -rf -- "$runtime_snapshot"; die 'official sing-box runtime 准备失败'; }
+  runtime_version="$(tuic_runtime_version)" || {
+    tuic_restore_runtime_files "$runtime_snapshot" || true
+    rm -rf -- "$runtime_snapshot"
+    return 1
+  }
+  id="$(tuic_generate_instance_id)"
+  user_id="$(tuic_generate_user_id)"
+  uuid="$(tuic_generate_uuid)" || {
+    tuic_install_transaction_rollback "$id" "$PORT" "$runtime_snapshot" "$template_preexisting"
+    rm -rf -- "$runtime_snapshot"
+    return 1
+  }
+  password="$(tuic_generate_password)" || {
+    tuic_install_transaction_rollback "$id" "$PORT" "$runtime_snapshot" "$template_preexisting"
+    rm -rf -- "$runtime_snapshot"
+    return 1
+  }
+  users="[$(tuic_user_json "$user_id" "$TUIC_USER" "$uuid" "$password")]"
+  cert="$(tuic_cert_file "$id")" key="$(tuic_key_file "$id")"
+  config="$(tuic_config_file "$id")" state="$(tuic_state_file "$id")"
+  mkdir -p "$(dirname "$state")" "$(dirname "$config")" \
+    && chmod 0700 "$(dirname "$state")" "$(dirname "$config")" \
+    && tuic_generate_certificate "$cert" "$key" "$TUIC_SNI" \
+    && config_tmp="$(mktemp_file .tuic-config)" \
+    && state_tmp="$(mktemp_file .tuic-state)" || {
+      tuic_install_transaction_rollback "$id" "$PORT" "$runtime_snapshot" "$template_preexisting"
+      rm -f "$config_tmp" "$state_tmp"
+      rm -rf -- "$runtime_snapshot"
+      return 1
+    }
+  tuic_generate_server_config "$config_tmp" "$id" 0.0.0.0 "$PORT" "$cert" "$key" "$TUIC_SNI" "$users" \
+    && tuic_validate_config "$config_tmp" \
+    || {
+      tuic_install_transaction_rollback "$id" "$PORT" "$runtime_snapshot" "$template_preexisting"
+      rm -f "$config_tmp" "$state_tmp"
+      rm -rf -- "$runtime_snapshot"
+      return 1
+    }
+  mode="$(nb_endpoint_mode_from_values "$ADVERTISE_HOST")"
+  tuic_generate_state "$state_tmp" "$id" "$TUIC_NAME" 0.0.0.0 "$PORT" "$mode" \
+    "$ADVERTISE_HOST" "$ADVERTISE_PORT" "$TUIC_SNI" "$TUIC_CHANNEL" "$runtime_version" \
+    "$cert" "$key" "$users" || {
+      tuic_install_transaction_rollback "$id" "$PORT" "$runtime_snapshot" "$template_preexisting"
+      rm -f "$config_tmp" "$state_tmp"
+      rm -rf -- "$runtime_snapshot"
+      return 1
+    }
+  admin_lock_acquire || {
+    tuic_install_transaction_rollback "$id" "$PORT" "$runtime_snapshot" "$template_preexisting"
+    rm -f "$config_tmp" "$state_tmp"
+    rm -rf -- "$runtime_snapshot"
+    return 1
+  }
+  if ! nb_port_available_for_transport "$PORT" UDP \
+     || ! nb_atomic_install_file "$config_tmp" "$config" 0600 \
+     || ! nb_atomic_install_file "$state_tmp" "$state" 0600 \
+     || ! tuic_install_service_runtime \
+     || ! tuic_ensure_openrc_service "$id" \
+     || ! nb_firewall_open_pairs "UDP|${PORT}" \
+     || ! tuic_service_action "$id" start \
+     || ! nb_wait_for_listener UDP "$PORT" 25 \
+     || ! tuic_listener_owned_by_service "$id" "$PORT"; then
+    tuic_install_transaction_rollback "$id" "$PORT" "$runtime_snapshot" "$template_preexisting"
+    admin_lock_release
+    rm -f "$config_tmp" "$state_tmp"
+    rm -rf -- "$runtime_snapshot"
+    return 1
+  fi
+  admin_lock_release
+  rm -f "$config_tmp" "$state_tmp"
+  rm -rf -- "$runtime_snapshot"
+  nobrand_install_manager_script || true
+  tuic_show_user "$id" "$TUIC_USER"
+}
+
+tuic_commit_candidate_state() {
+  local id="$1" candidate_state="$2" state config config_tmp snapshot running port users
+  state="$(tuic_state_file "$id")" config="$(tuic_config_file "$id")"
+  port="$(jq -r .listen_port "$candidate_state")"
+  users="$(jq -c .users "$candidate_state")"
+  config_tmp="$(mktemp_file .tuic-config)" || return 1
+  tuic_generate_server_config "$config_tmp" "$id" "$(jq -r .listen_host "$candidate_state")" "$port" \
+    "$(jq -r .tls.certificate_path "$candidate_state")" "$(jq -r .tls.key_path "$candidate_state")" \
+    "$(jq -r .sni "$candidate_state")" "$users" || return 1
+  tuic_validate_config "$config_tmp" || return 1
+  snapshot="$(mktemp_dir)" || return 1
+  cp -a "$state" "$config" "$snapshot/" || return 1
+  running=0
+  tuic_service_active "$id" && running=1
+  if ! nb_atomic_install_file "$config_tmp" "$config" 0600 \
+     || ! nb_atomic_install_file "$candidate_state" "$state" 0600 \
+     || ! { [ "$running" -eq 0 ] || {
+          tuic_service_action "$id" restart \
+            && nb_wait_for_listener UDP "$port" 25 \
+            && tuic_listener_owned_by_service "$id" "$port"
+        }; }; then
+    cp -a "$snapshot/state.json" "$state" 2>/dev/null || true
+    cp -a "$snapshot/config.json" "$config" 2>/dev/null || true
+    [ "$running" -eq 0 ] || tuic_service_action "$id" restart >/dev/null 2>&1 || true
+    return 1
+  fi
+  rm -f "$config_tmp"
+  rm -rf -- "$snapshot"
+}
+
+tuic_user_add() {
+  local id="$1" name="$2" state candidate user_id uuid password user_json
+  tuic_valid_name "$name" || die 'TUIC user name 无效'
+  tuic_resolve_user_json "$id" "$name" >/dev/null 2>&1 && die "TUIC user 已存在: $name"
+  state="$(tuic_state_file "$id")" candidate="$(mktemp_file .tuic-state)" || return 1
+  user_id="$(tuic_generate_user_id)" uuid="$(tuic_generate_uuid)" password="$(tuic_generate_password)"
+  user_json="$(tuic_user_json "$user_id" "$name" "$uuid" "$password")"
+  jq --argjson user "$user_json" --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '.users += [$user] | .updated_at=$updated' "$state" >"$candidate" \
+    && tuic_commit_candidate_state "$id" "$candidate"
+  rm -f "$candidate"
+}
+
+tuic_user_delete() {
+  local id="$1" selector="$2" user_json user_id state candidate
+  user_json="$(tuic_resolve_user_json "$id" "$selector")" || die '找不到唯一 TUIC user'
+  user_id="$(jq -r .user_id <<<"$user_json")"
+  state="$(tuic_state_file "$id")" candidate="$(mktemp_file .tuic-state)" || return 1
+  [ "$(jq '.users|length' "$state")" -gt 1 ] || die 'TUIC instance 至少保留一个 user；请卸载 instance'
+  jq --arg user_id "$user_id" --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '.users |= map(select(.user_id!=$user_id)) | .updated_at=$updated' "$state" >"$candidate" \
+    && tuic_commit_candidate_state "$id" "$candidate"
+  rm -f "$candidate"
+}
+
+tuic_user_rotate() {
+  local id="$1" selector="$2" user_json user_id state candidate uuid password
+  user_json="$(tuic_resolve_user_json "$id" "$selector")" || die '找不到唯一 TUIC user'
+  user_id="$(jq -r .user_id <<<"$user_json")"
+  uuid="$(tuic_generate_uuid)" password="$(tuic_generate_password)"
+  state="$(tuic_state_file "$id")" candidate="$(mktemp_file .tuic-state)" || return 1
+  jq --arg user_id "$user_id" --arg uuid "$uuid" --arg password "$password" \
+    --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+    (.users[] | select(.user_id==$user_id)) |= (.uuid=$uuid | .password=$password)
+    | .updated_at=$updated
+  ' "$state" >"$candidate" && tuic_commit_candidate_state "$id" "$candidate"
+  rm -f "$candidate"
+}
+
+tuic_user_list() {
+  local id="$1"
+  jq -r '.users[] | [.name,.uuid,.created_at] | @tsv' "$(tuic_state_file "$id")"
+}
+
+tuic_show_user() {
+  local id="$1" selector="${2:-}" user_json endpoint
+  user_json="$(tuic_resolve_user_json "$id" "$selector")" || return 1
+  endpoint="$(tuic_effective_endpoint "$id")"
+  printf 'TUIC v5 instance: %s\nUser: %s\nDisplay Endpoint: %s:%s\nSNI: %s\nUUID: %s\nPassword: %s\n' \
+    "$(tuic_state_field "$id" name)" "$(jq -r .name <<<"$user_json")" \
+    "${endpoint%%|*}" "${endpoint#*|}" "$(tuic_state_field "$id" sni)" \
+    "$(jq -r .uuid <<<"$user_json")" "$(jq -r .password <<<"$user_json")"
+}
+
+tuic_export_user() {
+  local id="$1" selector="${2:-}" uri
+  printf '%s\n' '===== MIHOMO YAML ====='
+  tuic_export_mihomo "$id" "$selector"
+  printf '%s\n' '' '===== SING-BOX JSON ====='
+  tuic_export_singbox "$id" "$selector"
+  if uri="$(tuic_build_uri "$id" "$selector" 2>/dev/null)"; then
+    printf '\nTUIC URI: %s\n' "$uri"
+  else
+    printf '%s\n' '' 'TUIC URI: unavailable (no upstream-standardized v5 URI confirmed).'
+  fi
+}
+
+tuic_node_rows() {
+  local id endpoint status user
+  while IFS= read -r id; do
+    endpoint="$(tuic_effective_endpoint "$id")"
+    status=Stopped
+    tuic_service_active "$id" && nb_port_is_listening UDP "$(tuic_state_field "$id" listen_port)" && status=Running
+    while IFS= read -r user; do
+      printf 'TUIC v5|%s/%s|%s:%s|%s|UDP\n' "$(tuic_state_field "$id" name)" \
+        "$(jq -r .name <<<"$user")" "${endpoint%%|*}" "${endpoint#*|}" "$status"
+    done < <(jq -c '.users[]' "$(tuic_state_file "$id")")
+  done < <(tuic_instance_ids)
+}
+
+tuic_doctor_one() {
+  local id="$1" failed=0 port cert key runtime expected
+  port="$(tuic_state_field "$id" listen_port)"
+  cert="$(jq -r .tls.certificate_path "$(tuic_state_file "$id")")"
+  key="$(jq -r .tls.key_path "$(tuic_state_file "$id")")"
+  runtime="$(tuic_runtime_version 2>/dev/null || true)"
+  expected="$(tuic_state_field "$id" runtime_version)"
+  [ "$runtime" = "$expected" ] && nb_doctor_line PASS "sing-box ${runtime}" \
+    || { nb_doctor_line FAIL "sing-box version ${runtime:-missing}, expected ${expected}"; failed=1; }
+  tuic_config_matches_state "$id" && tuic_validate_config "$(tuic_config_file "$id")" \
+    && nb_doctor_line PASS "TUIC v5 config $(tuic_state_field "$id" name)" \
+    || { nb_doctor_line FAIL "TUIC config $(tuic_state_field "$id" name)"; failed=1; }
+  tuic_service_active "$id" && nb_doctor_line PASS 'service active' \
+    || { nb_doctor_line FAIL 'service inactive'; failed=1; }
+  nb_port_is_listening UDP "$port" && tuic_listener_owned_by_service "$id" "$port" \
+    && nb_doctor_line PASS "same-process UDP/${port}" \
+    || { nb_doctor_line FAIL "same-process UDP/${port}"; failed=1; }
+  nb_firewall_binding_owned UDP "$port" && nb_doctor_line PASS "firewall UDP/${port}" \
+    || { nb_doctor_line FAIL "firewall UDP/${port}"; failed=1; }
+  [ -s "$cert" ] && openssl x509 -in "$cert" -checkend 2592000 -noout >/dev/null 2>&1 \
+    && nb_doctor_line PASS 'TLS certificate valid beyond 30 days' \
+    || { nb_doctor_line FAIL 'TLS certificate missing/expiring'; failed=1; }
+  [ "$(stat -c '%a' "$key" 2>/dev/null || true)" = 600 ] \
+    && nb_doctor_line PASS 'TLS P-256 key mode=0600' \
+    || { nb_doctor_line FAIL 'TLS key permission'; failed=1; }
+  jq -e '.users|length>0 and all(.[]; .uuid|test("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"))' \
+    "$(tuic_state_file "$id")" >/dev/null \
+    && nb_doctor_line PASS 'TUIC v5 UUID+password users' \
+    || { nb_doctor_line FAIL 'TUIC users'; failed=1; }
+  return "$failed"
+}
+
+tuic_doctor_all() {
+  local id failed=0 found=0
+  while IFS= read -r id; do
+    found=1
+    tuic_doctor_one "$id" || failed=1
+  done < <(tuic_instance_ids)
+  [ "$found" -eq 1 ] || nb_doctor_line INFO 'TUIC v5 not installed'
+  return "$failed"
+}
+
+tuic_status() {
+  local id endpoint
+  id="$(tuic_resolve_instance_id "${TUIC_NAME:-}")" || { t 'TUIC instance 未安装或不唯一' 'TUIC instance missing or ambiguous'; return 0; }
+  endpoint="$(tuic_effective_endpoint "$id")"
+  printf 'TUIC v5\n  Instance: %s\n  Runtime: %s (%s)\n  Service: %s\n  UDP listener: %s\n  Display Endpoint: %s:%s\n  TLS: self-signed ECDSA P-256 / h3\n  Users: %s\n' \
+    "$(tuic_state_field "$id" name)" "$(tuic_state_field "$id" runtime_version)" \
+    "$(tuic_state_field "$id" runtime_channel)" \
+    "$(tuic_service_active "$id" && printf Running || printf Stopped)" \
+    "$(tuic_state_field "$id" listen_port)" "${endpoint%%|*}" "${endpoint#*|}" \
+    "$(jq '.users|length' "$(tuic_state_file "$id")")"
+}
+
+tuic_service_command() {
+  local id action="$1" port
+  id="$(tuic_resolve_instance_id "${TUIC_NAME:-}")" || die '请用 --name 指定 TUIC instance'
+  port="$(tuic_state_field "$id" listen_port)"
+  tuic_service_action "$id" "$action" || return 1
+  case "$action" in
+    start|restart) nb_wait_for_listener UDP "$port" 25 && tuic_listener_owned_by_service "$id" "$port" ;;
+  esac
+}
+
+remove_tuic_instance() {
+  local id port config_dir state_dir
+  id="$(tuic_resolve_instance_id "${TUIC_NAME:-}")" || die '请用 --name 指定 TUIC instance'
+  port="$(tuic_state_field "$id" listen_port)"
+  config_dir="$(tuic_instance_config_dir "$id")" state_dir="$(dirname "$(tuic_state_file "$id")")"
+  tuic_remove_service "$id" || return 1
+  nb_firewall_close_pairs "UDP|${port}" || return 1
+  find "$config_dir" -mindepth 1 -maxdepth 1 -delete
+  find "$state_dir" -mindepth 1 -maxdepth 1 -delete
+  rmdir "$config_dir" "$state_dir" 2>/dev/null || true
+  if [ -z "$(tuic_instance_ids)" ]; then
+    rm -f "$NOBRAND_SING_BOX_BIN" "$NOBRAND_SING_BOX_RUNTIME_META"
+    case "$NOBRAND_TUIC_SYSTEMD_TEMPLATE" in
+      /etc/systemd/system/nobrand-tuic@.service) rm -f "$NOBRAND_TUIC_SYSTEMD_TEMPLATE" ;;
+    esac
+    [ "$(nb_service_manager)" != systemd ] || systemctl daemon-reload
+  fi
+}
+
+tuic_upgrade_runtime_rollback() {
+  local snapshot="$1" active_file="$2" id port failed=0 state_snapshot
+  tuic_restore_runtime_files "$snapshot/runtime" || failed=1
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    state_snapshot="$snapshot/states/${id}.json"
+    [ ! -s "$state_snapshot" ] \
+      || nb_atomic_install_file "$state_snapshot" "$(tuic_state_file "$id")" 0600 \
+      || failed=1
+  done < <(tuic_instance_ids)
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    port="$(tuic_state_field "$id" listen_port 2>/dev/null || true)"
+    tuic_service_action "$id" restart >/dev/null 2>&1 \
+      && nb_wait_for_listener UDP "$port" 25 \
+      && tuic_listener_owned_by_service "$id" "$port" || failed=1
+  done <"$active_file"
+  [ "$failed" -eq 0 ]
+}
+
+tuic_upgrade_runtime() {
+  local id version state tmp candidate metadata_tmp snapshot active_file port failed=0
+  [ -n "$(tuic_instance_ids)" ] || die '没有可升级的 TUIC instance'
+  candidate="$(mktemp_file .sing-box-upgrade)" || return 1
+  metadata_tmp="$(mktemp_file .tuic-runtime-meta)" || return 1
+  snapshot="$(mktemp_dir)" || return 1
+  active_file="$snapshot/active.ids"
+  : >"$active_file"
+  mkdir -p "$snapshot/runtime" "$snapshot/states" || return 1
+  tuic_download_runtime_candidate "$candidate" "$TUIC_CHANNEL" "$TUIC_VERSION" || {
+    rm -f "$candidate" "$metadata_tmp"
+    rm -rf -- "$snapshot"
+    return 1
+  }
+  version="$(tuic_runtime_version "$candidate")" || return 1
+  tuic_generate_runtime_metadata "$metadata_tmp" "$TUIC_CHANNEL" "$version" || return 1
+  while IFS= read -r id; do
+    tuic_validate_config "$(tuic_config_file "$id")" "$candidate" || failed=1
+  done < <(tuic_instance_ids)
+  [ "$failed" -eq 0 ] || {
+    rm -f "$candidate" "$metadata_tmp"
+    rm -rf -- "$snapshot"
+    return 1
+  }
+  admin_lock_acquire || return 1
+  tuic_snapshot_runtime_files "$snapshot/runtime" || {
+    admin_lock_release
+    return 1
+  }
+  while IFS= read -r id; do
+    cp -a "$(tuic_state_file "$id")" "$snapshot/states/${id}.json" || failed=1
+    tuic_service_active "$id" && printf '%s\n' "$id" >>"$active_file"
+  done < <(tuic_instance_ids)
+  if [ "$failed" -ne 0 ] \
+     || ! nb_atomic_install_file "$candidate" "$NOBRAND_SING_BOX_BIN" 0755 \
+     || ! nb_atomic_install_file "$metadata_tmp" "$NOBRAND_SING_BOX_RUNTIME_META" 0600 \
+     || [ "$(tuic_runtime_version 2>/dev/null || true)" != "$version" ]; then
+    tuic_upgrade_runtime_rollback "$snapshot" "$active_file" \
+      || warn 'TUIC runtime upgrade rollback verification failed'
+    admin_lock_release
+    rm -f "$candidate" "$metadata_tmp"
+    rm -rf -- "$snapshot"
+    return 1
+  fi
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    port="$(tuic_state_field "$id" listen_port)"
+    if ! tuic_service_action "$id" restart \
+       || ! nb_wait_for_listener UDP "$port" 25 \
+       || ! tuic_listener_owned_by_service "$id" "$port"; then
+      failed=1
+      break
+    fi
+  done <"$active_file"
+  if [ "$failed" -eq 0 ]; then
+    while IFS= read -r id; do
+      state="$(tuic_state_file "$id")"
+      tmp="$(mktemp_file .tuic-state)" || { failed=1; break; }
+      jq --arg version "$version" --arg channel "$TUIC_CHANNEL" \
+        --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        '.runtime_version=$version | .runtime_channel=$channel | .updated_at=$updated' "$state" >"$tmp" \
+        && nb_atomic_install_file "$tmp" "$state" 0600 || failed=1
+      rm -f "$tmp"
+      [ "$failed" -eq 0 ] || break
+    done < <(tuic_instance_ids)
+  fi
+  if [ "$failed" -ne 0 ]; then
+    tuic_upgrade_runtime_rollback "$snapshot" "$active_file" \
+      || warn 'TUIC runtime upgrade rollback verification failed'
+    admin_lock_release
+    rm -f "$candidate" "$metadata_tmp"
+    rm -rf -- "$snapshot"
+    return 1
+  fi
+  admin_lock_release
+  rm -f "$candidate" "$metadata_tmp"
+  rm -rf -- "$snapshot"
+}
+
+tuic_restore_runtime() {
+  local first_id channel version current id state_version metadata_tmp
+  first_id="$(tuic_instance_ids | head -n1)"
+  [ -n "$first_id" ] || return 0
+  channel="$(tuic_state_field "$first_id" runtime_channel)"
+  version="$(tuic_state_field "$first_id" runtime_version)"
+  while IFS= read -r id; do
+    state_version="$(tuic_state_field "$id" runtime_version)"
+    [ "$state_version" = "$version" ] || return 1
+  done < <(tuic_instance_ids)
+  current="$(tuic_runtime_version 2>/dev/null || true)"
+  if [ "$current" != "$version" ] || ! tuic_runtime_metadata_valid "$version" ""; then
+    tuic_install_runtime pinned "$version" || return 1
+    metadata_tmp="$(mktemp_file .tuic-runtime-meta)" || return 1
+    jq --arg channel "$channel" '.channel=$channel' "$NOBRAND_SING_BOX_RUNTIME_META" >"$metadata_tmp" \
+      && nb_atomic_install_file "$metadata_tmp" "$NOBRAND_SING_BOX_RUNTIME_META" 0600 || return 1
+    rm -f "$metadata_tmp"
+  fi
+  tuic_install_service_runtime
+}
+
+nobrand_run_tuic_action() {
+  local id
+  case "${TUIC_ACTION:-menu}" in
+    install) install_tuic ;;
+    start|stop|restart) tuic_service_command "$TUIC_ACTION" ;;
+    status) tuic_status ;;
+    doctor) tuic_doctor_all ;;
+    show)
+      id="$(tuic_resolve_instance_id "${TUIC_NAME:-}")" || die '请用 --name 指定 TUIC instance'
+      tuic_show_user "$id" "${TUIC_USER:-}"
+      ;;
+    export)
+      id="$(tuic_resolve_instance_id "${TUIC_NAME:-}")" || die '请用 --name 指定 TUIC instance'
+      tuic_export_user "$id" "${TUIC_USER:-}"
+      ;;
+    set-endpoint)
+      id="$(tuic_resolve_instance_id "${TUIC_NAME:-}")" || die '请用 --name 指定 TUIC instance'
+      tuic_set_endpoint_state "$id" "${ADVERTISE_HOST:-}" "${ADVERTISE_PORT:-}"
+      ;;
+    user-add)
+      id="$(tuic_resolve_instance_id "${TUIC_NAME:-}")" || die '请用 --name 指定 TUIC instance'
+      tuic_user_add "$id" "$TUIC_USER"
+      ;;
+    user-delete)
+      id="$(tuic_resolve_instance_id "${TUIC_NAME:-}")" || die '请用 --name 指定 TUIC instance'
+      tuic_user_delete "$id" "$TUIC_USER"
+      ;;
+    user-list)
+      id="$(tuic_resolve_instance_id "${TUIC_NAME:-}")" || die '请用 --name 指定 TUIC instance'
+      tuic_user_list "$id"
+      ;;
+    user-show)
+      id="$(tuic_resolve_instance_id "${TUIC_NAME:-}")" || die '请用 --name 指定 TUIC instance'
+      tuic_show_user "$id" "$TUIC_USER"
+      ;;
+    user-rotate)
+      id="$(tuic_resolve_instance_id "${TUIC_NAME:-}")" || die '请用 --name 指定 TUIC instance'
+      tuic_user_rotate "$id" "$TUIC_USER"
+      ;;
+    upgrade-runtime) tuic_upgrade_runtime ;;
+    uninstall) remove_tuic_instance ;;
+    menu) tuic_status ;;
+    help)
+      cat <<'EOF'
+nobrand tuic install|start|stop|restart|status|doctor|show|export|set-endpoint|upgrade-runtime|uninstall
+nobrand tuic user add|delete|list|show|rotate
+TUIC v5 only; official sing-box; UDP/QUIC; independent UUID + password per user.
+EOF
+      ;;
+    *) die "未知 TUIC 操作: ${TUIC_ACTION}" ;;
+  esac
+}
+
 firewall_owned_has() {
   local key="$1"
   [ -f "$MITA_FIREWALL_OWNED_STATE" ] \
@@ -11603,6 +13604,3086 @@ client_protocol_label() {
   else
     printf '%s' "${PROTOCOL:-TCP}"
   fi
+}
+
+# ---------- SSH Tunnel: existing-OpenSSH policy and dedicated identities ----------
+
+ssh_tunnel_state_exists() {
+  [ -s "$NOBRAND_SSH_STATE_FILE" ] && jq empty "$NOBRAND_SSH_STATE_FILE" >/dev/null 2>&1
+}
+
+ssh_tunnel_state_field() {
+  local field="$1"
+  ssh_tunnel_state_exists || return 1
+  jq -r --arg field "$field" \
+    'if has($field) and .[$field] != null then .[$field] else empty end' \
+    "$NOBRAND_SSH_STATE_FILE"
+}
+
+ssh_tunnel_valid_label() {
+  local value="${1:-}"
+  [ -n "$value" ] || return 1
+  [ "$(printf '%s' "$value" | wc -c | tr -d '[:space:]')" -le 64 ] || return 1
+  ! has_control_chars "$value" && [[ "$value" != *'|'* ]]
+}
+
+ssh_tunnel_generate_account_id() {
+  local value
+  if command -v openssl >/dev/null 2>&1; then
+    value="$(openssl rand -hex 8 2>/dev/null || true)"
+  fi
+  [ -n "${value:-}" ] || value="$(printf '%08x%08x' "$RANDOM" "$RANDOM")"
+  printf 'a%s' "$value"
+}
+
+ssh_tunnel_linux_username() {
+  local label="$1" account_id="$2" slug
+  slug="$(printf '%s' "$label" | tr '[:upper:]' '[:lower:]' \
+    | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' | cut -c1-14)"
+  [ -n "$slug" ] || slug=user
+  printf 'nbt-%s-%s' "$slug" "${account_id#a}" | cut -c1-31
+}
+
+ssh_tunnel_nologin_shell() {
+  local candidate
+  for candidate in /usr/sbin/nologin /sbin/nologin /bin/false; do
+    [ -x "$candidate" ] && { printf '%s' "$candidate"; return 0; }
+  done
+  return 1
+}
+
+ssh_tunnel_generate_policy() {
+  local output="$1" nologin_shell="${2:-}" auth_pattern
+  [ -n "$nologin_shell" ] || nologin_shell="$(ssh_tunnel_nologin_shell)" || return 1
+  auth_pattern="${NOBRAND_SSH_AUTHORIZED_KEYS_DIR}/%u"
+  cat >"$output" <<EOF
+Match Group ${NOBRAND_SSH_GROUP}
+    AuthenticationMethods publickey
+    PubkeyAuthentication yes
+    PasswordAuthentication no
+    KbdInteractiveAuthentication no
+    AuthorizedKeysFile ${auth_pattern}
+    AllowTcpForwarding yes
+    AllowStreamLocalForwarding no
+    GatewayPorts no
+    PermitTTY no
+    X11Forwarding no
+    AllowAgentForwarding no
+    PermitTunnel no
+    PermitUserRC no
+    MaxSessions 0
+    ForceCommand ${nologin_shell}
+Match all
+EOF
+  chmod 0600 "$output" 2>/dev/null || true
+}
+
+ssh_tunnel_sshd_binary() {
+  local candidate
+  for candidate in "${NOBRAND_SSHD_BIN:-}" /usr/sbin/sshd /sbin/sshd; do
+    [ -n "$candidate" ] && [ -x "$candidate" ] && { printf '%s' "$candidate"; return 0; }
+  done
+  command -v sshd 2>/dev/null || return 1
+}
+
+ssh_tunnel_sshd_test() {
+  local config="${1:-$NOBRAND_SSH_CONFIG_MAIN}" sshd
+  sshd="$(ssh_tunnel_sshd_binary)" || return 1
+  "$sshd" -t -f "$config"
+}
+
+ssh_tunnel_sshd_effective() {
+  local config="$1" user="$2" host="${3:-localhost}" addr="${4:-127.0.0.1}" sshd
+  sshd="$(ssh_tunnel_sshd_binary)" || return 1
+  "$sshd" -T -f "$config" -C "user=${user},host=${host},addr=${addr}"
+}
+
+ssh_tunnel_effective_policy_valid() {
+  local config="$1" user="$2" effective expected key value
+  effective="$(ssh_tunnel_sshd_effective "$config" "$user")" || return 1
+  while IFS='|' read -r key expected; do
+    value="$(printf '%s\n' "$effective" | awk -v key="$key" '$1==key {$1=""; sub(/^ /,""); print; exit}')"
+    [ "$value" = "$expected" ] || {
+      warn "SSH Tunnel effective policy mismatch: ${key}=${value:-missing}, expected ${expected}"
+      return 1
+    }
+  done <<EOF
+authenticationmethods|publickey
+pubkeyauthentication|yes
+passwordauthentication|no
+kbdinteractiveauthentication|no
+allowtcpforwarding|yes
+allowstreamlocalforwarding|no
+gatewayports|no
+permittty|no
+x11forwarding|no
+allowagentforwarding|no
+permittunnel|no
+permituserrc|no
+maxsessions|0
+forcecommand|$(ssh_tunnel_nologin_shell)
+EOF
+}
+
+ssh_tunnel_detect_real_port() {
+  local sshd output
+  sshd="$(ssh_tunnel_sshd_binary)" || return 1
+  output="$("$sshd" -T -f "$NOBRAND_SSH_CONFIG_MAIN" 2>/dev/null)" || return 1
+  printf '%s\n' "$output" | awk '$1=="port" && $2 ~ /^[0-9]+$/ {print $2; exit}'
+}
+
+ssh_tunnel_default_display_port() {
+  local ip base real_port
+  ip="$(nb_detect_local_ipv4 2>/dev/null || true)"
+  if [ -n "$ip" ]; then
+    base="$(nb_port_base_for_ip "$ip" 2>/dev/null || true)"
+    if [ -n "$base" ]; then
+      printf '%s' "$base"
+      return 0
+    fi
+  fi
+  real_port="$(ssh_tunnel_detect_real_port 2>/dev/null || true)"
+  valid_advertise_port "$real_port" || return 1
+  printf '%s' "$(normalize_uint "$real_port")"
+}
+
+ssh_tunnel_generate_state() {
+  local output="$1" advertise_mode="$2" advertise_host="$3" advertise_port="$4"
+  local real_port="$5" strategy="$6" managed_path="$7" users="$8" created_at="${9:-}"
+  local updated_at
+  [ -n "$created_at" ] || created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  updated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  jq -n --arg mode "$advertise_mode" --arg host "$advertise_host" \
+    --arg advertise_port "$advertise_port" --arg real_port "$real_port" \
+    --arg group "$NOBRAND_SSH_GROUP" --arg strategy "$strategy" \
+    --arg managed_path "$managed_path" --argjson users "$users" \
+    --arg created "$created_at" --arg updated "$updated_at" '
+    {
+      schema_version:3,
+      ownership:"nobrand-v3",
+      protocol:"ssh-tunnel",
+      group:$group,
+      external_listener:true,
+      managed_listener:false,
+      managed_firewall:false,
+      real_port:($real_port|tonumber),
+      advertise_mode:$mode,
+      advertise_host:$host,
+      advertise_port:($advertise_port|tonumber),
+      config_strategy:$strategy,
+      managed_config_path:$managed_path,
+      policy_applied:false,
+      pending_operation:"",
+      pending_watchdog_token:"",
+      pending_origin_connection:"",
+      users:$users,
+      created_at:$created,
+      updated_at:$updated
+    }
+  ' >"$output"
+}
+
+ssh_tunnel_user_json() {
+  local account_id="$1" label="$2" linux_user="$3" uid="$4" fingerprint="$5"
+  local created_at="${6:-}"
+  [ -n "$created_at" ] || created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  jq -n --arg account_id "$account_id" --arg display_name "$label" --arg linux_user "$linux_user" \
+    --arg uid "$uid" --arg group "$NOBRAND_SSH_GROUP" --arg fingerprint "$fingerprint" \
+    --arg created "$created_at" '
+    {
+      account_id:$account_id,
+      display_name:$display_name,
+      linux_user:$linux_user,
+      uid:($uid|tonumber),
+      group:$group,
+      key_fingerprint:$fingerprint,
+      created_at:$created
+    }
+  '
+}
+
+ssh_tunnel_resolve_user_json() {
+  local selector="${1:-}"
+  ssh_tunnel_state_exists || return 1
+  [ -n "$selector" ] || {
+    [ "$(jq '.users | length' "$NOBRAND_SSH_STATE_FILE")" -eq 1 ] || return 1
+    jq -c '.users[0]' "$NOBRAND_SSH_STATE_FILE"
+    return 0
+  }
+  jq -ce --arg selector "$selector" '
+    [.users[] | select(.account_id==$selector or .display_name==$selector or .linux_user==$selector)]
+    | if length==1 then .[0] else empty end
+  ' "$NOBRAND_SSH_STATE_FILE"
+}
+
+ssh_tunnel_account_marker_file() {
+  printf '%s/%s.json' "$NOBRAND_SSH_ACCOUNT_MARKER_DIR" "$1"
+}
+
+ssh_tunnel_authorized_key_file() {
+  printf '%s/%s' "$NOBRAND_SSH_AUTHORIZED_KEYS_DIR" "$1"
+}
+
+ssh_tunnel_key_dir() {
+  printf '%s/%s' "$NOBRAND_SSH_KEYS_DIR" "$1"
+}
+
+ssh_tunnel_key_fingerprint() {
+  local public_key="$1"
+  ssh-keygen -lf "$public_key" -E sha256 2>/dev/null | awk '{print $2}'
+}
+
+ssh_tunnel_authorized_key_line() {
+  local public_key="$1" nologin_shell="$2" key_material
+  key_material="$(awk '{print $1" "$2}' "$public_key")" || return 1
+  printf 'command="%s",no-agent-forwarding,no-X11-forwarding,no-pty %s\n' \
+    "$nologin_shell" "$key_material"
+}
+
+ssh_tunnel_create_group() {
+  local gid marker_tmp="" created_group=0
+  if _has_group "$NOBRAND_SSH_GROUP"; then
+    gid="$(getent group "$NOBRAND_SSH_GROUP" 2>/dev/null | awk -F: '{print $3}')"
+    jq -e --arg group "$NOBRAND_SSH_GROUP" --arg gid "$gid" '
+      .ownership=="nobrand-v3" and .group==$group and .gid==($gid|tonumber)
+    ' "$NOBRAND_SSH_GROUP_MARKER" >/dev/null 2>&1
+    return $?
+  fi
+  if command -v groupadd >/dev/null 2>&1; then
+    groupadd --system "$NOBRAND_SSH_GROUP" || return 1
+  elif command -v addgroup >/dev/null 2>&1; then
+    addgroup -S "$NOBRAND_SSH_GROUP" || return 1
+  else
+    return 1
+  fi
+  created_group=1
+  gid="$(getent group "$NOBRAND_SSH_GROUP" 2>/dev/null | awk -F: '{print $3}')"
+  if ! [[ "$gid" =~ ^[0-9]+$ ]] \
+     || ! mkdir -p "$NOBRAND_SSH_ACCOUNT_MARKER_DIR" \
+     || ! chmod 0700 "$NOBRAND_SSH_ACCOUNT_MARKER_DIR" \
+     || ! marker_tmp="$(mktemp_file .ssh-group-marker)" \
+     || ! jq -n --arg group "$NOBRAND_SSH_GROUP" --arg gid "$gid" '
+    {schema_version:3,ownership:"nobrand-v3",group:$group,gid:($gid|tonumber)}
+  ' >"$marker_tmp" \
+     || ! nb_atomic_install_file "$marker_tmp" "$NOBRAND_SSH_GROUP_MARKER" 0600; then
+    rm -f "$marker_tmp" "$NOBRAND_SSH_GROUP_MARKER"
+    [ "$created_group" -eq 0 ] || ssh_tunnel_delete_group >/dev/null 2>&1 || true
+    return 1
+  fi
+  rm -f "$marker_tmp"
+}
+
+ssh_tunnel_delete_group() {
+  _has_group "$NOBRAND_SSH_GROUP" || return 0
+  if command -v groupdel >/dev/null 2>&1; then
+    groupdel "$NOBRAND_SSH_GROUP"
+  elif command -v delgroup >/dev/null 2>&1; then
+    delgroup "$NOBRAND_SSH_GROUP"
+  else
+    return 1
+  fi
+}
+
+ssh_tunnel_create_group_with_gid() {
+  local expected_gid="$1" actual_gid
+  [[ "$expected_gid" =~ ^[0-9]+$ ]] || return 1
+  ! _has_group "$NOBRAND_SSH_GROUP" || return 1
+  getent group "$expected_gid" >/dev/null 2>&1 && return 1
+  if command -v groupadd >/dev/null 2>&1; then
+    groupadd --system --gid "$expected_gid" "$NOBRAND_SSH_GROUP" || return 1
+  elif command -v addgroup >/dev/null 2>&1; then
+    addgroup -S -g "$expected_gid" "$NOBRAND_SSH_GROUP" || return 1
+  else
+    return 1
+  fi
+  actual_gid="$(getent group "$NOBRAND_SSH_GROUP" 2>/dev/null | awk -F: '{print $3}')"
+  [ "$actual_gid" = "$expected_gid" ]
+}
+
+ssh_tunnel_group_identity_valid() {
+  local gid
+  _has_group "$NOBRAND_SSH_GROUP" || return 1
+  gid="$(getent group "$NOBRAND_SSH_GROUP" 2>/dev/null | awk -F: '{print $3}')"
+  jq -e --arg group "$NOBRAND_SSH_GROUP" --arg gid "$gid" '
+    .ownership=="nobrand-v3" and .group==$group and .gid==($gid|tonumber)
+  ' "$NOBRAND_SSH_GROUP_MARKER" >/dev/null 2>&1
+}
+
+ssh_tunnel_create_linux_user() {
+  local linux_user="$1" account_id="$2" nologin_shell="$3"
+  ! _has_user "$linux_user" || return 1
+  if command -v useradd >/dev/null 2>&1; then
+    useradd --system --gid "$NOBRAND_SSH_GROUP" --no-create-home --home-dir /nonexistent \
+      --shell "$nologin_shell" --comment "NoBrand SSH Tunnel ${account_id}" "$linux_user" || return 1
+  elif command -v adduser >/dev/null 2>&1; then
+    adduser -S -D -H -G "$NOBRAND_SSH_GROUP" -h /nonexistent -s "$nologin_shell" \
+      -g "NoBrand SSH Tunnel ${account_id}" "$linux_user" || return 1
+  else
+    return 1
+  fi
+  command -v passwd >/dev/null 2>&1 && passwd -l "$linux_user" >/dev/null 2>&1 || true
+}
+
+ssh_tunnel_create_linux_user_with_uid() {
+  local linux_user="$1" account_id="$2" nologin_shell="$3" expected_uid="$4"
+  ! _has_user "$linux_user" || return 1
+  getent passwd "$expected_uid" >/dev/null 2>&1 && return 1
+  if command -v useradd >/dev/null 2>&1; then
+    useradd --system --uid "$expected_uid" --gid "$NOBRAND_SSH_GROUP" --no-create-home \
+      --home-dir /nonexistent --shell "$nologin_shell" \
+      --comment "NoBrand SSH Tunnel ${account_id}" "$linux_user" || return 1
+  elif command -v adduser >/dev/null 2>&1; then
+    adduser -S -D -H -u "$expected_uid" -G "$NOBRAND_SSH_GROUP" -h /nonexistent \
+      -s "$nologin_shell" -g "NoBrand SSH Tunnel ${account_id}" "$linux_user" || return 1
+  else
+    return 1
+  fi
+  command -v passwd >/dev/null 2>&1 && passwd -l "$linux_user" >/dev/null 2>&1 || true
+  [ "$(id -u "$linux_user")" = "$expected_uid" ]
+}
+
+ssh_tunnel_delete_linux_user() {
+  local linux_user="$1"
+  if command -v userdel >/dev/null 2>&1; then
+    userdel "$linux_user"
+  elif command -v deluser >/dev/null 2>&1; then
+    deluser "$linux_user"
+  else
+    return 1
+  fi
+}
+
+ssh_tunnel_user_identity_valid() {
+  local user_json="$1" linux_user expected_uid expected_group account_id expected_fp
+  local passwd_line actual_uid actual_gid group_gid gecos shell marker auth_file actual_fp
+  linux_user="$(jq -r .linux_user <<<"$user_json")"
+  expected_uid="$(jq -r .uid <<<"$user_json")"
+  expected_group="$(jq -r .group <<<"$user_json")"
+  account_id="$(jq -r .account_id <<<"$user_json")"
+  expected_fp="$(jq -r .key_fingerprint <<<"$user_json")"
+  passwd_line="$(getent passwd "$linux_user" 2>/dev/null || true)"
+  [ -n "$passwd_line" ] || return 1
+  IFS=: read -r _ _ actual_uid actual_gid gecos _ shell <<<"$passwd_line"
+  group_gid="$(getent group "$expected_group" 2>/dev/null | awk -F: '{print $3}')"
+  [ "$actual_uid" = "$expected_uid" ] && [ "$actual_gid" = "$group_gid" ] || return 1
+  [ "$gecos" = "NoBrand SSH Tunnel ${account_id}" ] || return 1
+  case "$shell" in /usr/sbin/nologin|/sbin/nologin|/bin/false) ;; *) return 1 ;; esac
+  marker="$(ssh_tunnel_account_marker_file "$linux_user")"
+  jq -e --arg account_id "$account_id" --arg linux_user "$linux_user" --arg uid "$expected_uid" \
+    '.ownership=="nobrand-v3" and .account_id==$account_id and .linux_user==$linux_user and .uid==($uid|tonumber)' \
+    "$marker" >/dev/null 2>&1 || return 1
+  auth_file="$(ssh_tunnel_authorized_key_file "$linux_user")"
+  [ -s "$auth_file" ] || return 1
+  actual_fp="$(ssh-keygen -lf "$auth_file" -E sha256 2>/dev/null | awk '{print $2}')"
+  [ "$actual_fp" = "$expected_fp" ]
+}
+
+ssh_tunnel_add_user_internal() {
+  local label="$1" account_id linux_user nologin_shell key_dir private_key public_key
+  local fingerprint uid user_json state_tmp marker_tmp auth_tmp created_user=0
+  ssh_tunnel_valid_label "$label" || die 'SSH Tunnel 用户标签必须为 1-64 字节且不能含控制字符或 |'
+  ssh_tunnel_resolve_user_json "$label" >/dev/null 2>&1 && die "SSH Tunnel 用户已存在: $label"
+  account_id="$(ssh_tunnel_generate_account_id)" || return 1
+  linux_user="$(ssh_tunnel_linux_username "$label" "$account_id")"
+  nologin_shell="$(ssh_tunnel_nologin_shell)" || die '找不到系统 nologin shell'
+  ! _has_user "$linux_user" || die "Linux 用户名冲突: $linux_user"
+  key_dir="$(ssh_tunnel_key_dir "$account_id")"
+  private_key="${key_dir}/id_ed25519"
+  public_key="${private_key}.pub"
+  mkdir -p "$key_dir" "$NOBRAND_SSH_AUTHORIZED_KEYS_DIR" "$NOBRAND_SSH_ACCOUNT_MARKER_DIR" || return 1
+  chmod 0700 "$key_dir" "$NOBRAND_SSH_ACCOUNT_MARKER_DIR" || return 1
+  chmod 0755 "$NOBRAND_SSH_AUTHORIZED_KEYS_DIR" || return 1
+  ssh-keygen -q -t ed25519 -N '' -C "nobrand:${account_id}" -f "$private_key" || {
+    rm -rf -- "$key_dir"
+    return 1
+  }
+  chmod 0600 "$private_key" && chmod 0644 "$public_key" || {
+    rm -rf -- "$key_dir"
+    return 1
+  }
+  fingerprint="$(ssh_tunnel_key_fingerprint "$public_key")" || {
+    rm -rf -- "$key_dir"
+    return 1
+  }
+  ssh_tunnel_create_linux_user "$linux_user" "$account_id" "$nologin_shell" || {
+    rm -rf -- "$key_dir"
+    return 1
+  }
+  created_user=1
+  uid="$(id -u "$linux_user")" || {
+    ssh_tunnel_delete_linux_user "$linux_user" >/dev/null 2>&1 || true
+    rm -rf -- "$key_dir"
+    return 1
+  }
+  user_json="$(ssh_tunnel_user_json "$account_id" "$label" "$linux_user" "$uid" "$fingerprint")"
+  auth_tmp="$(mktemp_file .authorized-key)" || {
+    ssh_tunnel_delete_linux_user "$linux_user" >/dev/null 2>&1 || true
+    rm -rf -- "$key_dir"
+    return 1
+  }
+  marker_tmp="$(mktemp_file .account-marker)" || {
+    rm -f "$auth_tmp"
+    ssh_tunnel_delete_linux_user "$linux_user" >/dev/null 2>&1 || true
+    rm -rf -- "$key_dir"
+    return 1
+  }
+  state_tmp="$(mktemp_file .ssh-state)" || {
+    rm -f "$auth_tmp" "$marker_tmp"
+    ssh_tunnel_delete_linux_user "$linux_user" >/dev/null 2>&1 || true
+    rm -rf -- "$key_dir"
+    return 1
+  }
+  ssh_tunnel_authorized_key_line "$public_key" "$nologin_shell" >"$auth_tmp" \
+    && jq -n --arg account_id "$account_id" --arg linux_user "$linux_user" --arg uid "$uid" \
+      '{schema_version:3,ownership:"nobrand-v3",account_id:$account_id,linux_user:$linux_user,uid:($uid|tonumber)}' \
+      >"$marker_tmp" \
+    && jq --argjson user "$user_json" --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      '.users += [$user] | .updated_at=$updated' "$NOBRAND_SSH_STATE_FILE" >"$state_tmp" \
+    && nb_atomic_install_file "$auth_tmp" "$(ssh_tunnel_authorized_key_file "$linux_user")" 0644 \
+    && nb_atomic_install_file "$marker_tmp" "$(ssh_tunnel_account_marker_file "$linux_user")" 0600 \
+    && nb_atomic_install_file "$state_tmp" "$NOBRAND_SSH_STATE_FILE" 0600 \
+    || {
+      rm -f "$auth_tmp" "$marker_tmp" "$state_tmp" \
+        "$(ssh_tunnel_authorized_key_file "$linux_user")" \
+        "$(ssh_tunnel_account_marker_file "$linux_user")"
+      [ "$created_user" -ne 1 ] || ssh_tunnel_delete_linux_user "$linux_user" >/dev/null 2>&1 || true
+      find "$key_dir" -mindepth 1 -maxdepth 1 -delete 2>/dev/null || true
+      rmdir "$key_dir" 2>/dev/null || true
+      return 1
+    }
+  rm -f "$auth_tmp" "$marker_tmp" "$state_tmp"
+  printf '%s' "$account_id"
+}
+
+ssh_tunnel_rotate_user_key() {
+  local selector="${1:-}" user_json account_id linux_user nologin_shell key_dir new_private
+  local new_public new_fp auth_tmp state_tmp snapshot
+  user_json="$(ssh_tunnel_resolve_user_json "$selector")" || die '找不到唯一 SSH Tunnel 用户'
+  ssh_tunnel_user_identity_valid "$user_json" || die 'SSH Tunnel 用户 identity 不匹配，拒绝轮换'
+  account_id="$(jq -r .account_id <<<"$user_json")"
+  linux_user="$(jq -r .linux_user <<<"$user_json")"
+  nologin_shell="$(ssh_tunnel_nologin_shell)" || return 1
+  key_dir="$(ssh_tunnel_key_dir "$account_id")"
+  new_private="$(mktemp "${key_dir}/id_ed25519.new.XXXXXX")" || return 1
+  rm -f "$new_private"
+  ssh-keygen -q -t ed25519 -N '' -C "nobrand:${account_id}" -f "$new_private" || {
+    rm -f "$new_private" "${new_private}.pub"
+    return 1
+  }
+  new_public="${new_private}.pub"
+  chmod 0600 "$new_private" && chmod 0644 "$new_public" || {
+    rm -f "$new_private" "$new_public"
+    return 1
+  }
+  new_fp="$(ssh_tunnel_key_fingerprint "$new_public")" || {
+    rm -f "$new_private" "$new_public"
+    return 1
+  }
+  auth_tmp="$(mktemp_file .authorized-key)" || {
+    rm -f "$new_private" "$new_public"
+    return 1
+  }
+  state_tmp="$(mktemp_file .ssh-state)" || {
+    rm -f "$new_private" "$new_public" "$auth_tmp"
+    return 1
+  }
+  snapshot="$(mktemp_dir)" || {
+    rm -f "$new_private" "$new_public" "$auth_tmp" "$state_tmp"
+    return 1
+  }
+  cp -a "$key_dir/id_ed25519" "$key_dir/id_ed25519.pub" \
+    "$(ssh_tunnel_authorized_key_file "$linux_user")" "$NOBRAND_SSH_STATE_FILE" "$snapshot/" || {
+      rm -f "$new_private" "$new_public" "$auth_tmp" "$state_tmp"
+      rm -rf -- "$snapshot"
+      return 1
+    }
+  ssh_tunnel_authorized_key_line "$new_public" "$nologin_shell" >"$auth_tmp" \
+    && jq --arg account_id "$account_id" --arg fingerprint "$new_fp" \
+      --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      '(.users[] | select(.account_id==$account_id)).key_fingerprint=$fingerprint | .updated_at=$updated' \
+      "$NOBRAND_SSH_STATE_FILE" >"$state_tmp" \
+    && nb_atomic_install_file "$new_private" "$key_dir/id_ed25519" 0600 \
+    && nb_atomic_install_file "$new_public" "$key_dir/id_ed25519.pub" 0644 \
+    && nb_atomic_install_file "$auth_tmp" "$(ssh_tunnel_authorized_key_file "$linux_user")" 0644 \
+    && nb_atomic_install_file "$state_tmp" "$NOBRAND_SSH_STATE_FILE" 0600 \
+    || {
+      cp -a "$snapshot/id_ed25519" "$key_dir/id_ed25519" 2>/dev/null || true
+      cp -a "$snapshot/id_ed25519.pub" "$key_dir/id_ed25519.pub" 2>/dev/null || true
+      cp -a "$snapshot/$linux_user" "$(ssh_tunnel_authorized_key_file "$linux_user")" 2>/dev/null || true
+      cp -a "$snapshot/state.json" "$NOBRAND_SSH_STATE_FILE" 2>/dev/null || true
+      rm -f "$new_private" "$new_public" "$auth_tmp" "$state_tmp"
+      rm -rf -- "$snapshot"
+      return 1
+    }
+  rm -f "$new_private" "$new_public" "$auth_tmp" "$state_tmp"
+  rm -rf -- "$snapshot"
+}
+
+ssh_tunnel_delete_user_internal() {
+  local selector="${1:-}" user_json account_id linux_user uid auth_file state_tmp snapshot nologin_shell
+  user_json="$(ssh_tunnel_resolve_user_json "$selector")" || die '找不到唯一 SSH Tunnel 用户'
+  ssh_tunnel_user_identity_valid "$user_json" || die 'SSH Tunnel 用户 identity 不匹配，拒绝删除'
+  account_id="$(jq -r .account_id <<<"$user_json")"
+  linux_user="$(jq -r .linux_user <<<"$user_json")"
+  uid="$(jq -r .uid <<<"$user_json")"
+  auth_file="$(ssh_tunnel_authorized_key_file "$linux_user")"
+  state_tmp="$(mktemp_file .ssh-state)" || return 1
+  snapshot="$(mktemp_dir)" || { rm -f "$state_tmp"; return 1; }
+  cp -a "$auth_file" "$NOBRAND_SSH_STATE_FILE" "$snapshot/" || {
+    rm -f "$state_tmp"
+    rm -rf -- "$snapshot"
+    return 1
+  }
+  jq --arg account_id "$account_id" --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '.users |= map(select(.account_id!=$account_id)) | .updated_at=$updated' \
+    "$NOBRAND_SSH_STATE_FILE" >"$state_tmp" || {
+      rm -f "$state_tmp"
+      rm -rf -- "$snapshot"
+      return 1
+    }
+  rm -f "$auth_file"
+  pkill -KILL -u "$uid" 2>/dev/null || true
+  if ! ssh_tunnel_delete_linux_user "$linux_user"; then
+    cp -a "$snapshot/$linux_user" "$auth_file" 2>/dev/null || true
+    rm -f "$state_tmp"
+    rm -rf -- "$snapshot"
+    return 1
+  fi
+  if ! nb_atomic_install_file "$state_tmp" "$NOBRAND_SSH_STATE_FILE" 0600; then
+    nologin_shell="$(ssh_tunnel_nologin_shell 2>/dev/null || true)"
+    if [ -n "$nologin_shell" ] \
+       && ssh_tunnel_create_linux_user_with_uid "$linux_user" "$account_id" "$nologin_shell" "$uid" \
+       && cp -a "$snapshot/$linux_user" "$auth_file"; then
+      warn 'SSH Tunnel state 提交失败；Linux 用户与 authorized key 已回滚'
+    else
+      warn 'SSH Tunnel state 提交失败且 Linux 用户回滚失败；authorized key 保持撤销，marker/key 保留供恢复'
+    fi
+    rm -f "$state_tmp"
+    rm -rf -- "$snapshot"
+    return 1
+  fi
+  rm -f "$(ssh_tunnel_account_marker_file "$linux_user")" "$state_tmp"
+  find "$(ssh_tunnel_key_dir "$account_id")" -mindepth 1 -maxdepth 1 -delete 2>/dev/null || true
+  rmdir "$(ssh_tunnel_key_dir "$account_id")" 2>/dev/null || true
+  rm -rf -- "$snapshot"
+}
+
+ssh_tunnel_dropin_supported() {
+  [ "$NOBRAND_SSH_CONFIG_DROPIN" = /etc/ssh/sshd_config.d/90-nobrand-ssh-tunnel.conf ] || return 1
+  awk '
+    /^[[:space:]]*#/ {next}
+    tolower($1)=="match" {exit}
+    tolower($1)=="include" {
+      for (i=2;i<=NF;i++) if ($i=="/etc/ssh/sshd_config.d/*.conf") found=1
+    }
+    END {exit(found?0:1)}
+  ' "$NOBRAND_SSH_CONFIG_MAIN"
+}
+
+ssh_tunnel_strip_marker_block() {
+  local source="$1" output="$2"
+  awk -v begin="$NOBRAND_SSH_BLOCK_BEGIN" -v end="$NOBRAND_SSH_BLOCK_END" '
+    $0==begin {inside=1; next}
+    $0==end {if (!inside) exit 2; inside=0; next}
+    !inside {print}
+    END {if (inside) exit 2}
+  ' "$source" >"$output"
+}
+
+ssh_tunnel_build_main_candidate() {
+  local policy="$1" output="$2" stripped
+  stripped="$(mktemp_file .sshd-main)" || return 1
+  ssh_tunnel_strip_marker_block "$NOBRAND_SSH_CONFIG_MAIN" "$stripped" || return 1
+  {
+    cat "$stripped"
+    printf '\n%s\n' "$NOBRAND_SSH_BLOCK_BEGIN"
+    cat "$policy"
+    printf '%s\n' "$NOBRAND_SSH_BLOCK_END"
+  } >"$output"
+  rm -f "$stripped"
+}
+
+ssh_tunnel_build_dropin_removal_candidate() {
+  local output="$1" candidate_root="$2" source_dir source_file candidate_dir replacement
+  source_dir="$(dirname "$NOBRAND_SSH_CONFIG_DROPIN")"
+  candidate_dir="${candidate_root}/sshd_config.d"
+  replacement="${candidate_dir}/*.conf"
+  mkdir -p "$candidate_dir" || return 1
+  while IFS= read -r source_file; do
+    [ "$source_file" = "$NOBRAND_SSH_CONFIG_DROPIN" ] && continue
+    cp -a "$source_file" "$candidate_dir/" || return 1
+  done < <(find "$source_dir" -maxdepth 1 -type f -name '*.conf' -print 2>/dev/null | LC_ALL=C sort)
+  awk -v original='/etc/ssh/sshd_config.d/*.conf' -v replacement="$replacement" '
+    {
+      if (tolower($1)=="include") {
+        changed=0
+        for (i=2;i<=NF;i++) if ($i==original) {$i=replacement; changed=1}
+        if (changed) {
+          line=$1
+          for (i=2;i<=NF;i++) line=line " " $i
+          print line
+          next
+        }
+      }
+      print
+    }
+  ' "$NOBRAND_SSH_CONFIG_MAIN" >"$output"
+}
+
+ssh_tunnel_detect_service() {
+  if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+    systemctl status ssh.service >/dev/null 2>&1 && { printf 'systemd|ssh.service'; return 0; }
+    systemctl status sshd.service >/dev/null 2>&1 && { printf 'systemd|sshd.service'; return 0; }
+  fi
+  if command -v rc-service >/dev/null 2>&1 && rc-service sshd status >/dev/null 2>&1; then
+    printf 'openrc|sshd'
+    return 0
+  fi
+  local pid_file pid
+  for pid_file in /run/sshd.pid /var/run/sshd.pid; do
+    [ -s "$pid_file" ] || continue
+    pid="$(cat "$pid_file" 2>/dev/null || true)"
+    [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null \
+      && { printf 'sighup|%s' "$pid"; return 0; }
+  done
+  return 1
+}
+
+ssh_tunnel_reload() {
+  local service kind name
+  service="$(ssh_tunnel_detect_service)" || return 1
+  kind="${service%%|*}"
+  name="${service#*|}"
+  case "$kind" in
+    systemd) systemctl reload "$name" ;;
+    openrc) rc-service "$name" reload ;;
+    sighup) kill -HUP "$name" ;;
+    *) return 1 ;;
+  esac
+}
+
+ssh_tunnel_watchdog_begin() {
+  local target="$1" operation="$2" token origin service kind name backup script token_file timeout pid
+  local state_backup state_absent
+  [ "${NOBRAND_SSH_WATCHDOG_DISABLED:-0}" != 1 ] \
+    || { printf 'disabled|||%s' "$operation"; return 0; }
+  mkdir -p "$NOBRAND_SSH_WATCHDOG_DIR" || return 1
+  chmod 0700 "$NOBRAND_SSH_WATCHDOG_DIR" || return 1
+  token="$(openssl rand -hex 16 2>/dev/null || printf '%08x%08x' "$RANDOM" "$RANDOM")"
+  origin="${SSH_CONNECTION:-}"
+  backup="${NOBRAND_SSH_WATCHDOG_DIR}/${token}.backup"
+  state_backup="${NOBRAND_SSH_WATCHDOG_DIR}/${token}.state.backup"
+  state_absent="${NOBRAND_SSH_WATCHDOG_DIR}/${token}.state.absent"
+  script="${NOBRAND_SSH_WATCHDOG_DIR}/${token}.rollback.sh"
+  token_file="${NOBRAND_SSH_WATCHDOG_DIR}/${token}.armed"
+  if [ -e "$target" ]; then cp -a "$target" "$backup"; else : >"${backup}.absent"; fi
+  if [ -e "$NOBRAND_SSH_STATE_FILE" ]; then
+    cp -a "$NOBRAND_SSH_STATE_FILE" "$state_backup"
+  else
+    : >"$state_absent"
+  fi
+  service="$(ssh_tunnel_detect_service)" || return 1
+  kind="${service%%|*}"
+  name="${service#*|}"
+  timeout="${NOBRAND_SSH_WATCHDOG_TIMEOUT:-180}"
+  [[ "$timeout" =~ ^[0-9]+$ ]] && [ "$timeout" -ge 30 ] || timeout=180
+  : >"$token_file"
+  {
+    printf '#!/usr/bin/env bash\nset -u\n[ "${NOBRAND_SSH_WATCHDOG_NOW:-0}" = 1 ] || sleep %q\n' "$timeout"
+    printf '[ -f %q ] || exit 0\n' "$token_file"
+    printf 'if [ -f %q ]; then cp -a %q %q; else rm -f %q; fi\n' \
+      "$backup" "$backup" "$target" "$target"
+    printf '%q -t -f %q || exit 1\n' "$(ssh_tunnel_sshd_binary)" "$NOBRAND_SSH_CONFIG_MAIN"
+    case "$kind" in
+      systemd) printf 'systemctl reload %q\n' "$name" ;;
+      openrc) printf 'rc-service %q reload\n' "$name" ;;
+      sighup) printf 'kill -HUP %q\n' "$name" ;;
+    esac
+    printf 'if [ -f %q ]; then cp -a %q %q; else rm -f %q; fi\n' \
+      "$state_backup" "$state_backup" "$NOBRAND_SSH_STATE_FILE" "$NOBRAND_SSH_STATE_FILE"
+    printf 'rm -f %q %q %q %q %q %q %q\n' "$token_file" "$backup" "${backup}.absent" \
+      "$state_backup" "$state_absent" "$script" "${script}.running"
+  } >"$script"
+  chmod 0700 "$script"
+  nohup "$script" >/dev/null 2>&1 &
+  pid=$!
+  printf '%s|%s|%s|%s' "$token" "$pid" "$origin" "$operation"
+}
+
+ssh_tunnel_watchdog_cancel() {
+  local token="$1" pid="${2:-}" base
+  [ "$token" != disabled ] || return 0
+  base="${NOBRAND_SSH_WATCHDOG_DIR}/${token}"
+  rm -f "${base}.armed"
+  [[ "$pid" =~ ^[0-9]+$ ]] && kill "$pid" 2>/dev/null || true
+  rm -f "${base}.backup" "${base}.backup.absent" "${base}.state.backup" \
+    "${base}.state.absent" "${base}.rollback.sh" "${base}.rollback.sh.running"
+}
+
+ssh_tunnel_watchdog_rollback_now() {
+  local token="$1" pid="${2:-}" base script
+  [ "$token" != disabled ] || return 0
+  base="${NOBRAND_SSH_WATCHDOG_DIR}/${token}"
+  script="${base}.rollback.sh"
+  [[ "$pid" =~ ^[0-9]+$ ]] && kill "$pid" 2>/dev/null || true
+  [ -x "$script" ] || return 1
+  NOBRAND_SSH_WATCHDOG_NOW=1 bash "$script"
+}
+
+ssh_tunnel_watchdog_prompt() {
+  local token="$1"
+  t "SSH policy 已安全 reload；请在 ${NOBRAND_SSH_WATCHDOG_TIMEOUT:-180} 秒内通过全新管理员 SSH 连接运行：" \
+    "SSH policy safely reloaded; from a brand-new administrator SSH connection, run within ${NOBRAND_SSH_WATCHDOG_TIMEOUT:-180} seconds:"
+  printf '  nobrand ssh confirm-admin --token %s\n' "$token"
+}
+
+ssh_tunnel_apply_policy() {
+  local validation_user="$1" requested_operation="${2:-install}"
+  local policy strategy target candidate watchdog token pid origin operation state_tmp
+  policy="$(mktemp_file .ssh-policy)" || return 1
+  candidate="$(mktemp_file .sshd-candidate)" || return 1
+  ssh_tunnel_generate_policy "$policy" || return 1
+  ssh_tunnel_build_main_candidate "$policy" "$candidate" || return 1
+  ssh_tunnel_sshd_test "$candidate" || { warn 'SSH candidate config syntax validation failed'; return 1; }
+  ssh_tunnel_effective_policy_valid "$candidate" "$validation_user" \
+    || { warn 'SSH candidate effective-policy validation failed'; return 1; }
+  if ssh_tunnel_dropin_supported; then
+    strategy=dropin
+    target="$NOBRAND_SSH_CONFIG_DROPIN"
+  else
+    strategy="marker-block"
+    target="$NOBRAND_SSH_CONFIG_MAIN"
+  fi
+  watchdog="$(ssh_tunnel_watchdog_begin "$target" "$requested_operation")" || return 1
+  IFS='|' read -r token pid origin operation <<<"$watchdog"
+  mkdir -p "$(dirname "$target")" || {
+    ssh_tunnel_watchdog_cancel "$token" "$pid"
+    return 1
+  }
+  if [ "$strategy" = dropin ]; then
+    nb_atomic_install_file "$policy" "$target" 0600 || {
+      ssh_tunnel_watchdog_rollback_now "$token" "$pid" || true
+      return 1
+    }
+  else
+    nb_atomic_install_file "$candidate" "$target" 0600 || {
+      ssh_tunnel_watchdog_rollback_now "$token" "$pid" || true
+      return 1
+    }
+  fi
+  if ! ssh_tunnel_sshd_test "$NOBRAND_SSH_CONFIG_MAIN" \
+     || ! ssh_tunnel_effective_policy_valid "$NOBRAND_SSH_CONFIG_MAIN" "$validation_user" \
+     || ! ssh_tunnel_reload; then
+    warn 'SSH policy apply/reload failed; rolling back immediately'
+    ssh_tunnel_watchdog_rollback_now "$token" "$pid" || warn 'SSH immediate rollback failed; watchdog remains armed'
+    return 1
+  fi
+  state_tmp="$(mktemp_file .ssh-state)" || return 1
+  jq --arg strategy "$strategy" --arg path "$target" --arg token "$token" \
+    --arg pid "$pid" --arg origin "$origin" --arg operation "$operation" \
+    --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+    .config_strategy=$strategy | .managed_config_path=$path | .policy_applied=true
+    | .pending_operation=$operation | .pending_watchdog_token=$token
+    | .pending_watchdog_pid=$pid | .pending_origin_connection=$origin | .updated_at=$updated
+  ' "$NOBRAND_SSH_STATE_FILE" >"$state_tmp" \
+    && nb_atomic_install_file "$state_tmp" "$NOBRAND_SSH_STATE_FILE" 0600 || {
+      ssh_tunnel_watchdog_rollback_now "$token" "$pid" || true
+      return 1
+    }
+  rm -f "$state_tmp" "$policy" "$candidate"
+  if [ "$token" = disabled ]; then
+    ssh_tunnel_confirm_admin disabled
+  else
+    ssh_tunnel_watchdog_prompt "$token"
+  fi
+}
+
+ssh_tunnel_remove_policy() {
+  local requested_operation="${1:-uninstall}" strategy target candidate candidate_root=""
+  local watchdog token pid origin operation state_tmp managed_path
+  managed_path="$(ssh_tunnel_state_field managed_config_path)"
+  strategy="$(ssh_tunnel_state_field config_strategy)"
+  candidate_root="$(mktemp_dir)" || return 1
+  candidate="${candidate_root}/sshd_config"
+  case "$strategy" in
+    dropin)
+      [ "$managed_path" = "$NOBRAND_SSH_CONFIG_DROPIN" ] || die 'SSH managed drop-in identity mismatch'
+      [ -s "$managed_path" ] || die 'SSH managed drop-in missing'
+      ssh_tunnel_build_dropin_removal_candidate "$candidate" "$candidate_root" || return 1
+      target="$managed_path"
+      ;;
+    marker-block)
+      [ "$managed_path" = "$NOBRAND_SSH_CONFIG_MAIN" ] || die 'SSH managed marker-block identity mismatch'
+      ssh_tunnel_strip_marker_block "$NOBRAND_SSH_CONFIG_MAIN" "$candidate" || return 1
+      target="$NOBRAND_SSH_CONFIG_MAIN"
+      ;;
+    *) die 'SSH managed config strategy 无效' ;;
+  esac
+  ssh_tunnel_sshd_test "$candidate" || {
+    rm -rf -- "$candidate_root"
+    die 'SSH policy removal candidate 无法通过 sshd -t'
+  }
+  watchdog="$(ssh_tunnel_watchdog_begin "$target" "$requested_operation")" || return 1
+  IFS='|' read -r token pid origin operation <<<"$watchdog"
+  if [ "$strategy" = dropin ]; then
+    rm -f "$target" || {
+      ssh_tunnel_watchdog_rollback_now "$token" "$pid" || true
+      return 1
+    }
+  else
+    nb_atomic_install_file "$candidate" "$target" 0600 || {
+      ssh_tunnel_watchdog_rollback_now "$token" "$pid" || true
+      return 1
+    }
+  fi
+  if ! ssh_tunnel_sshd_test "$NOBRAND_SSH_CONFIG_MAIN" || ! ssh_tunnel_reload; then
+    warn 'SSH policy removal/reload failed; rolling back immediately'
+    ssh_tunnel_watchdog_rollback_now "$token" "$pid" || warn 'SSH immediate rollback failed; watchdog remains armed'
+    return 1
+  fi
+  state_tmp="$(mktemp_file .ssh-state)" || {
+    ssh_tunnel_watchdog_rollback_now "$token" "$pid" || true
+    return 1
+  }
+  jq --arg token "$token" --arg pid "$pid" --arg origin "$origin" --arg operation "$operation" \
+    --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+    .policy_applied=false | .pending_operation=$operation | .pending_watchdog_token=$token
+    | .pending_watchdog_pid=$pid | .pending_origin_connection=$origin | .updated_at=$updated
+  ' "$NOBRAND_SSH_STATE_FILE" >"$state_tmp" \
+    && nb_atomic_install_file "$state_tmp" "$NOBRAND_SSH_STATE_FILE" 0600 || {
+      ssh_tunnel_watchdog_rollback_now "$token" "$pid" || true
+      return 1
+    }
+  rm -f "$state_tmp"
+  rm -rf -- "$candidate_root"
+  if [ "$token" = disabled ]; then
+    ssh_tunnel_confirm_admin disabled
+  else
+    ssh_tunnel_watchdog_prompt "$token"
+  fi
+}
+
+ssh_tunnel_confirm_admin() {
+  local supplied="${1:-}" expected pid origin current operation state_tmp continue_unified=0
+  require_root
+  ssh_tunnel_state_exists || die 'SSH Tunnel state 不存在'
+  expected="$(ssh_tunnel_state_field pending_watchdog_token)"
+  [ -n "$expected" ] || die '没有待确认的 SSH policy watchdog'
+  [ "$supplied" = "$expected" ] || die 'watchdog token 不匹配'
+  origin="$(ssh_tunnel_state_field pending_origin_connection 2>/dev/null || true)"
+  current="${SSH_CONNECTION:-}"
+  if [ "$expected" != disabled ]; then
+    [ -n "$current" ] || die '必须从一条全新的管理员 SSH connection 确认 watchdog'
+    [ -z "$origin" ] || [ "$current" != "$origin" ] \
+      || die '必须从一条全新的管理员 SSH connection 确认 watchdog'
+  fi
+  operation="$(ssh_tunnel_state_field pending_operation 2>/dev/null || true)"
+  pid="$(ssh_tunnel_state_field pending_watchdog_pid 2>/dev/null || true)"
+  ssh_tunnel_sshd_test "$NOBRAND_SSH_CONFIG_MAIN" || return 1
+  state_tmp="$(mktemp_file .ssh-state)" || return 1
+  jq --arg operation "$operation" --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+    .pending_operation="" | .pending_watchdog_token="" | .pending_watchdog_pid=""
+    | .pending_origin_connection=""
+    | .policy_applied=(if ($operation=="uninstall" or $operation=="unified-uninstall") then false else true end)
+    | .updated_at=$updated
+  ' "$NOBRAND_SSH_STATE_FILE" >"$state_tmp" \
+    && nb_atomic_install_file "$state_tmp" "$NOBRAND_SSH_STATE_FILE" 0600 || return 1
+  ssh_tunnel_watchdog_cancel "$expected" "$pid"
+  rm -f "$state_tmp"
+  t '全新管理员 SSH connection 已确认；rollback watchdog 已取消' \
+    'Brand-new administrator SSH connection confirmed; rollback watchdog cancelled'
+  case "$operation" in
+    uninstall) ssh_tunnel_finalize_uninstall ;;
+    unified-uninstall)
+      ssh_tunnel_finalize_uninstall || return 1
+      continue_unified=1
+      ;;
+  esac
+  if [ "$continue_unified" -eq 1 ]; then
+    YES=1 nobrand_uninstall
+  fi
+}
+
+ssh_tunnel_set_endpoint_state() {
+  local host="$1" port="$2" mode=custom tmp
+  ssh_tunnel_state_exists || die 'SSH Tunnel 未安装'
+  if [ -z "$host" ]; then
+    mode=auto
+    port="$(ssh_tunnel_default_display_port)" || die '无法安全推导 SSH Display port'
+  else
+    valid_advertise_host "$host" || die 'SSH Display host 无效'
+    valid_advertise_port "$port" || die 'SSH Display port 无效'
+    port="$(normalize_uint "$port")"
+  fi
+  tmp="$(mktemp_file .ssh-state)" || return 1
+  jq --arg mode "$mode" --arg host "$host" --arg port "$port" \
+    --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+    .advertise_mode=$mode | .advertise_host=$host | .advertise_port=($port|tonumber)
+    | .updated_at=$updated
+  ' "$NOBRAND_SSH_STATE_FILE" >"$tmp" \
+    && nb_atomic_install_file "$tmp" "$NOBRAND_SSH_STATE_FILE" 0600
+  rm -f "$tmp"
+}
+
+ssh_tunnel_effective_host() {
+  local mode host
+  mode="$(ssh_tunnel_state_field advertise_mode)"
+  host="$(ssh_tunnel_state_field advertise_host)"
+  nb_effective_advertise_host "$mode" "$host"
+}
+
+ssh_tunnel_host_public_key() {
+  local candidate
+  for candidate in /etc/ssh/ssh_host_ed25519_key.pub /etc/ssh/ssh_host_ecdsa_key.pub \
+    /etc/ssh/ssh_host_rsa_key.pub; do
+    [ -s "$candidate" ] && { printf '%s' "$candidate"; return 0; }
+  done
+  return 1
+}
+
+ssh_tunnel_known_hosts_entry() {
+  local host="$1" port="$2" public_key key_fields known_host
+  public_key="$(ssh_tunnel_host_public_key)" || return 1
+  key_fields="$(awk '{print $1" "$2}' "$public_key")"
+  known_host="$host"
+  [ "$port" = 22 ] || known_host="[${host}]:${port}"
+  printf '%s %s' "$known_host" "$key_fields"
+}
+
+ssh_tunnel_show_user() {
+  local selector="${1:-}" user_json account_id label linux_user host port key_path
+  user_json="$(ssh_tunnel_resolve_user_json "$selector")" || return 1
+  account_id="$(jq -r .account_id <<<"$user_json")"
+  label="$(jq -r .display_name <<<"$user_json")"
+  linux_user="$(jq -r .linux_user <<<"$user_json")"
+  host="$(ssh_tunnel_effective_host)"
+  port="$(ssh_tunnel_state_field advertise_port)"
+  key_path="$(ssh_tunnel_key_dir "$account_id")/id_ed25519"
+  printf 'SSH Tunnel user: %s\nLinux identity: %s\nDisplay Endpoint: %s:%s\n' \
+    "$label" "$linux_user" "$host" "$port"
+  printf 'Connection: ssh -N -i %s -p %s %s@%s\n' "$key_path" "$port" "$linux_user" "$host"
+  printf 'TCP forwarding: -L / -D / -R\nGatewayPorts=no; shell/exec/TTY/SFTP/SCP are disabled.\n'
+}
+
+ssh_tunnel_export_user() {
+  local selector="${1:-}" user_json account_id label linux_user host port key_path public_key
+  local fingerprint known_hosts
+  user_json="$(ssh_tunnel_resolve_user_json "$selector")" || return 1
+  account_id="$(jq -r .account_id <<<"$user_json")"
+  label="$(jq -r .display_name <<<"$user_json")"
+  linux_user="$(jq -r .linux_user <<<"$user_json")"
+  host="$(ssh_tunnel_effective_host)"
+  port="$(ssh_tunnel_state_field advertise_port)"
+  key_path="$(ssh_tunnel_key_dir "$account_id")/id_ed25519"
+  public_key="$(ssh_tunnel_host_public_key 2>/dev/null || true)"
+  fingerprint='unavailable'
+  known_hosts='unavailable'
+  [ -z "$public_key" ] || fingerprint="$(ssh-keygen -lf "$public_key" -E sha256 2>/dev/null || printf unavailable)"
+  known_hosts="$(ssh_tunnel_known_hosts_entry "$host" "$port" 2>/dev/null || printf unavailable)"
+  printf '%s\n' '===== OPENSSH PRIVATE KEY (explicit export) ====='
+  cat "$key_path" || return 1
+  printf '%s\n' '===== END OPENSSH PRIVATE KEY =====' ''
+  printf 'Host key fingerprint: %s\nknown_hosts: %s\n\n' "$fingerprint" "$known_hosts"
+  printf 'SOCKS5 command:\nssh -N -D 127.0.0.1:1080 -i <PRIVATE_KEY> -p %s %s@%s' \
+    "$port" "$linux_user" "$host"
+  printf ' -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3\n\n'
+  printf 'LocalForward template:\nssh -N -L <LOCAL_BIND>:<TARGET_HOST>:<TARGET_PORT> -i <PRIVATE_KEY> -p %s %s@%s -o ExitOnForwardFailure=yes\n\n' \
+    "$port" "$linux_user" "$host"
+  printf 'RemoteForward template:\nssh -N -R <REMOTE_PORT>:<TARGET_HOST>:<TARGET_PORT> -i <PRIVATE_KEY> -p %s %s@%s -o ExitOnForwardFailure=yes\n' \
+    "$port" "$linux_user" "$host"
+  printf 'GatewayPorts=no: RemoteForward remains loopback-only and cannot expose a public listener.\n\n'
+  printf 'OpenSSH config:\nHost nobrand-%s\n  HostName %s\n  Port %s\n  User %s\n  IdentityFile <PRIVATE_KEY>\n  IdentitiesOnly yes\n  ExitOnForwardFailure yes\n  ServerAliveInterval 30\n  ServerAliveCountMax 3\n' \
+    "$(safe_filename_component "$label")" "$host" "$port" "$linux_user"
+}
+
+ssh_tunnel_node_rows() {
+  local host port status user_json label
+  ssh_tunnel_state_exists || return 0
+  host="$(ssh_tunnel_effective_host)"
+  port="$(ssh_tunnel_state_field advertise_port)"
+  status=Stopped
+  [ "$(ssh_tunnel_state_field policy_applied 2>/dev/null || printf false)" = true ] && status=Ready
+  while IFS= read -r user_json; do
+    [ -n "$user_json" ] || continue
+    label="$(jq -r .display_name <<<"$user_json")"
+    printf 'SSH Tunnel|%s|%s:%s|%s|TCP (external sshd)\n' "$label" "$host" "$port" "$status"
+  done < <(jq -c '.users[]?' "$NOBRAND_SSH_STATE_FILE")
+}
+
+ssh_tunnel_doctor() {
+  local failed=0 user_json managed_path validation_user
+  if ! ssh_tunnel_state_exists; then
+    nb_doctor_line INFO 'SSH Tunnel not installed'
+    return 0
+  fi
+  ssh_tunnel_sshd_test "$NOBRAND_SSH_CONFIG_MAIN" \
+    && nb_doctor_line PASS 'sshd config syntax' \
+    || { nb_doctor_line FAIL 'sshd config syntax'; failed=1; }
+  managed_path="$(ssh_tunnel_state_field managed_config_path)"
+  [ -s "$managed_path" ] && nb_doctor_line PASS 'managed Match policy present' \
+    || { nb_doctor_line FAIL 'managed Match policy missing'; failed=1; }
+  ssh_tunnel_group_identity_valid && nb_doctor_line PASS 'dedicated group identity' \
+    || { nb_doctor_line FAIL 'dedicated group identity'; failed=1; }
+  validation_user="$(jq -r '.users[0].linux_user // empty' "$NOBRAND_SSH_STATE_FILE")"
+  [ -z "$validation_user" ] || ssh_tunnel_effective_policy_valid "$NOBRAND_SSH_CONFIG_MAIN" "$validation_user" \
+    && nb_doctor_line PASS 'effective forwarding-only policy' \
+    || { nb_doctor_line FAIL 'effective forwarding-only policy'; failed=1; }
+  while IFS= read -r user_json; do
+    ssh_tunnel_user_identity_valid "$user_json" \
+      && nb_doctor_line PASS "identity $(jq -r .display_name <<<"$user_json")" \
+      || { nb_doctor_line FAIL "identity $(jq -r .display_name <<<"$user_json")"; failed=1; }
+    [ "$(stat -c '%a' "$(ssh_tunnel_key_dir "$(jq -r .account_id <<<"$user_json")")/id_ed25519" 2>/dev/null || true)" = 600 ] \
+      && nb_doctor_line PASS "private-key mode $(jq -r .display_name <<<"$user_json")" \
+      || { nb_doctor_line FAIL "private-key mode $(jq -r .display_name <<<"$user_json")"; failed=1; }
+  done < <(jq -c '.users[]?' "$NOBRAND_SSH_STATE_FILE")
+  nb_doctor_line PASS 'external_listener=true managed_listener=false managed_firewall=false'
+  return "$failed"
+}
+
+ssh_tunnel_rollback_empty_install() {
+  local group_preexisting="${1:-1}"
+  rm -f "$NOBRAND_SSH_STATE_FILE"
+  find "$NOBRAND_SSH_KEYS_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + 2>/dev/null || true
+  find "$NOBRAND_SSH_AUTHORIZED_KEYS_DIR" -mindepth 1 -maxdepth 1 -type f -delete 2>/dev/null || true
+  find "$NOBRAND_SSH_ACCOUNT_MARKER_DIR" -mindepth 1 -maxdepth 1 -type f \
+    ! -name '.group.json' -delete 2>/dev/null || true
+  if [ "$group_preexisting" -eq 0 ]; then
+    if ssh_tunnel_group_identity_valid; then
+      ssh_tunnel_delete_group >/dev/null 2>&1 || return 1
+    elif _has_group "$NOBRAND_SSH_GROUP"; then
+      return 1
+    fi
+    rm -f "$NOBRAND_SSH_GROUP_MARKER"
+  fi
+  rmdir "$NOBRAND_SSH_KEYS_DIR" "$NOBRAND_SSH_AUTHORIZED_KEYS_DIR" \
+    "$NOBRAND_SSH_ACCOUNT_MARKER_DIR" "$NOBRAND_SSH_STATE_DIR" \
+    "$NOBRAND_SSH_CONFIG_DIR" 2>/dev/null || true
+}
+
+ssh_tunnel_install() {
+  local label mode host port real_port strategy managed_path users='[]' state_tmp="" account_id linux_user
+  local group_preexisting=0
+  require_root
+  require_linux
+  nobrand_prepare_common
+  command -v ssh-keygen >/dev/null 2>&1 || die 'SSH Tunnel 需要 OpenSSH ssh-keygen'
+  ssh_tunnel_sshd_binary >/dev/null || die '未检测到现有 OpenSSH sshd'
+  ssh_tunnel_sshd_test "$NOBRAND_SSH_CONFIG_MAIN" || die '现有 sshd_config 无法通过 sshd -t'
+  ssh_tunnel_state_exists && { t 'SSH Tunnel 已安装' 'SSH Tunnel is already installed'; return 0; }
+  label="${SSH_TUNNEL_USER:-default}"
+  ssh_tunnel_valid_label "$label" || die 'SSH Tunnel 用户标签无效'
+  real_port="$(ssh_tunnel_detect_real_port)" || die '无法读取现有 sshd effective Port'
+  if [ -n "${ADVERTISE_HOST:-}" ]; then
+    valid_advertise_host "$ADVERTISE_HOST" || die 'SSH Display host 无效'
+    valid_advertise_port "$ADVERTISE_PORT" || die 'SSH Display port 无效'
+    mode=custom host="$ADVERTISE_HOST" port="$(normalize_uint "$ADVERTISE_PORT")"
+  else
+    [ "${YES:-0}" -ne 1 ] || [ "${ADVERTISE_AUTO_REQUESTED:-0}" -eq 1 ] \
+      || die '非交互 SSH install 必须明确 Display Endpoint 或 --advertise-auto'
+    mode=auto host="" port="$(ssh_tunnel_default_display_port)" \
+      || die '无法安全推导 SSH Display port；请明确指定'
+  fi
+  _has_group "$NOBRAND_SSH_GROUP" && group_preexisting=1
+  ssh_tunnel_create_group || die '无法创建 SSH Tunnel group'
+  strategy="marker-block" managed_path="$NOBRAND_SSH_CONFIG_MAIN"
+  ssh_tunnel_dropin_supported && { strategy=dropin; managed_path="$NOBRAND_SSH_CONFIG_DROPIN"; }
+  state_tmp="$(mktemp_file .ssh-state)" || {
+    ssh_tunnel_rollback_empty_install "$group_preexisting" || true
+    return 1
+  }
+  ssh_tunnel_generate_state "$state_tmp" "$mode" "$host" "$port" "$real_port" \
+    "$strategy" "$managed_path" "$users" || {
+      rm -f "$state_tmp"
+      ssh_tunnel_rollback_empty_install "$group_preexisting" || true
+      return 1
+    }
+  nb_atomic_install_file "$state_tmp" "$NOBRAND_SSH_STATE_FILE" 0600 || {
+    rm -f "$state_tmp"
+    ssh_tunnel_rollback_empty_install "$group_preexisting" || true
+    return 1
+  }
+  rm -f "$state_tmp"
+  account_id="$(ssh_tunnel_add_user_internal "$label")" || {
+    ssh_tunnel_rollback_empty_install "$group_preexisting" || true
+    return 1
+  }
+  linux_user="$(jq -r --arg account_id "$account_id" '.users[] | select(.account_id==$account_id) | .linux_user' \
+    "$NOBRAND_SSH_STATE_FILE")"
+  if ! ssh_tunnel_apply_policy "$linux_user"; then
+    if ! ssh_tunnel_delete_user_internal "$label" >/dev/null 2>&1; then
+      warn 'SSH policy apply failed and account rollback was incomplete; state retained for safe retry'
+      return 1
+    fi
+    ssh_tunnel_rollback_empty_install "$group_preexisting" \
+      || warn 'SSH install rollback could not remove the newly created empty group'
+    return 1
+  fi
+  nobrand_install_manager_script || true
+  ssh_tunnel_show_user "$label"
+}
+
+ssh_tunnel_status() {
+  ssh_tunnel_state_exists || { t 'SSH Tunnel 未安装' 'SSH Tunnel is not installed'; return 0; }
+  printf 'SSH Tunnel\n  Policy: %s\n  Existing sshd real port: %s\n  Display Endpoint: %s:%s\n  Users: %s\n' \
+    "$(ssh_tunnel_state_field policy_applied)" "$(ssh_tunnel_state_field real_port)" \
+    "$(ssh_tunnel_effective_host)" "$(ssh_tunnel_state_field advertise_port)" \
+    "$(jq '.users | length' "$NOBRAND_SSH_STATE_FILE")"
+  printf '  Ownership: external_listener=true managed_listener=false managed_firewall=false\n'
+}
+
+ssh_tunnel_user_list() {
+  ssh_tunnel_state_exists || return 0
+  jq -r '.users[]? | [.display_name,.linux_user,.key_fingerprint] | @tsv' "$NOBRAND_SSH_STATE_FILE"
+}
+
+ssh_tunnel_restore_preflight() {
+  local staged_state="$1" user_json linux_user expected_uid marker
+  [ -s "$staged_state" ] || return 0
+  jq -e '
+    .schema_version==3 and .ownership=="nobrand-v3" and .protocol=="ssh-tunnel"
+    and .external_listener==true and .managed_listener==false and .managed_firewall==false
+  ' "$staged_state" >/dev/null || return 1
+  if _has_group "$NOBRAND_SSH_GROUP"; then
+    ssh_tunnel_group_identity_valid || return 1
+  fi
+  while IFS= read -r user_json; do
+    linux_user="$(jq -r .linux_user <<<"$user_json")"
+    expected_uid="$(jq -r .uid <<<"$user_json")"
+    if _has_user "$linux_user"; then
+      [ "$(id -u "$linux_user")" = "$expected_uid" ] || return 1
+      # A backup is not proof that an already-existing local identity belongs
+      # to NoBrand. Require the current, pre-restore ownership marker.
+      marker="$(ssh_tunnel_account_marker_file "$linux_user")"
+      jq -e --arg account_id "$(jq -r .account_id <<<"$user_json")" \
+        --arg linux_user "$linux_user" --arg uid "$expected_uid" '
+        .ownership=="nobrand-v3" and .account_id==$account_id
+        and .linux_user==$linux_user and .uid==($uid|tonumber)
+      ' "$marker" >/dev/null || return 1
+    elif getent passwd "$expected_uid" >/dev/null 2>&1; then
+      return 1
+    fi
+  done < <(jq -c '.users[]?' "$staged_state")
+}
+
+ssh_tunnel_snapshot_external_state() {
+  local snapshot="$1" label path
+  mkdir -p "$snapshot" || return 1
+  for label in main dropin; do
+    case "$label" in
+      main) path="$NOBRAND_SSH_CONFIG_MAIN" ;;
+      dropin) path="$NOBRAND_SSH_CONFIG_DROPIN" ;;
+    esac
+    if [ -e "$path" ]; then
+      cp -a "$path" "$snapshot/$label" || return 1
+    else
+      : >"$snapshot/${label}.absent" || return 1
+    fi
+  done
+  : >"$snapshot/created.log"
+}
+
+ssh_tunnel_log_created_restore_identity() {
+  local log="${1:-}" kind="$2" name="$3" numeric_id="$4" account_id="${5:-}"
+  [ -n "$log" ] || return 0
+  printf '%s|%s|%s|%s\n' "$kind" "$name" "$numeric_id" "$account_id" >>"$log"
+}
+
+ssh_tunnel_cancel_pending_watchdog() {
+  local token pid
+  ssh_tunnel_state_exists || return 0
+  token="$(ssh_tunnel_state_field pending_watchdog_token 2>/dev/null || true)"
+  pid="$(ssh_tunnel_state_field pending_watchdog_pid 2>/dev/null || true)"
+  [ -n "$token" ] || return 0
+  ssh_tunnel_watchdog_cancel "$token" "$pid"
+}
+
+ssh_tunnel_restore_external_snapshot() {
+  local snapshot="$1" log="${2:-$1/created.log}" kind name numeric_id account_id
+  local passwd_line actual_uid actual_gid gecos group_gid label path failed=0
+  if [ -s "$log" ]; then
+    while IFS='|' read -r kind name numeric_id account_id; do
+      [ "$kind" = USER ] || continue
+      passwd_line="$(getent passwd "$name" 2>/dev/null || true)"
+      [ -n "$passwd_line" ] || continue
+      IFS=: read -r _ _ actual_uid actual_gid gecos _ _ <<<"$passwd_line"
+      group_gid="$(getent group "$NOBRAND_SSH_GROUP" 2>/dev/null | awk -F: '{print $3}')"
+      if [ "$actual_uid" = "$numeric_id" ] && [ "$actual_gid" = "$group_gid" ] \
+         && [ "$gecos" = "NoBrand SSH Tunnel ${account_id}" ]; then
+        pkill -KILL -u "$actual_uid" 2>/dev/null || true
+        ssh_tunnel_delete_linux_user "$name" || failed=1
+      else
+        warn "SSH restore rollback refused to delete identity mismatch: $name"
+        failed=1
+      fi
+    done < <(awk -F'|' '$1=="USER" {line[NR]=$0} END {for (i=NR;i>=1;i--) if (line[i] != "") print line[i]}' "$log")
+    while IFS='|' read -r kind name numeric_id _; do
+      [ "$kind" = GROUP ] || continue
+      if _has_group "$name"; then
+        [ "$(getent group "$name" | awk -F: '{print $3}')" = "$numeric_id" ] || {
+          warn "SSH restore rollback refused to delete group identity mismatch: $name"
+          failed=1
+          continue
+        }
+        if command -v groupdel >/dev/null 2>&1; then
+          groupdel "$name" || failed=1
+        elif command -v delgroup >/dev/null 2>&1; then
+          delgroup "$name" || failed=1
+        else
+          failed=1
+        fi
+      fi
+    done <"$log"
+  fi
+  for label in main dropin; do
+    case "$label" in
+      main) path="$NOBRAND_SSH_CONFIG_MAIN" ;;
+      dropin) path="$NOBRAND_SSH_CONFIG_DROPIN" ;;
+    esac
+    if [ -e "$snapshot/$label" ]; then
+      mkdir -p "$(dirname "$path")" || { failed=1; continue; }
+      cp -a "$snapshot/$label" "$path" || failed=1
+    else
+      rm -f "$path" || failed=1
+    fi
+  done
+  if [ -e "$NOBRAND_SSH_CONFIG_MAIN" ]; then
+    ssh_tunnel_sshd_test "$NOBRAND_SSH_CONFIG_MAIN" && ssh_tunnel_reload || failed=1
+  fi
+  [ "$failed" -eq 0 ]
+}
+
+ssh_tunnel_restore_system_state() {
+  local transaction_log="${1:-}" user_json linux_user account_id expected_uid nologin_shell
+  local public_key fingerprint validation_user group_preexisting=0 group_gid created_user=0
+  ssh_tunnel_state_exists || return 0
+  _has_group "$NOBRAND_SSH_GROUP" && group_preexisting=1
+  if ! ssh_tunnel_create_group; then
+    if [ "$group_preexisting" -eq 0 ] && _has_group "$NOBRAND_SSH_GROUP"; then
+      group_gid="$(getent group "$NOBRAND_SSH_GROUP" | awk -F: '{print $3}')"
+      ssh_tunnel_log_created_restore_identity "$transaction_log" GROUP \
+        "$NOBRAND_SSH_GROUP" "$group_gid"
+    fi
+    return 1
+  fi
+  if [ "$group_preexisting" -eq 0 ]; then
+    group_gid="$(getent group "$NOBRAND_SSH_GROUP" | awk -F: '{print $3}')"
+    ssh_tunnel_log_created_restore_identity "$transaction_log" GROUP \
+      "$NOBRAND_SSH_GROUP" "$group_gid"
+  fi
+  nologin_shell="$(ssh_tunnel_nologin_shell)" || return 1
+  while IFS= read -r user_json; do
+    linux_user="$(jq -r .linux_user <<<"$user_json")"
+    account_id="$(jq -r .account_id <<<"$user_json")"
+    expected_uid="$(jq -r .uid <<<"$user_json")"
+    if _has_user "$linux_user"; then
+      ssh_tunnel_user_identity_valid "$user_json" || return 1
+    else
+      created_user=0
+      public_key="$(ssh_tunnel_key_dir "$account_id")/id_ed25519.pub"
+      fingerprint="$(ssh_tunnel_key_fingerprint "$public_key")" || return 1
+      [ "$fingerprint" = "$(jq -r .key_fingerprint <<<"$user_json")" ] || return 1
+      if ssh_tunnel_create_linux_user_with_uid "$linux_user" "$account_id" "$nologin_shell" "$expected_uid"; then
+        created_user=1
+      elif _has_user "$linux_user"; then
+        created_user=1
+      else
+        return 1
+      fi
+      if [ "$created_user" -eq 1 ]; then
+        ssh_tunnel_log_created_restore_identity "$transaction_log" USER \
+          "$linux_user" "$expected_uid" "$account_id"
+      fi
+      [ "$(id -u "$linux_user" 2>/dev/null || true)" = "$expected_uid" ] || return 1
+      ssh_tunnel_authorized_key_line "$public_key" "$nologin_shell" \
+        >"$(ssh_tunnel_authorized_key_file "$linux_user")" || return 1
+      chmod 0644 "$(ssh_tunnel_authorized_key_file "$linux_user")" || return 1
+    fi
+    chmod 0600 "$(ssh_tunnel_key_dir "$account_id")/id_ed25519" || return 1
+  done < <(jq -c '.users[]?' "$NOBRAND_SSH_STATE_FILE")
+  validation_user="$(jq -r '.users[0].linux_user // empty' "$NOBRAND_SSH_STATE_FILE")"
+  [ -n "$validation_user" ] || return 1
+  ssh_tunnel_apply_policy "$validation_user" restore
+}
+
+ssh_tunnel_restore_deleted_accounts() {
+  local snapshot="$1" deleted_list="$2" nologin_shell user_json linux_user account_id uid auth_file
+  nologin_shell="$(ssh_tunnel_nologin_shell)" || return 1
+  while IFS= read -r user_json; do
+    [ -n "$user_json" ] || continue
+    linux_user="$(jq -r .linux_user <<<"$user_json")"
+    account_id="$(jq -r .account_id <<<"$user_json")"
+    uid="$(jq -r .uid <<<"$user_json")"
+    if ! _has_user "$linux_user"; then
+      ssh_tunnel_create_linux_user_with_uid "$linux_user" "$account_id" "$nologin_shell" "$uid" \
+        || return 1
+    fi
+    auth_file="$(ssh_tunnel_authorized_key_file "$linux_user")"
+    [ ! -f "$snapshot/$linux_user" ] || cp -a "$snapshot/$linux_user" "$auth_file" || return 1
+  done <"$deleted_list"
+}
+
+ssh_tunnel_restore_uninstall_snapshot() {
+  local snapshot="$1" deleted_list="$2" group_gid="$3" state_mode config_mode failed=0
+  state_mode="$(stat -c '%a' "$snapshot/state-dir" 2>/dev/null || true)"
+  config_mode="$(stat -c '%a' "$snapshot/config-dir" 2>/dev/null || true)"
+  [[ "$state_mode" =~ ^[0-7]{3,4}$ ]] || return 1
+  [[ "$config_mode" =~ ^[0-7]{3,4}$ ]] || return 1
+  mkdir -p "$NOBRAND_SSH_STATE_DIR" "$NOBRAND_SSH_CONFIG_DIR" || return 1
+  cp -a "$snapshot/state-dir/." "$NOBRAND_SSH_STATE_DIR/" || failed=1
+  cp -a "$snapshot/config-dir/." "$NOBRAND_SSH_CONFIG_DIR/" || failed=1
+  chmod "$state_mode" "$NOBRAND_SSH_STATE_DIR" 2>/dev/null || failed=1
+  chmod "$config_mode" "$NOBRAND_SSH_CONFIG_DIR" 2>/dev/null || failed=1
+  if ! _has_group "$NOBRAND_SSH_GROUP"; then
+    ssh_tunnel_create_group_with_gid "$group_gid" || failed=1
+  fi
+  if _has_group "$NOBRAND_SSH_GROUP"; then
+    ssh_tunnel_restore_deleted_accounts "$snapshot" "$deleted_list" || failed=1
+  else
+    failed=1
+  fi
+  [ "$failed" -eq 0 ]
+}
+
+ssh_tunnel_finalize_uninstall() {
+  local user_json linux_user uid auth_file snapshot deleted_list group_gid
+  snapshot="$(mktemp_dir)" || return 1
+  deleted_list="${snapshot}/deleted.jsonl"
+  : >"$deleted_list"
+  ssh_tunnel_group_identity_valid || {
+    rm -rf -- "$snapshot"
+    die 'SSH Tunnel group identity mismatch，拒绝删除'
+  }
+  group_gid="$(getent group "$NOBRAND_SSH_GROUP" 2>/dev/null | awk -F: '{print $3}')"
+  [[ "$group_gid" =~ ^[0-9]+$ ]] || { rm -rf -- "$snapshot"; return 1; }
+  cp -a "$NOBRAND_SSH_STATE_DIR" "$snapshot/state-dir" \
+    && cp -a "$NOBRAND_SSH_CONFIG_DIR" "$snapshot/config-dir" || {
+      rm -rf -- "$snapshot"
+      return 1
+    }
+  while IFS= read -r user_json; do
+    ssh_tunnel_user_identity_valid "$user_json" || {
+      rm -rf -- "$snapshot"
+      die 'SSH Tunnel user identity mismatch，拒绝删除'
+    }
+    linux_user="$(jq -r .linux_user <<<"$user_json")"
+    auth_file="$(ssh_tunnel_authorized_key_file "$linux_user")"
+    cp -a "$auth_file" "$snapshot/$linux_user" || { rm -rf -- "$snapshot"; return 1; }
+  done < <(jq -c '.users[]?' "$NOBRAND_SSH_STATE_FILE")
+  while IFS= read -r user_json; do
+    linux_user="$(jq -r .linux_user <<<"$user_json")"
+    uid="$(jq -r .uid <<<"$user_json")"
+    rm -f "$(ssh_tunnel_authorized_key_file "$linux_user")"
+    pkill -KILL -u "$uid" 2>/dev/null || true
+    if ! ssh_tunnel_delete_linux_user "$linux_user"; then
+      ssh_tunnel_restore_deleted_accounts "$snapshot" "$deleted_list" || true
+      cp -a "$snapshot/$linux_user" "$(ssh_tunnel_authorized_key_file "$linux_user")" 2>/dev/null || true
+      rm -rf -- "$snapshot"
+      return 1
+    fi
+    printf '%s\n' "$user_json" >>"$deleted_list"
+  done < <(jq -c '.users[]?' "$NOBRAND_SSH_STATE_FILE")
+  if _has_group "$NOBRAND_SSH_GROUP"; then
+    if command -v groupdel >/dev/null 2>&1; then
+      groupdel "$NOBRAND_SSH_GROUP" || {
+        ssh_tunnel_restore_deleted_accounts "$snapshot" "$deleted_list" || true
+        rm -rf -- "$snapshot"
+        return 1
+      }
+    elif command -v delgroup >/dev/null 2>&1; then
+      delgroup "$NOBRAND_SSH_GROUP" || {
+        ssh_tunnel_restore_deleted_accounts "$snapshot" "$deleted_list" || true
+        rm -rf -- "$snapshot"
+        return 1
+      }
+    else
+      ssh_tunnel_restore_deleted_accounts "$snapshot" "$deleted_list" || true
+      rm -rf -- "$snapshot"
+      return 1
+    fi
+  fi
+  if ! find "$NOBRAND_SSH_STATE_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + \
+     || ! find "$NOBRAND_SSH_CONFIG_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + \
+     || ! rmdir "$NOBRAND_SSH_STATE_DIR" "$NOBRAND_SSH_CONFIG_DIR" 2>/dev/null; then
+    if ! ssh_tunnel_restore_uninstall_snapshot "$snapshot" "$deleted_list" "$group_gid"; then
+      warn "SSH Tunnel uninstall rollback incomplete; root-only snapshot retained: $snapshot"
+      return 1
+    fi
+    ssh_tunnel_group_identity_valid || return 1
+    while IFS= read -r user_json; do
+      ssh_tunnel_user_identity_valid "$user_json" || return 1
+    done <"$deleted_list"
+    rm -rf -- "$snapshot"
+    return 1
+  fi
+  rm -rf -- "$snapshot"
+  t '已删除 NoBrand SSH Tunnel；system sshd/端口/firewall/host keys/admin access 均保留' \
+    'Removed NoBrand SSH Tunnel; system sshd/port/firewall/host keys/admin access are preserved'
+}
+
+ssh_tunnel_uninstall() {
+  local operation="${1:-uninstall}" pending token user_json
+  require_root
+  ssh_tunnel_state_exists || { t 'SSH Tunnel 未安装' 'SSH Tunnel is not installed'; return 0; }
+  pending="$(ssh_tunnel_state_field pending_operation 2>/dev/null || true)"
+  if [ "$pending" = uninstall ] || [ "$pending" = unified-uninstall ]; then
+    token="$(ssh_tunnel_state_field pending_watchdog_token)"
+    [ "$token" = disabled ] || ssh_tunnel_watchdog_prompt "$token"
+    return 0
+  fi
+  [ -z "$pending" ] || die "SSH policy 尚有待确认操作: $pending"
+  while IFS= read -r user_json; do
+    ssh_tunnel_user_identity_valid "$user_json" \
+      || die 'SSH Tunnel user identity mismatch，拒绝卸载'
+  done < <(jq -c '.users[]?' "$NOBRAND_SSH_STATE_FILE")
+  ssh_tunnel_group_identity_valid || die 'SSH Tunnel group identity mismatch，拒绝卸载'
+  ssh_tunnel_remove_policy "$operation"
+}
+
+nobrand_run_ssh_tunnel_action() {
+  case "${SSH_TUNNEL_ACTION:-menu}" in
+    install) ssh_tunnel_install ;;
+    status) ssh_tunnel_status ;;
+    doctor) ssh_tunnel_doctor ;;
+    show) ssh_tunnel_show_user "${SSH_TUNNEL_USER:-}" ;;
+    export) ssh_tunnel_export_user "${SSH_TUNNEL_USER:-}" ;;
+    set-endpoint) ssh_tunnel_set_endpoint_state "${ADVERTISE_HOST:-}" "${ADVERTISE_PORT:-}" ;;
+    confirm-admin) ssh_tunnel_confirm_admin "$SSH_TUNNEL_WATCHDOG_TOKEN" ;;
+    user-list) ssh_tunnel_user_list ;;
+    user-add) ssh_tunnel_add_user_internal "$SSH_TUNNEL_USER" >/dev/null ;;
+    user-show) ssh_tunnel_show_user "$SSH_TUNNEL_USER" ;;
+    user-export) ssh_tunnel_export_user "$SSH_TUNNEL_USER" ;;
+    user-rotate-key) ssh_tunnel_rotate_user_key "$SSH_TUNNEL_USER" ;;
+    user-delete) ssh_tunnel_delete_user_internal "$SSH_TUNNEL_USER" ;;
+    uninstall) ssh_tunnel_uninstall ;;
+    menu) ssh_tunnel_status ;;
+    help)
+      cat <<'EOF'
+nobrand ssh install|status|doctor|show|export|set-endpoint|uninstall
+nobrand ssh user add|delete|list|show|rotate-key
+SSH Tunnel reuses the existing OpenSSH sshd and allows -L/-D/-R TCP forwarding only.
+EOF
+      ;;
+    *) die "未知 SSH Tunnel 操作: ${SSH_TUNNEL_ACTION}" ;;
+  esac
+}
+
+# ---------- Port Forward: nftables kernel NAT + official Realm relay ----------
+
+forward_now() {
+  date -u +%Y-%m-%dT%H:%M:%SZ
+}
+
+forward_normalize_protocol() {
+  case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
+    tcp) printf 'tcp' ;;
+    udp) printf 'udp' ;;
+    both|tcp+udp|tcp/udp|dual|all) printf 'both' ;;
+    *) return 1 ;;
+  esac
+}
+
+forward_protocol_transports() {
+  case "$(forward_normalize_protocol "${1:-}")" in
+    tcp) printf 'TCP\n' ;;
+    udp) printf 'UDP\n' ;;
+    both) printf 'TCP\nUDP\n' ;;
+  esac
+}
+
+forward_valid_ipv4() {
+  local value="${1:-}" a b c d extra segment
+  IFS=. read -r a b c d extra <<<"$value"
+  [ -z "${extra:-}" ] && [ -n "${d:-}" ] || return 1
+  for segment in "$a" "$b" "$c" "$d"; do
+    [[ "$segment" =~ ^[0-9]{1,3}$ ]] || return 1
+    [ "$((10#$segment))" -le 255 ] || return 1
+  done
+}
+
+forward_target_valid() {
+  local backend="${1:-}" target="${2:-}"
+  case "$backend" in
+    nftables) forward_valid_ipv4 "$target" ;;
+    realm)
+      valid_ip_literal "$target" && return 0
+      # An IPv4-looking value must be a valid literal; do not reinterpret a
+      # malformed address such as 999.2.3.4 as a DNS name.
+      [[ "$target" =~ ^[0-9.]+$ ]] && return 1
+      valid_domain_name "$target"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+forward_listen_host_valid() {
+  local backend="${1:-}" host="${2:-}"
+  case "$backend" in
+    nftables) forward_valid_ipv4 "$host" ;;
+    realm) valid_ip_literal "$host" ;;
+    *) return 1 ;;
+  esac
+}
+
+forward_socket_address_normalize() {
+  local value="${1:-}" host port
+  [ -n "$value" ] && ! has_control_chars "$value" || return 1
+  case "$value" in
+    \[*\]:*)
+      host="${value#\[}"
+      host="${host%%\]*}"
+      port="${value##*\]:}"
+      [ "$value" = "[${host}]:${port}" ] || return 1
+      [[ "$host" == *:* ]] && valid_ip_literal "$host" || return 1
+      ;;
+    *:*)
+      host="${value%:*}"
+      port="${value##*:}"
+      [ -n "$host" ] || return 1
+      valid_ip_literal "$host" || valid_domain_name "$host" || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  nb_valid_port "$port" || return 1
+  port="$(normalize_uint "$port")" || return 1
+  if [[ "$host" == *:* ]]; then
+    printf '[%s]:%s' "$host" "$port"
+  else
+    printf '%s:%s' "$host" "$port"
+  fi
+}
+
+forward_socket_address_valid() {
+  forward_socket_address_normalize "${1:-}" >/dev/null
+}
+
+forward_realm_options_valid_json() {
+  local options="${1:-}" through interface listen_interface listen_transport remote_transport item
+  jq -e '
+    (type=="object") and
+    (keys|sort)==["balance","dns_mode","dns_nameservers","dns_protocol","extra_targets",
+      "interface","listen_interface","listen_transport","proxy_accept","proxy_accept_timeout",
+      "proxy_send","proxy_version","remote_transport","tcp_timeout","through","udp_timeout","weights"] and
+    (.through|type)=="string" and (.interface|type)=="string" and
+    (.listen_interface|type)=="string" and
+    (.tcp_timeout|type)=="number" and (.tcp_timeout|floor)==.tcp_timeout and
+      .tcp_timeout>=0 and .tcp_timeout<=86400 and
+    (.udp_timeout|type)=="number" and (.udp_timeout|floor)==.udp_timeout and
+      .udp_timeout>=1 and .udp_timeout<=86400 and
+    (.proxy_send|type)=="boolean" and (.proxy_accept|type)=="boolean" and
+    (.proxy_version==1 or .proxy_version==2) and
+    (.proxy_accept_timeout|type)=="number" and
+      (.proxy_accept_timeout|floor)==.proxy_accept_timeout and
+      .proxy_accept_timeout>=0 and .proxy_accept_timeout<=86400 and
+    (.dns_mode=="system" or .dns_mode=="ipv4_only" or .dns_mode=="ipv6_only" or
+      .dns_mode=="ipv4_then_ipv6" or .dns_mode=="ipv6_then_ipv4" or .dns_mode=="ipv4_and_ipv6") and
+    (.dns_protocol=="tcp" or .dns_protocol=="udp" or .dns_protocol=="tcp_and_udp") and
+    (.dns_nameservers|type)=="array" and
+      all(.dns_nameservers[]; type=="string" and length>0 and length<=300 and (test("[[:space:]]")|not)) and
+    (.listen_transport|type)=="string" and (.listen_transport|length)<=1024 and
+    (.remote_transport|type)=="string" and (.remote_transport|length)<=1024 and
+    (.extra_targets|type)=="array" and
+      all(.extra_targets[]; type=="string" and length>0 and length<=300 and (test("[[:space:]]")|not)) and
+    (.balance=="off" or .balance=="roundrobin" or .balance=="iphash") and
+    (.weights|type)=="array" and
+      all(.weights[]; type=="number" and floor==. and .>=1 and .<=255) and
+    (if .balance=="off" then
+       (.extra_targets|length)==0 and (.weights|length)==0
+     else
+       (.extra_targets|length)>0 and (.weights|length)==(1+(.extra_targets|length))
+     end)
+  ' <<<"$options" >/dev/null || return 1
+  through="$(jq -r .through <<<"$options")"
+  [ -z "$through" ] || valid_ip_literal "$through" || return 1
+  interface="$(jq -r .interface <<<"$options")"
+  listen_interface="$(jq -r .listen_interface <<<"$options")"
+  for item in "$interface" "$listen_interface"; do
+    [ -z "$item" ] || [[ "$item" =~ ^[A-Za-z0-9_.:-]{1,64}$ ]] || return 1
+  done
+  listen_transport="$(jq -r .listen_transport <<<"$options")"
+  remote_transport="$(jq -r .remote_transport <<<"$options")"
+  ! has_control_chars "$listen_transport" && ! has_control_chars "$remote_transport" || return 1
+  while IFS= read -r item; do
+    forward_socket_address_valid "$item" || return 1
+  done < <(jq -r '.dns_nameservers[]' <<<"$options")
+  while IFS= read -r item; do
+    forward_socket_address_valid "$item" || return 1
+  done < <(jq -r '.extra_targets[]' <<<"$options")
+}
+
+forward_port_allowed() {
+  local port="${1:-}" protocol transport ignore_owner="${3:-}"
+  protocol="$(forward_normalize_protocol "${2:-}")" || return 1
+  nb_valid_port "$port" || return 1
+  nb_port_is_tail_base_reserved "$port" && return 1
+  while IFS= read -r transport; do
+    nb_port_available_for_transport "$port" "$transport" "$ignore_owner" || return 1
+  done < <(forward_protocol_transports "$protocol")
+}
+
+forward_init_state() {
+  local tmp
+  [ -e "$NOBRAND_FORWARD_STATE_FILE" ] && return 0
+  mkdir -p "$NOBRAND_FORWARD_STATE_DIR" "$NOBRAND_FORWARD_CONFIG_DIR" || return 1
+  chmod 0700 "$NOBRAND_FORWARD_STATE_DIR" "$NOBRAND_FORWARD_CONFIG_DIR" || return 1
+  tmp="$(mktemp_file .forward-state)" || return 1
+  jq -n --argjson schema "$NOBRAND_SCHEMA_VERSION" \
+    '{schema_version:$schema,ownership:"nobrand-v3",feature:"port-forward",rules:[]}' >"$tmp" \
+    && nb_atomic_install_file "$tmp" "$NOBRAND_FORWARD_STATE_FILE" 0600
+  local rc=$?
+  rm -f "$tmp"
+  return "$rc"
+}
+
+forward_state_valid() {
+  local state="${1:-$NOBRAND_FORWARD_STATE_FILE}" rule_id backend protocol listen_host options
+  local listen_port target_host target_port display_mode display_host display_port transport key
+  local forward_seen_ports=""
+  [ -s "$state" ] && jq -e '
+    (keys|sort)==["feature","ownership","rules","schema_version"] and
+    .schema_version==3 and .ownership=="nobrand-v3" and .feature=="port-forward" and
+    (.rules|type)=="array" and
+    all(.rules[];
+      (keys|sort)==["backend","backend_options","created_at","display_host","display_mode",
+                    "display_port","enabled","listen_host","listen_port","name","note",
+                    "ownership_metadata","protocol","rule_id","target_host","target_port","updated_at"] and
+      (.rule_id|type)=="string" and (.rule_id|test("^f[0-9a-f]{16}$")) and
+      (.name|type)=="string" and (.name|length)>0 and (.name|length)<=64 and
+        (.name|test("[[:cntrl:]]")|not) and
+      (.note|type)=="string" and (.note|length)<=256 and
+        (.note|test("[[:cntrl:]]")|not) and
+      (.backend=="nftables" or .backend=="realm") and (.enabled|type)=="boolean" and
+      (.protocol=="tcp" or .protocol=="udp" or .protocol=="both") and
+      (.listen_host|type)=="string" and (.listen_port|type)=="number" and
+      (.target_host|type)=="string" and (.target_port|type)=="number" and
+      (.display_host|type)=="string" and (.display_port|type)=="number" and
+      (.display_mode=="auto" or .display_mode=="custom") and
+      (.created_at|type)=="string" and (.created_at|test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")) and
+      (.updated_at|type)=="string" and (.updated_at|test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")) and
+      (.ownership_metadata|type)=="object" and
+      (.ownership_metadata|keys|sort)==["managed_firewall","managed_listener"] and
+      (.ownership_metadata.managed_listener|type)=="boolean" and
+      (.ownership_metadata.managed_firewall|type)=="boolean" and
+      (.backend_options|type)=="object" and
+      (if .backend=="nftables" then
+         (.backend_options|keys)==["source_mode"] and
+         (.backend_options.source_mode=="masquerade" or .backend_options.source_mode=="preserve")
+       else
+         (.backend_options|keys|sort)==["balance","dns_mode","dns_nameservers","dns_protocol",
+           "extra_targets","interface","listen_interface","listen_transport","proxy_accept",
+           "proxy_accept_timeout","proxy_send","proxy_version","remote_transport","tcp_timeout",
+           "through","udp_timeout","weights"] and
+         (.backend_options.through|type)=="string" and
+         (.backend_options.interface|type)=="string" and
+         (.backend_options.listen_interface|type)=="string" and
+         (.backend_options.tcp_timeout|type)=="number" and
+         (.backend_options.udp_timeout|type)=="number" and
+         (.backend_options.proxy_send|type)=="boolean" and
+         (.backend_options.proxy_accept|type)=="boolean" and
+         (.backend_options.proxy_version==1 or .backend_options.proxy_version==2) and
+         (.backend_options.proxy_accept_timeout|type)=="number" and
+         (.backend_options.dns_mode|type)=="string" and
+         (.backend_options.dns_protocol|type)=="string" and
+         (.backend_options.dns_nameservers|type)=="array" and
+         (.backend_options.listen_transport|type)=="string" and
+         (.backend_options.remote_transport|type)=="string" and
+         (.backend_options.extra_targets|type)=="array" and
+         (.backend_options.balance|type)=="string" and
+         (.backend_options.weights|type)=="array"
+       end)
+    ) and
+    ([.rules[].rule_id]|length)==([.rules[].rule_id]|unique|length) and
+    ([.rules[].name]|length)==([.rules[].name]|unique|length) and
+    ([.rules[] | . as $r |
+       (if .protocol=="both" then ["TCP","UDP"] elif .protocol=="tcp" then ["TCP"] else ["UDP"] end)[] |
+       "\(.)|\($r.listen_port)"] | length)==
+    ([.rules[] | . as $r |
+       (if .protocol=="both" then ["TCP","UDP"] elif .protocol=="tcp" then ["TCP"] else ["UDP"] end)[] |
+       "\(.)|\($r.listen_port)"] | unique | length)
+  ' "$state" >/dev/null || return 1
+
+  while IFS=$'\x1f' read -r rule_id backend protocol listen_host listen_port target_host target_port \
+    display_mode display_host display_port; do
+    forward_listen_host_valid "$backend" "$listen_host" || return 1
+    nb_valid_port "$listen_port" && nb_valid_port "$target_port" \
+      && valid_advertise_port "$display_port" || return 1
+    nb_port_is_tail_base_reserved "$listen_port" && return 1
+    forward_target_valid "$backend" "$target_host" || return 1
+    if [ "$backend" = realm ]; then
+      options="$(jq -c --arg id "$rule_id" '.rules[]|select(.rule_id==$id)|.backend_options' "$state")" \
+        || return 1
+      forward_realm_options_valid_json "$options" || return 1
+    fi
+    if [ "$display_mode" = custom ]; then
+      valid_advertise_host "$display_host" || return 1
+    else
+      [ -z "$display_host" ] || return 1
+      [ "$display_port" -eq "$listen_port" ] || return 1
+    fi
+    while IFS= read -r transport; do
+      key="${transport}|${listen_port}"
+      [ -z "${forward_seen_ports:-}" ] || case "|$forward_seen_ports|" in *"|$key|"*) return 1 ;; esac
+      forward_seen_ports="${forward_seen_ports:+${forward_seen_ports}|}${key}"
+    done < <(forward_protocol_transports "$protocol")
+  done < <(jq -r '.rules[] | [.rule_id,.backend,.protocol,.listen_host,(.listen_port|tostring),
+    .target_host,(.target_port|tostring),.display_mode,.display_host,(.display_port|tostring)] | join("\u001f")' "$state")
+
+  # Realm's DNS block is global. Multiple enabled Realm rules may share it,
+  # but conflicting values are rejected instead of silently overriding peers.
+  [ "$(jq -c '[.rules[] | select(.enabled and .backend=="realm") |
+      [.backend_options.dns_mode,.backend_options.dns_protocol,.backend_options.dns_nameservers]] | unique | length' "$state")" -le 1 ] \
+    || return 1
+}
+
+forward_rule_json() {
+  local state="${1:-$NOBRAND_FORWARD_STATE_FILE}" id="$2"
+  jq -c --arg id "$id" '.rules[] | select(.rule_id==$id or .name==$id)' "$state" | head -n1
+}
+
+forward_resolve_rule_id() {
+  local value="${1:-}" state="${2:-$NOBRAND_FORWARD_STATE_FILE}" id
+  id="$(jq -r --arg value "$value" '.rules[] | select(.rule_id==$value or .name==$value) | .rule_id' \
+    "$state" 2>/dev/null | head -n1)"
+  [ -n "$id" ] && [ "$id" != null ] || return 1
+  printf '%s' "$id"
+}
+
+forward_generate_rule_id() {
+  local material digest
+  material="$(forward_now)|$$|${RANDOM}|${FORWARD_NAME:-forward}"
+  if command -v sha256sum >/dev/null 2>&1; then
+    digest="$(printf '%s' "$material" | sha256sum | awk '{print $1}')"
+  else
+    digest="$(printf '%s' "$material" | openssl dgst -sha256 | awk '{print $NF}')"
+  fi
+  printf 'f%s' "${digest:0:16}"
+}
+
+forward_toml_string() {
+  jq -Rn --arg value "${1:-}" '$value'
+}
+
+forward_realm_address() {
+  local host="$1" port="$2"
+  case "$host" in
+    *:*) printf '[%s]:%s' "$host" "$port" ;;
+    *) printf '%s:%s' "$host" "$port" ;;
+  esac
+}
+
+forward_generate_realm_config() {
+  local state="$1" output="$2" tmp dns_json mode dns_protocol nameservers
+  local rule_id protocol listen_host listen_port target_host target_port options
+  local no_tcp use_udp through interface listen_interface listen_transport remote_transport
+  local tcp_timeout udp_timeout proxy_send proxy_accept proxy_version proxy_accept_timeout
+  local extra_targets balance weights endpoint target count
+  forward_state_valid "$state" || return 1
+  tmp="$(mktemp_file .realm.toml)" || return 1
+  {
+    printf '# Generated by NoBrand-OneClick; display endpoint metadata is intentionally excluded.\n'
+    printf '[log]\nlevel = "warn"\noutput = "stdout"\n\n'
+    dns_json="$(jq -c '[.rules[] | select(.enabled and .backend=="realm")][0].backend_options // empty' "$state")"
+    if [ -n "$dns_json" ]; then
+      mode="$(jq -r '.dns_mode' <<<"$dns_json")"
+      dns_protocol="$(jq -r '.dns_protocol' <<<"$dns_json")"
+      nameservers="$(jq -c '.dns_nameservers' <<<"$dns_json")"
+      if [ "$mode" != system ] || [ "$nameservers" != '[]' ]; then
+        printf '[dns]\n'
+        [ "$mode" = system ] || printf 'mode = %s\n' "$(forward_toml_string "$mode")"
+        printf 'protocol = %s\n' "$(forward_toml_string "$dns_protocol")"
+        [ "$nameservers" = '[]' ] || printf 'nameservers = %s\n' "$nameservers"
+        printf '\n'
+      fi
+    fi
+    while IFS=$'\t' read -r rule_id protocol listen_host listen_port target_host target_port options; do
+      [ -n "$rule_id" ] || continue
+      case "$protocol" in
+        tcp) no_tcp=false; use_udp=false ;;
+        udp) no_tcp=true; use_udp=true ;;
+        both) no_tcp=false; use_udp=true ;;
+      esac
+      endpoint="$(forward_realm_address "$listen_host" "$listen_port")"
+      target="$(forward_realm_address "$target_host" "$target_port")"
+      through="$(jq -r '.through' <<<"$options")"
+      interface="$(jq -r '.interface' <<<"$options")"
+      listen_interface="$(jq -r '.listen_interface' <<<"$options")"
+      listen_transport="$(jq -r '.listen_transport' <<<"$options")"
+      remote_transport="$(jq -r '.remote_transport' <<<"$options")"
+      tcp_timeout="$(jq -r '.tcp_timeout' <<<"$options")"
+      udp_timeout="$(jq -r '.udp_timeout' <<<"$options")"
+      proxy_send="$(jq -r '.proxy_send' <<<"$options")"
+      proxy_accept="$(jq -r '.proxy_accept' <<<"$options")"
+      proxy_version="$(jq -r '.proxy_version' <<<"$options")"
+      proxy_accept_timeout="$(jq -r '.proxy_accept_timeout' <<<"$options")"
+      extra_targets="$(jq -c '.extra_targets' <<<"$options")"
+      balance="$(jq -r '.balance' <<<"$options")"
+      weights="$(jq -c '.weights' <<<"$options")"
+      printf '[[endpoints]]\nlisten = %s\nremote = %s\n' \
+        "$(forward_toml_string "$endpoint")" "$(forward_toml_string "$target")"
+      if [ "$extra_targets" != '[]' ]; then
+        printf 'extra_remotes = %s\n' "$extra_targets"
+      fi
+      if [ "$balance" != off ]; then
+        count="$(jq 'length' <<<"$weights")"
+        [ "$count" -gt 0 ] || { rm -f "$tmp"; return 1; }
+        printf 'balance = %s\n' "$(forward_toml_string "${balance}: $(jq -r 'map(tostring)|join(", ")' <<<"$weights")")"
+      fi
+      [ -z "$through" ] || printf 'through = %s\n' "$(forward_toml_string "$through")"
+      [ -z "$interface" ] || printf 'interface = %s\n' "$(forward_toml_string "$interface")"
+      [ -z "$listen_interface" ] || printf 'listen_interface = %s\n' "$(forward_toml_string "$listen_interface")"
+      [ -z "$listen_transport" ] || printf 'listen_transport = %s\n' "$(forward_toml_string "$listen_transport")"
+      [ -z "$remote_transport" ] || printf 'remote_transport = %s\n' "$(forward_toml_string "$remote_transport")"
+      printf '[endpoints.network]\nno_tcp = %s\nuse_udp = %s\n' "$no_tcp" "$use_udp"
+      printf 'tcp_timeout = %s\nudp_timeout = %s\n' "$tcp_timeout" "$udp_timeout"
+      printf 'send_proxy = %s\nsend_proxy_version = %s\n' "$proxy_send" "$proxy_version"
+      printf 'accept_proxy = %s\naccept_proxy_timeout = %s\n\n' "$proxy_accept" "$proxy_accept_timeout"
+    done < <(jq -r '.rules | sort_by(.rule_id)[] | select(.enabled and .backend=="realm") |
+      [.rule_id,.protocol,.listen_host,(.listen_port|tostring),.target_host,(.target_port|tostring),
+       (.backend_options|tojson)] | @tsv' "$state")
+  } >"$tmp" || { rm -f "$tmp"; return 1; }
+  mkdir -p "$(dirname "$output")" || { rm -f "$tmp"; return 1; }
+  install -m 0600 "$tmp" "$output"
+  local rc=$?
+  rm -f "$tmp"
+  return "$rc"
+}
+
+forward_generate_nft_ruleset() {
+  local state="$1" output="$2" tmp rule_id protocol listen_host listen_port
+  local target_host target_port source_mode transport proto match_host original_match_host
+  forward_state_valid "$state" || return 1
+  tmp="$(mktemp_file .nft)" || return 1
+  {
+    printf 'table ip %s {\n' "$NOBRAND_FORWARD_NFT_TABLE"
+    printf '  comment "Owned by NoBrand-OneClick Port Forward"\n'
+    printf '  chain prerouting {\n    type nat hook prerouting priority dstnat; policy accept;\n'
+    while IFS=$'\t' read -r rule_id protocol listen_host listen_port target_host target_port source_mode; do
+      [ -n "$rule_id" ] || continue
+      match_host=""
+      [ "$listen_host" = 0.0.0.0 ] || match_host="ip daddr ${listen_host} "
+      while IFS= read -r transport; do
+        proto="$(printf '%s' "$transport" | tr '[:upper:]' '[:lower:]')"
+        printf '    %s%s dport %s counter dnat to %s:%s comment "nobrand:%s:dnat:%s"\n' \
+          "$match_host" "$proto" "$listen_port" "$target_host" "$target_port" "$rule_id" "$proto"
+      done < <(forward_protocol_transports "$protocol")
+    done < <(jq -r '.rules | sort_by(.rule_id)[] | select(.enabled and .backend=="nftables") |
+      [.rule_id,.protocol,.listen_host,(.listen_port|tostring),.target_host,(.target_port|tostring),
+       .backend_options.source_mode] | @tsv' "$state")
+    printf '  }\n'
+    printf '  chain postrouting {\n    type nat hook postrouting priority srcnat; policy accept;\n'
+    while IFS=$'\t' read -r rule_id protocol listen_host listen_port target_host target_port source_mode; do
+      [ "$source_mode" = masquerade ] || continue
+      original_match_host=""
+      [ "$listen_host" = 0.0.0.0 ] || original_match_host="ct original ip daddr ${listen_host} "
+      while IFS= read -r transport; do
+        proto="$(printf '%s' "$transport" | tr '[:upper:]' '[:lower:]')"
+        printf '    meta l4proto %s %sct original proto-dst %s ip daddr %s %s dport %s counter masquerade comment "nobrand:%s:snat:%s"\n' \
+          "$proto" "$original_match_host" "$listen_port" "$target_host" "$proto" "$target_port" "$rule_id" "$proto"
+      done < <(forward_protocol_transports "$protocol")
+    done < <(jq -r '.rules | sort_by(.rule_id)[] | select(.enabled and .backend=="nftables") |
+      [.rule_id,.protocol,.listen_host,(.listen_port|tostring),.target_host,(.target_port|tostring),
+       .backend_options.source_mode] | @tsv' "$state")
+    printf '  }\n'
+    printf '  chain forward {\n    type filter hook forward priority -10; policy accept;\n'
+    while IFS=$'\t' read -r rule_id protocol listen_host listen_port target_host target_port source_mode; do
+      original_match_host=""
+      [ "$listen_host" = 0.0.0.0 ] || original_match_host="ct original ip daddr ${listen_host} "
+      while IFS= read -r transport; do
+        proto="$(printf '%s' "$transport" | tr '[:upper:]' '[:lower:]')"
+        printf '    meta l4proto %s %sct original proto-dst %s ip daddr %s %s dport %s ct status dnat counter accept comment "nobrand:%s:forward:%s"\n' \
+          "$proto" "$original_match_host" "$listen_port" "$target_host" "$proto" "$target_port" "$rule_id" "$proto"
+      done < <(forward_protocol_transports "$protocol")
+    done < <(jq -r '.rules | sort_by(.rule_id)[] | select(.enabled and .backend=="nftables") |
+      [.rule_id,.protocol,.listen_host,(.listen_port|tostring),.target_host,(.target_port|tostring),
+       .backend_options.source_mode] | @tsv' "$state")
+    printf '  }\n}\n'
+  } >"$tmp" || { rm -f "$tmp"; return 1; }
+  mkdir -p "$(dirname "$output")" || { rm -f "$tmp"; return 1; }
+  install -m 0600 "$tmp" "$output"
+  local rc=$?
+  rm -f "$tmp"
+  return "$rc"
+}
+
+forward_set_endpoint_state() {
+  local selector="$1" mode="$2" host="${3:-}" port="${4:-}" id tmp
+  id="$(forward_resolve_rule_id "$selector")" || return 1
+  case "$mode" in
+    auto)
+      host=""
+      port="$(jq -r --arg id "$id" '.rules[]|select(.rule_id==$id)|.listen_port' "$NOBRAND_FORWARD_STATE_FILE")"
+      ;;
+    custom)
+      valid_advertise_host "$host" && valid_advertise_port "$port" || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  tmp="$(mktemp_file .forward-endpoint)" || return 1
+  jq --arg id "$id" --arg mode "$mode" --arg host "$host" --argjson port "$(normalize_uint "$port")" \
+    --arg now "$(forward_now)" '
+      (.rules[]|select(.rule_id==$id)) |=
+        (.display_mode=$mode|.display_host=$host|.display_port=$port|.updated_at=$now)
+    ' "$NOBRAND_FORWARD_STATE_FILE" >"$tmp" \
+    && forward_state_valid "$tmp" \
+    && nb_atomic_install_file "$tmp" "$NOBRAND_FORWARD_STATE_FILE" 0600
+  local rc=$?
+  rm -f "$tmp"
+  return "$rc"
+}
+
+forward_export_json() {
+  local output="${1:-}" tmp
+  tmp="$(mktemp_file .forward-export)" || return 1
+  jq --arg exported_at "$(forward_now)" '
+    {format:"nobrand-forward-export",format_version:1,schema_version:3,
+     ownership:"nobrand-v3",exported_at:$exported_at,rules:.rules}
+  ' "$NOBRAND_FORWARD_STATE_FILE" >"$tmp" || { rm -f "$tmp"; return 1; }
+  if [ -n "$output" ] && [ "$output" != - ]; then
+    mkdir -p "$(dirname "$output")" 2>/dev/null || true
+    install -m 0600 "$tmp" "$output"
+  else
+    cat "$tmp"
+  fi
+  local rc=$?
+  rm -f "$tmp"
+  return "$rc"
+}
+
+forward_import_validate() {
+  local input="$1" candidate
+  [ -s "$input" ] || return 1
+  jq -e '
+    (keys|sort)==["exported_at","format","format_version","ownership","rules","schema_version"] and
+    .format=="nobrand-forward-export" and .format_version==1 and
+    .schema_version==3 and .ownership=="nobrand-v3" and
+    (.exported_at|type)=="string" and (.rules|type)=="array"
+  ' "$input" >/dev/null || return 1
+  candidate="$(mktemp_file .forward-import-state)" || return 1
+  jq '{schema_version:.schema_version,ownership:.ownership,feature:"port-forward",rules:.rules}' \
+    "$input" >"$candidate" && forward_state_valid "$candidate"
+  local rc=$?
+  rm -f "$candidate"
+  return "$rc"
+}
+
+forward_sysctl_snapshot() {
+  local snapshot="$1"
+  mkdir -p "$snapshot" || return 1
+  [ ! -e "$NOBRAND_FORWARD_SYSCTL_STATE" ] \
+    || cp -a "$NOBRAND_FORWARD_SYSCTL_STATE" "$snapshot/state.json" || return 1
+  [ ! -e "$NOBRAND_FORWARD_SYSCTL_FRAGMENT" ] \
+    || cp -a "$NOBRAND_FORWARD_SYSCTL_FRAGMENT" "$snapshot/fragment" || return 1
+  if command -v sysctl >/dev/null 2>&1; then
+    sysctl -n net.ipv4.ip_forward 2>/dev/null >"$snapshot/live-value" || true
+  fi
+}
+
+forward_sysctl_state_valid() {
+  local state="${1:-$NOBRAND_FORWARD_SYSCTL_STATE}"
+  [ -s "$state" ] && jq -e '
+    (keys|sort)==["active_rules","changed_by_nobrand","fragment_owned","key","original_value","ownership","schema_version"] and
+    .schema_version==3 and .ownership=="nobrand-v3" and .key=="net.ipv4.ip_forward" and
+    (.original_value==0 or .original_value==1) and
+    (.changed_by_nobrand|type)=="boolean" and
+    (.active_rules|type)=="number" and (.active_rules|floor)==.active_rules and .active_rules>=0 and
+    .fragment_owned==true
+  ' "$state" >/dev/null
+}
+
+forward_sysctl_fragment_owned() {
+  local fragment="${1:-$NOBRAND_FORWARD_SYSCTL_FRAGMENT}"
+  [ -f "$fragment" ] && [ ! -L "$fragment" ] \
+    && [ "$(wc -l <"$fragment" | tr -d '[:space:]')" = 2 ] \
+    && [ "$(sed -n '1p' "$fragment")" = '# Owned by NoBrand-OneClick Port Forward' ] \
+    && [ "$(sed -n '2p' "$fragment")" = 'net.ipv4.ip_forward = 1' ]
+}
+
+forward_sysctl_restore_snapshot() {
+  local snapshot="$1" value
+  if [ -e "$snapshot/state.json" ]; then
+    nb_atomic_install_file "$snapshot/state.json" "$NOBRAND_FORWARD_SYSCTL_STATE" 0600 || return 1
+  else
+    rm -f "$NOBRAND_FORWARD_SYSCTL_STATE"
+  fi
+  if [ -e "$snapshot/fragment" ]; then
+    nb_atomic_install_file "$snapshot/fragment" "$NOBRAND_FORWARD_SYSCTL_FRAGMENT" 0644 || return 1
+  else
+    rm -f "$NOBRAND_FORWARD_SYSCTL_FRAGMENT"
+  fi
+  value="$(tr -d '[:space:]' <"$snapshot/live-value" 2>/dev/null || true)"
+  case "$value" in 0|1) sysctl -q -w "net.ipv4.ip_forward=${value}" >/dev/null || return 1 ;; esac
+}
+
+forward_sysctl_reconcile() {
+  local state="$1" count current original changed fragment_owned tmp
+  count="$(jq '[.rules[]|select(.enabled and .backend=="nftables")]|length' "$state")" || return 1
+  command -v sysctl >/dev/null 2>&1 || { [ "$count" -eq 0 ]; return; }
+  current="$(sysctl -n net.ipv4.ip_forward 2>/dev/null | tr -d '[:space:]')"
+  case "$current" in 0|1) ;; *) return 1 ;; esac
+  if [ "$count" -gt 0 ]; then
+    if [ -s "$NOBRAND_FORWARD_SYSCTL_STATE" ]; then
+      forward_sysctl_state_valid "$NOBRAND_FORWARD_SYSCTL_STATE" || return 1
+      # Unified backup contains NoBrand state/config, while this runtime
+      # fragment lives under /etc/sysctl.d and is recreated during restore.
+      # A valid ownership state may therefore legitimately outlive a missing
+      # fragment.  Recreate only when the path is truly absent; any existing
+      # file or symlink must still match the exact NoBrand marker/content.
+      if [ -e "$NOBRAND_FORWARD_SYSCTL_FRAGMENT" ] \
+         || [ -L "$NOBRAND_FORWARD_SYSCTL_FRAGMENT" ]; then
+        forward_sysctl_fragment_owned "$NOBRAND_FORWARD_SYSCTL_FRAGMENT" || return 1
+      fi
+      original="$(jq -r '.original_value' "$NOBRAND_FORWARD_SYSCTL_STATE")"
+      changed="$(jq -r '.changed_by_nobrand' "$NOBRAND_FORWARD_SYSCTL_STATE")"
+    else
+      [ ! -e "$NOBRAND_FORWARD_SYSCTL_FRAGMENT" ] || return 1
+      original="$current"
+      changed=false
+    fi
+    if [ "$current" -ne 1 ]; then
+      sysctl -q -w net.ipv4.ip_forward=1 >/dev/null || return 1
+      changed=true
+    fi
+    tmp="$(mktemp_file .forward-sysctl)" || return 1
+    printf '# Owned by NoBrand-OneClick Port Forward\nnet.ipv4.ip_forward = 1\n' >"$tmp"
+    nb_atomic_install_file "$tmp" "$NOBRAND_FORWARD_SYSCTL_FRAGMENT" 0644 || { rm -f "$tmp"; return 1; }
+    rm -f "$tmp"
+    tmp="$(mktemp_file .forward-sysctl-state)" || return 1
+    jq -n --argjson original "$original" --argjson changed "$changed" --argjson users "$count" \
+      '{schema_version:3,ownership:"nobrand-v3",key:"net.ipv4.ip_forward",
+        original_value:$original,changed_by_nobrand:$changed,active_rules:$users,fragment_owned:true}' >"$tmp" \
+      && nb_atomic_install_file "$tmp" "$NOBRAND_FORWARD_SYSCTL_STATE" 0600
+    local rc=$?
+    rm -f "$tmp"
+    return "$rc"
+  fi
+
+  [ -s "$NOBRAND_FORWARD_SYSCTL_STATE" ] || return 0
+  forward_sysctl_state_valid "$NOBRAND_FORWARD_SYSCTL_STATE" || return 1
+  forward_sysctl_fragment_owned "$NOBRAND_FORWARD_SYSCTL_FRAGMENT" || return 1
+  original="$(jq -r '.original_value' "$NOBRAND_FORWARD_SYSCTL_STATE")"
+  changed="$(jq -r '.changed_by_nobrand' "$NOBRAND_FORWARD_SYSCTL_STATE")"
+  fragment_owned="$(jq -r '.fragment_owned' "$NOBRAND_FORWARD_SYSCTL_STATE")"
+  if [ "$changed" = true ] && [ "$current" = 1 ] && [ "$original" = 0 ]; then
+    sysctl -q -w net.ipv4.ip_forward=0 >/dev/null || return 1
+  fi
+  [ "$fragment_owned" != true ] || rm -f "$NOBRAND_FORWARD_SYSCTL_FRAGMENT"
+  rm -f "$NOBRAND_FORWARD_SYSCTL_STATE"
+}
+
+forward_ensure_nftables_dependency() {
+  local pm
+  command -v nft >/dev/null 2>&1 && command -v sysctl >/dev/null 2>&1 && return 0
+  require_root
+  pm="$(detect_pkg_manager)" || return 1
+  case "$pm" in
+    deb)
+      run apt-get update || return 1
+      run apt-get install -y nftables procps || return 1
+      ;;
+    rpm)
+      if command -v dnf >/dev/null 2>&1; then
+        run dnf install -y nftables procps-ng || return 1
+      else
+        run yum install -y nftables procps-ng || return 1
+      fi
+      ;;
+    alpine) run apk add --no-cache nftables procps-ng || return 1 ;;
+    *) return 1 ;;
+  esac
+  command -v nft >/dev/null 2>&1 && command -v sysctl >/dev/null 2>&1
+}
+
+forward_nft_table_owned() {
+  local listing
+  command -v nft >/dev/null 2>&1 || return 1
+  listing="$(nft list table "$NOBRAND_FORWARD_NFT_FAMILY" "$NOBRAND_FORWARD_NFT_TABLE" 2>/dev/null)" \
+    || return 1
+  grep -Fq 'comment "Owned by NoBrand-OneClick Port Forward"' <<<"$listing"
+}
+
+forward_nft_rule_owned() {
+  local id="$1" listing
+  command -v nft >/dev/null 2>&1 || return 1
+  listing="$(nft list table "$NOBRAND_FORWARD_NFT_FAMILY" "$NOBRAND_FORWARD_NFT_TABLE" 2>/dev/null)" \
+    || return 1
+  # Do not pipe nft directly into grep -q under pipefail. An early match can
+  # close the pipe while nft is still writing and turn a healthy rule into a
+  # position-dependent SIGPIPE failure.
+  grep -F "nobrand:${id}:dnat:" <<<"$listing" >/dev/null
+}
+
+forward_apply_nft_state() {
+  local state="$1" candidate batch count
+  count="$(jq '[.rules[]|select(.enabled and .backend=="nftables")]|length' "$state")" || return 1
+  if [ "$count" -eq 0 ]; then
+    if command -v nft >/dev/null 2>&1; then
+      forward_remove_owned_nft_table || return 1
+    fi
+    rm -f "$NOBRAND_FORWARD_NFT_RULESET"
+    forward_sysctl_reconcile "$state"
+    return $?
+  fi
+  forward_ensure_nftables_dependency || return 1
+  candidate="$(mktemp_file .forward.nft)" || return 1
+  batch="$(mktemp_file .forward-batch.nft)" || { rm -f "$candidate"; return 1; }
+  forward_generate_nft_ruleset "$state" "$candidate" || { rm -f "$candidate" "$batch"; return 1; }
+  {
+    if nft list table "$NOBRAND_FORWARD_NFT_FAMILY" "$NOBRAND_FORWARD_NFT_TABLE" >/dev/null 2>&1; then
+      forward_nft_table_owned || { rm -f "$candidate" "$batch"; return 1; }
+      printf 'delete table %s %s\n' "$NOBRAND_FORWARD_NFT_FAMILY" "$NOBRAND_FORWARD_NFT_TABLE"
+    fi
+    cat "$candidate"
+  } >"$batch"
+  nft -c -f "$batch" >/dev/null 2>&1 && nft -f "$batch" \
+    && nb_atomic_install_file "$candidate" "$NOBRAND_FORWARD_NFT_RULESET" 0600 \
+    && forward_sysctl_reconcile "$state"
+  local rc=$?
+  rm -f "$candidate" "$batch"
+  return "$rc"
+}
+
+forward_remove_owned_nft_table() {
+  command -v nft >/dev/null 2>&1 || return 0
+  nft list table "$NOBRAND_FORWARD_NFT_FAMILY" "$NOBRAND_FORWARD_NFT_TABLE" >/dev/null 2>&1 \
+    || return 0
+  forward_nft_table_owned || return 1
+  nft delete table "$NOBRAND_FORWARD_NFT_FAMILY" "$NOBRAND_FORWARD_NFT_TABLE"
+}
+
+forward_firewall_pairs() {
+  local state="$1"
+  jq -r '.rules[]|select(.enabled and .backend=="realm")|. as $r|
+    (if .protocol=="both" then ["TCP","UDP"] elif .protocol=="tcp" then ["TCP"] else ["UDP"] end)[]|
+    "\(.)|\($r.listen_port)"' "$state" | LC_ALL=C sort -u
+}
+
+forward_firewall_reconcile() {
+  local old_state="$1" new_state="$2" old_pairs new_pairs pair close_pairs="" open_pairs=""
+  old_pairs="$(forward_firewall_pairs "$old_state")" || return 1
+  new_pairs="$(forward_firewall_pairs "$new_state")" || return 1
+  while IFS= read -r pair; do
+    [ -n "$pair" ] || continue
+    grep -qxF "$pair" <<<"$old_pairs" \
+      || printf -v open_pairs '%s%s\n' "$open_pairs" "$pair"
+  done <<<"$new_pairs"
+  while IFS= read -r pair; do
+    [ -n "$pair" ] || continue
+    grep -qxF "$pair" <<<"$new_pairs" \
+      || printf -v close_pairs '%s%s\n' "$close_pairs" "$pair"
+  done <<<"$old_pairs"
+  [ -z "$open_pairs" ] || nb_firewall_open_pairs "$open_pairs" || return 1
+  [ -z "$close_pairs" ] || nb_firewall_close_pairs "$close_pairs" || return 1
+}
+
+forward_realm_asset_name() {
+  case "$(uname -m)" in
+    x86_64|amd64) printf 'realm-x86_64-unknown-linux-musl.tar.gz' ;;
+    aarch64|arm64) printf 'realm-aarch64-unknown-linux-musl.tar.gz' ;;
+    *) return 1 ;;
+  esac
+}
+
+forward_realm_tested_digest() {
+  case "$1" in
+    realm-x86_64-unknown-linux-musl.tar.gz) printf '%s' "$TESTED_REALM_AMD64_MUSL_SHA256" ;;
+    realm-aarch64-unknown-linux-musl.tar.gz) printf '%s' "$TESTED_REALM_ARM64_MUSL_SHA256" ;;
+    *) return 1 ;;
+  esac
+}
+
+forward_realm_version() {
+  local binary="${1:-$NOBRAND_REALM_BIN}"
+  [ -x "$binary" ] || return 1
+  "$binary" --version 2>/dev/null | sed -nE 's/.*[Rr]ealm[[:space:]]+([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' | head -n1
+}
+
+forward_realm_runtime_metadata_valid() {
+  local meta="$NOBRAND_REALM_RUNTIME_META"
+  [ -s "$meta" ] && jq -e '
+    (keys|sort)==["asset","channel","consumer","installed_at","ownership","schema_version","sha256","source_url","version"] and
+    .schema_version==3 and .ownership=="nobrand-v3" and .consumer=="port-forward" and
+    (.version|type)=="string" and (.version|test("^[0-9]+\\.[0-9]+\\.[0-9]+$")) and
+    (.channel=="stable" or .channel=="latest" or .channel=="pinned") and
+    (.asset|type)=="string" and (.asset|test("^realm-(x86_64|aarch64)-unknown-linux-musl\\.tar\\.gz$")) and
+    (.source_url|type)=="string" and (.source_url|startswith("https://github.com/zhboner/realm/releases/download/")) and
+    (.sha256|type)=="string" and (.sha256|test("^[0-9a-f]{64}$")) and
+    (.installed_at|type)=="string"
+  ' "$meta" >/dev/null
+}
+
+forward_ensure_realm_dependencies() {
+  local command_name
+  for command_name in curl jq tar sha256sum find; do
+    command -v "$command_name" >/dev/null 2>&1 || return 1
+  done
+}
+
+forward_realm_install_runtime() {
+  local channel="${1:-stable}" version="${2:-}" api response tag asset url digest expected
+  local archive extract binary actual actual_version meta
+  case "$channel" in
+    stable) version="$TESTED_REALM_VERSION" ;;
+    latest) ;;
+    pinned) [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1 ;;
+    *) return 1 ;;
+  esac
+  forward_ensure_realm_dependencies || return 1
+  if [ -e "$NOBRAND_REALM_BIN" ] && ! forward_realm_runtime_metadata_valid; then
+    warn "Refusing to replace unowned Realm runtime: $NOBRAND_REALM_BIN"
+    return 1
+  fi
+  if [ -e "$NOBRAND_REALM_RUNTIME_META" ] && ! forward_realm_runtime_metadata_valid; then
+    warn "Refusing to replace invalid Realm ownership metadata: $NOBRAND_REALM_RUNTIME_META"
+    return 1
+  fi
+  [ "$channel" != latest ] && api="${NOBRAND_REALM_RELEASE_API}/tags/v${version}" \
+    || api="${NOBRAND_REALM_RELEASE_API}/latest"
+  response="$(curl -fsSL --connect-timeout 10 --max-time 60 \
+    -H 'Accept: application/vnd.github+json' -H 'User-Agent: NoBrand-OneClick' "$api")" || return 1
+  jq -e '.draft==false and .prerelease==false' <<<"$response" >/dev/null || return 1
+  tag="$(jq -r .tag_name <<<"$response")"
+  [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+  version="${tag#v}"
+  asset="$(forward_realm_asset_name)" || return 1
+  url="$(jq -r --arg asset "$asset" '.assets[]|select(.name==$asset)|.browser_download_url' <<<"$response" | head -n1)"
+  digest="$(jq -r --arg asset "$asset" '.assets[]|select(.name==$asset)|.digest // empty' <<<"$response" | head -n1)"
+  digest="${digest#sha256:}"
+  [[ "$digest" =~ ^[0-9a-f]{64}$ ]] && [ -n "$url" ] || return 1
+  if [ "$channel" = stable ]; then
+    expected="$(forward_realm_tested_digest "$asset")" || return 1
+    [ "$digest" = "$expected" ] || return 1
+  fi
+  archive="$(mktemp_file .realm.tar.gz)" || return 1
+  extract="$(mktemp_dir)" || { rm -f "$archive"; return 1; }
+  curl -fL --connect-timeout 10 --max-time 300 -H 'User-Agent: NoBrand-OneClick' "$url" -o "$archive" \
+    || { rm -f "$archive"; rm -rf -- "$extract"; return 1; }
+  actual="$(nobrand_sha256_file "$archive")" || return 1
+  [ "$actual" = "$digest" ] || return 1
+  tar --no-same-owner -C "$extract" -xzf "$archive" || return 1
+  binary="$(find "$extract" -type f -name realm -print -quit)"
+  [ -n "$binary" ] || return 1
+  chmod 0755 "$binary" || return 1
+  actual_version="$(forward_realm_version "$binary")" || return 1
+  [ "$actual_version" = "$version" ] || return 1
+  nb_atomic_install_file "$binary" "$NOBRAND_REALM_BIN" 0755 || return 1
+  meta="$(mktemp_file .realm-meta)" || return 1
+  jq -n --arg version "$version" --arg channel "$channel" --arg asset "$asset" \
+    --arg source "$url" --arg sha256 "$digest" --arg installed_at "$(forward_now)" '
+      {schema_version:3,ownership:"nobrand-v3",consumer:"port-forward",version:$version,
+       channel:$channel,asset:$asset,source_url:$source,sha256:$sha256,installed_at:$installed_at}
+    ' >"$meta" && nb_atomic_install_file "$meta" "$NOBRAND_REALM_RUNTIME_META" 0600
+  local rc=$?
+  rm -f "$archive" "$meta"
+  rm -rf -- "$extract"
+  return "$rc"
+}
+
+forward_realm_service_active() {
+  forward_realm_service_file_owned || return 1
+  nb_service_is_active "$NOBRAND_REALM_SERVICE_NAME" "$NOBRAND_REALM_SERVICE_NAME"
+}
+
+forward_realm_service_pid() {
+  forward_realm_service_file_owned || return 1
+  case "$(nb_service_manager)" in
+    systemd) systemctl show -p MainPID --value "$NOBRAND_REALM_SERVICE_NAME" 2>/dev/null ;;
+    openrc) [ -s /run/nobrand-realm.pid ] && cat /run/nobrand-realm.pid ;;
+  esac
+}
+
+forward_realm_service_path() {
+  case "$(nb_service_manager)" in
+    systemd) printf '%s' "$NOBRAND_REALM_SYSTEMD_SERVICE" ;;
+    openrc) printf '%s' "$NOBRAND_REALM_OPENRC_SERVICE" ;;
+    *) return 1 ;;
+  esac
+}
+
+forward_realm_service_file_owned() {
+  local path
+  path="$(forward_realm_service_path 2>/dev/null)" || return 1
+  forward_realm_service_path_owned "$path"
+}
+
+forward_realm_service_path_owned() {
+  local path="$1"
+  [ -f "$path" ] && [ ! -L "$path" ] \
+    && grep -Fq 'Owned by NoBrand-OneClick Port Forward' "$path" \
+    && grep -Fq "$NOBRAND_REALM_BIN" "$path" \
+    && grep -Fq "$NOBRAND_FORWARD_REALM_CONFIG" "$path"
+}
+
+forward_realm_install_service() {
+  local manager tmp path
+  manager="$(nb_service_manager)"
+  path="$(forward_realm_service_path)" || return 1
+  [ ! -e "$path" ] || forward_realm_service_file_owned || {
+    warn "Refusing to replace unowned Realm service: $path"
+    return 1
+  }
+  tmp="$(mktemp_file .realm-service)" || return 1
+  case "$manager" in
+    systemd)
+      cat >"$tmp" <<EOF
+# Owned by NoBrand-OneClick Port Forward
+[Unit]
+Description=NoBrand Realm Port Forward
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=${NOBRAND_REALM_BIN} -c ${NOBRAND_FORWARD_REALM_CONFIG}
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadOnlyPaths=${NOBRAND_REALM_BIN} ${NOBRAND_FORWARD_REALM_CONFIG}
+
+[Install]
+WantedBy=multi-user.target
+EOF
+      nb_atomic_install_file "$tmp" "$NOBRAND_REALM_SYSTEMD_SERVICE" 0644 \
+        && systemctl daemon-reload \
+        && systemctl enable "$NOBRAND_REALM_SERVICE_NAME" >/dev/null 2>&1
+      ;;
+    openrc)
+      cat >"$tmp" <<EOF
+#!/sbin/openrc-run
+# Owned by NoBrand-OneClick Port Forward
+name="NoBrand Realm Port Forward"
+command="${NOBRAND_REALM_BIN}"
+command_args="-c ${NOBRAND_FORWARD_REALM_CONFIG}"
+command_background="yes"
+pidfile="/run/nobrand-realm.pid"
+output_log="/var/log/nobrand-realm.log"
+error_log="/var/log/nobrand-realm.err"
+depend() { use net; after firewall; }
+EOF
+      nb_atomic_install_file "$tmp" "$NOBRAND_REALM_OPENRC_SERVICE" 0755 \
+        && rc-update add "$NOBRAND_REALM_SERVICE_NAME" default >/dev/null 2>&1
+      ;;
+    *) rm -f "$tmp"; return 1 ;;
+  esac
+  local rc=$?
+  rm -f "$tmp"
+  return "$rc"
+}
+
+forward_realm_service_action() {
+  forward_realm_service_file_owned || return 1
+  case "$(nb_service_manager)" in
+    systemd) systemctl "$1" "$NOBRAND_REALM_SERVICE_NAME" ;;
+    openrc) rc-service "$NOBRAND_REALM_SERVICE_NAME" "$1" ;;
+    *) return 1 ;;
+  esac
+}
+
+forward_realm_listener_owned() {
+  local state="$1" pid protocol port transport found
+  pid="$(forward_realm_service_pid 2>/dev/null || true)"
+  [[ "$pid" =~ ^[0-9]+$ ]] && [ "$pid" -gt 1 ] || return 1
+  while IFS=$'\t' read -r protocol port; do
+    while IFS= read -r transport; do
+      found=0
+      while IFS= read -r listener_pid; do
+        [ "$listener_pid" != "$pid" ] || found=1
+      done < <(nb_port_listener_pids "$transport" "$port")
+      [ "$found" -eq 1 ] || return 1
+    done < <(forward_protocol_transports "$protocol")
+  done < <(jq -r '.rules[]|select(.enabled and .backend=="realm")|[.protocol,(.listen_port|tostring)]|@tsv' "$state")
+}
+
+forward_realm_probe_config() {
+  local config="$1" pid i
+  [ -x "$NOBRAND_REALM_BIN" ] || return 1
+  "$NOBRAND_REALM_BIN" -c "$config" >/dev/null 2>&1 &
+  pid=$!
+  i=0
+  while [ "$i" -lt 10 ]; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      wait "$pid" 2>/dev/null || true
+      return 1
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+}
+
+forward_realm_probe_port_available() {
+  local port="$1" protocol="$2" used="${3:-}" transport
+  case "|$used|" in *"|$port|"*) return 1 ;; esac
+  while IFS= read -r transport; do
+    nb_port_available_for_transport "$port" "$transport" || return 1
+  done < <(forward_protocol_transports "$protocol")
+}
+
+forward_generate_realm_probe_config() {
+  local state="$1" output="$2" probe_state id protocol port used=""
+  probe_state="$(mktemp_file .realm-probe-state)" || return 1
+  cp -a "$state" "$probe_state" || { rm -f "$probe_state"; return 1; }
+  while IFS=$'\t' read -r id protocol; do
+    [ -n "$id" ] || continue
+    port="$(nb_scan_port_span 40000 65535 forward_realm_probe_port_available "$protocol" "$used")" \
+      || { rm -f "$probe_state"; return 1; }
+    used="${used:+${used}|}${port}"
+    jq --arg id "$id" --argjson port "$port" '
+      (.rules[]|select(.rule_id==$id)) |=
+        (.listen_port=$port | if .display_mode=="auto" then .display_port=$port else . end)
+    ' "$probe_state" >"${probe_state}.next" \
+      && mv -f "${probe_state}.next" "$probe_state" \
+      || { rm -f "$probe_state" "${probe_state}.next"; return 1; }
+  done < <(jq -r '.rules|sort_by(.rule_id)[]|select(.enabled and .backend=="realm")|
+    [.rule_id,.protocol]|@tsv' "$state")
+  forward_generate_realm_config "$probe_state" "$output"
+  local rc=$?
+  rm -f "$probe_state" "${probe_state}.next"
+  return "$rc"
+}
+
+forward_realm_apply_state() {
+  local state="$1" count candidate probe
+  count="$(jq '[.rules[]|select(.enabled and .backend=="realm")]|length' "$state")" || return 1
+  if [ "$count" -eq 0 ]; then
+    forward_realm_service_action stop >/dev/null 2>&1 || true
+    rm -f "$NOBRAND_FORWARD_REALM_CONFIG"
+    return 0
+  fi
+  [ -x "$NOBRAND_REALM_BIN" ] || forward_realm_install_runtime stable || return 1
+  candidate="$(mktemp_file .realm-candidate.toml)" || return 1
+  probe="$(mktemp_file .realm-probe.toml)" || { rm -f "$candidate"; return 1; }
+  forward_generate_realm_config "$state" "$candidate" \
+    && forward_generate_realm_probe_config "$state" "$probe" \
+    && forward_realm_probe_config "$probe" \
+    || { rm -f "$candidate" "$probe"; return 1; }
+  nb_atomic_install_file "$candidate" "$NOBRAND_FORWARD_REALM_CONFIG" 0600 \
+    && forward_realm_install_service \
+    && forward_realm_service_action restart \
+    && forward_realm_service_active \
+    && forward_realm_listener_owned "$state"
+  local rc=$?
+  rm -f "$candidate" "$probe"
+  return "$rc"
+}
+
+forward_transaction_commit() {
+  local candidate="$1" operation="${2:-modify}" old_backend="${3:-}" new_backend="${4:-}"
+  local snapshot old_state failed=0
+  forward_state_valid "$candidate" || return 1
+  snapshot="$(mktemp_dir)" || return 1
+  old_state="$snapshot/old-state.json"
+  if [ -s "$NOBRAND_FORWARD_STATE_FILE" ]; then
+    cp -a "$NOBRAND_FORWARD_STATE_FILE" "$old_state" || { rm -rf -- "$snapshot"; return 1; }
+  else
+    jq -n '{schema_version:3,ownership:"nobrand-v3",feature:"port-forward",rules:[]}' >"$old_state"
+  fi
+  forward_snapshot_restore_side_effects "$snapshot/side-effects" \
+    || { rm -rf -- "$snapshot"; return 1; }
+  if [ "$operation" = switch-backend ] && [ "$old_backend" = nftables ] && [ "$new_backend" = realm ]; then
+    forward_realm_apply_state "$candidate" || failed=1
+    [ "$failed" -ne 0 ] || forward_apply_nft_state "$candidate" || failed=1
+  else
+    forward_apply_nft_state "$candidate" || failed=1
+    [ "$failed" -ne 0 ] || forward_realm_apply_state "$candidate" || failed=1
+  fi
+  [ "$failed" -ne 0 ] || forward_firewall_reconcile "$old_state" "$candidate" || failed=1
+  if [ "$failed" -eq 0 ] && nb_atomic_install_file "$candidate" "$NOBRAND_FORWARD_STATE_FILE" 0600; then
+    rm -rf -- "$snapshot"
+    return 0
+  fi
+  forward_firewall_reconcile "$candidate" "$old_state" >/dev/null 2>&1 || true
+  forward_restore_side_effect_snapshot "$snapshot/side-effects" >/dev/null 2>&1 || true
+  forward_realm_apply_state "$old_state" >/dev/null 2>&1 || true
+  rm -rf -- "$snapshot"
+  return 1
+}
+
+forward_csv_strings_json() {
+  local value="${1:-}"
+  [ -n "$value" ] || { printf '[]'; return 0; }
+  jq -Rn --arg value "$value" '$value|split(",")|map(gsub("^[[:space:]]+|[[:space:]]+$";""))|map(select(length>0))'
+}
+
+forward_csv_numbers_json() {
+  local value="${1:-}"
+  [ -n "$value" ] || { printf '[]'; return 0; }
+  jq -Rn --arg value "$value" '
+    $value|split(",")|map(gsub("^[[:space:]]+|[[:space:]]+$";""))|
+    if all(.[]; test("^[0-9]+$") and ((tonumber)>=1) and ((tonumber)<=255))
+    then map(tonumber) else error("invalid weight") end
+  ' 2>/dev/null
+}
+
+forward_csv_socket_addresses_json() {
+  local value="${1:-}" raw item normalized result='[]'
+  [ -n "$value" ] || { printf '[]'; return 0; }
+  raw="$(forward_csv_strings_json "$value")" || return 1
+  while IFS= read -r item; do
+    normalized="$(forward_socket_address_normalize "$item")" || return 1
+    result="$(jq -c --arg value "$normalized" '.+[$value]' <<<"$result")" || return 1
+  done < <(jq -r '.[]' <<<"$raw")
+  printf '%s' "$result"
+}
+
+forward_realm_options_json() {
+  local nameservers extra weights
+  [ -z "$FORWARD_THROUGH" ] || valid_ip_literal "$FORWARD_THROUGH" || return 1
+  for iface in "$FORWARD_INTERFACE" "$FORWARD_LISTEN_INTERFACE"; do
+    [ -z "$iface" ] || [[ "$iface" =~ ^[A-Za-z0-9_.:-]{1,64}$ ]] || return 1
+  done
+  [[ "$FORWARD_TCP_TIMEOUT" =~ ^[0-9]+$ ]] && [ "$FORWARD_TCP_TIMEOUT" -le 86400 ] || return 1
+  [[ "$FORWARD_UDP_TIMEOUT" =~ ^[0-9]+$ ]] && [ "$FORWARD_UDP_TIMEOUT" -ge 1 ] \
+    && [ "$FORWARD_UDP_TIMEOUT" -le 86400 ] || return 1
+  case "$FORWARD_PROXY_SEND" in true|false) ;; *) return 1 ;; esac
+  case "$FORWARD_PROXY_ACCEPT" in true|false) ;; *) return 1 ;; esac
+  case "$FORWARD_PROXY_VERSION" in 1|2) ;; *) return 1 ;; esac
+  [[ "$FORWARD_PROXY_ACCEPT_TIMEOUT" =~ ^[0-9]+$ ]] && [ "$FORWARD_PROXY_ACCEPT_TIMEOUT" -le 86400 ] || return 1
+  case "$FORWARD_DNS_MODE" in system|ipv4_only|ipv6_only|ipv4_then_ipv6|ipv6_then_ipv4|ipv4_and_ipv6) ;; *) return 1 ;; esac
+  case "$FORWARD_DNS_PROTOCOL" in tcp|udp|tcp_and_udp) ;; *) return 1 ;; esac
+  case "$FORWARD_BALANCE" in off|roundrobin|iphash) ;; *) return 1 ;; esac
+  [ "${#FORWARD_LISTEN_TRANSPORT}" -le 1024 ] && [ "${#FORWARD_REMOTE_TRANSPORT}" -le 1024 ] || return 1
+  ! has_control_chars "$FORWARD_LISTEN_TRANSPORT" && ! has_control_chars "$FORWARD_REMOTE_TRANSPORT" || return 1
+  nameservers="$(forward_csv_socket_addresses_json "$FORWARD_DNS_NAMESERVERS")" || return 1
+  extra="$(forward_csv_socket_addresses_json "$FORWARD_EXTRA_TARGETS")" || return 1
+  weights="$(forward_csv_numbers_json "$FORWARD_WEIGHTS")" || return 1
+  jq -e 'all(.[]; type=="string" and length>0 and length<=255 and (test("[[:space:]]")|not))' \
+    <<<"$nameservers" >/dev/null || return 1
+  jq -e 'all(.[]; type=="string" and length>2 and length<=300 and (test("[[:space:]]")|not))' \
+    <<<"$extra" >/dev/null || return 1
+  if [ "$FORWARD_BALANCE" = off ]; then
+    [ "$weights" = '[]' ] && [ "$extra" = '[]' ] || return 1
+  else
+    [ "$(jq 'length' <<<"$extra")" -gt 0 ] || return 1
+    [ "$(jq 'length' <<<"$weights")" -eq "$((1 + $(jq 'length' <<<"$extra")))" ] || return 1
+  fi
+  jq -n --arg through "$FORWARD_THROUGH" --arg interface "$FORWARD_INTERFACE" \
+    --arg listen_interface "$FORWARD_LISTEN_INTERFACE" \
+    --argjson tcp_timeout "$FORWARD_TCP_TIMEOUT" --argjson udp_timeout "$FORWARD_UDP_TIMEOUT" \
+    --argjson proxy_send "$FORWARD_PROXY_SEND" --argjson proxy_accept "$FORWARD_PROXY_ACCEPT" \
+    --argjson proxy_version "$FORWARD_PROXY_VERSION" \
+    --argjson proxy_accept_timeout "$FORWARD_PROXY_ACCEPT_TIMEOUT" \
+    --arg dns_mode "$FORWARD_DNS_MODE" --arg dns_protocol "$FORWARD_DNS_PROTOCOL" \
+    --argjson dns_nameservers "$nameservers" --arg listen_transport "$FORWARD_LISTEN_TRANSPORT" \
+    --arg remote_transport "$FORWARD_REMOTE_TRANSPORT" --argjson extra_targets "$extra" \
+    --arg balance "$FORWARD_BALANCE" --argjson weights "$weights" '
+      {through:$through,interface:$interface,listen_interface:$listen_interface,
+       tcp_timeout:$tcp_timeout,udp_timeout:$udp_timeout,proxy_send:$proxy_send,
+       proxy_accept:$proxy_accept,proxy_version:$proxy_version,
+       proxy_accept_timeout:$proxy_accept_timeout,dns_mode:$dns_mode,
+       dns_protocol:$dns_protocol,dns_nameservers:$dns_nameservers,
+       listen_transport:$listen_transport,remote_transport:$remote_transport,
+       extra_targets:$extra_targets,balance:$balance,weights:$weights}
+    '
+}
+
+forward_default_options_json() {
+  case "$1" in
+    nftables)
+      case "$FORWARD_SOURCE_MODE" in masquerade|preserve) ;; *) return 1 ;; esac
+      jq -n --arg source_mode "$FORWARD_SOURCE_MODE" '{source_mode:$source_mode}'
+      ;;
+    realm) forward_realm_options_json ;;
+    *) return 1 ;;
+  esac
+}
+
+forward_validate_requested_rule() {
+  local ignore_owner="${1:-}" transport old_json="${2:-}" old_port="" old_protocol=""
+  [ -n "$FORWARD_NAME" ] && [ "${#FORWARD_NAME}" -le 64 ] && ! has_control_chars "$FORWARD_NAME" || return 1
+  [ "${#FORWARD_NOTE}" -le 256 ] && ! has_control_chars "$FORWARD_NOTE" || return 1
+  case "$FORWARD_BACKEND" in nftables|realm) ;; *) return 1 ;; esac
+  FORWARD_PROTOCOL="$(forward_normalize_protocol "$FORWARD_PROTOCOL")" || return 1
+  FORWARD_LISTEN_HOST="${FORWARD_LISTEN_HOST:-0.0.0.0}"
+  forward_listen_host_valid "$FORWARD_BACKEND" "$FORWARD_LISTEN_HOST" || return 1
+  nb_valid_port "$FORWARD_LISTEN_PORT" && nb_valid_port "$FORWARD_TARGET_PORT" || return 1
+  FORWARD_LISTEN_PORT="$(normalize_uint "$FORWARD_LISTEN_PORT")"
+  FORWARD_TARGET_PORT="$(normalize_uint "$FORWARD_TARGET_PORT")"
+  if [ "$FORWARD_BACKEND" = nftables ] && ! forward_valid_ipv4 "$FORWARD_TARGET_HOST"; then
+    warn 'nftables backend currently requires IP target; use Realm backend for domain targets.'
+    return 1
+  fi
+  forward_target_valid "$FORWARD_BACKEND" "$FORWARD_TARGET_HOST" || return 1
+  if [ -n "$old_json" ]; then
+    old_port="$(jq -r .listen_port <<<"$old_json")"
+    old_protocol="$(jq -r .protocol <<<"$old_json")"
+  fi
+  if [ "$old_port" != "$FORWARD_LISTEN_PORT" ] || [ "$old_protocol" != "$FORWARD_PROTOCOL" ]; then
+    forward_port_allowed "$FORWARD_LISTEN_PORT" "$FORWARD_PROTOCOL" "$ignore_owner" || return 1
+  fi
+}
+
+forward_requested_display_json() {
+  if [ "$ADVERTISE_CLI" -eq 1 ] && [ "$ADVERTISE_AUTO_REQUESTED" -eq 0 ]; then
+    valid_advertise_host "$ADVERTISE_HOST" && valid_advertise_port "$ADVERTISE_PORT" || return 1
+    jq -n --arg mode custom --arg host "$ADVERTISE_HOST" \
+      --argjson port "$(normalize_uint "$ADVERTISE_PORT")" '{mode:$mode,host:$host,port:$port}'
+  else
+    jq -n --arg mode auto --arg host '' --argjson port "$FORWARD_LISTEN_PORT" \
+      '{mode:$mode,host:$host,port:$port}'
+  fi
+}
+
+forward_add_rule() {
+  local id now options display rule candidate
+  forward_init_state || return 1
+  [ -n "$FORWARD_NAME" ] && [ -n "$FORWARD_BACKEND" ] && [ -n "$FORWARD_PROTOCOL" ] \
+    && [ -n "$FORWARD_LISTEN_PORT" ] && [ -n "$FORWARD_TARGET_HOST" ] \
+    && [ -n "$FORWARD_TARGET_PORT" ] || die 'forward add 非交互模式需要 --name --backend --protocol --port --target --target-port'
+  forward_validate_requested_rule || die 'Forward rule 参数无效、端口冲突或命中 xx00 保留端口'
+  jq -e --arg name "$FORWARD_NAME" 'all(.rules[];.name!=$name)' "$NOBRAND_FORWARD_STATE_FILE" >/dev/null \
+    || die 'Forward rule name 已存在'
+  options="$(forward_default_options_json "$FORWARD_BACKEND")" || die 'Forward backend options 无效'
+  display="$(forward_requested_display_json)" || die 'Forward Display Endpoint 无效'
+  id="$(forward_generate_rule_id)"
+  now="$(forward_now)"
+  rule="$(jq -n --arg id "$id" --arg name "$FORWARD_NAME" --arg note "$FORWARD_NOTE" \
+    --arg backend "$FORWARD_BACKEND" --arg protocol "$FORWARD_PROTOCOL" \
+    --arg listen_host "$FORWARD_LISTEN_HOST" --argjson listen_port "$FORWARD_LISTEN_PORT" \
+    --arg target_host "$FORWARD_TARGET_HOST" --argjson target_port "$FORWARD_TARGET_PORT" \
+    --arg display_mode "$(jq -r .mode <<<"$display")" --arg display_host "$(jq -r .host <<<"$display")" \
+    --argjson display_port "$(jq -r .port <<<"$display")" --arg now "$now" \
+    --argjson options "$options" '
+      {rule_id:$id,name:$name,note:$note,backend:$backend,enabled:true,protocol:$protocol,
+       listen_host:$listen_host,listen_port:$listen_port,target_host:$target_host,target_port:$target_port,
+       display_host:$display_host,display_port:$display_port,display_mode:$display_mode,
+       created_at:$now,updated_at:$now,
+       ownership_metadata:{managed_listener:true,managed_firewall:true},backend_options:$options}
+    ')" || return 1
+  candidate="$(mktemp_file .forward-add)" || return 1
+  jq --argjson rule "$rule" '.rules += [$rule]' "$NOBRAND_FORWARD_STATE_FILE" >"$candidate" \
+    && forward_transaction_commit "$candidate" add '' "$FORWARD_BACKEND"
+  local rc=$?
+  rm -f "$candidate"
+  [ "$rc" -ne 0 ] || msg "Forward rule created: ${id} (${FORWARD_NAME})"
+  return "$rc"
+}
+
+forward_delete_rule() {
+  local id old_backend candidate
+  id="$(forward_resolve_rule_id "$FORWARD_RULE_ID")" || die 'Forward rule 不存在'
+  old_backend="$(jq -r --arg id "$id" '.rules[]|select(.rule_id==$id)|.backend' "$NOBRAND_FORWARD_STATE_FILE")"
+  candidate="$(mktemp_file .forward-delete)" || return 1
+  jq --arg id "$id" '.rules |= map(select(.rule_id!=$id))' "$NOBRAND_FORWARD_STATE_FILE" >"$candidate" \
+    && forward_transaction_commit "$candidate" delete "$old_backend" ''
+  local rc=$?
+  rm -f "$candidate"
+  return "$rc"
+}
+
+forward_set_enabled() {
+  local enabled="$1" id backend candidate
+  id="$(forward_resolve_rule_id "$FORWARD_RULE_ID")" || die 'Forward rule 不存在'
+  backend="$(jq -r --arg id "$id" '.rules[]|select(.rule_id==$id)|.backend' "$NOBRAND_FORWARD_STATE_FILE")"
+  candidate="$(mktemp_file .forward-enable)" || return 1
+  jq --arg id "$id" --argjson enabled "$enabled" --arg now "$(forward_now)" \
+    '(.rules[]|select(.rule_id==$id)) |= (.enabled=$enabled|.updated_at=$now)' \
+    "$NOBRAND_FORWARD_STATE_FILE" >"$candidate" \
+    && forward_transaction_commit "$candidate" enable "$backend" "$backend"
+  local rc=$?
+  rm -f "$candidate"
+  return "$rc"
+}
+
+forward_modify_rule() {
+  local id old old_backend options candidate new_name new_note new_protocol new_listen_host
+  local new_listen_port new_target_host new_target_port display
+  local new_display_mode new_display_host new_display_port
+  id="$(forward_resolve_rule_id "$FORWARD_RULE_ID")" || die 'Forward rule 不存在'
+  old="$(forward_rule_json "$NOBRAND_FORWARD_STATE_FILE" "$id")"
+  old_backend="$(jq -r .backend <<<"$old")"
+  [ -z "$FORWARD_BACKEND" ] || [ "$FORWARD_BACKEND" = "$old_backend" ] \
+    || die 'modify 不切换 backend；请使用 switch-backend'
+  FORWARD_BACKEND="$old_backend"
+  new_name="${FORWARD_NAME:-$(jq -r .name <<<"$old")}"
+  new_note="${FORWARD_NOTE:-$(jq -r .note <<<"$old")}"
+  new_protocol="${FORWARD_PROTOCOL:-$(jq -r .protocol <<<"$old")}"
+  new_listen_host="${FORWARD_LISTEN_HOST:-$(jq -r .listen_host <<<"$old")}"
+  new_listen_port="${FORWARD_LISTEN_PORT:-$(jq -r .listen_port <<<"$old")}"
+  new_target_host="${FORWARD_TARGET_HOST:-$(jq -r .target_host <<<"$old")}"
+  new_target_port="${FORWARD_TARGET_PORT:-$(jq -r .target_port <<<"$old")}"
+  FORWARD_NAME="$new_name" FORWARD_NOTE="$new_note" FORWARD_PROTOCOL="$new_protocol"
+  FORWARD_LISTEN_HOST="$new_listen_host" FORWARD_LISTEN_PORT="$new_listen_port"
+  FORWARD_TARGET_HOST="$new_target_host" FORWARD_TARGET_PORT="$new_target_port"
+  forward_validate_requested_rule "forward:${id}" "$old" || die 'Forward 修改参数无效、冲突或命中 xx00'
+  if [ "$ADVERTISE_CLI" -eq 1 ]; then
+    display="$(forward_requested_display_json)" || die 'Forward Display Endpoint 无效'
+    new_display_mode="$(jq -r .mode <<<"$display")"
+    new_display_host="$(jq -r .host <<<"$display")"
+    new_display_port="$(jq -r .port <<<"$display")"
+  elif [ "$(jq -r .display_mode <<<"$old")" = auto ]; then
+    # Auto Display Endpoints follow the real listener.  Keeping the previous
+    # display_port after a listen-port modification would make the candidate
+    # internally inconsistent and forward_state_valid correctly rejects it.
+    new_display_mode=auto
+    new_display_host=""
+    new_display_port="$FORWARD_LISTEN_PORT"
+  else
+    new_display_mode="$(jq -r .display_mode <<<"$old")"
+    new_display_host="$(jq -r .display_host <<<"$old")"
+    new_display_port="$(jq -r .display_port <<<"$old")"
+  fi
+  if [ "$old_backend" = nftables ]; then
+    if [ "$FORWARD_SOURCE_MODE_CLI" -eq 1 ]; then
+      options="$(forward_default_options_json nftables)" || die 'nftables source mode 无效'
+    else
+      options="$(jq -c .backend_options <<<"$old")"
+    fi
+  elif [ "$FORWARD_ADVANCED_CLI" -eq 1 ]; then
+    options="$(forward_default_options_json realm)" || die 'Realm advanced options 无效'
+  else
+    options="$(jq -c .backend_options <<<"$old")"
+  fi
+  candidate="$(mktemp_file .forward-modify)" || return 1
+  jq --arg id "$id" --arg name "$FORWARD_NAME" --arg note "$FORWARD_NOTE" \
+    --arg protocol "$FORWARD_PROTOCOL" --arg listen_host "$FORWARD_LISTEN_HOST" \
+    --argjson listen_port "$FORWARD_LISTEN_PORT" --arg target_host "$FORWARD_TARGET_HOST" \
+    --argjson target_port "$FORWARD_TARGET_PORT" --arg display_mode "$new_display_mode" \
+    --arg display_host "$new_display_host" --argjson display_port "$new_display_port" \
+    --argjson options "$options" --arg now "$(forward_now)" '
+      (.rules[]|select(.rule_id==$id)) |=
+        (.name=$name|.note=$note|.protocol=$protocol|.listen_host=$listen_host|.listen_port=$listen_port|
+         .target_host=$target_host|.target_port=$target_port|.display_mode=$display_mode|
+         .display_host=$display_host|.display_port=$display_port|.backend_options=$options|.updated_at=$now)
+    ' "$NOBRAND_FORWARD_STATE_FILE" >"$candidate" \
+    && forward_transaction_commit "$candidate" modify "$old_backend" "$old_backend"
+  local rc=$?
+  rm -f "$candidate"
+  return "$rc"
+}
+
+forward_switch_backend() {
+  local id old old_backend new_backend options target candidate
+  id="$(forward_resolve_rule_id "$FORWARD_RULE_ID")" || die 'Forward rule 不存在'
+  old="$(forward_rule_json "$NOBRAND_FORWARD_STATE_FILE" "$id")"
+  old_backend="$(jq -r .backend <<<"$old")"
+  new_backend="$FORWARD_BACKEND"
+  case "$new_backend" in nftables|realm) ;; *) die 'switch-backend 需要 --backend nftables|realm' ;; esac
+  [ "$new_backend" != "$old_backend" ] || die 'Forward rule 已使用该 backend'
+  target="${FORWARD_TARGET_HOST:-$(jq -r .target_host <<<"$old")}"
+  if [ "$new_backend" = nftables ] && ! forward_valid_ipv4 "$target"; then
+    [ -n "$FORWARD_TARGET_HOST" ] \
+      || die 'Realm domain/IPv6 切换到 nftables 时必须显式提供 --target IPv4；不会静默解析并固定域名'
+  fi
+  FORWARD_NAME="$(jq -r .name <<<"$old")"
+  FORWARD_NOTE="$(jq -r .note <<<"$old")"
+  FORWARD_PROTOCOL="$(jq -r .protocol <<<"$old")"
+  FORWARD_LISTEN_HOST="${FORWARD_LISTEN_HOST:-$(jq -r .listen_host <<<"$old")}"
+  if [ "$new_backend" = nftables ] && ! forward_valid_ipv4 "$FORWARD_LISTEN_HOST"; then
+    FORWARD_LISTEN_HOST=0.0.0.0
+  fi
+  FORWARD_LISTEN_PORT="$(jq -r .listen_port <<<"$old")"
+  FORWARD_TARGET_HOST="$target"
+  FORWARD_TARGET_PORT="${FORWARD_TARGET_PORT:-$(jq -r .target_port <<<"$old")}"
+  FORWARD_BACKEND="$new_backend"
+  forward_validate_requested_rule "forward:${id}" "$old" || die 'Backend switch 参数无效'
+  options="$(forward_default_options_json "$new_backend")" || die 'Backend options 无效'
+  candidate="$(mktemp_file .forward-switch)" || return 1
+  jq --arg id "$id" --arg backend "$new_backend" --arg listen_host "$FORWARD_LISTEN_HOST" \
+    --arg target_host "$FORWARD_TARGET_HOST" --argjson target_port "$FORWARD_TARGET_PORT" \
+    --argjson options "$options" --arg now "$(forward_now)" '
+      (.rules[]|select(.rule_id==$id)) |=
+       (.backend=$backend|.listen_host=$listen_host|.target_host=$target_host|.target_port=$target_port|
+        .backend_options=$options|.updated_at=$now)
+    ' "$NOBRAND_FORWARD_STATE_FILE" >"$candidate" \
+    && forward_transaction_commit "$candidate" switch-backend "$old_backend" "$new_backend"
+  local rc=$?
+  rm -f "$candidate"
+  return "$rc"
+}
+
+forward_list_rules() {
+  forward_init_state || return 1
+  printf '%-18s %-20s %-10s %-6s %-22s %-28s %s\n' ID NAME BACKEND PROTO LISTEN TARGET STATUS
+  jq -r '.rules|sort_by(.rule_id)[]|[.rule_id,.name,.backend,.protocol,
+    (.listen_host+":"+(.listen_port|tostring)),(.target_host+":"+(.target_port|tostring)),
+    (if .enabled then "Enabled" else "Disabled" end)]|@tsv' "$NOBRAND_FORWARD_STATE_FILE" \
+    | while IFS=$'\t' read -r id name backend protocol listen target status; do
+        printf '%-18s %-20s %-10s %-6s %-22s %-28s %s\n' "$id" "$name" "$backend" "$protocol" "$listen" "$target" "$status"
+      done
+}
+
+forward_node_rows() {
+  local auto_host id name backend enabled protocol display_mode display_host display_port listen_port
+  local effective_host effective_port status
+  [ -s "$NOBRAND_FORWARD_STATE_FILE" ] || return 0
+  auto_host="$(public_ip 2>/dev/null || printf 'YOUR_SERVER_IP')"
+  while IFS=$'\x1f' read -r id name backend enabled protocol display_mode display_host display_port listen_port; do
+    effective_host="$display_host"
+    [ "$display_mode" = custom ] || effective_host="$auto_host"
+    effective_port="$display_port"
+    [ "$display_mode" = custom ] || effective_port="$listen_port"
+    status=Disabled
+    if [ "$enabled" = true ]; then
+      if [ "$backend" = nftables ]; then
+        status=Degraded
+        forward_nft_rule_owned "$id" && status=Healthy
+      else
+        status=Degraded
+        forward_realm_service_active && status=Healthy
+      fi
+    fi
+    printf 'Port Forward/%s|%s|%s:%s|%s|%s\n' \
+      "$backend" "$name" "$effective_host" "$effective_port" "$status" "$(printf '%s' "$protocol" | tr '[:lower:]' '[:upper:]')"
+  done < <(jq -r '.rules|sort_by(.rule_id)[]|[.rule_id,.name,.backend,(.enabled|tostring),.protocol,
+    .display_mode,.display_host,(.display_port|tostring),(.listen_port|tostring)]|join("\u001f")' \
+    "$NOBRAND_FORWARD_STATE_FILE")
+}
+
+forward_show_rule() {
+  local id rule display_host display_port
+  id="$(forward_resolve_rule_id "$FORWARD_RULE_ID")" || die 'Forward rule 不存在'
+  rule="$(forward_rule_json "$NOBRAND_FORWARD_STATE_FILE" "$id")"
+  display_host="$(nb_effective_advertise_host "$(jq -r .display_mode <<<"$rule")" "$(jq -r .display_host <<<"$rule")")"
+  display_port="$(nb_effective_advertise_port "$(jq -r .display_mode <<<"$rule")" \
+    "$(jq -r .display_port <<<"$rule")" "$(jq -r .listen_port <<<"$rule")")"
+  printf 'ID: %s\nName: %s\nNote: %s\nBackend: %s\nEnabled: %s\nProtocol: %s\n' \
+    "$id" "$(jq -r .name <<<"$rule")" "$(jq -r .note <<<"$rule")" "$(jq -r .backend <<<"$rule")" \
+    "$(jq -r .enabled <<<"$rule")" "$(jq -r .protocol <<<"$rule")"
+  printf 'Real listener: %s:%s\nTarget: %s:%s\nDisplay endpoint: %s:%s\nDisplay mode: %s\n' \
+    "$(jq -r .listen_host <<<"$rule")" "$(jq -r .listen_port <<<"$rule")" \
+    "$(jq -r .target_host <<<"$rule")" "$(jq -r .target_port <<<"$rule")" \
+    "$display_host" "$display_port" "$(jq -r .display_mode <<<"$rule")"
+  printf 'Backend options: %s\n' "$(jq -c .backend_options <<<"$rule")"
+}
+
+forward_doctor() {
+  local failed=0 id backend enabled protocol port target transport owner count
+  forward_state_valid "$NOBRAND_FORWARD_STATE_FILE" || { warn 'Forward state: FAIL'; return 1; }
+  msg 'Forward state: PASS (schema v3)'
+  while IFS=$'\t' read -r id backend enabled protocol port target; do
+    owner="forward:${id}"
+    while IFS= read -r transport; do
+      [ "$(nb_registry_port_owner "$transport" "$port" 2>/dev/null || true)" = "$owner" ] \
+        || { warn "${id} port registry ${transport}/${port}: FAIL"; failed=1; }
+    done < <(forward_protocol_transports "$protocol")
+    forward_target_valid "$backend" "$target" || { warn "${id} target: FAIL"; failed=1; }
+    [ "$enabled" = true ] || continue
+    if [ "$backend" = nftables ]; then
+      forward_nft_rule_owned "$id" \
+        || { warn "${id} nft ownership: FAIL"; failed=1; }
+      [ "$(sysctl -n net.ipv4.ip_forward 2>/dev/null || true)" = 1 ] \
+        || { warn "${id} ip_forward: FAIL"; failed=1; }
+    else
+      forward_realm_service_active || { warn "${id} Realm service: FAIL"; failed=1; }
+    fi
+  done < <(jq -r '.rules[]|[.rule_id,.backend,(.enabled|tostring),.protocol,
+    (.listen_port|tostring),.target_host]|@tsv' "$NOBRAND_FORWARD_STATE_FILE")
+  count="$(jq '[.rules[]|select(.enabled and .backend=="realm")]|length' "$NOBRAND_FORWARD_STATE_FILE")"
+  [ "$count" -eq 0 ] || forward_realm_listener_owned "$NOBRAND_FORWARD_STATE_FILE" \
+    || { warn 'Realm listener ownership: FAIL'; failed=1; }
+  [ "$failed" -eq 0 ] && msg 'Port Forward Doctor: PASS'
+  [ "$failed" -eq 0 ]
+}
+
+forward_import_apply() {
+  local source="$FORWARD_IMPORT_FILE" candidate
+  [ -n "$source" ] || die 'forward import 需要文件路径'
+  forward_import_validate "$source" || die 'Forward import 文件无效或包含未知字段'
+  candidate="$(mktemp_file .forward-import)" || return 1
+  jq '{schema_version:.schema_version,ownership:.ownership,feature:"port-forward",rules:.rules}' "$source" >"$candidate" \
+    && forward_transaction_commit "$candidate" import '' ''
+  local rc=$?
+  rm -f "$candidate"
+  return "$rc"
+}
+
+forward_realm_restore_runtime() {
+  local count channel version
+  [ -s "$NOBRAND_FORWARD_STATE_FILE" ] || return 0
+  count="$(jq '[.rules[]|select(.backend=="realm")]|length' "$NOBRAND_FORWARD_STATE_FILE")"
+  [ "$count" -gt 0 ] || return 0
+  if [ -x "$NOBRAND_REALM_BIN" ] && forward_realm_runtime_metadata_valid; then
+    return 0
+  fi
+  forward_realm_runtime_metadata_valid || return 1
+  channel="$(jq -r '.channel' "$NOBRAND_REALM_RUNTIME_META")"
+  version="$(jq -r '.version' "$NOBRAND_REALM_RUNTIME_META")"
+  case "$channel" in
+    stable) forward_realm_install_runtime stable ;;
+    latest|pinned) forward_realm_install_runtime pinned "$version" ;;
+    *) return 1 ;;
+  esac
+}
+
+forward_snapshot_restore_side_effects() {
+  local snapshot="$1" item label path runtime_owned=0
+  mkdir -p "$snapshot/sysctl" || return 1
+  forward_sysctl_snapshot "$snapshot/sysctl" || return 1
+  forward_realm_runtime_metadata_valid && runtime_owned=1
+  for item in \
+    "binary|$NOBRAND_REALM_BIN" \
+    "metadata|$NOBRAND_REALM_RUNTIME_META" \
+    "systemd-service|$NOBRAND_REALM_SYSTEMD_SERVICE" \
+    "openrc-service|$NOBRAND_REALM_OPENRC_SERVICE"; do
+    label="${item%%|*}"; path="${item#*|}"
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      case "$label" in
+        binary|metadata)
+          if [ "$runtime_owned" -eq 1 ]; then
+            cp -a "$path" "$snapshot/$label" || return 1
+          else
+            : >"$snapshot/${label}.external" || return 1
+          fi
+          ;;
+        systemd-service|openrc-service)
+          if forward_realm_service_path_owned "$path"; then
+            cp -a "$path" "$snapshot/$label" || return 1
+          else
+            : >"$snapshot/${label}.external" || return 1
+          fi
+          ;;
+      esac
+    else
+      : >"$snapshot/${label}.absent" || return 1
+    fi
+  done
+  if command -v nft >/dev/null 2>&1 \
+     && nft list table "$NOBRAND_FORWARD_NFT_FAMILY" "$NOBRAND_FORWARD_NFT_TABLE" >/dev/null 2>&1; then
+    if forward_nft_table_owned; then
+      # `nft list table` is not a round-trip serialization on every supported
+      # nftables version: it may resolve service names and can optimize away
+      # the l4proto context required to parse `ct original proto-dst` again.
+      # Rebuild the snapshot from the validated authoritative state instead.
+      [ -s "$NOBRAND_FORWARD_STATE_FILE" ] \
+        && forward_state_valid "$NOBRAND_FORWARD_STATE_FILE" \
+        && forward_generate_nft_ruleset "$NOBRAND_FORWARD_STATE_FILE" "$snapshot/nft-table.nft" \
+        || return 1
+    else
+      : >"$snapshot/nft-table.external" || return 1
+    fi
+  else
+    : >"$snapshot/nft-table.absent" || return 1
+  fi
+}
+
+forward_remove_restore_attempt_resources() {
+  forward_realm_service_action stop >/dev/null 2>&1 || true
+  forward_remove_owned_nft_table >/dev/null 2>&1 || true
+}
+
+forward_restore_side_effect_snapshot() {
+  local snapshot="$1" item label path mode failed=0
+  forward_remove_restore_attempt_resources
+  for item in \
+    "binary|$NOBRAND_REALM_BIN|0755" \
+    "metadata|$NOBRAND_REALM_RUNTIME_META|0600" \
+    "systemd-service|$NOBRAND_REALM_SYSTEMD_SERVICE|0644" \
+    "openrc-service|$NOBRAND_REALM_OPENRC_SERVICE|0755"; do
+    label="${item%%|*}"
+    path="${item#*|}"; path="${path%%|*}"
+    mode="${item##*|}"
+    if [ -e "$snapshot/${label}.external" ]; then
+      :
+    elif [ -e "$snapshot/$label" ]; then
+      nb_atomic_install_file "$snapshot/$label" "$path" "$mode" || failed=1
+    else
+      rm -f "$path" || failed=1
+    fi
+  done
+  if [ -s "$snapshot/nft-table.nft" ]; then
+    command -v nft >/dev/null 2>&1 && nft -c -f "$snapshot/nft-table.nft" >/dev/null 2>&1 \
+      && nft -f "$snapshot/nft-table.nft" || failed=1
+  fi
+  forward_sysctl_restore_snapshot "$snapshot/sysctl" || failed=1
+  [ "$(nb_service_manager)" != systemd ] || systemctl daemon-reload >/dev/null 2>&1 || failed=1
+  [ "$failed" -eq 0 ]
+}
+
+forward_uninstall() {
+  local empty service_path
+  forward_init_state || return 1
+  empty="$(mktemp_file .forward-empty)" || return 1
+  jq '.rules=[]' "$NOBRAND_FORWARD_STATE_FILE" >"$empty" \
+    && forward_transaction_commit "$empty" uninstall '' '' || { rm -f "$empty"; return 1; }
+  rm -f "$empty"
+  forward_realm_service_action stop >/dev/null 2>&1 || true
+  service_path="$(forward_realm_service_path 2>/dev/null || true)"
+  if [ -n "$service_path" ] && forward_realm_service_path_owned "$service_path"; then
+    case "$(nb_service_manager)" in
+    systemd)
+      systemctl disable "$NOBRAND_REALM_SERVICE_NAME" >/dev/null 2>&1 || true
+      rm -f "$NOBRAND_REALM_SYSTEMD_SERVICE"
+      systemctl daemon-reload >/dev/null 2>&1 || true
+      ;;
+    openrc)
+      rc-update del "$NOBRAND_REALM_SERVICE_NAME" default >/dev/null 2>&1 || true
+      rm -f "$NOBRAND_REALM_OPENRC_SERVICE"
+      ;;
+    esac
+  fi
+  if forward_realm_runtime_metadata_valid; then
+    rm -f "$NOBRAND_REALM_BIN" "$NOBRAND_REALM_RUNTIME_META"
+  fi
+  forward_remove_owned_nft_table || return 1
+  rm -f "$NOBRAND_FORWARD_REALM_CONFIG" "$NOBRAND_FORWARD_NFT_RULESET" "$NOBRAND_FORWARD_STATE_FILE"
+  msg 'Port Forward uninstalled; external nftables tables and external Realm installations were preserved.'
+}
+
+forward_usage() {
+  cat <<'EOF'
+Port Forward:
+  nobrand forward add --name NAME --backend nftables|realm --protocol TCP|UDP|BOTH \
+    --listen 0.0.0.0 --port PORT --target HOST --target-port PORT
+  nobrand forward list
+  nobrand forward show|delete|modify|enable|disable RULE
+  nobrand forward set-endpoint RULE --advertise-host HOST --advertise-port PORT
+  nobrand forward switch-backend RULE --backend nftables|realm [--target IPv4]
+  nobrand forward doctor
+  nobrand forward export [FILE]
+  nobrand forward import FILE
+
+nftables targets are IPv4 literals. Realm targets may be IPv4, IPv6, or domains.
+The local IPv4 tail base xx00 is reserved for every backend and transport.
+EOF
+}
+
+nobrand_run_forward_action() {
+  local lock_required=0 rc
+  case "$FORWARD_ACTION" in
+    add|delete|modify|enable|disable|set-endpoint|switch-backend|import|upgrade-runtime|uninstall)
+      lock_required=1
+      require_root
+      ensure_management_dependencies "$(detect_pkg_manager)" || return 1
+      admin_lock_acquire || return 1
+      ;;
+  esac
+  nobrand_run_forward_action_unlocked
+  rc=$?
+  [ "$lock_required" -eq 0 ] || admin_lock_release
+  return "$rc"
+}
+
+nobrand_run_forward_action_unlocked() {
+  case "$FORWARD_ACTION" in
+    menu) forward_menu_loop ;;
+    add) forward_add_rule ;;
+    delete) [ -n "$FORWARD_RULE_ID" ] || die 'forward delete 需要 RULE'; forward_delete_rule ;;
+    modify) [ -n "$FORWARD_RULE_ID" ] || die 'forward modify 需要 RULE'; forward_modify_rule ;;
+    list) forward_list_rules ;;
+    show) [ -n "$FORWARD_RULE_ID" ] || die 'forward show 需要 RULE'; forward_show_rule ;;
+    enable) [ -n "$FORWARD_RULE_ID" ] || die 'forward enable 需要 RULE'; forward_set_enabled true ;;
+    disable) [ -n "$FORWARD_RULE_ID" ] || die 'forward disable 需要 RULE'; forward_set_enabled false ;;
+    set-endpoint)
+      [ -n "$FORWARD_RULE_ID" ] || die 'forward set-endpoint 需要 RULE'
+      if [ "$ADVERTISE_AUTO_REQUESTED" -eq 1 ]; then
+        forward_set_endpoint_state "$FORWARD_RULE_ID" auto '' ''
+      else
+        [ "$ADVERTISE_CLI" -eq 1 ] || die 'set-endpoint 需要 --advertise-host/--advertise-port 或 --advertise-auto'
+        forward_set_endpoint_state "$FORWARD_RULE_ID" custom "$ADVERTISE_HOST" "$ADVERTISE_PORT"
+      fi
+      ;;
+    switch-backend) [ -n "$FORWARD_RULE_ID" ] || die 'switch-backend 需要 RULE'; forward_switch_backend ;;
+    doctor) forward_doctor ;;
+    export) forward_export_json "$FORWARD_EXPORT_FILE" ;;
+    import) forward_import_apply ;;
+    upgrade-runtime) forward_realm_install_runtime stable ;;
+    uninstall) forward_uninstall ;;
+    help) forward_usage ;;
+    *) die "未知 Port Forward 操作: $FORWARD_ACTION" ;;
+  esac
 }
 
 start_mita() {
@@ -13599,7 +18680,7 @@ show_backup_menu() {
   local choice=""
   read_tty choice "$(t '请选择 [0-5]: ' 'Choose [0-5]: ')" || choice=""
   case "$(printf '%s' "$choice" | tr -d '[:space:]')" in
-    1) ACTION=user-backup ;;
+    1) ACTION="user-backup" ;;
     2) ACTION="user-restore" ;;
     3) ACTION="user-export" ;;
     4) ACTION="user-import" ;;
@@ -13669,8 +18750,8 @@ show_menu() {
   fi
   case "$choice" in
     1) ACTION=install ;;
-    2) ACTION=client-config ;;
-    3) ACTION=user-manage ;;
+    2) ACTION="client-config" ;;
+    3) ACTION="user-manage" ;;
     4)
       show_performance_menu || selected_rc=$?
       [ "$selected_rc" -eq 0 ] || return 1
@@ -13753,7 +18834,7 @@ snell_menu_set_quic() {
     2) SNELL_QUIC_PROXY=on ;;
     *) warn '无效选择'; return 0 ;;
   esac
-  SNELL_QUIC_CLI=1 YES=0 SNELL_ACTION=set-quic
+  SNELL_QUIC_CLI=1 YES=0 SNELL_ACTION="set-quic"
   nobrand_menu_run nobrand_run_snell_action
 }
 
@@ -13799,7 +18880,7 @@ snell_menu_loop() {
       4) snell_menu_set_quic ;;
       5)
         snell_menu_select_instance || continue
-        ADVERTISE_CLI=0 ADVERTISE_AUTO_REQUESTED=0 YES=0 SNELL_ACTION=set-endpoint
+        ADVERTISE_CLI=0 ADVERTISE_AUTO_REQUESTED=0 YES=0 SNELL_ACTION="set-endpoint"
         nobrand_menu_run nobrand_run_snell_action
         ;;
       6) snell_menu_service ;;
@@ -13903,7 +18984,7 @@ vless_sudoku_menu_loop() {
       2) VLESS_SUDOKU_ACTION=show; nobrand_menu_run nobrand_run_vless_sudoku_action ;;
       3)
         ADVERTISE_HOST="" ADVERTISE_PORT="" ADVERTISE_CLI=0 ADVERTISE_AUTO_REQUESTED=0
-        YES=0 VLESS_SUDOKU_ACTION=set-endpoint
+        YES=0 VLESS_SUDOKU_ACTION="set-endpoint"
         nobrand_menu_run nobrand_run_vless_sudoku_action
         ;;
       4) VLESS_SUDOKU_ACTION=status; nobrand_menu_run nobrand_run_vless_sudoku_action ;;
@@ -13919,6 +19000,306 @@ vless_sudoku_menu_loop() {
         VLESS_SUDOKU_ACTION=remove
         nobrand_menu_run nobrand_run_vless_sudoku_action
         ;;
+      0) return 0 ;;
+      *) warn '无效选择' ;;
+    esac
+    menu_pause
+  done
+}
+
+tuic_menu_select_instance() {
+  local id name choice="" found=0
+  while IFS= read -r id; do
+    name="$(tuic_state_field "$id" name)"
+    printf '  - %s (%s)\n' "$name" "$id"
+    found=1
+  done < <(tuic_instance_ids)
+  [ "$found" -eq 1 ] || { warn 'TUIC 尚无 instance'; return 1; }
+  read_tty choice '输入 TUIC instance name: ' || choice=""
+  tuic_find_id_by_name "$choice" >/dev/null 2>&1 || { warn 'TUIC instance 不存在'; return 1; }
+  TUIC_NAME="$choice"
+}
+
+tuic_menu_loop() {
+  local choice="" user="" confirm=""
+  trap - ERR
+  while true; do
+    msg ''
+    msg '========== TUIC v5 / official sing-box =========='
+    msg '  1) 安装 TUIC v5 instance'
+    msg '  2) 查看 / 导出用户节点'
+    msg '  3) 用户管理（add/delete/list/rotate）'
+    msg '  4) 修改 Display Endpoint'
+    msg '  5) 状态'
+    msg '  6) 启动'
+    msg '  7) 停止'
+    msg '  8) 重启'
+    msg '  9) 升级 official sing-box runtime'
+    msg ' 10) Doctor'
+    msg ' 11) 卸载 instance'
+    msg '  0) 返回'
+    read_tty choice '请选择 [0-11]: ' || choice=""
+    case "$choice" in
+      1)
+        read_tty TUIC_NAME 'Instance name [primary]: ' || TUIC_NAME=""
+        TUIC_NAME="${TUIC_NAME:-primary}"
+        read_tty TUIC_USER 'First user [default]: ' || TUIC_USER=""
+        TUIC_USER="${TUIC_USER:-default}"
+        PORT="" ADVERTISE_HOST="" ADVERTISE_PORT="" ADVERTISE_CLI=0 ADVERTISE_AUTO_REQUESTED=0
+        TUIC_SNI="" TUIC_CHANNEL=stable TUIC_VERSION="" YES=0 TUIC_ACTION=install
+        nobrand_menu_run nobrand_run_tuic_action
+        ;;
+      2)
+        tuic_menu_select_instance || continue
+        read_tty TUIC_USER 'User name（唯一 user 可留空）: ' || TUIC_USER=""
+        TUIC_ACTION="export"; nobrand_menu_run nobrand_run_tuic_action
+        ;;
+      3)
+        tuic_menu_select_instance || continue
+        msg '  1) list  2) add  3) delete  4) rotate UUID+password'
+        read_tty confirm '请选择 [1-4]: ' || confirm=""
+        case "$confirm" in
+          1) TUIC_ACTION="user-list" ;;
+          2) read_tty user 'New user name: ' || user=""; TUIC_USER="$user"; TUIC_ACTION="user-add" ;;
+          3) read_tty user 'Delete user name: ' || user=""; TUIC_USER="$user"; TUIC_ACTION="user-delete" ;;
+          4) read_tty user 'Rotate user name: ' || user=""; TUIC_USER="$user"; TUIC_ACTION="user-rotate" ;;
+          *) warn '无效选择'; continue ;;
+        esac
+        nobrand_menu_run nobrand_run_tuic_action
+        ;;
+      4)
+        tuic_menu_select_instance || continue
+        ADVERTISE_HOST="" ADVERTISE_PORT="" ADVERTISE_CLI=0 ADVERTISE_AUTO_REQUESTED=0
+        nb_collect_advertise_endpoint_interactive 'TUIC v5' "$(tuic_state_field "$(tuic_find_id_by_name "$TUIC_NAME")" listen_port)"
+        TUIC_ACTION="set-endpoint"; nobrand_menu_run nobrand_run_tuic_action
+        ;;
+      5|6|7|8)
+        tuic_menu_select_instance || continue
+        case "$choice" in 5) TUIC_ACTION=status ;; 6) TUIC_ACTION=start ;; 7) TUIC_ACTION=stop ;; 8) TUIC_ACTION=restart ;; esac
+        nobrand_menu_run nobrand_run_tuic_action
+        ;;
+      9) TUIC_CHANNEL=stable TUIC_VERSION="" TUIC_ACTION="upgrade-runtime"; nobrand_menu_run nobrand_run_tuic_action ;;
+      10) TUIC_ACTION=doctor; nobrand_menu_run nobrand_run_tuic_action ;;
+      11)
+        tuic_menu_select_instance || continue
+        read_tty confirm "确认卸载 ${TUIC_NAME}？输入 yes: " || confirm=""
+        [ "$confirm" = yes ] || { warn '已取消'; continue; }
+        TUIC_ACTION=uninstall; nobrand_menu_run nobrand_run_tuic_action
+        ;;
+      0) return 0 ;;
+      *) warn '无效选择' ;;
+    esac
+    menu_pause
+  done
+}
+
+ssh_tunnel_menu_loop() {
+  local choice="" user="" confirm=""
+  trap - ERR
+  while true; do
+    msg ''
+    msg '========== SSH Tunnel / existing OpenSSH =========='
+    msg 'TCP forwarding: -L / -D / -R; no shell/exec/TTY/SFTP/SCP; GatewayPorts=no'
+    msg '  1) 安装 SSH Tunnel policy + first user'
+    msg '  2) 查看用户'
+    msg '  3) 显式导出用户 private key/命令'
+    msg '  4) 用户管理（add/delete/list/rotate-key）'
+    msg '  5) 修改 Display Endpoint'
+    msg '  6) 状态'
+    msg '  7) Doctor'
+    msg '  8) 卸载 SSH Tunnel'
+    msg '  0) 返回'
+    read_tty choice '请选择 [0-8]: ' || choice=""
+    case "$choice" in
+      1)
+        read_tty SSH_TUNNEL_USER 'First tunnel user [default]: ' || SSH_TUNNEL_USER=""
+        SSH_TUNNEL_USER="${SSH_TUNNEL_USER:-default}"
+        ADVERTISE_HOST="" ADVERTISE_PORT="" ADVERTISE_CLI=0 ADVERTISE_AUTO_REQUESTED=0 YES=0
+        SSH_TUNNEL_ACTION=install; nobrand_menu_run nobrand_run_ssh_tunnel_action
+        ;;
+      2|3)
+        read_tty user 'Tunnel user label（唯一 user 可留空）: ' || user=""
+        SSH_TUNNEL_USER="$user"
+        if [ "$choice" = 2 ]; then
+          SSH_TUNNEL_ACTION="show"
+        else
+          SSH_TUNNEL_ACTION="export"
+        fi
+        nobrand_menu_run nobrand_run_ssh_tunnel_action
+        ;;
+      4)
+        msg '  1) list  2) add  3) delete  4) rotate-key'
+        read_tty confirm '请选择 [1-4]: ' || confirm=""
+        case "$confirm" in
+          1) SSH_TUNNEL_ACTION="user-list" ;;
+          2) read_tty user 'New tunnel user label: ' || user=""; SSH_TUNNEL_USER="$user"; SSH_TUNNEL_ACTION="user-add" ;;
+          3) read_tty user 'Delete tunnel user label: ' || user=""; SSH_TUNNEL_USER="$user"; SSH_TUNNEL_ACTION="user-delete" ;;
+          4) read_tty user 'Rotate tunnel user label: ' || user=""; SSH_TUNNEL_USER="$user"; SSH_TUNNEL_ACTION="user-rotate-key" ;;
+          *) warn '无效选择'; continue ;;
+        esac
+        nobrand_menu_run nobrand_run_ssh_tunnel_action
+        ;;
+      5)
+        nb_collect_advertise_endpoint_interactive 'SSH Tunnel' "$(ssh_tunnel_state_field advertise_port)"
+        SSH_TUNNEL_ACTION="set-endpoint"; nobrand_menu_run nobrand_run_ssh_tunnel_action
+        ;;
+      6) SSH_TUNNEL_ACTION=status; nobrand_menu_run nobrand_run_ssh_tunnel_action ;;
+      7) SSH_TUNNEL_ACTION=doctor; nobrand_menu_run nobrand_run_ssh_tunnel_action ;;
+      8)
+        read_tty confirm '确认卸载 SSH Tunnel？输入 yes: ' || confirm=""
+        [ "$confirm" = yes ] || { warn '已取消'; continue; }
+        SSH_TUNNEL_ACTION=uninstall; nobrand_menu_run nobrand_run_ssh_tunnel_action
+        ;;
+      0) return 0 ;;
+      *) warn '无效选择' ;;
+    esac
+    menu_pause
+  done
+}
+
+forward_menu_reset_requests() {
+  FORWARD_RULE_ID="" FORWARD_NAME="" FORWARD_NOTE="" FORWARD_BACKEND="" FORWARD_PROTOCOL=""
+  FORWARD_LISTEN_HOST="" FORWARD_LISTEN_PORT="" FORWARD_TARGET_HOST="" FORWARD_TARGET_PORT=""
+  FORWARD_SOURCE_MODE=masquerade FORWARD_SOURCE_MODE_CLI=0 FORWARD_ADVANCED_CLI=0
+  FORWARD_THROUGH="" FORWARD_INTERFACE="" FORWARD_LISTEN_INTERFACE=""
+  FORWARD_TCP_TIMEOUT=5 FORWARD_UDP_TIMEOUT=30 FORWARD_PROXY_SEND=false FORWARD_PROXY_ACCEPT=false
+  FORWARD_PROXY_VERSION=2 FORWARD_PROXY_ACCEPT_TIMEOUT=5 FORWARD_DNS_MODE=system
+  FORWARD_DNS_PROTOCOL=tcp_and_udp FORWARD_DNS_NAMESERVERS="" FORWARD_LISTEN_TRANSPORT=""
+  FORWARD_REMOTE_TRANSPORT="" FORWARD_EXTRA_TARGETS="" FORWARD_BALANCE=off FORWARD_WEIGHTS=""
+  ADVERTISE_HOST="" ADVERTISE_PORT="" ADVERTISE_CLI=0 ADVERTISE_AUTO_REQUESTED=0 YES=0
+}
+
+forward_menu_select_rule() {
+  local selector=""
+  forward_list_rules
+  read_tty selector '输入 rule ID 或 name: ' || selector=""
+  [ -n "$selector" ] && forward_resolve_rule_id "$selector" >/dev/null 2>&1 \
+    || { warn 'Forward rule 不存在'; return 1; }
+  FORWARD_RULE_ID="$selector"
+}
+
+forward_menu_collect_add() {
+  local choice="" advanced=""
+  forward_menu_reset_requests
+  read_tty FORWARD_NAME 'Rule name: ' || FORWARD_NAME=""
+  [ -n "$FORWARD_NAME" ] || { warn 'Rule name 不能为空'; return 1; }
+  msg 'Backend: 1) nftables — Kernel NAT [simple IP forwarding]'
+  msg '         2) Realm — Userspace Relay [domain / advanced forwarding]'
+  read_tty choice '请选择 [1-2]: ' || choice=""
+  case "$choice" in 1) FORWARD_BACKEND=nftables ;; 2) FORWARD_BACKEND=realm ;; *) warn '无效 backend'; return 1 ;; esac
+  msg 'Protocol: 1) TCP  2) UDP  3) TCP + UDP'
+  read_tty choice '请选择 [1-3]: ' || choice=""
+  case "$choice" in 1) FORWARD_PROTOCOL=tcp ;; 2) FORWARD_PROTOCOL=udp ;; 3) FORWARD_PROTOCOL=both ;; *) warn '无效 protocol'; return 1 ;; esac
+  read_tty FORWARD_LISTEN_HOST 'Listen address [0.0.0.0]: ' || FORWARD_LISTEN_HOST=""
+  FORWARD_LISTEN_HOST="${FORWARD_LISTEN_HOST:-0.0.0.0}"
+  read_tty FORWARD_LISTEN_PORT 'Listen port: ' || FORWARD_LISTEN_PORT=""
+  read_tty FORWARD_TARGET_HOST 'Target host: ' || FORWARD_TARGET_HOST=""
+  read_tty FORWARD_TARGET_PORT 'Target port: ' || FORWARD_TARGET_PORT=""
+  read_tty FORWARD_NOTE 'Note [optional]: ' || FORWARD_NOTE=""
+  if [ "$FORWARD_BACKEND" = nftables ]; then
+    msg 'Source mode: 1) MASQUERADE [default]  2) Preserve Source [advanced; target needs return route]'
+    read_tty choice '请选择 [1-2，默认 1]: ' || choice=""
+    case "${choice:-1}" in
+      1) FORWARD_SOURCE_MODE=masquerade ;;
+      2)
+        FORWARD_SOURCE_MODE=preserve
+        warn 'Preserve Source 不做 SNAT；目标服务器必须经本转发机正确回程，否则连接会失败。'
+        ;;
+      *) warn '无效 source mode'; return 1 ;;
+    esac
+  else
+    read_tty advanced '配置 Realm advanced options？[y/N]: ' || advanced=""
+    case "$advanced" in
+      y|Y|yes|YES)
+        FORWARD_ADVANCED_CLI=1
+        read_tty FORWARD_THROUGH 'Outgoing IP / through [empty=system]: ' || FORWARD_THROUGH=""
+        read_tty FORWARD_INTERFACE 'Outgoing interface [empty=system]: ' || FORWARD_INTERFACE=""
+        read_tty FORWARD_LISTEN_INTERFACE 'Listen interface [empty=system]: ' || FORWARD_LISTEN_INTERFACE=""
+        read_tty FORWARD_DNS_NAMESERVERS 'DNS nameservers, comma-separated [empty=system]: ' || FORWARD_DNS_NAMESERVERS=""
+        if [ -n "$FORWARD_DNS_NAMESERVERS" ]; then FORWARD_DNS_MODE=ipv4_and_ipv6; fi
+        read_tty FORWARD_EXTRA_TARGETS 'Extra targets host:port, comma-separated [empty=none]: ' || FORWARD_EXTRA_TARGETS=""
+        if [ -n "$FORWARD_EXTRA_TARGETS" ]; then
+          read_tty FORWARD_BALANCE 'Balance [roundrobin/iphash]: ' || FORWARD_BALANCE=""
+          read_tty FORWARD_WEIGHTS 'Weights including primary, comma-separated: ' || FORWARD_WEIGHTS=""
+        fi
+        ;;
+    esac
+  fi
+  nb_collect_advertise_endpoint_interactive 'Port Forward' "$FORWARD_LISTEN_PORT"
+}
+
+forward_menu_loop() {
+  local choice="" confirm="" backend_choice="" path=""
+  trap - ERR
+  while true; do
+    msg ''
+    msg '========== Port Forward / nftables + Realm =========='
+    msg '  1) Add rule'
+    msg '  2) List rules'
+    msg '  3) Show rule'
+    msg '  4) Modify rule'
+    msg '  5) Switch backend'
+    msg '  6) Enable rule'
+    msg '  7) Disable rule'
+    msg '  8) Set Display Endpoint'
+    msg '  9) Delete rule'
+    msg ' 10) Doctor'
+    msg ' 11) Export JSON'
+    msg ' 12) Import JSON'
+    msg ' 13) Upgrade official Realm runtime'
+    msg '  0) 返回'
+    read_tty choice '请选择 [0-13]: ' || choice=""
+    case "$choice" in
+      1)
+        forward_menu_collect_add || continue
+        FORWARD_ACTION=add; nobrand_menu_run nobrand_run_forward_action
+        ;;
+      2) FORWARD_ACTION=list; nobrand_menu_run nobrand_run_forward_action ;;
+      3) forward_menu_reset_requests; forward_menu_select_rule || continue; FORWARD_ACTION=show; nobrand_menu_run nobrand_run_forward_action ;;
+      4)
+        forward_menu_reset_requests; forward_menu_select_rule || continue
+        read_tty FORWARD_TARGET_HOST 'New target host [empty=unchanged]: ' || FORWARD_TARGET_HOST=""
+        read_tty FORWARD_TARGET_PORT 'New target port [empty=unchanged]: ' || FORWARD_TARGET_PORT=""
+        FORWARD_ACTION=modify; nobrand_menu_run nobrand_run_forward_action
+        ;;
+      5)
+        forward_menu_reset_requests; forward_menu_select_rule || continue
+        msg 'New backend: 1) nftables  2) Realm'
+        read_tty backend_choice '请选择 [1-2]: ' || backend_choice=""
+        case "$backend_choice" in 1) FORWARD_BACKEND=nftables ;; 2) FORWARD_BACKEND=realm ;; *) warn '无效 backend'; continue ;; esac
+        if [ "$FORWARD_BACKEND" = nftables ]; then
+          read_tty FORWARD_TARGET_HOST 'nftables IPv4 target（domain rule 必须明确填写）[empty=keep if IPv4]: ' || FORWARD_TARGET_HOST=""
+        fi
+        FORWARD_ACTION=switch-backend; nobrand_menu_run nobrand_run_forward_action
+        ;;
+      6|7)
+        forward_menu_reset_requests; forward_menu_select_rule || continue
+        [ "$choice" = 6 ] && FORWARD_ACTION=enable || FORWARD_ACTION=disable
+        nobrand_menu_run nobrand_run_forward_action
+        ;;
+      8)
+        forward_menu_reset_requests; forward_menu_select_rule || continue
+        nb_collect_advertise_endpoint_interactive 'Port Forward' \
+          "$(jq -r --arg id "$(forward_resolve_rule_id "$FORWARD_RULE_ID")" '.rules[]|select(.rule_id==$id)|.listen_port' "$NOBRAND_FORWARD_STATE_FILE")"
+        FORWARD_ACTION=set-endpoint; nobrand_menu_run nobrand_run_forward_action
+        ;;
+      9)
+        forward_menu_reset_requests; forward_menu_select_rule || continue
+        read_tty confirm '确认删除此 Forward rule？输入 yes: ' || confirm=""
+        [ "$confirm" = yes ] || { warn '已取消'; continue; }
+        FORWARD_ACTION=delete; nobrand_menu_run nobrand_run_forward_action
+        ;;
+      10) FORWARD_ACTION=doctor; nobrand_menu_run nobrand_run_forward_action ;;
+      11)
+        read_tty path 'Export path [empty=stdout]: ' || path=""
+        FORWARD_EXPORT_FILE="$path" FORWARD_ACTION=export; nobrand_menu_run nobrand_run_forward_action
+        ;;
+      12)
+        read_tty path 'Import JSON path: ' || path=""
+        [ -n "$path" ] || { warn '路径不能为空'; continue; }
+        FORWARD_IMPORT_FILE="$path" FORWARD_ACTION=import; nobrand_menu_run nobrand_run_forward_action
+        ;;
+      13) FORWARD_ACTION=upgrade-runtime; nobrand_menu_run nobrand_run_forward_action ;;
       0) return 0 ;;
       *) warn '无效选择' ;;
     esac
@@ -13969,28 +19350,34 @@ nobrand_menu_loop() {
     msg '  1) Mieru'
     msg '  2) Snell v4 / v5'
     msg '  3) Hysteria2 (Xray-core)'
-    msg '  4) VLESS + FinalMask + Sudoku (TCP)'
-    msg '  5) 查看全部节点'
-    msg '  6) 综合状态'
-    msg '  7) Doctor'
-    msg '  8) 性能 / BBR / FQ（Mieru 公共网络工具）'
-    msg '  9) 备份 / 恢复'
-    msg ' 10) 帮助 / CLI'
-    msg ' 11) 卸载 NoBrand-OneClick（全部协议）'
+    msg '  4) TUIC v5 (official sing-box)'
+    msg '  5) VLESS + FinalMask + Sudoku (TCP)'
+    msg '  6) SSH Tunnel (existing OpenSSH)'
+    msg '  7) Port Forward (nftables / Realm)'
+    msg '  8) 查看全部节点'
+    msg '  9) 综合状态'
+    msg ' 10) Doctor'
+    msg ' 11) 备份 / 恢复'
+    msg ' 12) 性能 / BBR / FQ（Mieru 公共网络工具）'
+    msg ' 13) 帮助 / CLI'
+    msg ' 14) 卸载 NoBrand-OneClick（全部协议）'
     msg '  0) 退出'
-    read_tty choice "$(t '请选择 [0-11]: ' 'Choose [0-11]: ')" || choice=""
+    read_tty choice "$(t '请选择 [0-14]: ' 'Choose [0-14]: ')" || choice=""
     case "$choice" in
       1) menu_loop ;;
       2) snell_menu_loop ;;
       3) hysteria2_menu_loop ;;
-      4) vless_sudoku_menu_loop ;;
-      5) NOBRAND_PROTOCOL_FILTER=""; nobrand_menu_run nobrand_nodes; menu_pause ;;
-      6) nobrand_menu_run nobrand_status; menu_pause ;;
-      7) nobrand_menu_run nobrand_doctor; menu_pause ;;
-      8) nobrand_menu_run do_perf; menu_pause ;;
-      9) nobrand_backup_menu_loop ;;
-      10) nobrand_usage; menu_pause ;;
-      11) YES=0; nobrand_menu_run nobrand_uninstall; menu_pause ;;
+      4) tuic_menu_loop ;;
+      5) vless_sudoku_menu_loop ;;
+      6) ssh_tunnel_menu_loop ;;
+      7) forward_menu_loop ;;
+      8) NOBRAND_PROTOCOL_FILTER=""; nobrand_menu_run nobrand_nodes; menu_pause ;;
+      9) nobrand_menu_run nobrand_status; menu_pause ;;
+      10) nobrand_menu_run nobrand_doctor; menu_pause ;;
+      11) nobrand_backup_menu_loop ;;
+      12) nobrand_menu_run do_perf; menu_pause ;;
+      13) nobrand_usage; menu_pause ;;
+      14) YES=0; nobrand_menu_run nobrand_uninstall; menu_pause ;;
       0) return 0 ;;
       *) warn '无效选择' ;;
     esac
@@ -14004,6 +19391,7 @@ main() {
     nobrand-version) nobrand_version; return 0 ;;
     nobrand-help) nobrand_usage; return 0 ;;
   esac
+  nb_validate_authoritative_state_boundary
   if [ "${DRY_RUN:-0}" -ne 1 ] \
      && [ "$(id -u 2>/dev/null || echo 1)" -eq 0 ]; then
     ensure_manager_state_layout 0
@@ -14076,10 +19464,14 @@ main() {
     nobrand-doctor) nobrand_doctor ;;
     nobrand-backup) nobrand_backup_action ;;
     nobrand-uninstall) nobrand_uninstall ;;
+    nobrand-manager-upgrade) nobrand_manager_upgrade ;;
     nobrand-network) do_perf ;;
     nobrand-snell) nobrand_run_snell_action ;;
     nobrand-hy2) nobrand_run_hy2_action ;;
     nobrand-vless-sudoku) nobrand_run_vless_sudoku_action ;;
+    nobrand-tuic) nobrand_run_tuic_action ;;
+    nobrand-ssh-tunnel) nobrand_run_ssh_tunnel_action ;;
+    nobrand-forward) nobrand_run_forward_action ;;
     nobrand-mieru-menu) menu_loop ;;
     help) usage; exit 0 ;;
     menu)

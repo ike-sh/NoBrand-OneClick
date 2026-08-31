@@ -28,6 +28,8 @@ source "${SOURCE_ROOT}/src/21-platform-xray-hy2.sh"
 source "${SOURCE_ROOT}/src/22-platform-snell.sh"
 # shellcheck source=src/23-platform-vless-sudoku.sh
 source "${SOURCE_ROOT}/src/23-platform-vless-sudoku.sh"
+# shellcheck source=src/24-platform-tuic.sh
+source "${SOURCE_ROOT}/src/24-platform-tuic.sh"
 # shellcheck source=src/25-network-mtu.sh
 source "${SOURCE_ROOT}/src/25-network-mtu.sh"
 # shellcheck source=src/30-users-instance.sh
@@ -50,8 +52,12 @@ source "${SOURCE_ROOT}/src/56-snell.sh"
 source "${SOURCE_ROOT}/src/57-hysteria2.sh"
 # shellcheck source=src/58-vless-sudoku.sh
 source "${SOURCE_ROOT}/src/58-vless-sudoku.sh"
+# shellcheck source=src/59-tuic.sh
+source "${SOURCE_ROOT}/src/59-tuic.sh"
 # shellcheck source=src/60-daemon-firewall-network.sh
 source "${SOURCE_ROOT}/src/60-daemon-firewall-network.sh"
+# shellcheck source=src/61-ssh-tunnel.sh
+source "${SOURCE_ROOT}/src/61-ssh-tunnel.sh"
 # shellcheck source=src/65-service-bbr.sh
 source "${SOURCE_ROOT}/src/65-service-bbr.sh"
 # shellcheck source=src/70-client-export-install.sh

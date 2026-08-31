@@ -17,6 +17,11 @@ export NOBRAND_LIB_DIR="$fixture/nobrand-oneclick/lib"
 source_installer
 nb_init_state_layout
 
+if ! command -v unzip >/dev/null 2>&1; then
+  chmod 0755 "$TEST_ROOT/tests/helpers/unzip"
+  PATH="$TEST_ROOT/tests/helpers:$PATH"
+  export PATH
+fi
 for command_name in curl jq unzip openssl python3 ss; do
   command -v "$command_name" >/dev/null 2>&1 || fail "runtime integration dependency missing: $command_name"
 done

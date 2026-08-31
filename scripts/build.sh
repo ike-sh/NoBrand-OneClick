@@ -19,6 +19,7 @@ MODULES=(
   src/21-platform-xray-hy2.sh
   src/22-platform-snell.sh
   src/23-platform-vless-sudoku.sh
+  src/24-platform-tuic.sh
   src/25-network-mtu.sh
   src/30-users-instance.sh
   src/35-users-state.sh
@@ -30,7 +31,10 @@ MODULES=(
   src/56-snell.sh
   src/57-hysteria2.sh
   src/58-vless-sudoku.sh
+  src/59-tuic.sh
   src/60-daemon-firewall-network.sh
+  src/61-ssh-tunnel.sh
+  src/62-forward.sh
   src/65-service-bbr.sh
   src/70-client-export-install.sh
   src/71-snell-export.sh

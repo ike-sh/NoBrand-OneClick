@@ -9,17 +9,29 @@ nb_init_state_layout() {
   mkdir -p "$NOBRAND_BACKUP_DIR" "$NOBRAND_LOCK_DIR" \
     "$MITA_MANAGER_STATE_DIR" "$MITA_USERS_BACKUP_DIR" \
     "$NOBRAND_SNELL_STATE_DIR" "$NOBRAND_HY2_STATE_DIR" \
-    "$NOBRAND_VLESS_STATE_DIR" \
+    "$NOBRAND_VLESS_STATE_DIR" "$NOBRAND_TUIC_STATE_DIR" \
+    "$NOBRAND_SSH_STATE_DIR" "$NOBRAND_SSH_KEYS_DIR" "$NOBRAND_SSH_WATCHDOG_DIR" \
+    "$NOBRAND_FORWARD_STATE_DIR" \
     "$NOBRAND_CONFIG_DIR" "$NOBRAND_SNELL_CONFIG_DIR" "$NOBRAND_HY2_CONFIG_DIR" \
-    "$NOBRAND_VLESS_CONFIG_DIR" \
+    "$NOBRAND_VLESS_CONFIG_DIR" "$NOBRAND_TUIC_CONFIG_DIR" "$NOBRAND_FORWARD_CONFIG_DIR" \
+    "$NOBRAND_SSH_CONFIG_DIR" "$NOBRAND_SSH_AUTHORIZED_KEYS_DIR" \
+    "$NOBRAND_SSH_ACCOUNT_MARKER_DIR" \
     "$NOBRAND_BIN_DIR" "$NOBRAND_SNELL_RUNTIME_DIR" "$NOBRAND_LIB_DIR" \
     || return 1
   chmod 0700 "$NOBRAND_STATE_DIR" "$NOBRAND_BACKUP_DIR" "$NOBRAND_LOCK_DIR" \
     "$MITA_MANAGER_STATE_DIR" "$MITA_USERS_BACKUP_DIR" \
     "$NOBRAND_SNELL_STATE_DIR" "$NOBRAND_HY2_STATE_DIR" \
-    "$NOBRAND_VLESS_STATE_DIR" \
-    "$NOBRAND_CONFIG_DIR" "$NOBRAND_SNELL_CONFIG_DIR" "$NOBRAND_HY2_CONFIG_DIR" \
-    "$NOBRAND_VLESS_CONFIG_DIR" || return 1
+    "$NOBRAND_VLESS_STATE_DIR" "$NOBRAND_TUIC_STATE_DIR" \
+    "$NOBRAND_SSH_STATE_DIR" "$NOBRAND_SSH_KEYS_DIR" "$NOBRAND_SSH_WATCHDOG_DIR" \
+    "$NOBRAND_FORWARD_STATE_DIR" \
+    "$NOBRAND_SNELL_CONFIG_DIR" "$NOBRAND_HY2_CONFIG_DIR" \
+    "$NOBRAND_VLESS_CONFIG_DIR" "$NOBRAND_TUIC_CONFIG_DIR" "$NOBRAND_FORWARD_CONFIG_DIR" \
+    "$NOBRAND_SSH_ACCOUNT_MARKER_DIR" || return 1
+  # sshd reads AuthorizedKeysFile after switching to the target identity. Keep
+  # the shared and SSH config roots traversable but not listable; every other
+  # protocol config directory and all secret/state directories remain 0700.
+  chmod 0711 "$NOBRAND_CONFIG_DIR" "$NOBRAND_SSH_CONFIG_DIR" || return 1
+  chmod 0755 "$NOBRAND_SSH_AUTHORIZED_KEYS_DIR" || return 1
   # Protocol services can run as dedicated unprivileged users (Mieru uses the
   # mita account). Runtime directories contain only managed executables/assets
   # and must remain traversable; secrets stay in the 0700 state/config roots.

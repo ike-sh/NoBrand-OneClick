@@ -33,7 +33,7 @@ getent group mita >/dev/null || groupadd --system mita
 id mita >/dev/null 2>&1 || useradd --system -g mita -s /usr/sbin/nologin -d /tmp/metrics mita
 
 source /work/install-nobrand.sh
-test "$SCRIPT_VERSION" = 3.0.0
+test "$SCRIPT_VERSION" = 3.1.0
 test "$SCRIPT_NAME|$SCRIPT_REPO" = 'NoBrand-OneClick|ike-sh/NoBrand-OneClick'
 trap - ERR
 MITA_STATE=/tmp/manager-state/install-state.env

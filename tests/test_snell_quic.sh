@@ -181,6 +181,7 @@ eval "$original_state_set_quic"
 # Backups persist both QUIC booleans. Restore is exercised without running
 # real services.
 nobrand_stop_all_services() { :; }
+nobrand_restore_protocol_runtimes() { :; }
 nobrand_start_enabled_services() { :; }
 archive="$fixture/quic-backup.tar.gz"
 nobrand_backup_create "$archive" >/dev/null

@@ -1,5 +1,49 @@
 # Changelog
 
+## 3.1.0 — 2026-08-31
+
+### Added
+
+- Added SSH Tunnel over the machine's existing OpenSSH sshd, with one locked system account and Ed25519 keypair per user, centralized authorized keys, forwarding-only Match policy, `-L`/`-D`/`-R`, `GatewayPorts=no`, host-key fingerprint discovery, strict pinned `known_hosts` export, and explicit private-key export.
+- Added a two-phase SSH policy watchdog. Install, update, restore, module uninstall, and unified uninstall require candidate `sshd -t`/`sshd -T`, reload, and confirmation from a brand-new administrator SSH connection before rollback is cancelled or destructive work continues.
+- Added TUIC v5 using a NoBrand-owned official sing-box runtime, isolated named instances, multiple UUID/password users, P-256 self-signed TLS, UDP firewall ownership, stable/latest/pinned runtime channels, and Mihomo/sing-box exporters.
+- Added Port Forward as a Common Network Feature with a unified schema-v3 rule model, transport-aware Common Port ownership, metadata-only Display Endpoint, CLI/menu CRUD, enable/disable, Doctor, versioned JSON export/import, and transactional backend switching.
+- Added an nftables backend for IPv4 TCP/UDP/BOTH DNAT, MASQUERADE default, Preserve Source advanced mode, one marked NoBrand-owned table, atomic candidate application, and ownership/refcount-aware `net.ipv4.ip_forward` persistence.
+- Added a Realm backend using the official Realm v2.9.6 musl runtime, GitHub and pinned SHA-256 verification, one `nobrand-realm` systemd/OpenRC daemon, generated multi-endpoint config, IP/IPv6/domain targets, DNS, through/interfaces, Proxy Protocol, transports, extra remotes, load-balancing algorithms, and weights.
+- Added real Forward runtime suites for official Realm TCP/UDP/BOTH/domain/multi-rule/advanced configuration, nftables namespace MASQUERADE/Preserve Source and external-table preservation, and nftables→Realm→nftables data-plane switching with induced candidate rollback.
+- Added real OpenSSH and TUIC runtime suites. TUIC covers sing-box and Mihomo TCP plus SOCKS5 UDP ASSOCIATE at 64/512/1200/1400 bytes; SSH covers authentication, distinct UID/key isolation, forwarding, session denial, rotation, backup/restore, watchdog, and uninstall.
+- Added Docker-daemon-free Debian/Ubuntu/Rocky/Alpine rootfs qualification, repository sanitization, ordinary-output secret checks, and SSH/TUIC install/restore failure injection.
+
+### Changed
+
+- Kept `schema_version=3`; SSH Tunnel, TUIC, and Forward are optional schema-v3 modules, so a valid 3.0 state remains valid and byte-stable when the new modules are absent.
+- Unified nodes, status, Doctor, menus, backup/restore, and uninstall now include TUIC v5, SSH Tunnel, Forward nftables, and Forward Realm.
+- The shared config root and SSH config root use traverse-only mode 0711 so sshd can read centralized public keys after switching identity; protocol secret directories remain 0700 and secret files remain 0600.
+- Unified restore now snapshots and rolls back TUIC runtime/service-template and SSH sshd-config/Linux-account side effects in addition to state/config.
+- Unified restore reconstructs Forward's official Realm runtime and restores the nftables table, Realm service/config, sysctl ownership, firewall bindings, and authoritative state transactionally.
+- Unified uninstall pauses all other protocol removal until SSH policy removal is confirmed from a new administrator session.
+
+### Fixed
+
+- Fixed TUIC active-service candidate acceptance, which previously interpreted a successful restart/listener/ownership group as transaction failure.
+- Fixed complete TUIC shared-runtime rollback after a later instance restart or state commit failure.
+- Fixed SSH policy apply/reload and removal rollback, group/user creation cleanup, and account deletion state-write recovery.
+- Fixed SSH centralized authorized-key traversal permissions discovered by a real sshd authentication test.
+- Fixed service detection in chroot/container environments by requiring a live systemd runtime before choosing `systemctl` reload.
+- Fixed jq 1.6 compatibility by avoiding the reserved `label` identifier in SSH user JSON generation.
+- Fixed Forward ownership boundaries so same-name external nftables tables, Realm service/runtime paths, and sysctl fragments fail closed instead of being replaced or removed.
+- Fixed Realm candidate validation so temporary free listeners are probed without stopping the active Realm data plane first; failed runtime/service/listener acceptance restores every Forward external side effect.
+- Fixed Realm advanced validation for DNS nameserver and extra-remote socket addresses, integer timeout/weight bounds, balance target counts, and global DNS consistency.
+- Fixed Realm domain/IPv6 to nftables switching so it always requires an explicit IPv4 target and never resolves a domain once and pins the result.
+- Fixed `forward modify --port` so an automatic Display Endpoint follows the new listener port while an explicitly customized Display Endpoint remains unchanged.
+- Fixed unified Forward restore so a missing NoBrand-owned sysctl fragment is reconstructed from valid ownership state, while a symlink, foreign file, or mismatched content continues to fail closed.
+
+### Validation status
+
+- Final unit/transaction, warning-level ShellCheck, real upstream runtime, deterministic-build, repository-sanitization, and Debian/Ubuntu/Rocky/Alpine platform gates pass.
+- Real-machine qualification passes the exact 3.1.0 candidate for upgrade preservation, all supported protocols, TUIC TCP/UDP, SSH Tunnel SOCKS5, nftables/Realm Forward, backend switching and rollback, backup/restore, unified uninstall, fresh reinstall, external-resource preservation, and final production-style health.
+- `LOCAL_TEST_GATE=PASS`, `REAL_MACHINE_GATE=PASS`, and `PROTOCOL_FEATURE_FREEZE=true`. Snell v5 QUIC Proxy Mode remains OFF and its official QUIC wire remains NOT VERIFIED.
+
 ## 3.0.0 — 2026-08-28
 
 ### Unified clean architecture

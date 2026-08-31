@@ -5,6 +5,7 @@ main() {
     nobrand-version) nobrand_version; return 0 ;;
     nobrand-help) nobrand_usage; return 0 ;;
   esac
+  nb_validate_authoritative_state_boundary
   if [ "${DRY_RUN:-0}" -ne 1 ] \
      && [ "$(id -u 2>/dev/null || echo 1)" -eq 0 ]; then
     ensure_manager_state_layout 0
@@ -77,10 +78,14 @@ main() {
     nobrand-doctor) nobrand_doctor ;;
     nobrand-backup) nobrand_backup_action ;;
     nobrand-uninstall) nobrand_uninstall ;;
+    nobrand-manager-upgrade) nobrand_manager_upgrade ;;
     nobrand-network) do_perf ;;
     nobrand-snell) nobrand_run_snell_action ;;
     nobrand-hy2) nobrand_run_hy2_action ;;
     nobrand-vless-sudoku) nobrand_run_vless_sudoku_action ;;
+    nobrand-tuic) nobrand_run_tuic_action ;;
+    nobrand-ssh-tunnel) nobrand_run_ssh_tunnel_action ;;
+    nobrand-forward) nobrand_run_forward_action ;;
     nobrand-mieru-menu) menu_loop ;;
     help) usage; exit 0 ;;
     menu)

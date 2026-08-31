@@ -11,12 +11,12 @@ run_case() {
 }
 
 run_case debian:bookworm-slim \
-  'apt-get update -qq >/dev/null && apt-get install -y -qq bash python3 iproute2 >/dev/null'
+  'apt-get update -qq >/dev/null && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq bash python3 iproute2 jq openssl openssh-server openssh-client passwd procps >/dev/null'
 run_case ubuntu:24.04 \
-  'apt-get update -qq >/dev/null && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq bash python3 iproute2 >/dev/null'
+  'apt-get update -qq >/dev/null && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq bash python3 iproute2 jq openssl openssh-server openssh-client passwd procps >/dev/null'
 run_case rockylinux:9 \
-  'dnf install -y -q bash python3 iproute >/dev/null'
+  'dnf install -y -q bash python3 iproute jq openssl openssh-server openssh-clients shadow-utils procps-ng >/dev/null'
 run_case alpine:3.20 \
-  'apk add --no-cache bash python3 iproute2 >/dev/null'
+  'apk add --no-cache bash python3 iproute2 jq openssl openssh-server openssh-keygen shadow procps-ng >/dev/null'
 
 echo 'platform-smoke: PASS'

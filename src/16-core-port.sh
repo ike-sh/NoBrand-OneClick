@@ -207,6 +207,8 @@ nb_registry_rows() {
   NOBRAND_SNELL_STATE_DIR="$NOBRAND_SNELL_STATE_DIR" \
   NOBRAND_HY2_STATE_FILE="$NOBRAND_HY2_STATE_FILE" \
   NOBRAND_VLESS_STATE_FILE="$NOBRAND_VLESS_STATE_FILE" \
+  NOBRAND_TUIC_STATE_DIR="$NOBRAND_TUIC_STATE_DIR" \
+  NOBRAND_FORWARD_STATE_FILE="$NOBRAND_FORWARD_STATE_FILE" \
   MITA_USERS_STATE="$MITA_USERS_STATE" \
   python3 - <<'PY'
 import glob
@@ -251,6 +253,39 @@ if vless_path and os.path.isfile(vless_path):
         state = json.load(open(vless_path, encoding="utf-8"))
         emit("vless-sudoku:default", "TCP", state.get("listen_port"),
              state.get("advertise_host"), state.get("advertise_port"))
+    except Exception:
+        pass
+
+tuic_dir = os.environ.get("NOBRAND_TUIC_STATE_DIR", "")
+for path in sorted(glob.glob(os.path.join(tuic_dir, "*", "state.json"))):
+    try:
+        state = json.load(open(path, encoding="utf-8"))
+        instance_id = str(state.get("instance_id") or "")
+        if (state.get("schema_version") != 3 or state.get("ownership") != "nobrand-v3"
+                or state.get("protocol") != "tuic" or state.get("tuic_version") != 5
+                or os.path.basename(os.path.dirname(path)) != instance_id):
+            continue
+        emit("tuic:" + instance_id, "UDP", state.get("listen_port"),
+             state.get("advertise_host"), state.get("advertise_port"))
+    except Exception:
+        pass
+
+forward_path = os.environ.get("NOBRAND_FORWARD_STATE_FILE", "")
+if forward_path and os.path.isfile(forward_path):
+    try:
+        state = json.load(open(forward_path, encoding="utf-8"))
+        if (state.get("schema_version") == 3 and state.get("ownership") == "nobrand-v3"
+                and state.get("feature") == "port-forward"):
+            for rule in sorted(state.get("rules") or [], key=lambda item: str(item.get("rule_id") or "")):
+                rule_id = str(rule.get("rule_id") or "")
+                protocol = str(rule.get("protocol") or "").lower()
+                owner = "forward:" + rule_id
+                if protocol in ("tcp", "both"):
+                    emit(owner, "TCP", rule.get("listen_port"), rule.get("display_host"),
+                         rule.get("display_port"))
+                if protocol in ("udp", "both"):
+                    emit(owner, "UDP", rule.get("listen_port"), rule.get("display_host"),
+                         rule.get("display_port"))
     except Exception:
         pass
 

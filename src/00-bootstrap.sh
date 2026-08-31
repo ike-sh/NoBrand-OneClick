@@ -1,7 +1,7 @@
 # The menu intentionally mutates globals inside isolated action subshells; the
 # parent only consumes exit codes, so SC2030/SC2031 are false positives here.
 # shellcheck disable=SC2030,SC2031
-# NoBrand-OneClick — Mieru / Snell / Hysteria2 / Plain VLESS Sudoku 工具箱
+# NoBrand-OneClick — Mieru / Snell / Hysteria2 / TUIC v5 / Plain VLESS Sudoku / SSH Tunnel
 # 作者: ike / https://github.com/ike-sh/NoBrand-OneClick
 # Mieru 母体代码源自 ike-sh/mieru-OneClick (MIT)；Hysteria2 与 VLESS
 # FinalMask/Sudoku 逻辑参考 ike-sh/Xray-OneClick (GPL-3.0)。本融合项目按

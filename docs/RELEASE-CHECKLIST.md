@@ -1,5 +1,7 @@
 # NoBrand-OneClick 1.3.0 Release Checklist
 
+> Historical 1.3.0 release record only. The current 3.1.0 release is governed by [`RELEASE-CHECKLIST-3.1.md`](RELEASE-CHECKLIST-3.1.md).
+
 Status date: 2026-08-28 (Asia/Shanghai)
 
 Checked items have direct source, automated, container, or real-machine evidence. Publishing steps that necessarily occur after the release commit are verified separately in the final release report.

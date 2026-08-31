@@ -57,8 +57,16 @@ nb_legacy_state_detected() {
 
 nb_fail_legacy_state() {
   die "$(t \
-    '检测到旧版安装数据。NoBrand-OneClick 3.0.0 不提供旧用户自动迁移；请先备份并清理旧安装后重新部署。' \
-    'Legacy installation data was detected. NoBrand-OneClick 3.0.0 does not migrate old users; back it up, clean the old installation, then deploy fresh.')"
+    '检测到旧版安装数据。NoBrand-OneClick 3.1.0 不提供旧用户自动迁移；请先备份并清理旧安装后重新部署。' \
+    'Legacy installation data was detected. NoBrand-OneClick 3.1.0 does not migrate old users; back it up, clean the old installation, then deploy fresh.')"
+}
+
+nb_validate_authoritative_state_boundary() {
+  nb_legacy_state_detected && nb_fail_legacy_state
+  if [ -e "$NOBRAND_STATE_DIR" ]; then
+    [ -d "$NOBRAND_STATE_DIR" ] && [ ! -L "$NOBRAND_STATE_DIR" ] || nb_fail_legacy_state
+    nb_schema_v3_file_valid || nb_fail_legacy_state
+  fi
 }
 
 nb_write_schema_v3_file() {

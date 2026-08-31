@@ -24,6 +24,9 @@ nobrand_print_banner() { msg 'NoBrand test menu'; }
 nobrand_menu_run() { "$@"; }
 menu_loop() { printf 'top:mieru\n' >>"$action_log"; }
 hysteria2_menu_loop() { printf 'top:hy2\n' >>"$action_log"; }
+tuic_menu_loop() { printf 'top:tuic\n' >>"$action_log"; }
+ssh_tunnel_menu_loop() { printf 'top:ssh\n' >>"$action_log"; }
+forward_menu_loop() { printf 'top:forward\n' >>"$action_log"; }
 nobrand_nodes() { printf 'top:nodes\n' >>"$action_log"; }
 nobrand_status() { printf 'top:status\n' >>"$action_log"; }
 nobrand_doctor() { printf 'top:doctor\n' >>"$action_log"; }
@@ -80,13 +83,16 @@ grep -qx "backup:restore:${restore_path}" "$action_log" || fail 'backup restore 
 vless_sudoku_menu_loop() { printf 'top:vless\n' >>"$action_log"; }
 nobrand_backup_menu_loop() { printf 'top:backup\n' >>"$action_log"; }
 snell_menu_loop() { printf 'top:snell\n' >>"$action_log"; }
-set_inputs invalid -1 999 '' 1 2 3 4 5 6 7 8 9 10 11 0
+set_inputs invalid -1 999 '' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 0
 nobrand_menu_loop >"$fixture/top.out"
 top_output="$(<"$fixture/top.out")"
 assert_contains "$top_output" 'VLESS + FinalMask + Sudoku (TCP)' 'top VLESS menu visibility'
+assert_contains "$top_output" 'TUIC v5 (official sing-box)' 'top TUIC menu visibility'
+assert_contains "$top_output" 'SSH Tunnel (existing OpenSSH)' 'top SSH Tunnel menu visibility'
+assert_contains "$top_output" 'Port Forward (nftables / Realm)' 'top Port Forward menu visibility'
 assert_contains "$top_output" '卸载 NoBrand-OneClick（全部协议）' 'top unified uninstall label'
 assert_not_contains "$top_output" '保留 Mieru' 'top uninstall must not claim Mieru preservation'
-for item in mieru snell hy2 vless nodes status doctor network backup help uninstall; do
+for item in mieru snell hy2 tuic vless ssh forward nodes status doctor network backup help uninstall; do
   grep -qx "top:${item}" "$action_log" || fail "top menu handler not reached: $item"
 done
 

@@ -1,0 +1,90 @@
+#!/usr/bin/env python3
+"""Minimal, path-safe unzip compatibility for isolated runtime tests."""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path, PurePosixPath
+import stat
+import sys
+import zipfile
+
+
+def usage() -> int:
+    print("usage: unzip -t ARCHIVE | unzip -qo ARCHIVE -d DIRECTORY", file=sys.stderr)
+    return 2
+
+
+def safe_members(archive: zipfile.ZipFile) -> list[zipfile.ZipInfo]:
+    members = archive.infolist()
+    for member in members:
+        path = PurePosixPath(member.filename)
+        mode = member.external_attr >> 16
+        if (
+            not member.filename
+            or path.is_absolute()
+            or ".." in path.parts
+            or "\x00" in member.filename
+            or stat.S_ISLNK(mode)
+        ):
+            raise ValueError(f"unsafe ZIP member: {member.filename!r}")
+    return members
+
+
+def extract(archive: zipfile.ZipFile, members: list[zipfile.ZipInfo], destination: Path) -> None:
+    destination.mkdir(parents=True, exist_ok=True)
+    root = destination.resolve()
+    for member in members:
+        target = (destination / PurePosixPath(member.filename)).resolve()
+        if target != root and root not in target.parents:
+            raise ValueError(f"ZIP member escapes destination: {member.filename!r}")
+        if member.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with archive.open(member) as source, target.open("wb") as output:
+            while chunk := source.read(1024 * 1024):
+                output.write(chunk)
+
+
+def main(argv: list[str]) -> int:
+    test_only = False
+    destination: Path | None = None
+    archive_path: Path | None = None
+    index = 0
+    while index < len(argv):
+        argument = argv[index]
+        if argument == "-d":
+            index += 1
+            if index >= len(argv):
+                return usage()
+            destination = Path(argv[index])
+        elif argument.startswith("-"):
+            flags = argument[1:]
+            if any(flag not in "qot" for flag in flags):
+                return usage()
+            test_only = test_only or "t" in flags
+        elif archive_path is None:
+            archive_path = Path(argument)
+        else:
+            return usage()
+        index += 1
+    if archive_path is None or (not test_only and destination is None):
+        return usage()
+    try:
+        with zipfile.ZipFile(archive_path) as archive:
+            members = safe_members(archive)
+            bad_member = archive.testzip()
+            if bad_member is not None:
+                raise ValueError(f"ZIP CRC failure: {bad_member}")
+            if not test_only:
+                assert destination is not None
+                extract(archive, members, destination)
+    except (OSError, ValueError, zipfile.BadZipFile) as error:
+        print(f"unzip: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

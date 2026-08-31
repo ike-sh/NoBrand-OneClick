@@ -41,6 +41,7 @@ if orphans:
     raise SystemExit(1)
 print("FUNCTION_ORPHAN_COUNT=0")
 print("FUNCTION_DUPLICATE_COUNT=0")
+print("ACCIDENTAL_OVERRIDE_COUNT=0")
 PY
 
 for removed in \

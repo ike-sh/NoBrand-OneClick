@@ -193,8 +193,8 @@ parse_nobrand_snell_args() {
     add|create) SNELL_ACTION=install ;;
     list|nodes) SNELL_ACTION=show ;;
     delete|uninstall) SNELL_ACTION=remove ;;
-    endpoint) SNELL_ACTION=set-endpoint ;;
-    quic|set-quic) SNELL_ACTION=set-quic ;;
+    endpoint) SNELL_ACTION="set-endpoint" ;;
+    quic|set-quic) SNELL_ACTION="set-quic" ;;
     menu|install|show|set-endpoint|remove|start|stop|restart|status|doctor|upgrade) ;;
     help|-h|--help) SNELL_ACTION=help ;;
     *) die "未知 Snell 操作: $SNELL_ACTION" ;;
@@ -292,7 +292,7 @@ parse_nobrand_vless_sudoku_args() {
     add|create|reconfigure) VLESS_SUDOKU_ACTION=install ;;
     nodes) VLESS_SUDOKU_ACTION=show ;;
     delete|uninstall) VLESS_SUDOKU_ACTION=remove ;;
-    endpoint) VLESS_SUDOKU_ACTION=set-endpoint ;;
+    endpoint) VLESS_SUDOKU_ACTION="set-endpoint" ;;
     menu|install|show|set-endpoint|remove|start|stop|restart|status|doctor|smoke|upgrade) ;;
     help|-h|--help) VLESS_SUDOKU_ACTION=help ;;
     *) die "未知 VLESS Sudoku 操作: $VLESS_SUDOKU_ACTION" ;;
@@ -308,6 +308,242 @@ parse_nobrand_vless_sudoku_args() {
     shift "$consumed"
   done
   ACTION="nobrand-vless-sudoku"
+  NOBRAND_ARGS_HANDLED=1
+}
+
+parse_nobrand_tuic_args() {
+  local consumed rc
+  TUIC_ACTION="${1:-menu}"
+  [ "$#" -eq 0 ] || shift
+  if [ "$TUIC_ACTION" = user ]; then
+    TUIC_USER_ACTION="${1:-list}"
+    [ "$#" -eq 0 ] || shift
+    case "$TUIC_USER_ACTION" in
+      add|create) TUIC_ACTION="user-add" ;;
+      delete|del|remove) TUIC_ACTION="user-delete" ;;
+      list) TUIC_ACTION="user-list" ;;
+      show|export) TUIC_ACTION="user-show" ;;
+      rotate|rotate-key) TUIC_ACTION="user-rotate" ;;
+      *) die "未知 TUIC user 操作: $TUIC_USER_ACTION" ;;
+    esac
+  else
+    case "$TUIC_ACTION" in
+      add|create) TUIC_ACTION=install ;;
+      remove|delete) TUIC_ACTION=uninstall ;;
+      endpoint) TUIC_ACTION="set-endpoint" ;;
+      upgrade) TUIC_ACTION="upgrade-runtime" ;;
+      menu|install|start|stop|restart|status|doctor|show|export|set-endpoint|upgrade-runtime|uninstall) ;;
+      help|-h|--help) TUIC_ACTION=help ;;
+      *) die "未知 TUIC 操作: $TUIC_ACTION" ;;
+    esac
+  fi
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --name)
+        TUIC_NAME="${2:-}"
+        [ -n "$TUIC_NAME" ] && [[ "$TUIC_NAME" != --* ]] || die '--name 需要 TUIC instance name'
+        shift 2
+        ;;
+      --user)
+        TUIC_USER="${2:-}"
+        [ -n "$TUIC_USER" ] && [[ "$TUIC_USER" != --* ]] || die '--user 需要 TUIC user name'
+        shift 2
+        ;;
+      --sni)
+        TUIC_SNI="${2:-}"
+        [ -n "$TUIC_SNI" ] && [[ "$TUIC_SNI" != --* ]] || die '--sni 需要 domain 或 IPv4'
+        shift 2
+        ;;
+      --channel)
+        TUIC_CHANNEL="${2:-}"
+        [ -n "$TUIC_CHANNEL" ] && [[ "$TUIC_CHANNEL" != --* ]] || die '--channel 需要 stable、latest 或 pinned'
+        shift 2
+        ;;
+      --runtime-version|--version)
+        TUIC_VERSION="${2:-}"
+        TUIC_CHANNEL=pinned
+        [ -n "$TUIC_VERSION" ] && [[ "$TUIC_VERSION" != --* ]] || die '--runtime-version 需要精确版本'
+        shift 2
+        ;;
+      *)
+        consumed=0 rc=0
+        parse_nobrand_common_option "$1" "${2:-}" || rc=$?
+        case "$rc" in
+          0) consumed=1 ;;
+          2) consumed=2 ;;
+          *) die "未知 TUIC 参数: $1" ;;
+        esac
+        shift "$consumed"
+        ;;
+    esac
+  done
+  case "$TUIC_CHANNEL" in stable|latest|pinned) ;; *) die 'TUIC channel 只支持 stable、latest、pinned' ;; esac
+  ACTION="nobrand-tuic"
+  NOBRAND_ARGS_HANDLED=1
+}
+
+parse_nobrand_ssh_args() {
+  local consumed rc
+  SSH_TUNNEL_ACTION="${1:-menu}"
+  [ "$#" -eq 0 ] || shift
+  if [ "$SSH_TUNNEL_ACTION" = user ]; then
+    SSH_TUNNEL_USER_ACTION="${1:-list}"
+    [ "$#" -eq 0 ] || shift
+    case "$SSH_TUNNEL_USER_ACTION" in
+      add|create) SSH_TUNNEL_ACTION="user-add" ;;
+      delete|del|remove) SSH_TUNNEL_ACTION="user-delete" ;;
+      list) SSH_TUNNEL_ACTION="user-list" ;;
+      show) SSH_TUNNEL_ACTION="user-show" ;;
+      export) SSH_TUNNEL_ACTION="user-export" ;;
+      rotate|rotate-key) SSH_TUNNEL_ACTION="user-rotate-key" ;;
+      *) die "未知 SSH Tunnel user 操作: $SSH_TUNNEL_USER_ACTION" ;;
+    esac
+  else
+    case "$SSH_TUNNEL_ACTION" in
+      add|create) SSH_TUNNEL_ACTION=install ;;
+      remove|delete) SSH_TUNNEL_ACTION=uninstall ;;
+      endpoint) SSH_TUNNEL_ACTION="set-endpoint" ;;
+      menu|install|status|doctor|show|export|set-endpoint|confirm-admin|uninstall) ;;
+      help|-h|--help) SSH_TUNNEL_ACTION=help ;;
+      *) die "未知 SSH Tunnel 操作: $SSH_TUNNEL_ACTION" ;;
+    esac
+  fi
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --user)
+        SSH_TUNNEL_USER="${2:-}"
+        [ -n "$SSH_TUNNEL_USER" ] && [[ "$SSH_TUNNEL_USER" != --* ]] || die '--user 需要 SSH Tunnel user label'
+        shift 2
+        ;;
+      --token)
+        SSH_TUNNEL_WATCHDOG_TOKEN="${2:-}"
+        [ -n "$SSH_TUNNEL_WATCHDOG_TOKEN" ] && [[ "$SSH_TUNNEL_WATCHDOG_TOKEN" != --* ]] \
+          || die '--token 需要 watchdog token'
+        shift 2
+        ;;
+      *)
+        consumed=0 rc=0
+        parse_nobrand_common_option "$1" "${2:-}" || rc=$?
+        case "$rc" in
+          0) consumed=1 ;;
+          2) consumed=2 ;;
+          *) die "未知 SSH Tunnel 参数: $1" ;;
+        esac
+        shift "$consumed"
+        ;;
+    esac
+  done
+  ACTION="nobrand-ssh-tunnel"
+  NOBRAND_ARGS_HANDLED=1
+}
+
+parse_nobrand_forward_args() {
+  local value
+  FORWARD_ACTION="${1:-menu}"
+  [ "$#" -eq 0 ] || shift
+  case "$FORWARD_ACTION" in
+    create) FORWARD_ACTION=add ;;
+    remove) FORWARD_ACTION=delete ;;
+    endpoint) FORWARD_ACTION=set-endpoint ;;
+    switch) FORWARD_ACTION=switch-backend ;;
+    menu|add|delete|modify|list|show|enable|disable|set-endpoint|switch-backend|doctor|export|import|upgrade-runtime|uninstall) ;;
+    help|-h|--help) FORWARD_ACTION=help ;;
+    *) die "未知 Port Forward 操作: $FORWARD_ACTION" ;;
+  esac
+  if [ "$#" -gt 0 ] && [[ "$1" != --* ]]; then
+    case "$FORWARD_ACTION" in
+      delete|modify|show|enable|disable|set-endpoint|switch-backend)
+        FORWARD_RULE_ID="$1"; shift ;;
+      export) FORWARD_EXPORT_FILE="$1"; shift ;;
+      import) FORWARD_IMPORT_FILE="$1"; shift ;;
+    esac
+  fi
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --id|--rule|--rule-id)
+        FORWARD_RULE_ID="${2:-}"
+        [ -n "$FORWARD_RULE_ID" ] && [[ "$FORWARD_RULE_ID" != --* ]] || die "$1 需要 rule ID 或 name"
+        shift 2
+        ;;
+      --name)
+        FORWARD_NAME="${2:-}"
+        [ -n "$FORWARD_NAME" ] && [[ "$FORWARD_NAME" != --* ]] || die '--name 需要规则名'
+        shift 2
+        ;;
+      --note)
+        FORWARD_NOTE="${2:-}"
+        [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--note 需要说明文字'
+        shift 2
+        ;;
+      --backend)
+        FORWARD_BACKEND="$(printf '%s' "${2:-}" | tr '[:upper:]' '[:lower:]')"
+        [ -n "$FORWARD_BACKEND" ] && [[ "$FORWARD_BACKEND" != --* ]] || die '--backend 需要 nftables 或 realm'
+        shift 2
+        ;;
+      --protocol)
+        FORWARD_PROTOCOL="${2:-}"
+        [ -n "$FORWARD_PROTOCOL" ] && [[ "$FORWARD_PROTOCOL" != --* ]] || die '--protocol 需要 TCP、UDP 或 BOTH'
+        shift 2
+        ;;
+      --listen|--listen-host)
+        FORWARD_LISTEN_HOST="${2:-}"
+        [ -n "$FORWARD_LISTEN_HOST" ] && [[ "$FORWARD_LISTEN_HOST" != --* ]] || die "$1 需要监听地址"
+        shift 2
+        ;;
+      --port|--listen-port)
+        FORWARD_LISTEN_PORT="${2:-}"
+        [ -n "$FORWARD_LISTEN_PORT" ] && [[ "$FORWARD_LISTEN_PORT" != --* ]] || die "$1 需要监听端口"
+        shift 2
+        ;;
+      --target)
+        FORWARD_TARGET_HOST="${2:-}"
+        [ -n "$FORWARD_TARGET_HOST" ] && [[ "$FORWARD_TARGET_HOST" != --* ]] || die '--target 需要 IPv4、IPv6 或域名'
+        shift 2
+        ;;
+      --target-port)
+        FORWARD_TARGET_PORT="${2:-}"
+        [ -n "$FORWARD_TARGET_PORT" ] && [[ "$FORWARD_TARGET_PORT" != --* ]] || die '--target-port 需要端口'
+        shift 2
+        ;;
+      --source-mode)
+        FORWARD_SOURCE_MODE="$(printf '%s' "${2:-}" | tr '[:upper:]' '[:lower:]')"
+        [ -n "$FORWARD_SOURCE_MODE" ] && [[ "$FORWARD_SOURCE_MODE" != --* ]] || die '--source-mode 需要 masquerade 或 preserve'
+        FORWARD_SOURCE_MODE_CLI=1
+        shift 2
+        ;;
+      --through) FORWARD_THROUGH="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--through 需要 outgoing IP'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
+      --interface) FORWARD_INTERFACE="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--interface 需要 interface'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
+      --listen-interface) FORWARD_LISTEN_INTERFACE="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--listen-interface 需要 interface'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
+      --tcp-timeout) FORWARD_TCP_TIMEOUT="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--tcp-timeout 需要秒数'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
+      --udp-timeout) FORWARD_UDP_TIMEOUT="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--udp-timeout 需要秒数'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
+      --proxy-send) FORWARD_PROXY_SEND="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--proxy-send 需要 true 或 false'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
+      --proxy-accept) FORWARD_PROXY_ACCEPT="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--proxy-accept 需要 true 或 false'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
+      --proxy-version) FORWARD_PROXY_VERSION="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--proxy-version 需要 1 或 2'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
+      --proxy-accept-timeout) FORWARD_PROXY_ACCEPT_TIMEOUT="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--proxy-accept-timeout 需要秒数'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
+      --dns-mode) FORWARD_DNS_MODE="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--dns-mode 需要 Realm DNS mode'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
+      --dns-protocol) FORWARD_DNS_PROTOCOL="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--dns-protocol 需要 tcp、udp 或 tcp_and_udp'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
+      --dns-nameservers) FORWARD_DNS_NAMESERVERS="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--dns-nameservers 需要逗号分隔地址'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
+      --listen-transport) FORWARD_LISTEN_TRANSPORT="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--listen-transport 需要 Realm transport string'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
+      --remote-transport) FORWARD_REMOTE_TRANSPORT="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--remote-transport 需要 Realm transport string'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
+      --extra-targets) FORWARD_EXTRA_TARGETS="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--extra-targets 需要逗号分隔 host:port'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
+      --balance) FORWARD_BALANCE="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--balance 需要 off、roundrobin 或 iphash'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
+      --weights) FORWARD_WEIGHTS="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--weights 需要逗号分隔权重'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
+      --file)
+        value="${2:-}"
+        [ -n "$value" ] && [[ "$value" != --* ]] || die '--file 需要路径'
+        [ "$FORWARD_ACTION" = import ] && FORWARD_IMPORT_FILE="$value" || FORWARD_EXPORT_FILE="$value"
+        shift 2
+        ;;
+      --advertise-host|--advertise-port|--advertise-auto|--yes|-y|--dry-run)
+        local consumed=0 rc=0
+        parse_nobrand_common_option "$1" "${2:-}" || rc=$?
+        case "$rc" in 0) consumed=1 ;; 2) consumed=2 ;; *) die "未知 Forward 参数: $1" ;; esac
+        shift "$consumed"
+        ;;
+      *) die "未知 Forward 参数: $1" ;;
+    esac
+  done
+  ACTION="nobrand-forward"
   NOBRAND_ARGS_HANDLED=1
 }
 
@@ -338,9 +574,32 @@ detect_nobrand_entry() {
       shift
       parse_nobrand_vless_sudoku_args "$@"
       ;;
+    tuic)
+      shift
+      parse_nobrand_tuic_args "$@"
+      ;;
+    ssh|ssh-tunnel)
+      shift
+      parse_nobrand_ssh_args "$@"
+      ;;
+    forward|port-forward)
+      shift
+      parse_nobrand_forward_args "$@"
+      ;;
+    manager)
+      shift
+      NOBRAND_MANAGER_ACTION="${1:-}"
+      [ "$#" -eq 0 ] || shift
+      case "$NOBRAND_MANAGER_ACTION" in
+        install|upgrade) ;;
+        *) die 'manager 只支持 install 或 upgrade' ;;
+      esac
+      [ "$#" -eq 0 ] || die 'manager install/upgrade 不接受额外参数'
+      ACTION="nobrand-manager-upgrade"; NOBRAND_ARGS_HANDLED=1
+      ;;
     status)
       [ "$#" -eq 1 ] || die 'status 不接受参数'
-      ACTION=nobrand-status; NOBRAND_ARGS_HANDLED=1
+      ACTION="nobrand-status"; NOBRAND_ARGS_HANDLED=1
       ;;
     nodes)
       shift
@@ -349,17 +608,17 @@ detect_nobrand_entry() {
           --protocol)
             NOBRAND_PROTOCOL_FILTER="${2:-}"
             [ -n "$NOBRAND_PROTOCOL_FILTER" ] \
-              || die "--protocol 需要 mieru、snell、hy2 或 vless-sudoku"
+              || die "--protocol 需要 mieru、snell、hy2、tuic、vless-sudoku 或 ssh"
             shift 2
             ;;
           *) die "未知 nodes 参数: $1" ;;
         esac
       done
-      ACTION=nobrand-nodes; NOBRAND_ARGS_HANDLED=1
+      ACTION="nobrand-nodes"; NOBRAND_ARGS_HANDLED=1
       ;;
     doctor)
       [ "$#" -eq 1 ] || die 'doctor 不接受参数'
-      ACTION=nobrand-doctor; NOBRAND_ARGS_HANDLED=1
+      ACTION="nobrand-doctor"; NOBRAND_ARGS_HANDLED=1
       ;;
     backup)
       shift
@@ -371,7 +630,7 @@ detect_nobrand_entry() {
         shift
       fi
       [ "$#" -eq 0 ] || die "backup 参数过多"
-      ACTION=nobrand-backup; NOBRAND_ARGS_HANDLED=1
+      ACTION="nobrand-backup"; NOBRAND_ARGS_HANDLED=1
       ;;
     uninstall|remove)
       shift
@@ -381,11 +640,11 @@ detect_nobrand_entry() {
           *) die "未知 uninstall 参数: $1" ;;
         esac
       done
-      ACTION=nobrand-uninstall; NOBRAND_ARGS_HANDLED=1
+      ACTION="nobrand-uninstall"; NOBRAND_ARGS_HANDLED=1
       ;;
     network|bbr)
       [ "$#" -eq 1 ] || die 'network/bbr 不接受参数'
-      ACTION=nobrand-network; NOBRAND_ARGS_HANDLED=1
+      ACTION="nobrand-network"; NOBRAND_ARGS_HANDLED=1
       ;;
     menu)
       [ "$#" -eq 1 ] || die 'menu 不接受参数'
@@ -393,11 +652,11 @@ detect_nobrand_entry() {
       ;;
     help|-h|--help)
       [ "$#" -eq 1 ] || die 'help 不接受参数'
-      ACTION=nobrand-help; NOBRAND_ARGS_HANDLED=1
+      ACTION="nobrand-help"; NOBRAND_ARGS_HANDLED=1
       ;;
     version|--version)
       [ "$#" -eq 1 ] || die 'version 不接受参数'
-      ACTION=nobrand-version; NOBRAND_ARGS_HANDLED=1
+      ACTION="nobrand-version"; NOBRAND_ARGS_HANDLED=1
       ;;
     *) die "未知 NoBrand 操作: $1（使用 --help 查看帮助）" ;;
   esac
@@ -417,48 +676,48 @@ while [ "$NOBRAND_ARGS_HANDLED" -eq 0 ] && [ $# -gt 0 ]; do
     --upgrade) ACTION=upgrade ;;
     --uninstall) ACTION=uninstall ;;
     --status) ACTION=status ;;
-    --client-config|--show) ACTION=client-config ;;
+    --client-config|--show) ACTION="client-config" ;;
     --mtu-config|--set-mtu) ACTION="mtu-config" ;;
     --start) ACTION=start ;;
     --stop) ACTION=stop ;;
     --restart) ACTION=restart ;;
-    --users|--user-list) ACTION=user-list ;;
-    --user-add) ACTION=user-add ;;
+    --users|--user-list) ACTION="user-list" ;;
+    --user-add) ACTION="user-add" ;;
     --user-del|--user-delete)
-      ACTION=user-del
+      ACTION="user-del"
       USER_DEL_NAME="${2:-}"
       [ -n "$USER_DEL_NAME" ] || die "--user-del 需要用户名"
       shift
       ;;
     --user-show)
-      ACTION=user-show
+      ACTION="user-show"
       USER_SHOW_NAME="${2:-}"
       [ -n "$USER_SHOW_NAME" ] || die "--user-show 需要用户名"
       shift
       ;;
-    --user-set-quota) ACTION=user-set-quota ;;
-    --user-set-expire) ACTION=user-set-expire ;;
-    --user-set-endpoint) ACTION=user-set-endpoint ;;
+    --user-set-quota) ACTION="user-set-quota" ;;
+    --user-set-expire) ACTION="user-set-expire" ;;
+    --user-set-endpoint) ACTION="user-set-endpoint" ;;
     --user-enable)
-      ACTION=user-enable
+      ACTION="user-enable"
       USER_SHOW_NAME="${2:-}"
       [ -n "$USER_SHOW_NAME" ] || die "--user-enable 需要用户名"
       shift
       ;;
     --user-disable)
-      ACTION=user-disable
+      ACTION="user-disable"
       USER_SHOW_NAME="${2:-}"
       [ -n "$USER_SHOW_NAME" ] || die "--user-disable 需要用户名"
       shift
       ;;
-    --user-scan) ACTION=user-scan ;;
-    --user-quota-reset) ACTION=user-quota-reset ;;
-    --user-set-rate|--user-set-bandwidth) ACTION=user-set-rate ;;
-    --rate-status|--tc-status) ACTION=rate-status ;;
-    --rate-restore|--tc-restore) ACTION=rate-restore ;;
-    --user-usage|--usage) ACTION=user-usage ;;
+    --user-scan) ACTION="user-scan" ;;
+    --user-quota-reset) ACTION="user-quota-reset" ;;
+    --user-set-rate|--user-set-bandwidth) ACTION="user-set-rate" ;;
+    --rate-status|--tc-status) ACTION="rate-status" ;;
+    --rate-restore|--tc-restore) ACTION="rate-restore" ;;
+    --user-usage|--usage) ACTION="user-usage" ;;
     --user-export-clients)
-      ACTION=user-export-clients
+      ACTION="user-export-clients"
       if [ -n "${2:-}" ] && [[ "${2}" != --* ]]; then
         MITA_CLIENT_EXPORT_DIR="${2}"
         shift
@@ -467,15 +726,15 @@ while [ "$NOBRAND_ARGS_HANDLED" -eq 0 ] && [ $# -gt 0 ]; do
     --doctor|--verify) ACTION=doctor ;;
     --perf) ACTION=perf ;;
     --profile-config) ACTION="profile-config" ;;
-    --user-backup) ACTION=user-backup ;;
+    --user-backup) ACTION="user-backup" ;;
     --user-restore)
-      ACTION=user-restore
+      ACTION="user-restore"
       USER_RESTORE_FILE="${2:-}"
       [ -n "$USER_RESTORE_FILE" ] || die "--user-restore 需要备份文件路径"
       shift
       ;;
     --user-export)
-      ACTION=user-export
+      ACTION="user-export"
       if [ -n "${2:-}" ] && [[ "${2}" != --* ]]; then
         USER_EXPORT_FILE="${2}"
         shift
@@ -484,26 +743,26 @@ while [ "$NOBRAND_ARGS_HANDLED" -eq 0 ] && [ $# -gt 0 ]; do
       fi
       ;;
     --user-import)
-      ACTION=user-import
+      ACTION="user-import"
       USER_RESTORE_FILE="${2:-}"
       [ -n "$USER_RESTORE_FILE" ] || die "--user-import 需要文件路径"
       shift
       ;;
     install|upgrade|uninstall|status|reconfigure|client-config|show|mtu|mtu-config|set-mtu|profile|profile-config|perf|menu|start|stop|restart|配置|节点|users|user-list|user-add|user-del|user-delete|user-show|user-manage|user-set-endpoint|user-set-quota|user-set-expire|user-enable|user-disable|user-scan|user-quota-reset|user-set-rate|user-set-bandwidth|rate-status|rate-restore|tc-status|tc-restore|user-backup|user-restore|user-export|user-import|user-usage|usage|user-export-clients|doctor|verify|help)
       [ -z "$ACTION" ] && ACTION="$_arg_lc"
-      [ "$_arg_lc" = show ] && ACTION=client-config
+      [ "$_arg_lc" = show ] && ACTION="client-config"
       { [ "$_arg_lc" = mtu ] || [ "$_arg_lc" = set-mtu ]; } && ACTION="mtu-config"
       [ "$_arg_lc" = profile ] && ACTION="profile-config"
       [ "$_arg_lc" = menu ] && ACTION=""
-      [ "$_arg_lc" = 配置 ] && ACTION=client-config
-      [ "$_arg_lc" = 节点 ] && ACTION=client-config
-      [ "$_arg_lc" = users ] && ACTION=user-list
-      [ "$_arg_lc" = user-delete ] && ACTION=user-del
-      [ "$_arg_lc" = user-manage ] && ACTION=user-manage
-      [ "$_arg_lc" = user-set-bandwidth ] && ACTION=user-set-rate
-      [ "$_arg_lc" = tc-status ] && ACTION=rate-status
-      [ "$_arg_lc" = tc-restore ] && ACTION=rate-restore
-      [ "$_arg_lc" = usage ] && ACTION=user-usage
+      [ "$_arg_lc" = 配置 ] && ACTION="client-config"
+      [ "$_arg_lc" = 节点 ] && ACTION="client-config"
+      [ "$_arg_lc" = users ] && ACTION="user-list"
+      [ "$_arg_lc" = user-delete ] && ACTION="user-del"
+      [ "$_arg_lc" = user-manage ] && ACTION="user-manage"
+      [ "$_arg_lc" = user-set-bandwidth ] && ACTION="user-set-rate"
+      [ "$_arg_lc" = tc-status ] && ACTION="rate-status"
+      [ "$_arg_lc" = tc-restore ] && ACTION="rate-restore"
+      [ "$_arg_lc" = usage ] && ACTION="user-usage"
       [ "$_arg_lc" = verify ] && ACTION=doctor
       [ "$_arg_lc" = help ] && ACTION=help
       # 裸子命令后的位置参数：user-del bob / user-restore /path.json
