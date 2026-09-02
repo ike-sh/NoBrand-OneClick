@@ -53,19 +53,21 @@ reinstall_mita_package() {
   esac
   arch="$(detect_arch 2>/dev/null || true)"
   [ -n "$arch" ] || return 1
-  ver="$(installed_version 2>/dev/null || true)"
-  if [ -z "$ver" ]; then
-    load_install_state 2>/dev/null || true
-    ver="$(target_mieru_version 2>/dev/null || true)"
+  load_install_state 2>/dev/null || true
+  if ! mieru_resolve_runtime "${MIERU_CHANNEL:-stable}" "${MIERU_VERSION:-}" "$pm" "$arch"; then
+    return 1
   fi
-  [ -n "$ver" ] || return 1
+  ver="$MIERU_RUNTIME_RESOLVED_VERSION"
   warn "$(t "mita 二进制缺失，正在自动重新下载并安装 v${ver}（apt 源中没有该包）..." \
     "mita binary missing; auto re-downloading and installing v${ver} (not in apt repo)...")"
-  url="$(package_url "$ver" "$pm" "$arch" 2>/dev/null || true)"
-  [ -n "$url" ] || return 1
+  url="$MIERU_RUNTIME_RESOLVED_URL"
   tmp="$(mktemp_file)"
   # 子 shell 包裹：download/install 内部的 die→exit 只会终止子 shell，不会杀掉主流程
-  if ( download_package "$url" "$tmp" && install_package "$tmp" "$pm" ); then
+  if ( download_package "$url" "$tmp" \
+         "$MIERU_RUNTIME_RESOLVED_SHA256" \
+         "$MIERU_RUNTIME_RESOLVED_CHECKSUM_URL" \
+       && install_package "$tmp" "$pm" ) \
+     && mieru_assert_runtime_version "$ver"; then
     rm -f "$tmp"
     hash -r 2>/dev/null || true
     return 0
@@ -128,15 +130,6 @@ service_manager() {
   fi
 }
 
-arch_tar_suffix() {
-  local arch="$1"
-  case "$arch" in
-    amd64) echo linux_amd64 ;;
-    arm64) echo linux_arm64 ;;
-    *) die "$(t 'Alpine 不支持该架构' 'Unsupported arch for Alpine tarball')" ;;
-  esac
-}
-
 detect_arch() {
   STAGE="检测 CPU 架构"
   local m
@@ -146,23 +139,6 @@ detect_arch() {
     aarch64|arm64) echo arm64 ;;
     *) die "$(t "不支持的架构：${m}（仅 amd64/arm64）" "Unsupported arch: ${m} (amd64/arm64 only)")" ;;
   esac
-}
-
-query_latest_version() {
-  STAGE="查询最新版本"
-  require_cmd curl
-  local body="" tag="" effective=""
-  body="$(curl -fsSL --connect-timeout 15 --max-time 30 "$GITHUB_API" 2>/dev/null || true)"
-  tag="$(printf '%s' "$body" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)"
-  if [ -z "$tag" ]; then
-    effective="$(curl -fsSL --connect-timeout 15 --max-time 30 -o /dev/null \
-      -w '%{url_effective}' "https://github.com/${UPSTREAM_REPO}/releases/latest" 2>/dev/null || true)"
-    tag="${effective##*/}"
-  fi
-  tag="${tag#v}"
-  [[ "$tag" =~ ^[0-9]+([.][0-9]+){2}([.-][0-9A-Za-z.]+)?$ ]] \
-    || die "$(t '无法取得合法的最新版本号' 'Failed to obtain a valid latest release version')"
-  printf '%s' "$tag"
 }
 
 normalize_mieru_channel() {
@@ -178,25 +154,171 @@ valid_mieru_version() {
   [[ "${1:-}" =~ ^[0-9]+([.][0-9]+){2}([.-][0-9A-Za-z.]+)?$ ]]
 }
 
-target_mieru_version() {
-  MIERU_CHANNEL="$(normalize_mieru_channel "${MIERU_CHANNEL:-stable}")" || \
-    die "$(t '非法 Mieru 通道（stable/latest）' 'Invalid Mieru channel (stable/latest)')"
-  case "$MIERU_CHANNEL" in
-    stable) printf '%s' "$TESTED_MIERU_VERSION" ;;
-    latest) query_latest_version ;;
+mieru_stable_version() {
+  [[ "${1:-}" =~ ^[0-9]+[.][0-9]+[.][0-9]+$ ]]
+}
+
+mieru_runtime_asset_name() {
+  local version="$1" pm="$2" arch="$3"
+  valid_mieru_version "$version" || return 1
+  case "${pm}:${arch}" in
+    deb:amd64) printf 'mita_%s_amd64.deb' "$version" ;;
+    deb:arm64) printf 'mita_%s_arm64.deb' "$version" ;;
+    rpm:amd64) printf 'mita-%s-1.x86_64.rpm' "$version" ;;
+    rpm:arm64) printf 'mita-%s-1.aarch64.rpm' "$version" ;;
+    alpine:amd64) printf 'mita_%s_linux_amd64.tar.gz' "$version" ;;
+    alpine:arm64) printf 'mita_%s_linux_arm64.tar.gz' "$version" ;;
+    *) return 1 ;;
+  esac
+}
+
+mieru_last_known_good_digest() {
+  case "$1" in
+    mita_3.36.0_amd64.deb) printf '%s' "$LAST_KNOWN_GOOD_MIERU_AMD64_DEB_SHA256" ;;
+    mita_3.36.0_arm64.deb) printf '%s' "$LAST_KNOWN_GOOD_MIERU_ARM64_DEB_SHA256" ;;
+    mita-3.36.0-1.x86_64.rpm) printf '%s' "$LAST_KNOWN_GOOD_MIERU_AMD64_RPM_SHA256" ;;
+    mita-3.36.0-1.aarch64.rpm) printf '%s' "$LAST_KNOWN_GOOD_MIERU_ARM64_RPM_SHA256" ;;
+    mita_3.36.0_linux_amd64.tar.gz) printf '%s' "$LAST_KNOWN_GOOD_MIERU_AMD64_TAR_SHA256" ;;
+    mita_3.36.0_linux_arm64.tar.gz) printf '%s' "$LAST_KNOWN_GOOD_MIERU_ARM64_TAR_SHA256" ;;
+    *) return 1 ;;
+  esac
+}
+
+mieru_fetch_releases_metadata() {
+  local output="$1"
+  curl -fsSL --connect-timeout 15 --max-time 90 --retry 3 --retry-delay 2 --retry-all-errors \
+    -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' \
+    -H 'User-Agent: NoBrand-OneClick' "${NOBRAND_MIERU_RELEASES_API}?per_page=100" -o "$output"
+}
+
+mieru_fetch_tag_metadata() {
+  local version="$1" output="$2"
+  curl -fsSL --connect-timeout 15 --max-time 90 --retry 3 --retry-delay 2 --retry-all-errors \
+    -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' \
+    -H 'User-Agent: NoBrand-OneClick' "${NOBRAND_MIERU_RELEASES_API}/tags/v${version}" -o "$output"
+}
+
+mieru_reset_runtime_resolution() {
+  MIERU_RUNTIME_RESOLVED_VERSION=""
+  MIERU_RUNTIME_RESOLVED_ASSET=""
+  MIERU_RUNTIME_RESOLVED_URL=""
+  MIERU_RUNTIME_RESOLVED_CHECKSUM_URL=""
+  MIERU_RUNTIME_RESOLVED_SHA256=""
+  MIERU_RUNTIME_RESOLVED_CHANNEL=""
+  MIERU_RUNTIME_RESOLUTION_FALLBACK=0
+}
+
+mieru_apply_last_known_good_resolution() {
+  local channel="$1" pm="$2" arch="$3" version asset digest
+  version="$LAST_KNOWN_GOOD_MIERU_VERSION"
+  mieru_stable_version "$version" || return 1
+  asset="$(mieru_runtime_asset_name "$version" "$pm" "$arch")" || return 1
+  digest="$(mieru_last_known_good_digest "$asset")" || return 1
+  MIERU_RUNTIME_RESOLVED_VERSION="$version"
+  MIERU_RUNTIME_RESOLVED_ASSET="$asset"
+  MIERU_RUNTIME_RESOLVED_URL="${GITHUB_DL}/v${version}/${asset}"
+  MIERU_RUNTIME_RESOLVED_CHECKSUM_URL="${MIERU_RUNTIME_RESOLVED_URL}.sha256.txt"
+  MIERU_RUNTIME_RESOLVED_SHA256="$digest"
+  MIERU_RUNTIME_RESOLVED_CHANNEL="$channel"
+  # Resolver result fields are consumed by callers after this function returns.
+  # shellcheck disable=SC2034
+  MIERU_RUNTIME_RESOLUTION_FALLBACK=1
+  warn 'LATEST_RESOLUTION_FAILED' >&2
+  warn "USING_LAST_KNOWN_GOOD=${version}" >&2
+}
+
+mieru_resolve_runtime() {
+  local channel requested_version pm arch metadata release tag version asset checksum_asset
+  local asset_count checksum_count url checksum_url digest expected_prefix
+  channel="$(normalize_mieru_channel "${1:-stable}")" || return 1
+  requested_version="${2:-}"
+  pm="$3"
+  arch="$4"
+  mieru_reset_runtime_resolution
+  metadata="$(mktemp_file .mieru-release.json)" || return 1
+
+  case "$channel" in
+    stable|latest)
+      if ! mieru_fetch_releases_metadata "$metadata"; then
+        rm -f "$metadata"
+        mieru_apply_last_known_good_resolution "$channel" "$pm" "$arch"
+        return $?
+      fi
+      if ! release="$(jq -ce '
+          select(type == "array")
+          | [ .[]
+              | select(.draft == false and .prerelease == false)
+              | select((.tag_name | type) == "string")
+              | select(.tag_name | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))
+              | . + {nobrand_semver:(.tag_name[1:] | split(".") | map(tonumber))}
+            ]
+          | sort_by(.nobrand_semver)
+          | last
+          | select(type == "object")
+        ' "$metadata" 2>/dev/null)"; then
+        rm -f "$metadata"
+        return 1
+      fi
+      ;;
     pinned)
-      valid_mieru_version "${MIERU_VERSION:-}" || \
-        die "$(t 'pinned 通道需要合法的 --mieru-version' \
-          'The pinned channel requires a valid --mieru-version')"
-      printf '%s' "$MIERU_VERSION"
+      valid_mieru_version "$requested_version" || { rm -f "$metadata"; return 1; }
+      if ! mieru_fetch_tag_metadata "$requested_version" "$metadata"; then
+        rm -f "$metadata"
+        return 1
+      fi
+      if ! release="$(jq -ce --arg tag "v${requested_version}" '
+          select(type == "object" and .draft == false and .tag_name == $tag)
+        ' "$metadata" 2>/dev/null)"; then
+        rm -f "$metadata"
+        return 1
+      fi
       ;;
   esac
+  rm -f "$metadata"
+  [ -n "$release" ] || return 1
+  tag="$(jq -r '.tag_name // empty' <<<"$release")"
+  version="${tag#v}"
+  if [ "$channel" = pinned ]; then
+    valid_mieru_version "$version" || return 1
+  else
+    mieru_stable_version "$version" || return 1
+  fi
+  asset="$(mieru_runtime_asset_name "$version" "$pm" "$arch")" || return 1
+  checksum_asset="${asset}.sha256.txt"
+  asset_count="$(jq -r --arg asset "$asset" \
+    'if (.assets | type) == "array" then [.assets[] | select(.name==$asset)] | length else 0 end' \
+    <<<"$release")"
+  checksum_count="$(jq -r --arg asset "$checksum_asset" \
+    'if (.assets | type) == "array" then [.assets[] | select(.name==$asset)] | length else 0 end' \
+    <<<"$release")"
+  [ "$asset_count" = 1 ] && [ "$checksum_count" = 1 ] || return 1
+  url="$(jq -r --arg asset "$asset" '.assets[] | select(.name==$asset) | .browser_download_url' <<<"$release")"
+  checksum_url="$(jq -r --arg asset "$checksum_asset" '.assets[] | select(.name==$asset) | .browser_download_url' <<<"$release")"
+  digest="$(jq -r --arg asset "$asset" '.assets[] | select(.name==$asset) | .digest // empty' <<<"$release")"
+  digest="${digest#sha256:}"
+  [[ "$digest" =~ ^[0-9a-fA-F]{64}$ ]] || return 1
+  digest="$(printf '%s' "$digest" | tr '[:upper:]' '[:lower:]')"
+  expected_prefix="${GITHUB_DL}/v${version}/"
+  [[ "$url" = "${expected_prefix}${asset}" ]] || return 1
+  [[ "$checksum_url" = "${expected_prefix}${checksum_asset}" ]] || return 1
+  if [ "$version" = "$LAST_KNOWN_GOOD_MIERU_VERSION" ]; then
+    [ "$digest" = "$(mieru_last_known_good_digest "$asset")" ] || return 1
+  fi
+  MIERU_RUNTIME_RESOLVED_VERSION="$version"
+  # Resolver result fields are consumed by callers after this function returns.
+  # shellcheck disable=SC2034
+  MIERU_RUNTIME_RESOLVED_ASSET="$asset"
+  MIERU_RUNTIME_RESOLVED_URL="$url"
+  MIERU_RUNTIME_RESOLVED_CHECKSUM_URL="$checksum_url"
+  MIERU_RUNTIME_RESOLVED_SHA256="$digest"
+  # shellcheck disable=SC2034
+  MIERU_RUNTIME_RESOLVED_CHANNEL="$channel"
 }
 
 mieru_channel_label() {
   case "$(normalize_mieru_channel "${MIERU_CHANNEL:-stable}" 2>/dev/null || printf stable)" in
-    stable) t 'stable（项目测试版）' 'stable (project-tested)' ;;
-    latest) t 'latest（上游最新版）' 'latest (upstream newest)' ;;
+    stable) t 'stable（官方最新稳定版）' 'stable (official latest stable)' ;;
+    latest) t 'latest（官方最新稳定版兼容名）' 'latest (official latest-stable alias)' ;;
     pinned) t "pinned (${MIERU_VERSION:-unknown})" "pinned (${MIERU_VERSION:-unknown})" ;;
   esac
 }
@@ -227,10 +349,77 @@ mita_bin() {
   printf '%s' "$MITA_BIN"
 }
 
+mieru_runtime_version() {
+  local binary="${1:-$(mita_bin)}" output
+  [ -x "$binary" ] || return 1
+  output="$("$binary" version 2>/dev/null | sed -n '1p')" || return 1
+  [[ "$output" =~ ^v?([0-9]+[.][0-9]+[.][0-9]+)([[:space:]]|$) ]] || return 1
+  printf '%s' "${BASH_REMATCH[1]}"
+}
+
 installed_version() {
-  if mita_installed; then
-    "$(mita_bin)" version 2>/dev/null | sed -n '1p' | tr -d 'v'
+  mita_installed || return 1
+  mieru_runtime_version "$(mita_bin)"
+}
+
+mieru_assert_runtime_version() {
+  local expected="$1" actual
+  actual="$(mieru_runtime_version "${2:-$(mita_bin)}")" || return 1
+  [ "$actual" = "$expected" ] || {
+    warn "$(t "mita runtime 身份不匹配：期望 ${expected}，实际 ${actual}" \
+      "mita runtime identity mismatch: expected ${expected}, got ${actual}")"
+    return 1
+  }
+}
+
+mieru_runtime_snapshot() {
+  local snapshot
+  snapshot="$(mktemp_dir)" || return 1
+  if [ -f "$MITA_BIN" ] && [ ! -L "$MITA_BIN" ]; then
+    cp -p "$MITA_BIN" "$snapshot/mita" || { rm -rf -- "$snapshot"; return 1; }
+  else
+    : >"$snapshot/binary.absent"
   fi
+  if [ -f "$MITA_MARKER" ] && [ ! -L "$MITA_MARKER" ]; then
+    cp -p "$MITA_MARKER" "$snapshot/marker" || { rm -rf -- "$snapshot"; return 1; }
+  else
+    : >"$snapshot/marker.absent"
+  fi
+  printf '%s' "$snapshot"
+}
+
+mieru_runtime_snapshot_valid() {
+  local snapshot="${1:-}"
+  [[ "$snapshot" = /tmp/mita.* || "$snapshot" = /tmp/mita_* ]] \
+    && [ -d "$snapshot" ] && [ ! -L "$snapshot" ]
+}
+
+mieru_runtime_rollback() {
+  local snapshot="$1" rc=0
+  mieru_runtime_snapshot_valid "$snapshot" || return 1
+  run install -d -o root -g root -m 0755 "$NOBRAND_BIN_DIR" "$(dirname "$MITA_MARKER")" || rc=1
+  if [ -f "$snapshot/mita" ]; then
+    run install -m 0755 "$snapshot/mita" "$MITA_BIN" || rc=1
+  elif [ -f "$snapshot/binary.absent" ]; then
+    run rm -f "$MITA_BIN" || rc=1
+  else
+    rc=1
+  fi
+  if [ -f "$snapshot/marker" ]; then
+    run install -m 0600 "$snapshot/marker" "$MITA_MARKER" || rc=1
+  elif [ -f "$snapshot/marker.absent" ]; then
+    run rm -f "$MITA_MARKER" || rc=1
+  else
+    rc=1
+  fi
+  rm -rf -- "$snapshot"
+  return "$rc"
+}
+
+mieru_runtime_commit() {
+  local snapshot="$1"
+  mieru_runtime_snapshot_valid "$snapshot" || return 1
+  rm -rf -- "$snapshot"
 }
 
 version_is_current() {
@@ -240,35 +429,27 @@ version_is_current() {
   [ "$(printf '%s\n%s' "$current" "$available" | sort -V | tail -n1)" = "$current" ]
 }
 
-package_url() {
-  local ver="$1"
-  local pm="$2"
-  local arch="$3"
-  case "${pm}:${arch}" in
-    deb:amd64) echo "${GITHUB_DL}/v${ver}/mita_${ver}_amd64.deb" ;;
-    deb:arm64) echo "${GITHUB_DL}/v${ver}/mita_${ver}_arm64.deb" ;;
-    rpm:amd64) echo "${GITHUB_DL}/v${ver}/mita-${ver}-1.x86_64.rpm" ;;
-    rpm:arm64) echo "${GITHUB_DL}/v${ver}/mita-${ver}-1.aarch64.rpm" ;;
-    alpine:amd64|alpine:arm64)
-      echo "${GITHUB_DL}/v${ver}/mita_${ver}_$(arch_tar_suffix "$arch").tar.gz"
-      ;;
-    *) die "$(t '无法构造下载链接' 'Cannot build download URL')" ;;
-  esac
-}
-
 download_package() {
   local url="$1"
   local dest="$2"
+  local pinned_sha256="${3:-}" checksum_url="${4:-${url}.sha256.txt}" actual
   STAGE="下载安装包"
   info "$(t "下载 ${url}" "Downloading ${url}")"
   run curl -fL --connect-timeout 30 --retry 3 --retry-delay 2 -o "$dest" "$url"
   [ -s "$dest" ] || die "$(t '下载文件为空' 'Downloaded file is empty')"
-  verify_package_sha256 "$dest" "${url}.sha256.txt"
+  if [ -n "$pinned_sha256" ]; then
+    [[ "$pinned_sha256" =~ ^[0-9a-f]{64}$ ]] || return 1
+    actual="$(nobrand_sha256_file "$dest")" || return 1
+    [ "$actual" = "$pinned_sha256" ] \
+      || die "$(t '安装包与已解析 release digest 不一致' 'Package does not match the resolved release digest')"
+  fi
+  verify_package_sha256 "$dest" "$checksum_url" "$pinned_sha256"
 }
 
 verify_package_sha256() {
   local file="$1"
   local sha_url="$2"
+  local pinned_sha256="${3:-}"
   [ "$DRY_RUN" -eq 1 ] && return 0
   STAGE="校验安装包 SHA256"
   local sha_file expected actual
@@ -286,6 +467,11 @@ verify_package_sha256() {
     return 1
   }
   expected="$(printf '%s' "$expected" | tr '[:upper:]' '[:lower:]')"
+  [ -z "$pinned_sha256" ] || [ "$expected" = "$pinned_sha256" ] || {
+    rm -f "$sha_file"
+    die "$(t '校验清单与 release digest 不一致' 'Checksum manifest disagrees with the release digest')"
+    return 1
+  }
   if command -v sha256sum >/dev/null 2>&1; then
     actual="$(sha256sum "$file" | awk '{print $1}')"
   elif command -v shasum >/dev/null 2>&1; then

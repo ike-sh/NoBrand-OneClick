@@ -22,17 +22,23 @@ fi
 bash scripts/build.sh --check
 
 unit_tests=(
+  tests/test_mieru_latest_stable.sh
   tests/test_mieru_parity.sh
   tests/test_architecture_audit.sh
   tests/test_repository_sanitization.sh
   tests/test_schema_v3.sh
   tests/test_common_port.sh
+  tests/test_ingress_profiles.sh
+  tests/test_ingress_enforcement.sh
+  tests/test_ingress_enforcement_transaction.sh
   tests/test_forward.sh
   tests/test_forward_transaction.sh
   tests/test_forward_sysctl.sh
   tests/test_forward_ownership.sh
   tests/test_tuic_v5.sh
   tests/test_tuic_transaction.sh
+  tests/test_vless_reality.sh
+  tests/test_vless_reality_transaction.sh
   tests/test_ssh_tunnel.sh
   tests/test_ssh_tunnel_transaction.sh
   tests/test_upgrade_3_0_3_1.sh
@@ -61,11 +67,14 @@ done
 if [ "$run_runtime" -eq 1 ]; then
   runtime_tests=(
     tests/test_runtime_integration.sh
+    tests/test_mieru_latest_stable_runtime.sh
+    tests/test_vless_reality_runtime.sh
     tests/test_tuic_runtime.sh
     tests/test_ssh_runtime.sh
     tests/test_forward_realm_runtime.sh
     tests/test_forward_nft_runtime.sh
     tests/test_forward_backend_switch_runtime.sh
+    tests/test_ingress_enforcement_runtime.sh
   )
   for test_file in "${runtime_tests[@]}"; do
     bash "$test_file"

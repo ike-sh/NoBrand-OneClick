@@ -74,6 +74,10 @@ nb_registry_port_owner TCP 3611 >/dev/null 2>&1 && fail 'TUIC must not reserve s
 nb_port_available_for_transport 3600 UDP && fail 'TUIC must reject reserved xx00'
 
 mihomo="$(tuic_export_mihomo "$instance_id" alice)"
+printf '%s\n' "$mihomo" >"$fixture/tuic-mihomo.yaml"
+python3 "$TEST_ROOT/tests/helpers/assert_mihomo_routing_contract.py" \
+  "$fixture/tuic-mihomo.yaml" NOBRAND >/dev/null \
+  || fail 'Mihomo TUIC routing contract'
 assert_contains "$mihomo" 'type: tuic' 'Mihomo TUIC type'
 assert_contains "$mihomo" "uuid: ${uuid_a}" 'Mihomo TUIC v5 UUID'
 assert_contains "$mihomo" 'password: alice-secret' 'Mihomo TUIC v5 password'

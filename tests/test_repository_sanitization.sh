@@ -26,6 +26,9 @@ private_markers = [
 binary_magics = (b"\x7fELF", b"MZ", b"!<arch>\n", b"\x1f\x8b\x08", b"PK\x03\x04")
 bundle_suffixes = (".key", ".p12", ".pfx", ".mobileconfig", ".zip", ".tar.gz", ".deb", ".rpm")
 infra_literals = (
+    "87" + ".86.22.217",
+    "172" + ".16.4.110",
+    "211" + ".136.162.188",
     "211" + ".136.162.185",
     "168" + "00",
     "dev" + "-ssh",
@@ -35,12 +38,18 @@ uuid_literal = re.compile(
     re.IGNORECASE,
 )
 password_literal = re.compile(r'["\']password["\']\s*:\s*["\'][^"\']{8,}["\']', re.IGNORECASE)
+reality_private_literal = re.compile(
+    r'(?:["\']privateKey["\']\s*:\s*["\']|\bprivate_key\s*=\s*["\']?)'
+    r'[A-Za-z0-9_-]{43}(?:["\']|\b)',
+    re.IGNORECASE,
+)
 
 private_hits: list[str] = []
 binary_hits: list[str] = []
 bundle_hits: list[str] = []
 infra_hits: list[str] = []
 credential_hits: list[str] = []
+reality_private_hits: list[str] = []
 for path in paths:
     if not path.is_file():
         continue
@@ -57,6 +66,8 @@ for path in paths:
         infra_hits.append(relative)
     if not relative.startswith("tests/") and uuid_literal.search(text) and password_literal.search(text):
         credential_hits.append(relative)
+    if reality_private_literal.search(text):
+        reality_private_hits.append(relative)
 
 problems = {
     "private key": private_hits,
@@ -64,6 +75,7 @@ problems = {
     "client bundle": bundle_hits,
     "real infrastructure literal": infra_hits,
     "literal TUIC credential pair": credential_hits,
+    "literal REALITY private key": reality_private_hits,
 }
 for label, hits in problems.items():
     if hits:
@@ -72,6 +84,7 @@ if any(problems.values()):
     raise SystemExit(1)
 
 print("REAL_PRIVATE_KEY_MATCHES=0")
+print("REAL_REALITY_PRIVATE_KEY_MATCHES=0")
 print("REAL_TUIC_CREDENTIAL_MATCHES=0")
 print("REAL_INFRA_MATCHES=0")
 print("RUNTIME_BINARY_MATCHES=0")

@@ -37,14 +37,26 @@ nobrand_xray_arch_asset() {
   esac
 }
 
+nobrand_xray_tested_digest() {
+  case "$1" in
+    Xray-linux-64.zip) printf '%s' "$TESTED_XRAY_AMD64_SHA256" ;;
+    Xray-linux-arm64-v8a.zip) printf '%s' "$TESTED_XRAY_ARM64_SHA256" ;;
+    *) return 1 ;;
+  esac
+}
+
 nobrand_xray_version() {
+  local output version
   [ -x "$NOBRAND_XRAY_BIN" ] || return 1
-  "$NOBRAND_XRAY_BIN" version 2>/dev/null \
-    | sed -nE 's/^Xray[[:space:]]+([^[:space:]]+).*/\1/p' | head -n1
+  output="$("$NOBRAND_XRAY_BIN" version 2>/dev/null)" || return 1
+  version="$(printf '%s\n' "$output" \
+    | sed -nE 's/^Xray[[:space:]]+([^[:space:]]+).*/\1/p' | head -n1)"
+  [ -n "$version" ] || return 1
+  printf '%s' "$version"
 }
 
 nobrand_xray_release_info() {
-  local asset metadata
+  local asset metadata version url digest expected
   asset="$(nobrand_xray_arch_asset)" || {
     warn "$(t 'NoBrand HY2 的 Xray runtime 仅测试 amd64/arm64' \
       'NoBrand HY2 Xray runtime is tested only on amd64/arm64')"
@@ -58,15 +70,18 @@ nobrand_xray_release_info() {
     rm -f "$metadata"
     return 1
   fi
-  jq -r --arg asset "$asset" '
+  IFS=$'\t' read -r version url digest < <(jq -r --arg asset "$asset" '
     .tag_name as $version |
     first(.assets[]? | select(.name == $asset)) as $matched |
     select($matched != null) |
     [$version, $matched.browser_download_url, ($matched.digest // "")] | @tsv
-  ' "$metadata"
+  ' "$metadata")
   local rc=$?
   rm -f "$metadata"
-  return "$rc"
+  [ "$rc" -eq 0 ] && [ "$version" = "v${TESTED_XRAY_VERSION}" ] || return 1
+  expected="$(nobrand_xray_tested_digest "$asset")" || return 1
+  [ "$digest" = "sha256:${expected}" ] || return 1
+  printf '%s\t%s\t%s\n' "$version" "$url" "$digest"
 }
 
 nobrand_sha256_file() {
@@ -96,7 +111,7 @@ nobrand_verify_release_digest() {
 }
 
 nobrand_download_xray_candidate() {
-  local output="$1" info_line version url digest archive_dir candidate
+  local output="$1" asset_output_dir="${2:-}" info_line version url digest archive_dir candidate asset
   info_line="$(nobrand_xray_release_info)" || return 1
   IFS=$'\t' read -r version url digest <<<"$info_line"
   [[ "$url" = https://github.com/XTLS/Xray-core/releases/download/* ]] || {
@@ -119,53 +134,163 @@ nobrand_download_xray_candidate() {
   chmod 0755 "$candidate" || { rm -rf -- "$archive_dir"; return 1; }
   "$candidate" version >/dev/null 2>&1 || { rm -rf -- "$archive_dir"; return 1; }
   install -m 0755 "$candidate" "$output" || { rm -rf -- "$archive_dir"; return 1; }
+  if [ -n "$asset_output_dir" ]; then
+    mkdir -p "$asset_output_dir" || { rm -rf -- "$archive_dir"; return 1; }
+    for asset in geoip.dat geosite.dat; do
+      [ -s "$archive_dir/unpacked/$asset" ] \
+        || { rm -rf -- "$archive_dir"; return 1; }
+      install -m 0644 "$archive_dir/unpacked/$asset" "$asset_output_dir/$asset" \
+        || { rm -rf -- "$archive_dir"; return 1; }
+    done
+  fi
   info "NoBrand isolated Xray-core asset resolved: ${version}"
   rm -rf -- "$archive_dir"
 }
 
+nobrand_xray_asset_dir_safe() {
+  [ -n "${NOBRAND_LIB_DIR:-}" ] && [ -n "${NOBRAND_XRAY_ASSET_DIR:-}" ] \
+    && [ "$NOBRAND_XRAY_ASSET_DIR" != / ] \
+    && [[ "$NOBRAND_XRAY_ASSET_DIR" == "$NOBRAND_LIB_DIR"/* ]]
+}
+
+nobrand_xray_assets_ready() {
+  nobrand_xray_asset_dir_safe \
+    && [ -s "$NOBRAND_XRAY_ASSET_DIR/geoip.dat" ] \
+    && [ -s "$NOBRAND_XRAY_ASSET_DIR/geosite.dat" ]
+}
+
+nobrand_remove_xray_runtime_files() {
+  nobrand_xray_asset_dir_safe || return 1
+  rm -f "$NOBRAND_XRAY_BIN" || return 1
+  rm -rf -- "$NOBRAND_XRAY_ASSET_DIR"
+}
+
 nobrand_install_xray_runtime() {
-  local force="${1:-0}" candidate backup="" had_old=0
-  if [ -x "$NOBRAND_XRAY_BIN" ] && [ "$force" -ne 1 ]; then
+  local force="${1:-0}" candidate candidate_assets snapshot new_assets
+  local had_runtime=0 had_assets=0 replace_runtime=1 rc=0
+  nobrand_xray_asset_dir_safe || return 1
+  if [ -x "$NOBRAND_XRAY_BIN" ] && nobrand_xray_assets_ready && [ "$force" -ne 1 ]; then
     return 0
   fi
+  if [ -x "$NOBRAND_XRAY_BIN" ] && [ "$force" -ne 1 ]; then
+    [ "$(nobrand_xray_version 2>/dev/null || true)" = "$TESTED_XRAY_VERSION" ] || return 1
+    replace_runtime=0
+  fi
   candidate="$(mktemp_file .xray)" || return 1
-  if ! nobrand_download_xray_candidate "$candidate"; then
+  candidate_assets="$(mktemp_dir)" || { rm -f "$candidate"; return 1; }
+  if ! nobrand_download_xray_candidate "$candidate" "$candidate_assets"; then
     rm -f "$candidate"
+    rm -rf -- "$candidate_assets"
     warn "$(t 'NoBrand 独立 Xray-core 下载或校验失败' \
       'NoBrand isolated Xray-core download or validation failed')"
     return 1
   fi
-  mkdir -p "$(dirname "$NOBRAND_XRAY_BIN")" || { rm -f "$candidate"; return 1; }
+  snapshot="$(mktemp_dir)" || { rm -f "$candidate"; rm -rf -- "$candidate_assets"; return 1; }
   if [ -e "$NOBRAND_XRAY_BIN" ]; then
-    backup="$(mktemp "${NOBRAND_XRAY_BIN}.rollback.XXXXXX")" || { rm -f "$candidate"; return 1; }
-    rm -f "$backup"
-    mv "$NOBRAND_XRAY_BIN" "$backup" || { rm -f "$candidate"; return 1; }
-    had_old=1
+    cp -a "$NOBRAND_XRAY_BIN" "$snapshot/xray" || rc=1
+    had_runtime=1
   fi
-  if ! install -m 0755 "$candidate" "${NOBRAND_XRAY_BIN}.new" \
-     || ! mv -f "${NOBRAND_XRAY_BIN}.new" "$NOBRAND_XRAY_BIN" \
-     || ! nobrand_xray_version >/dev/null; then
-    rm -f "$candidate" "${NOBRAND_XRAY_BIN}.new" "$NOBRAND_XRAY_BIN"
-    [ "$had_old" -eq 0 ] || mv "$backup" "$NOBRAND_XRAY_BIN" 2>/dev/null || true
-    return 1
+  if [ -d "$NOBRAND_XRAY_ASSET_DIR" ] && [ ! -L "$NOBRAND_XRAY_ASSET_DIR" ]; then
+    cp -a "$NOBRAND_XRAY_ASSET_DIR" "$snapshot/assets" || rc=1
+    had_assets=1
   fi
-  rm -f "$candidate"
-  if ! nobrand_xray_validate_managed_configs "$NOBRAND_XRAY_BIN"; then
+  new_assets="${NOBRAND_XRAY_ASSET_DIR}.new.$$"
+  if [ "$rc" -eq 0 ]; then
+    mkdir -p "$(dirname "$NOBRAND_XRAY_BIN")" "$(dirname "$NOBRAND_XRAY_ASSET_DIR")" \
+      && rm -rf -- "$new_assets" \
+      && mkdir -p "$new_assets" \
+      && install -m 0644 "$candidate_assets/geoip.dat" "$new_assets/geoip.dat" \
+      && install -m 0644 "$candidate_assets/geosite.dat" "$new_assets/geosite.dat" || rc=1
+  fi
+  if [ "$rc" -eq 0 ] && [ "$replace_runtime" -eq 1 ]; then
+    install -m 0755 "$candidate" "${NOBRAND_XRAY_BIN}.new" \
+      && mv -f "${NOBRAND_XRAY_BIN}.new" "$NOBRAND_XRAY_BIN" \
+      && [ "$(nobrand_xray_version 2>/dev/null || true)" = "$TESTED_XRAY_VERSION" ] || rc=1
+  fi
+  if [ "$rc" -eq 0 ]; then
+    rm -rf -- "$NOBRAND_XRAY_ASSET_DIR" \
+      && mv "$new_assets" "$NOBRAND_XRAY_ASSET_DIR" \
+      && nobrand_xray_assets_ready \
+      && nobrand_xray_validate_managed_configs "$NOBRAND_XRAY_BIN" || rc=1
+  fi
+  rm -f "$candidate" "${NOBRAND_XRAY_BIN}.new"
+  rm -rf -- "$candidate_assets" "$new_assets"
+  if [ "$rc" -ne 0 ]; then
     rm -f "$NOBRAND_XRAY_BIN"
-    [ "$had_old" -eq 0 ] || mv "$backup" "$NOBRAND_XRAY_BIN" 2>/dev/null || true
+    [ "$had_runtime" -eq 0 ] || install -m 0755 "$snapshot/xray" "$NOBRAND_XRAY_BIN" 2>/dev/null || true
+    rm -rf -- "$NOBRAND_XRAY_ASSET_DIR"
+    [ "$had_assets" -eq 0 ] \
+      || cp -a "$snapshot/assets" "$NOBRAND_XRAY_ASSET_DIR" 2>/dev/null || true
+    rm -rf -- "$snapshot"
     return 1
   fi
-  rm -f "$backup"
+  rm -rf -- "$snapshot"
+}
+
+nobrand_xray_redact_validation_log() {
+  local config="$1" log="$2"
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf '%s\n' '[validation details suppressed: redactor unavailable]' >&2
+    return 0
+  fi
+  python3 - "$config" "$log" >&2 <<'PY' || {
+import json
+import re
+import sys
+
+config_path, log_path = sys.argv[1:3]
+sensitive_keys = {
+    "auth", "password", "privatekey", "publickey", "uuid", "shortid", "shortids"
+}
+
+try:
+    with open(config_path, encoding="utf-8") as handle:
+        config = json.load(handle)
+    with open(log_path, encoding="utf-8", errors="replace") as handle:
+        text = handle.read()
+except Exception:
+    raise SystemExit(1)
+
+secrets = set()
+
+def collect(value):
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if str(key).casefold() in sensitive_keys:
+                values = child if isinstance(child, list) else [child]
+                for item in values:
+                    if isinstance(item, (str, int, float)) and str(item):
+                        secrets.add(str(item))
+            collect(child)
+    elif isinstance(value, list):
+        for child in value:
+            collect(child)
+
+collect(config)
+for secret in sorted(secrets, key=len, reverse=True):
+    text = text.replace(secret, "***REDACTED***")
+
+field = r'(?:auth|password|privateKey|publicKey|uuid|shortId|shortIds)'
+text = re.sub(
+    rf'(?i)((?:["\']?{field}["\']?)\s*[:=]\s*)(?:"[^"]*"|\'[^\']*\'|[^\s,}}\]]+)',
+    lambda match: match.group(1) + '***REDACTED***',
+    text,
+)
+sys.stdout.write(text)
+PY
+    printf '%s\n' '[validation details suppressed: redaction failed]' >&2
+  }
 }
 
 nobrand_xray_test_config() {
   local config="$1" binary="${2:-$NOBRAND_XRAY_BIN}" log
   [ -x "$binary" ] && jq empty "$config" >/dev/null 2>&1 || return 1
   log="$(mktemp_file .log)" || return 1
-  if ! "$binary" run -test -c "$config" >"$log" 2>&1; then
+  if ! XRAY_LOCATION_ASSET="$NOBRAND_XRAY_ASSET_DIR" \
+      "$binary" run -test -c "$config" >"$log" 2>&1; then
     warn "$(t 'NoBrand Xray 配置校验失败（已脱敏）:' \
       'NoBrand Xray config validation failed (redacted):')"
-    sed -E 's/(auth|password)(["=: ]+)[^," ]+/\1\2***REDACTED***/Ig' "$log" >&2 || true
+    nobrand_xray_redact_validation_log "$config" "$log"
     rm -f "$log"
     return 1
   fi
@@ -173,20 +298,31 @@ nobrand_xray_test_config() {
 }
 
 nobrand_xray_validate_managed_configs() {
-  local binary="${1:-$NOBRAND_XRAY_BIN}" config
+  local binary="${1:-$NOBRAND_XRAY_BIN}" config id
   for config in "$NOBRAND_HY2_CONFIG_FILE" "$NOBRAND_VLESS_CONFIG_FILE"; do
     [ -f "$config" ] || continue
     nobrand_xray_test_config "$config" "$binary" || return 1
   done
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    config="$(reality_config_file "$id")"
+    [ -f "$config" ] || return 1
+    nobrand_xray_test_config "$config" "$binary" || return 1
+  done < <(reality_instance_ids)
 }
 
 nobrand_restore_xray_upgrade_snapshot() {
-  local snapshot="$1" had_runtime="$2" hy2_had_state="$3" vless_had_state="$4"
-  local hy2_was_active="$5" vless_was_active="$6"
+  local snapshot="$1" had_runtime="$2" had_assets="$3" hy2_had_state="$4" vless_had_state="$5"
+  local hy2_was_active="$6" vless_was_active="$7" id
   if [ "$had_runtime" -eq 1 ]; then
     install -m 0755 "$snapshot/xray" "$NOBRAND_XRAY_BIN" || return 1
   else
     rm -f "$NOBRAND_XRAY_BIN"
+  fi
+  nobrand_xray_asset_dir_safe || return 1
+  rm -rf -- "$NOBRAND_XRAY_ASSET_DIR"
+  if [ "$had_assets" -eq 1 ]; then
+    cp -a "$snapshot/xray-assets" "$NOBRAND_XRAY_ASSET_DIR" || return 1
   fi
   if [ "$hy2_had_state" -eq 1 ]; then
     cp -a "$snapshot/hy2-state" "$NOBRAND_HY2_STATE_FILE" || return 1
@@ -194,30 +330,55 @@ nobrand_restore_xray_upgrade_snapshot() {
   if [ "$vless_had_state" -eq 1 ]; then
     cp -a "$snapshot/vless-state" "$NOBRAND_VLESS_STATE_FILE" || return 1
   fi
+  if [ -d "$snapshot/reality-states" ]; then
+    for id in "$snapshot/reality-states"/*.json; do
+      [ -f "$id" ] || continue
+      cp -a "$id" "$(reality_state_file "$(basename "$id" .json)")" || return 1
+    done
+  fi
   if [ "$had_runtime" -eq 1 ]; then
     [ "$hy2_was_active" -eq 0 ] \
       || nobrand_hy2_service_action restart >/dev/null 2>&1 || true
     [ "$vless_was_active" -eq 0 ] \
       || nobrand_vless_sudoku_service_action restart >/dev/null 2>&1 || true
+    if [ -s "$snapshot/reality-active.ids" ]; then
+      while IFS= read -r id; do
+        [ -n "$id" ] || continue
+        reality_service_action "$id" restart >/dev/null 2>&1 || true
+      done <"$snapshot/reality-active.ids"
+    fi
   else
     [ "$hy2_was_active" -eq 0 ] \
       || nobrand_hy2_service_action stop >/dev/null 2>&1 || true
     [ "$vless_was_active" -eq 0 ] \
       || nobrand_vless_sudoku_service_action stop >/dev/null 2>&1 || true
+    if [ -s "$snapshot/reality-active.ids" ]; then
+      while IFS= read -r id; do
+        [ -n "$id" ] || continue
+        reality_service_action "$id" stop >/dev/null 2>&1 || true
+      done <"$snapshot/reality-active.ids"
+    fi
   fi
 }
 
 nobrand_upgrade_xray_runtime() {
-  local snapshot had_runtime=0 hy2_had_state=0 vless_had_state=0
+  local snapshot had_runtime=0 had_assets=0 hy2_had_state=0 vless_had_state=0
   local hy2_was_active=0 vless_was_active=0 hy2_port="" vless_port=""
-  local failed=0
+  local failed=0 id port state tmp runtime
   nobrand_prepare_common
   admin_lock_acquire || return 1
   snapshot="$(mktemp_dir)" || { admin_lock_release; return 1; }
+  mkdir -p "$snapshot/reality-states" || { rm -rf -- "$snapshot"; admin_lock_release; return 1; }
+  : >"$snapshot/reality-active.ids"
   if [ -e "$NOBRAND_XRAY_BIN" ]; then
     cp -a "$NOBRAND_XRAY_BIN" "$snapshot/xray" \
       || { rm -rf -- "$snapshot"; admin_lock_release; return 1; }
     had_runtime=1
+  fi
+  if [ -d "$NOBRAND_XRAY_ASSET_DIR" ] && [ ! -L "$NOBRAND_XRAY_ASSET_DIR" ]; then
+    cp -a "$NOBRAND_XRAY_ASSET_DIR" "$snapshot/xray-assets" \
+      || { rm -rf -- "$snapshot"; admin_lock_release; return 1; }
+    had_assets=1
   fi
   if hysteria2_state_exists; then
     cp -a "$NOBRAND_HY2_STATE_FILE" "$snapshot/hy2-state" \
@@ -233,8 +394,17 @@ nobrand_upgrade_xray_runtime() {
   fi
   nobrand_hy2_service_active && hy2_was_active=1
   nobrand_vless_sudoku_service_active && vless_was_active=1
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    cp -a "$(reality_state_file "$id")" "$snapshot/reality-states/${id}.json" \
+      || { rm -rf -- "$snapshot"; admin_lock_release; return 1; }
+    reality_service_active "$id" && printf '%s\n' "$id" >>"$snapshot/reality-active.ids"
+  done < <(reality_instance_ids)
 
   if ! nobrand_install_xray_runtime 1; then
+    failed=1
+  elif ! runtime="$(nobrand_xray_version 2>/dev/null)" \
+       || [ -z "$runtime" ] || [ "$runtime" != "$TESTED_XRAY_VERSION" ]; then
     failed=1
   elif [ "$hy2_was_active" -eq 1 ] \
        && { ! nobrand_hy2_service_action restart \
@@ -244,24 +414,47 @@ nobrand_upgrade_xray_runtime() {
        && { ! nobrand_vless_sudoku_service_action restart \
          || ! nb_wait_for_listener TCP "$vless_port" 25; }; then
     failed=1
-  elif ! hysteria2_refresh_runtime_metadata \
-       || ! vless_sudoku_refresh_runtime_metadata; then
+  else
+    while IFS= read -r id; do
+      [ -n "$id" ] || continue
+      port="$(reality_state_field "$id" listen_port)"
+      if ! reality_service_action "$id" restart \
+         || ! nb_wait_for_listener TCP "$port" 25 \
+         || ! reality_listener_owned_by_service "$id" "$port"; then
+        failed=1
+        break
+      fi
+    done <"$snapshot/reality-active.ids"
+  fi
+  if [ "$failed" -eq 0 ] \
+     && { ! hysteria2_refresh_runtime_metadata || ! vless_sudoku_refresh_runtime_metadata; }; then
     failed=1
   fi
+  if [ "$failed" -eq 0 ]; then
+    while IFS= read -r id; do
+      [ -n "$id" ] || continue
+      state="$(reality_state_file "$id")"; tmp="$(mktemp_file .reality-state)" || { failed=1; break; }
+      jq --arg runtime "$TESTED_XRAY_VERSION" --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        '.runtime_version=$runtime | .updated_at=$updated' "$state" >"$tmp" \
+        && nb_atomic_install_file "$tmp" "$state" 0600 || failed=1
+      rm -f "$tmp"
+      [ "$failed" -eq 0 ] || break
+    done < <(reality_instance_ids)
+  fi
   if [ "$failed" -eq 1 ]; then
-    nobrand_restore_xray_upgrade_snapshot "$snapshot" "$had_runtime" \
+    nobrand_restore_xray_upgrade_snapshot "$snapshot" "$had_runtime" "$had_assets" \
       "$hy2_had_state" "$vless_had_state" "$hy2_was_active" "$vless_was_active" \
       || warn '共享 Xray runtime 回滚不完整；请立即运行 nobrand doctor'
     rm -rf -- "$snapshot"
     admin_lock_release
-    warn '共享 Xray 升级或双服务验收失败，已恢复升级前 runtime/state'
+    warn '共享 Xray 升级或活动服务验收失败，已恢复升级前 runtime/state'
     return 1
   fi
 
   rm -rf -- "$snapshot"
   admin_lock_release
-  t 'NoBrand 共享 Xray-core 升级完成；活动 HY2/VLESS 服务均已验收' \
-    'NoBrand shared Xray-core upgraded; active HY2/VLESS services passed acceptance'
+  t 'NoBrand 共享 Xray-core 升级完成；活动 HY2/VLESS Sudoku/VLESS REALITY 服务均已验收' \
+    'NoBrand shared Xray-core upgraded; active HY2/VLESS Sudoku/VLESS REALITY services passed acceptance'
 }
 
 nobrand_write_hy2_service() {

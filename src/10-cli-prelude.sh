@@ -159,6 +159,12 @@ parse_nobrand_common_option() {
       [ -n "$PORT" ] && [[ "$PORT" != --* ]] || die "--port 需要端口号"
       return 2
       ;;
+    --ingress-profile)
+      INGRESS_PROFILE="${2:-}"
+      INGRESS_PROFILE_CLI=1
+      [ -n "$INGRESS_PROFILE" ] && [[ "$INGRESS_PROFILE" != --* ]] || die "--ingress-profile 需要入口配置 ID 或名称"
+      return 2
+      ;;
     --advertise-host)
       ADVERTISE_HOST="${2:-}"
       ADVERTISE_CLI=1
@@ -182,6 +188,70 @@ parse_nobrand_common_option() {
     *) return 1 ;;
   esac
   return 0
+}
+
+parse_nobrand_ingress_args() {
+  INGRESS_ACTION="${1:-list}"
+  [ "$#" -eq 0 ] || shift
+  case "$INGRESS_ACTION" in
+    create) INGRESS_ACTION=add ;;
+    remove) INGRESS_ACTION=delete ;;
+    default) INGRESS_ACTION='set-default' ;;
+    list|show|add|modify|delete|set-default|unset-default|apply|doctor) ;;
+    help|-h|--help) INGRESS_ACTION=help ;;
+    *) die "未知 Ingress 操作: $INGRESS_ACTION" ;;
+  esac
+  if [ "$#" -gt 0 ] && [[ "$1" != --* ]]; then
+    case "$INGRESS_ACTION" in show|modify|delete|set-default|apply) INGRESS_PROFILE_SELECTOR="$1"; shift ;; esac
+  fi
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --id|--profile)
+        INGRESS_PROFILE_SELECTOR="${2:-}"
+        [ -n "$INGRESS_PROFILE_SELECTOR" ] && [[ "$INGRESS_PROFILE_SELECTOR" != --* ]] || die "$1 需要入口配置 ID 或名称"
+        shift 2
+        ;;
+      --name) INGRESS_NAME="${2:-}"; INGRESS_NAME_CLI=1; [ -n "$INGRESS_NAME" ] || die '--name 需要名称'; shift 2 ;;
+      --type) INGRESS_TYPE="$(printf '%s' "${2:-}" | tr '[:upper:]' '[:lower:]')"; INGRESS_TYPE_CLI=1; shift 2 ;;
+      --interface) INGRESS_INTERFACE="${2:-}"; INGRESS_INTERFACE_CLI=1; [ -n "$INGRESS_INTERFACE" ] || die '--interface 需要网卡名'; shift 2 ;;
+      --address) INGRESS_ADDRESS="${2:-}"; INGRESS_ADDRESS_CLI=1; [ -n "$INGRESS_ADDRESS" ] || die '--address 需要本地 IPv4'; shift 2 ;;
+      --port-policy) INGRESS_PORT_POLICY="$(printf '%s' "${2:-}" | tr '_' '-' | tr '[:upper:]' '[:lower:]')"; INGRESS_PORT_POLICY_CLI=1; shift 2 ;;
+      --range-start) INGRESS_RANGE_START="${2:-}"; INGRESS_RANGE_START_CLI=1; shift 2 ;;
+      --range-end) INGRESS_RANGE_END="${2:-}"; INGRESS_RANGE_END_CLI=1; shift 2 ;;
+      --reserve|--reserved)
+        [ -n "${2:-}" ] && [[ "${2:-}" != --* ]] || die "$1 需要端口或逗号分隔端口"
+        INGRESS_RESERVED_PORTS="${INGRESS_RESERVED_PORTS}${INGRESS_RESERVED_PORTS:+,}${2}"
+        INGRESS_RESERVED_CLI=1
+        shift 2
+        ;;
+      --advertise-host|--display-host)
+        INGRESS_DISPLAY_HOST_DEFAULT="${2:-}"; INGRESS_DISPLAY_HOST_CLI=1
+        [ -n "$INGRESS_DISPLAY_HOST_DEFAULT" ] && [[ "$INGRESS_DISPLAY_HOST_DEFAULT" != --* ]] || die "$1 需要地址"
+        shift 2
+        ;;
+      --clear-advertise-host|--clear-display-host) INGRESS_DISPLAY_HOST_DEFAULT=""; INGRESS_DISPLAY_HOST_CLI=1; shift ;;
+      --display-port-policy)
+        INGRESS_DISPLAY_PORT_POLICY="$(printf '%s' "${2:-}" | tr '_' '-' | tr '[:upper:]' '[:lower:]')"
+        INGRESS_DISPLAY_PORT_POLICY_CLI=1; shift 2
+        ;;
+      --display-port) INGRESS_DISPLAY_PORT="${2:-}"; INGRESS_DISPLAY_PORT_CLI=1; shift 2 ;;
+      --enable) INGRESS_ENABLED=true; INGRESS_ENABLED_CLI=1; shift ;;
+      --disable) INGRESS_ENABLED=false; INGRESS_ENABLED_CLI=1; shift ;;
+      --enforcement)
+        INGRESS_ENFORCEMENT="$(printf '%s' "${2:-}" | tr '[:upper:]' '[:lower:]')"
+        INGRESS_ENFORCEMENT_CLI=1
+        shift 2
+        ;;
+      --apply-existing) INGRESS_APPLY_EXISTING=1; shift ;;
+      --yes|-y) YES=1; shift ;;
+      *) die "未知 Ingress 参数: $1" ;;
+    esac
+  done
+  case "$INGRESS_ACTION" in
+    show|modify|delete|set-default|apply) [ -n "$INGRESS_PROFILE_SELECTOR" ] || die "${INGRESS_ACTION} 需要入口配置 ID 或名称" ;;
+  esac
+  ACTION="nobrand-ingress"
+  NOBRAND_ARGS_HANDLED=1
 }
 
 parse_nobrand_snell_args() {
@@ -308,6 +378,63 @@ parse_nobrand_vless_sudoku_args() {
     shift "$consumed"
   done
   ACTION="nobrand-vless-sudoku"
+  NOBRAND_ARGS_HANDLED=1
+}
+
+parse_nobrand_vless_reality_args() {
+  local consumed rc
+  VLESS_REALITY_ACTION="${1:-menu}"
+  [ "$#" -eq 0 ] || shift
+  case "$VLESS_REALITY_ACTION" in
+    add|create) VLESS_REALITY_ACTION=install ;;
+    nodes) VLESS_REALITY_ACTION=show ;;
+    delete) VLESS_REALITY_ACTION=remove ;;
+    endpoint) VLESS_REALITY_ACTION=set-endpoint ;;
+    menu|install|show|export|set-endpoint|remove|uninstall|start|stop|restart|status|doctor|upgrade) ;;
+    help|-h|--help) VLESS_REALITY_ACTION=help ;;
+    *) die "未知 VLESS REALITY 操作: $VLESS_REALITY_ACTION" ;;
+  esac
+  if [ "$#" -gt 0 ] && [[ "$1" != --* ]]; then
+    case "$VLESS_REALITY_ACTION" in
+      show|export|set-endpoint|remove|uninstall|start|stop|restart|status|doctor)
+        VLESS_REALITY_NAME="$1"; shift ;;
+    esac
+  fi
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --name)
+        VLESS_REALITY_NAME="${2:-}"
+        [ -n "$VLESS_REALITY_NAME" ] && [[ "$VLESS_REALITY_NAME" != --* ]] \
+          || die '--name 需要 VLESS REALITY instance name'
+        shift 2
+        ;;
+      --target|--server-name|--sni)
+        VLESS_REALITY_TARGET="${2:-}"
+        [ -n "$VLESS_REALITY_TARGET" ] && [[ "$VLESS_REALITY_TARGET" != --* ]] \
+          || die "$1 需要公网 hostname"
+        VLESS_REALITY_TARGET_CLI=1
+        shift 2
+        ;;
+      --target-port)
+        VLESS_REALITY_TARGET_PORT="${2:-}"
+        [ -n "$VLESS_REALITY_TARGET_PORT" ] && [[ "$VLESS_REALITY_TARGET_PORT" != --* ]] \
+          || die '--target-port 需要端口'
+        VLESS_REALITY_TARGET_PORT_CLI=1
+        shift 2
+        ;;
+      *)
+        consumed=0; rc=0
+        parse_nobrand_common_option "$1" "${2:-}" || rc=$?
+        case "$rc" in
+          0) consumed=1 ;;
+          2) consumed=2 ;;
+          *) die "未知 VLESS REALITY 参数: $1" ;;
+        esac
+        shift "$consumed"
+        ;;
+    esac
+  done
+  ACTION="nobrand-vless-reality"
   NOBRAND_ARGS_HANDLED=1
 }
 
@@ -487,6 +614,7 @@ parse_nobrand_forward_args() {
         ;;
       --listen|--listen-host)
         FORWARD_LISTEN_HOST="${2:-}"
+        FORWARD_LISTEN_HOST_CLI=1
         [ -n "$FORWARD_LISTEN_HOST" ] && [[ "$FORWARD_LISTEN_HOST" != --* ]] || die "$1 需要监听地址"
         shift 2
         ;;
@@ -534,7 +662,7 @@ parse_nobrand_forward_args() {
         [ "$FORWARD_ACTION" = import ] && FORWARD_IMPORT_FILE="$value" || FORWARD_EXPORT_FILE="$value"
         shift 2
         ;;
-      --advertise-host|--advertise-port|--advertise-auto|--yes|-y|--dry-run)
+      --advertise-host|--advertise-port|--advertise-auto|--ingress-profile|--yes|-y|--dry-run)
         local consumed=0 rc=0
         parse_nobrand_common_option "$1" "${2:-}" || rc=$?
         case "$rc" in 0) consumed=1 ;; 2) consumed=2 ;; *) die "未知 Forward 参数: $1" ;; esac
@@ -574,6 +702,10 @@ detect_nobrand_entry() {
       shift
       parse_nobrand_vless_sudoku_args "$@"
       ;;
+    vless-reality|reality)
+      shift
+      parse_nobrand_vless_reality_args "$@"
+      ;;
     tuic)
       shift
       parse_nobrand_tuic_args "$@"
@@ -585,6 +717,10 @@ detect_nobrand_entry() {
     forward|port-forward)
       shift
       parse_nobrand_forward_args "$@"
+      ;;
+    ingress)
+      shift
+      parse_nobrand_ingress_args "$@"
       ;;
     manager)
       shift
@@ -608,7 +744,7 @@ detect_nobrand_entry() {
           --protocol)
             NOBRAND_PROTOCOL_FILTER="${2:-}"
             [ -n "$NOBRAND_PROTOCOL_FILTER" ] \
-              || die "--protocol 需要 mieru、snell、hy2、tuic、vless-sudoku 或 ssh"
+              || die "--protocol 需要 mieru、snell、hy2、tuic、vless-reality、vless-sudoku、ssh 或 forward"
             shift 2
             ;;
           *) die "未知 nodes 参数: $1" ;;
@@ -802,6 +938,12 @@ while [ "$NOBRAND_ARGS_HANDLED" -eq 0 ] && [ $# -gt 0 ]; do
       PORT="${2:-}"
       PORT_CLI=1
       [ -n "$PORT" ] || die "--port 需要端口号"
+      shift
+      ;;
+    --ingress-profile)
+      INGRESS_PROFILE="${2:-}"
+      INGRESS_PROFILE_CLI=1
+      [ -n "$INGRESS_PROFILE" ] && [[ "$INGRESS_PROFILE" != --* ]] || die "--ingress-profile 需要入口配置 ID 或名称"
       shift
       ;;
     --port-range)

@@ -119,6 +119,7 @@ snell_generate_state() {
   local output="$1" id="$2" name="$3" major="$4" psk="$5" listen_host="$6" listen_port="$7"
   local advertise_mode="$8" advertise_host="$9" advertise_port="${10}" created_at="${11:-}"
   local quic_proxy_enabled="${12:-false}"
+  local ingress_profile_id="${13:-}"
   local runtime_version runtime_status updated_at
   case "$major" in 4|5) ;; *) return 1 ;; esac
   runtime_version="$(snell_runtime_release_version "$major" 2>/dev/null || printf unknown)"
@@ -130,7 +131,7 @@ snell_generate_state() {
     --arg advertise_mode "$advertise_mode" --arg advertise_host "$advertise_host" \
     --arg advertise_port "$advertise_port" --arg runtime_version "$runtime_version" \
     --arg runtime_status "$runtime_status" --arg created_at "$created_at" --arg updated_at "$updated_at" \
-    --argjson quic_proxy_enabled "$quic_proxy_enabled" '
+    --argjson quic_proxy_enabled "$quic_proxy_enabled" --arg ingress_profile_id "$ingress_profile_id" '
       {
         protocol:"snell",
         instance_id:$id,
@@ -151,6 +152,7 @@ snell_generate_state() {
         created_at:$created_at,
         updated_at:$updated_at
       }
+      + if $ingress_profile_id=="" then {} else {ingress_profile_id:$ingress_profile_id} end
     ' >"$output"
 }
 
@@ -220,21 +222,22 @@ snell_firewall_pairs() {
 
 snell_install_port_available() {
   local port="$1"
-  nb_port_available_for_transport "$port" TCP || return 1
-  [ "${SNELL_QUIC_PROXY:-off}" != on ] || nb_port_available_for_transport "$port" UDP
+  nb_port_available_for_profile "$port" TCP "${INGRESS_PROFILE_ID:-$NOBRAND_LEGACY_INGRESS_PROFILE_ID}" || return 1
+  [ "${SNELL_QUIC_PROXY:-off}" != on ] \
+    || nb_port_available_for_profile "$port" UDP "${INGRESS_PROFILE_ID:-$NOBRAND_LEGACY_INGRESS_PROFILE_ID}"
 }
 
 snell_select_available_install_port() {
-  local ip bounds lo hi selected attempt=0 random_value
-  [ "${SNELL_QUIC_PROXY:-off}" = on ] || { nb_select_available_port TCP; return; }
-  ip="$(nb_detect_local_ipv4 2>/dev/null || true)"
-  if bounds="$(nb_tail_port_bounds "$ip" 2>/dev/null)"; then
+  local profile_id="${INGRESS_PROFILE_ID:-$NOBRAND_LEGACY_INGRESS_PROFILE_ID}" bounds lo hi selected attempt=0 random_value
+  [ "${SNELL_QUIC_PROXY:-off}" = on ] || { nb_select_available_port TCP "$profile_id"; return; }
+  if bounds="$(nb_ingress_profile_auto_range "$profile_id" 2>/dev/null)"; then
     lo="${bounds%%|*}"; hi="${bounds#*|}"
     if selected="$(nb_scan_port_span "$lo" "$hi" snell_install_port_available)"; then
       printf '%s' "$selected"
       return 0
     fi
   fi
+  [ "$profile_id" = "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ] || return 1
   while [ "$attempt" -lt 512 ]; do
     random_value="$(openssl rand -hex 2 2>/dev/null || true)"
     if [[ "$random_value" =~ ^[0-9a-fA-F]{4}$ ]]; then
@@ -249,13 +252,14 @@ snell_select_available_install_port() {
 }
 
 snell_effective_endpoint() {
-  local id="$1" mode host advertise_port listen_port effective_host effective_port
+  local id="$1" mode host advertise_port listen_port ingress_profile_id effective_host effective_port
   mode="$(snell_state_field "$id" advertise_mode)"
   host="$(snell_state_field "$id" advertise_host)"
   advertise_port="$(snell_state_field "$id" advertise_port)"
   listen_port="$(snell_state_field "$id" listen_port)"
-  effective_host="$(nb_effective_advertise_host "$mode" "$host")"
-  effective_port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port")"
+  ingress_profile_id="$(snell_state_field "$id" ingress_profile_id 2>/dev/null || true)"
+  effective_host="$(nb_effective_advertise_host "$mode" "$host" "$ingress_profile_id")"
+  effective_port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port" "$ingress_profile_id")"
   printf '%s|%s' "$effective_host" "$effective_port"
 }
 
@@ -277,6 +281,9 @@ snell_collect_install_requests() {
   case "${SNELL_VERSION:-5}" in 4|5) ;; *) die 'Snell 只支持 v4、v5' ;; esac
   snell_platform_supported "$SNELL_VERSION" \
     || die "当前 OS/arch 不支持官方 Snell v${SNELL_VERSION} runtime"
+  nb_prepare_ingress_request || return 1
+  nb_prepare_ingress_deployment "$INGRESS_PROFILE_ID" native-bind \
+    || die '所选 Ingress strict local address cannot be bound by Snell'
   if [ -z "${SNELL_NAME:-}" ]; then
     if [ "$interactive" -eq 1 ]; then
       read_tty SNELL_NAME "$(t "节点名 [snell-v${SNELL_VERSION}]: " "Node name [snell-v${SNELL_VERSION}]: ")" || SNELL_NAME=""
@@ -286,13 +293,14 @@ snell_collect_install_requests() {
   snell_valid_name "$SNELL_NAME" || die 'Snell 节点名无效（1-64 字符且不能含控制字符或 |）'
   [ -z "$(snell_find_id_by_name "$SNELL_NAME" 2>/dev/null || true)" ] || die "Snell 节点名已存在: $SNELL_NAME"
   if [ -z "${PORT:-}" ]; then
-    PORT="$(nb_select_available_port TCP)" || die '未找到可用 Snell TCP 端口'
+    PORT="$(nb_select_available_port TCP "$INGRESS_PROFILE_ID")" \
+      || die '所选入口配置没有可用 Snell TCP 自动端口；manual-only 必须显式使用 --port'
     PORT_AUTO_SELECTED=1
   else
     nb_valid_port "$PORT" || die 'Snell 端口必须是 1-65535'
     PORT="$(normalize_uint "$PORT")"
-    nb_warn_if_outside_recommended_range "$PORT"
-    if ! nb_port_available_for_transport "$PORT" TCP; then
+    nb_warn_if_outside_recommended_range "$PORT" "$INGRESS_PROFILE_ID"
+    if ! nb_port_available_for_profile "$PORT" TCP "$INGRESS_PROFILE_ID"; then
       warn "Snell TCP/${PORT} 已占用"
       nb_describe_port_conflict TCP "$PORT"
       return 1
@@ -323,7 +331,8 @@ snell_collect_install_requests() {
     SNELL_QUIC_PROXY=off
   fi
   case "$SNELL_QUIC_PROXY" in on|off) ;; *) die 'QUIC Proxy Mode 只支持 on 或 off' ;; esac
-  if [ "$SNELL_QUIC_PROXY" = on ] && ! nb_port_available_for_transport "$PORT" UDP; then
+  if [ "$SNELL_QUIC_PROXY" = on ] \
+     && ! nb_port_available_for_profile "$PORT" UDP "$INGRESS_PROFILE_ID"; then
     if [ "${PORT_AUTO_SELECTED:-0}" -eq 1 ]; then
       PORT="$(snell_select_available_install_port)" || die '未找到同时可用的 Snell v5 TCP/UDP 同号端口'
     else
@@ -379,10 +388,12 @@ install_snell() {
   mode="$(nb_endpoint_mode_from_values "$ADVERTISE_HOST")"
   firewall_pairs="TCP|${PORT}"
   [ "$SNELL_QUIC_PROXY" != on ] || firewall_pairs="${firewall_pairs}"$'\n'"UDP|${PORT}"
-  if ! snell_generate_server_config "$config_tmp" "$SNELL_VERSION" 0.0.0.0 "$PORT" "$SNELL_PSK" \
+  if ! snell_generate_server_config "$config_tmp" "$SNELL_VERSION" "$INGRESS_LISTEN_HOST" "$PORT" "$SNELL_PSK" \
      || ! snell_generate_state "$state_tmp" "$id" "$SNELL_NAME" "$SNELL_VERSION" "$SNELL_PSK" \
-          0.0.0.0 "$PORT" "$mode" "$ADVERTISE_HOST" "$ADVERTISE_PORT" "" \
+          "$INGRESS_LISTEN_HOST" "$PORT" "$mode" "$ADVERTISE_HOST" "$ADVERTISE_PORT" "" \
           "$([ "$SNELL_QUIC_PROXY" = on ] && printf true || printf false)" \
+          "$INGRESS_PROFILE_ID" \
+     || ! nb_ingress_stamp_state_file "$state_tmp" "$INGRESS_PROFILE_ID" native-bind \
      || ! snell_config_matches_state_files "$state_tmp" "$config_tmp"; then
     rm -f "$config_tmp" "$state_tmp"
     admin_lock_release
@@ -411,8 +422,7 @@ install_snell() {
     && new_pairs="${new_pairs}${new_pairs:+$'\n'}UDP|${PORT}"
   if ! snell_service_action "$id" start \
      || ! snell_service_active "$id" \
-     || ! nb_wait_for_listener TCP "$PORT" 25 \
-     || ! { [ "$SNELL_QUIC_PROXY" != on ] || snell_wait_for_quic_listener "$PORT" 25; }; then
+     || ! snell_wait_for_required_listeners "$id" 25; then
     snell_install_rollback "$id" "$new_pairs"
     admin_lock_release
     warn "Snell v${SNELL_VERSION} 启动或 TCP listener 验收失败，已回滚"
@@ -597,11 +607,67 @@ snell_wait_for_quic_listener() {
 }
 
 snell_wait_for_required_listeners() {
-  local id="$1" timeout="${2:-25}" port
+  local id="$1" timeout="${2:-25}" port policy method address owner
   port="$(snell_state_field "$id" listen_port)" || return 1
-  nb_wait_for_listener TCP "$port" "$timeout" || return 1
+  policy="$(snell_state_field "$id" ingress_enforcement 2>/dev/null || printf permissive)"
+  method="$(snell_state_field "$id" ingress_enforcement_method 2>/dev/null || printf wildcard)"
+  address="$(snell_state_field "$id" ingress_local_address 2>/dev/null || true)"
+  owner="snell:${id}"
+  nb_wait_for_enforced_listener "$policy" "$method" TCP "$port" "$address" "$owner" "$timeout" || return 1
   snell_quic_proxy_enabled "$id" || return 0
-  snell_wait_for_quic_listener "$port" "$timeout"
+  snell_wait_for_quic_listener "$port" "$timeout" || return 1
+  [ "$policy" != strict ] || nb_wait_for_listener_address UDP "$port" "$address" "$timeout"
+}
+
+snell_apply_ingress_enforcement() {
+  local id="$1" state config profile_id port major psk candidate_state candidate_config snapshot
+  local was_active=0 enabled policy method address rc=0
+  state="$(snell_state_path "$id")" || return 1
+  config="$(snell_config_path "$id")" || return 1
+  snell_state_exists "$id" || return 1
+  profile_id="$(snell_state_field "$id" ingress_profile_id 2>/dev/null || true)"
+  [ -n "$profile_id" ] || profile_id="$NOBRAND_LEGACY_INGRESS_PROFILE_ID"
+  nb_prepare_ingress_deployment "$profile_id" native-bind || return 1
+  port="$(snell_state_field "$id" listen_port)"
+  major="$(snell_state_field "$id" version)"
+  psk="$(snell_state_field "$id" psk)"
+  enabled="$(snell_state_field "$id" enabled 2>/dev/null || printf true)"
+  candidate_state="$(mktemp_file .snell-ingress-state)" || return 1
+  candidate_config="$(mktemp_file .snell-ingress-config)" || { rm -f "$candidate_state"; return 1; }
+  snapshot="$(mktemp_dir)" || { rm -f "$candidate_state" "$candidate_config"; return 1; }
+  cp -a "$state" "$snapshot/state" && cp -a "$config" "$snapshot/config" || rc=1
+  if [ "$rc" -eq 0 ]; then
+    jq --arg listen "$INGRESS_LISTEN_HOST" "$state" '.listen_host=$listen' >"$candidate_state" \
+      && nb_ingress_stamp_state_file "$candidate_state" "$profile_id" native-bind \
+      && snell_generate_server_config "$candidate_config" "$major" "$INGRESS_LISTEN_HOST" "$port" "$psk" \
+      && snell_config_matches_state_files "$candidate_state" "$candidate_config" || rc=1
+  fi
+  snell_service_active "$id" && was_active=1
+  if [ "$rc" -eq 0 ]; then
+    nb_atomic_install_file "$candidate_config" "$config" 0600 \
+      && nb_atomic_install_file "$candidate_state" "$state" 0600 || rc=1
+  fi
+  if [ "$rc" -eq 0 ] && [ "$was_active" -eq 1 ]; then
+    [ "${NOBRAND_TEST_INGRESS_SERVICE_FAIL:-0}" -eq 0 ] \
+      && snell_service_action "$id" restart \
+      && [ "${NOBRAND_TEST_INGRESS_LISTENER_FAIL:-0}" -eq 0 ] \
+      && snell_wait_for_required_listeners "$id" 25 || rc=1
+  fi
+  if [ "$rc" -ne 0 ]; then
+    nb_atomic_install_file "$snapshot/config" "$config" 0600 >/dev/null 2>&1 || true
+    nb_atomic_install_file "$snapshot/state" "$state" 0600 >/dev/null 2>&1 || true
+    if [ "$was_active" -eq 1 ]; then
+      snell_service_action "$id" restart >/dev/null 2>&1 \
+        && snell_wait_for_required_listeners "$id" 25 >/dev/null 2>&1 || true
+    else
+      snell_service_action "$id" stop >/dev/null 2>&1 || true
+    fi
+  elif [ "$enabled" != true ] && [ "$was_active" -eq 0 ]; then
+    snell_service_action "$id" stop >/dev/null 2>&1 || true
+  fi
+  rm -f "$candidate_state" "$candidate_config"
+  rm -rf -- "$snapshot"
+  return "$rc"
 }
 
 snell_node_rows() {
@@ -642,6 +708,8 @@ snell_print_result() {
   printf '真实监听\n  Address   %s\n  Port      %s\n  Transport TCP\n' "$listen_host" "$listen_port"
   printf '  QUIC Proxy %s\n' "$quic"
   [ "$quic" != Enabled ] || printf '  QUIC Transport UDP/%s (same port)\n' "$listen_port"
+  msg ''
+  printf '网络入口\n  Profile   %s\n' "$(nb_ingress_profile_name "$(snell_state_field "$id" ingress_profile_id 2>/dev/null || true)")"
   msg ''
   printf '客户端入口\n  Host      %s\n  Port      %s\n' "$host" "$port"
   msg ''

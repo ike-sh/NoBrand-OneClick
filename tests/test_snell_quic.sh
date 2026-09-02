@@ -26,6 +26,7 @@ nb_collect_advertise_endpoint_interactive() {
   ADVERTISE_PORT="$2"
 }
 nb_port_available_for_transport() { return 0; }
+nb_port_available_for_profile() { return 0; }
 
 reset_request() {
   # Request globals are consumed indirectly by snell_collect_install_requests.
@@ -65,6 +66,9 @@ PORT=""
 answer=2
 nb_select_available_port() { printf 3611; }
 nb_port_available_for_transport() {
+  [ "$1:$2" != 3611:UDP ]
+}
+nb_port_available_for_profile() {
   [ "$1:$2" != 3611:UDP ]
 }
 snell_select_available_install_port() { printf 3620; }

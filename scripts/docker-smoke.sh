@@ -8,6 +8,8 @@ set -Eeuo pipefail
 apt-get update -qq >/dev/null
 apt-get install -y -qq python3 bash curl jq util-linux iproute2 passwd >/dev/null
 bash -n /work/install-nobrand.sh
+bash /work/tests/test_ingress_enforcement.sh
+bash /work/tests/test_ingress_enforcement_transaction.sh
 
 export MITA_SOURCE_ONLY=1
 export MITA_MANAGER_STATE_DIR=/tmp/manager-state
@@ -33,10 +35,42 @@ getent group mita >/dev/null || groupadd --system mita
 id mita >/dev/null 2>&1 || useradd --system -g mita -s /usr/sbin/nologin -d /tmp/metrics mita
 
 source /work/install-nobrand.sh
-test "$SCRIPT_VERSION" = 3.1.0
+test "$SCRIPT_VERSION" = 3.2.0
 test "$SCRIPT_NAME|$SCRIPT_REPO" = 'NoBrand-OneClick|ike-sh/NoBrand-OneClick'
 trap - ERR
 MITA_STATE=/tmp/manager-state/install-state.env
+
+# REALITY's container boundary is pure generation: wildcard TCP/REALITY/Vision
+# server state/config plus three no-direct client exporters. Runtime data-plane
+# qualification remains in scripts/test.sh --runtime.
+(
+  reality_id="r$(openssl rand -hex 8)"
+  reality_uuid="$(tr -d '\r\n' </proc/sys/kernel/random/uuid)"
+  reality_private="$(openssl rand -base64 32 | tr '/+' '_-' | tr -d '=\r\n')"
+  reality_public="$(openssl rand -base64 32 | tr '/+' '_-' | tr -d '=\r\n')"
+  reality_short="$(openssl rand -hex 8)"
+  reality_config=/tmp/reality-docker-config.json
+  reality_state=/tmp/reality-docker-state.json
+  reality_key=/tmp/reality-docker-private.key
+  printf '%s\n' "$reality_private" >"$reality_key"
+  chmod 0600 "$reality_key"
+  reality_generate_server_config "$reality_config" "$reality_id" 0.0.0.0 32052 \
+    "$reality_uuid" "$reality_private" "$reality_short" example.com 443 22052
+  reality_generate_state "$reality_state" "$reality_id" docker-reality 0.0.0.0 32052 \
+    custom 198.51.100.52 32052 "$reality_uuid" "$reality_public" "$reality_key" \
+    "$reality_short" example.com 443 chrome / "$TESTED_XRAY_VERSION" \
+    "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" 22052 2026-09-01T00:00:00Z
+  reality_state_matches "$reality_state" "$reality_id"
+  jq -e '.inbounds[0].streamSettings.network=="tcp"
+    and .inbounds[0].streamSettings.security=="reality"
+    and .inbounds[0].streamSettings.realitySettings.serverNames==["example.com"]
+    and .inbounds[0].streamSettings.realitySettings.target=="127.0.0.1:22052"
+    and .inbounds[1].listen=="127.0.0.1"
+    and .inbounds[1].protocol=="dokodemo-door"
+    and .routing.rules[3].domain==["full:example.com"]
+    and .routing.rules[4].outboundTag=="BLOCK"' "$reality_config" >/dev/null
+  rm -f "$reality_config" "$reality_state" "$reality_key"
+)
 
 # RC2 UI：品牌格式恢复；主菜单编号固定，卸载为直接入口，未安装摘要不泄漏默认 Profile/state。
 grep -q '^# 作者: ike / https://github.com/ike-sh/NoBrand-OneClick$' /work/install-nobrand.sh
@@ -212,6 +246,12 @@ test "$PROFILE|$MIERU_CHANNEL" = "custom|stable"
   detect_pkg_manager(){ echo deb; }
   detect_arch(){ echo amd64; }
   ensure_management_dependencies(){ :; }
+  mieru_resolve_runtime(){
+    MIERU_RUNTIME_RESOLVED_VERSION=3.36.0
+    MIERU_RUNTIME_RESOLVED_URL=https://example.invalid/mita.deb
+    MIERU_RUNTIME_RESOLVED_SHA256="$(printf '%064d' 0)"
+    MIERU_RUNTIME_RESOLVED_CHECKSUM_URL=https://example.invalid/mita.deb.sha256.txt
+  }
   installed_version(){ echo 3.40.0; }
   install_self_script(){ :; }
   admin_lock_acquire(){ :; }
@@ -227,7 +267,7 @@ test "$PROFILE|$MIERU_CHANNEL" = "custom|stable"
   do_upgrade >/dev/null
   test ! -e /tmp/stable-unexpected-download
   grep -qx 'MIERU_CHANNEL=stable' "$MITA_STATE"
-  grep -qx 'MIERU_VERSION=3.35.0' "$MITA_STATE"
+  grep -qx 'MIERU_VERSION=3.36.0' "$MITA_STATE"
 )
 test "$(normalize_multiplexing off)" = MULTIPLEXING_OFF
 test "$(normalize_handshake_mode no-wait)" = HANDSHAKE_NO_WAIT
@@ -289,13 +329,28 @@ apply_profile_values stealth
 test "$TRAFFIC_PATTERN|$LOW_ENTROPY_MODE|$(infer_profile_from_values)" = \
   'aggressive|LOW_ENTROPY_MODE_OFF|stealth'
 (
+  mieru_resolve_runtime(){
+    case "$(normalize_mieru_channel "$1")" in
+      stable)
+        MIERU_RUNTIME_RESOLVED_VERSION="$TESTED_MIERU_VERSION"
+        ;;
+      latest)
+        MIERU_RUNTIME_RESOLVED_VERSION=9.9.9
+        ;;
+      pinned)
+        MIERU_RUNTIME_RESOLVED_VERSION="$2"
+        ;;
+    esac
+  }
   MIERU_CHANNEL=stable
-  test "$(target_mieru_version)" = "$TESTED_MIERU_VERSION"
-  query_latest_version(){ echo 9.9.9; }
+  mieru_resolve_runtime "$MIERU_CHANNEL" "${MIERU_VERSION:-}" deb amd64
+  test "$MIERU_RUNTIME_RESOLVED_VERSION" = "$TESTED_MIERU_VERSION"
   MIERU_CHANNEL=latest
-  test "$(target_mieru_version)" = 9.9.9
+  mieru_resolve_runtime "$MIERU_CHANNEL" "${MIERU_VERSION:-}" deb amd64
+  test "$MIERU_RUNTIME_RESOLVED_VERSION" = 9.9.9
   MIERU_CHANNEL=pinned MIERU_VERSION=3.40.1
-  test "$(target_mieru_version)" = 3.40.1
+  mieru_resolve_runtime "$MIERU_CHANNEL" "$MIERU_VERSION" deb amd64
+  test "$MIERU_RUNTIME_RESOLVED_VERSION" = 3.40.1
 )
 apply_profile_values balanced
 MIERU_CHANNEL=latest MIERU_VERSION=""
@@ -506,7 +561,7 @@ wait "$listener_pid" 2>/dev/null || true
 port_available_for_mode 26801
 (
   derive_port_base(){ echo 26800; }
-  port_is_listening(){ [ "$1" -ne 26899 ]; }
+  nb_port_available_for_profile(){ [ "$1" -eq 26899 ]; }
   PROTOCOL=TCP
   test "$(derive_port_from_ip)" = 26899
 )

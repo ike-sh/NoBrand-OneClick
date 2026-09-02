@@ -3,9 +3,9 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/testlib.sh"
 
 fixture="$(mktemp -d)"
-server_pid="" client_pid="" target_tcp_pid="" target_udp_pid="" mihomo_pid=""
+server_pid="" client_pid="" target_tcp_pid="" target_udp_pid="" mihomo_pid="" relay_pid=""
 cleanup() {
-  for pid in "$mihomo_pid" "$client_pid" "$server_pid" "$target_tcp_pid" "$target_udp_pid"; do
+  for pid in "$mihomo_pid" "$client_pid" "$server_pid" "$target_tcp_pid" "$target_udp_pid" "$relay_pid"; do
     [ -z "$pid" ] || kill "$pid" >/dev/null 2>&1 || true
   done
   wait >/dev/null 2>&1 || true
@@ -60,6 +60,7 @@ NOBRAND_SING_BOX_BIN="$runtime"
 export NOBRAND_SING_BOX_BIN
 
 server_port="$(free_port udp)"
+transport_port="$(free_port udp)"
 tcp_target_port="$(free_port tcp)"
 udp_target_port="$(free_port udp)"
 id=t1111111111111111
@@ -77,7 +78,7 @@ users="[$(tuic_user_json u1111111111111111 alice "$alice_uuid" "$alice_password"
 tuic_generate_server_config "$config" "$id" 127.0.0.1 "$server_port" "$cert" "$key" \
   www.microsoft.com "$users"
 tuic_generate_state "$state" "$id" runtime 127.0.0.1 "$server_port" custom \
-  127.0.0.1 "$server_port" www.microsoft.com stable "$TESTED_SING_BOX_SERVER_VERSION" \
+  127.0.0.1 "$transport_port" www.microsoft.com stable "$TESTED_SING_BOX_SERVER_VERSION" \
   "$cert" "$key" "$users" 2026-08-30T00:00:00Z
 tuic_validate_config "$config" "$runtime" || fail 'official sing-box server config check'
 
@@ -88,6 +89,13 @@ python3 "$TEST_ROOT/tests/helpers/socks5_probe.py" echo-server --protocol udp \
   --port "$udp_target_port" >"$fixture/udp-target.log" 2>&1 &
 target_udp_pid=$!
 wait_tcp "$tcp_target_port" || fail 'controlled TCP echo target startup'
+relay_count_file="$fixture/transport.count"
+python3 "$TEST_ROOT/tests/helpers/udp_recording_relay.py" \
+  --listen-port "$transport_port" --target-port "$server_port" \
+  --count-file "$relay_count_file" >"$fixture/transport-relay.log" 2>&1 &
+relay_pid=$!
+sleep 0.2
+kill -0 "$relay_pid" 2>/dev/null || fail 'controlled TUIC transport relay startup'
 
 start_server() {
   stop_process "$server_pid"
@@ -240,6 +248,10 @@ assert_eq "$endpoint_fields" "$(jq -cS '[.advertise_mode,.advertise_host,.advert
 mihomo_dir="$fixture/mihomo"
 mkdir -p "$mihomo_dir"
 tuic_export_mihomo "$id" bob >"$mihomo_dir/config.yaml"
+python3 "$TEST_ROOT/tests/helpers/assert_mihomo_routing_contract.py" \
+  "$mihomo_dir/config.yaml" NOBRAND >/dev/null \
+  || fail 'generated Mihomo TUIC routing contract'
+relay_count_before="$(cat "$relay_count_file")"
 mihomo_cache="${NOBRAND_RUNTIME_CACHE:-/tmp/nobrand-runtime-cache}"
 mkdir -p "$mihomo_cache"
 mihomo_gzip="$mihomo_cache/mihomo-linux-amd64-v1.19.30.gz"
@@ -270,7 +282,40 @@ python3 "$TEST_ROOT/tests/helpers/socks5_probe.py" tcp --proxy-port 7890 \
 python3 "$TEST_ROOT/tests/helpers/socks5_probe.py" udp --proxy-port 7890 \
   --target-port "$udp_target_port" --sizes 64 512 1200 1400 \
   || fail 'Mihomo TUIC SOCKS5 UDP data plane'
-printf '[PASS] Mihomo v1.19.30 TUIC parser, TCP, and SOCKS5 UDP 64/512/1200/1400\n'
+relay_count_after="$(cat "$relay_count_file")"
+[ "$relay_count_after" -gt "$relay_count_before" ] \
+  || fail 'Mihomo TUIC transport destination packet proof'
+printf '[PASS] Mihomo v1.19.30 TUIC parser, transport destination, TCP, and SOCKS5 UDP 64/512/1200/1400\n'
+
+# The controlled echo targets remain reachable directly. Stopping only the
+# TUIC server must therefore make the exported Mihomo path fail; otherwise the
+# full exporter has silently bypassed its NOBRAND routing contract.
+stop_process "$server_pid"
+server_pid=""
+if python3 "$TEST_ROOT/tests/helpers/socks5_probe.py" tcp --proxy-port 7890 \
+     --target-port "$tcp_target_port" --size 64 --timeout 3 >/dev/null 2>&1; then
+  fail 'Mihomo TUIC exporter allowed direct fallback with server stopped'
+fi
+printf '[PASS] Mihomo TUIC exporter has no direct fallback when transport is unavailable\n'
+
+start_server
+stop_process "$relay_pid"
+relay_pid=""
+python3 "$TEST_ROOT/tests/helpers/udp_recording_relay.py" \
+  --listen-port "$transport_port" --target-port "$server_port" \
+  --count-file "$relay_count_file" >"$fixture/transport-relay-restarted.log" 2>&1 &
+relay_pid=$!
+sleep 0.2
+kill -0 "$relay_pid" 2>/dev/null || fail 'TUIC transport relay recovery'
+stop_process "$mihomo_pid"
+mihomo_pid=""
+"$mihomo" -d "$mihomo_dir" >"$fixture/mihomo-restarted.log" 2>&1 &
+mihomo_pid=$!
+wait_tcp 7890 || fail 'Mihomo TUIC client restart after transport recovery'
+python3 "$TEST_ROOT/tests/helpers/socks5_probe.py" tcp --proxy-port 7890 \
+  --target-port "$tcp_target_port" --size 131072 \
+  || fail 'Mihomo TUIC data plane after transport recovery'
+printf '[PASS] Mihomo TUIC exporter transport recovery\n'
 
 stop_process "$mihomo_pid"
 mihomo_pid=""

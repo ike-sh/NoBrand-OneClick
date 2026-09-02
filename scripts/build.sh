@@ -13,6 +13,7 @@ MODULES=(
   src/10-cli-prelude.sh
   src/15-core-state.sh
   src/16-core-port.sh
+  src/16-core-ingress.sh
   src/17-core-endpoint.sh
   src/18-core-nodes.sh
   src/20-platform-mieru.sh
@@ -20,6 +21,7 @@ MODULES=(
   src/22-platform-snell.sh
   src/23-platform-vless-sudoku.sh
   src/24-platform-tuic.sh
+  src/25-platform-vless-reality.sh
   src/25-network-mtu.sh
   src/30-users-instance.sh
   src/35-users-state.sh
@@ -32,6 +34,7 @@ MODULES=(
   src/57-hysteria2.sh
   src/58-vless-sudoku.sh
   src/59-tuic.sh
+  src/59-vless-reality.sh
   src/60-daemon-firewall-network.sh
   src/61-ssh-tunnel.sh
   src/62-forward.sh

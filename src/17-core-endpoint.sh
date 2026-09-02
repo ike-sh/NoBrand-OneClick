@@ -9,11 +9,11 @@ nb_init_state_layout() {
   mkdir -p "$NOBRAND_BACKUP_DIR" "$NOBRAND_LOCK_DIR" \
     "$MITA_MANAGER_STATE_DIR" "$MITA_USERS_BACKUP_DIR" \
     "$NOBRAND_SNELL_STATE_DIR" "$NOBRAND_HY2_STATE_DIR" \
-    "$NOBRAND_VLESS_STATE_DIR" "$NOBRAND_TUIC_STATE_DIR" \
+    "$NOBRAND_VLESS_STATE_DIR" "$NOBRAND_REALITY_STATE_DIR" "$NOBRAND_TUIC_STATE_DIR" \
     "$NOBRAND_SSH_STATE_DIR" "$NOBRAND_SSH_KEYS_DIR" "$NOBRAND_SSH_WATCHDOG_DIR" \
     "$NOBRAND_FORWARD_STATE_DIR" \
     "$NOBRAND_CONFIG_DIR" "$NOBRAND_SNELL_CONFIG_DIR" "$NOBRAND_HY2_CONFIG_DIR" \
-    "$NOBRAND_VLESS_CONFIG_DIR" "$NOBRAND_TUIC_CONFIG_DIR" "$NOBRAND_FORWARD_CONFIG_DIR" \
+    "$NOBRAND_VLESS_CONFIG_DIR" "$NOBRAND_REALITY_CONFIG_DIR" "$NOBRAND_TUIC_CONFIG_DIR" "$NOBRAND_FORWARD_CONFIG_DIR" \
     "$NOBRAND_SSH_CONFIG_DIR" "$NOBRAND_SSH_AUTHORIZED_KEYS_DIR" \
     "$NOBRAND_SSH_ACCOUNT_MARKER_DIR" \
     "$NOBRAND_BIN_DIR" "$NOBRAND_SNELL_RUNTIME_DIR" "$NOBRAND_LIB_DIR" \
@@ -21,11 +21,11 @@ nb_init_state_layout() {
   chmod 0700 "$NOBRAND_STATE_DIR" "$NOBRAND_BACKUP_DIR" "$NOBRAND_LOCK_DIR" \
     "$MITA_MANAGER_STATE_DIR" "$MITA_USERS_BACKUP_DIR" \
     "$NOBRAND_SNELL_STATE_DIR" "$NOBRAND_HY2_STATE_DIR" \
-    "$NOBRAND_VLESS_STATE_DIR" "$NOBRAND_TUIC_STATE_DIR" \
+    "$NOBRAND_VLESS_STATE_DIR" "$NOBRAND_REALITY_STATE_DIR" "$NOBRAND_TUIC_STATE_DIR" \
     "$NOBRAND_SSH_STATE_DIR" "$NOBRAND_SSH_KEYS_DIR" "$NOBRAND_SSH_WATCHDOG_DIR" \
     "$NOBRAND_FORWARD_STATE_DIR" \
     "$NOBRAND_SNELL_CONFIG_DIR" "$NOBRAND_HY2_CONFIG_DIR" \
-    "$NOBRAND_VLESS_CONFIG_DIR" "$NOBRAND_TUIC_CONFIG_DIR" "$NOBRAND_FORWARD_CONFIG_DIR" \
+    "$NOBRAND_VLESS_CONFIG_DIR" "$NOBRAND_REALITY_CONFIG_DIR" "$NOBRAND_TUIC_CONFIG_DIR" "$NOBRAND_FORWARD_CONFIG_DIR" \
     "$NOBRAND_SSH_ACCOUNT_MARKER_DIR" || return 1
   # sshd reads AuthorizedKeysFile after switching to the target identity. Keep
   # the shared and SSH config roots traversable but not listable; every other
@@ -112,6 +112,13 @@ nb_endpoint_conflict_owner() {
 
 nb_require_explicit_endpoint_noninteractive() {
   [ "${YES:-0}" -eq 1 ] || return 0
+  # An explicit/default mapped or public ingress profile supplies a stable
+  # display host. Its follow-actual policy supplies the listener port.
+  if [ -n "${INGRESS_PROFILE_ID:-}" ] \
+     && [ "${INGRESS_PROFILE_ID}" != "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ] \
+     && [ -n "$(nb_ingress_profile_display_host "$INGRESS_PROFILE_ID" 2>/dev/null || true)" ]; then
+    return 0
+  fi
   if [ "${ADVERTISE_AUTO_REQUESTED:-0}" -eq 1 ]; then
     return 0
   fi
@@ -123,13 +130,18 @@ nb_require_explicit_endpoint_noninteractive() {
 }
 
 nb_collect_advertise_endpoint_interactive() {
-  local protocol_name="$1" listen_port="$2" detected="" choice="" host="" port=""
-  detected="$(public_ip 2>/dev/null || true)"
+  local protocol_name="$1" listen_port="$2" detected="" choice="" host="" port="" profile_name=""
+  detected="$(nb_ingress_profile_display_host "${INGRESS_PROFILE_ID:-}" 2>/dev/null || true)"
+  if [ -n "$detected" ]; then
+    profile_name="$(nb_ingress_profile_name "$INGRESS_PROFILE_ID")"
+  else
+    detected="$(public_ip 2>/dev/null || true)"
+  fi
   msg ""
   t "${protocol_name} 真实监听端口: ${listen_port}" "${protocol_name} real listen port: ${listen_port}"
   if [ -n "$detected" ]; then
-    t "自动检测到客户端入口建议: ${detected}:${listen_port}" \
-      "Detected client entry suggestion: ${detected}:${listen_port}"
+    t "客户端入口建议: ${detected}:$(nb_ingress_profile_display_port "${INGRESS_PROFILE_ID:-$NOBRAND_LEGACY_INGRESS_PROFILE_ID}" "$listen_port")${profile_name:+（来自入口配置 ${profile_name}）}" \
+      "Client entry suggestion: ${detected}:$(nb_ingress_profile_display_port "${INGRESS_PROFILE_ID:-$NOBRAND_LEGACY_INGRESS_PROFILE_ID}" "$listen_port")${profile_name:+ (from ingress profile ${profile_name})}"
   else
     warn "$(t '未检测到公网入口；IPLC/NAT 环境请填写实际前置入口' \
       'No public entry detected; enter the actual IPLC/NAT frontend endpoint')"
@@ -169,18 +181,24 @@ nb_collect_advertise_endpoint_interactive() {
 }
 
 nb_effective_advertise_host() {
-  local mode="${1:-auto}" host="${2:-}"
+  local mode="${1:-auto}" host="${2:-}" profile_id="${3:-}" profile_host=""
   if [ "$mode" = custom ] && [ -n "$host" ]; then
     printf '%s' "$host"
+  elif [ -n "$profile_id" ] && [ "$profile_id" != "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ] \
+       && profile_host="$(nb_ingress_profile_display_host "$profile_id" 2>/dev/null)" \
+       && [ -n "$profile_host" ]; then
+    printf '%s' "$profile_host"
   else
     public_ip 2>/dev/null || printf 'YOUR_SERVER_IP'
   fi
 }
 
 nb_effective_advertise_port() {
-  local mode="${1:-auto}" advertise_port="${2:-}" listen_port="${3:-}"
+  local mode="${1:-auto}" advertise_port="${2:-}" listen_port="${3:-}" profile_id="${4:-}"
   if [ "$mode" = custom ] && [ -n "$advertise_port" ]; then
     printf '%s' "$advertise_port"
+  elif [ -n "$profile_id" ] && [ "$profile_id" != "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ]; then
+    nb_ingress_profile_display_port "$profile_id" "$listen_port"
   else
     printf '%s' "$listen_port"
   fi

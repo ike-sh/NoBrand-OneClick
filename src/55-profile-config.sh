@@ -167,7 +167,7 @@ choose_protocol_interactive() {
 }
 
 collect_advertise_endpoint_interactive() {
-  local input="" candidate="" detected="" auto_selected=0
+  local input="" candidate="" detected="" auto_selected=0 profile_default=0
   local default_host="${ADVERTISE_HOST:-}" default_port="${ADVERTISE_PORT:-${PORT:-}}"
   if [ "${ADVERTISE_CLI:-0}" -eq 1 ]; then
     validate_advertise_endpoint || die "$(t '自定义客户端入口参数无效' \
@@ -178,7 +178,13 @@ collect_advertise_endpoint_interactive() {
 
   msg ""
   if [ -z "$default_host" ]; then
-    detected="$(public_ip 2>/dev/null || true)"
+    detected="$(nb_ingress_profile_display_host "${INGRESS_PROFILE_ID:-}" 2>/dev/null || true)"
+    if [ -n "$detected" ]; then
+      profile_default=1
+      default_port="$(nb_ingress_profile_display_port "$INGRESS_PROFILE_ID" "${PORT:-}")"
+    else
+      detected="$(public_ip 2>/dev/null || true)"
+    fi
     default_host="$detected"
   fi
   if [ -n "$detected" ]; then
@@ -205,7 +211,11 @@ collect_advertise_endpoint_interactive() {
       ADVERTISE_HOST=""
       break
     fi
-    if valid_advertise_host "$candidate"; then
+    if [ "$profile_default" -eq 1 ] && [ -z "$input" ]; then
+      auto_selected=1
+      ADVERTISE_HOST=""
+      break
+    elif valid_advertise_host "$candidate"; then
       ADVERTISE_HOST="$candidate"
       break
     fi
@@ -233,8 +243,8 @@ collect_advertise_endpoint_interactive() {
 
   msg ""
   if [ "$auto_selected" -eq 1 ]; then
-    t '客户端入口: 自动探测公网地址并使用实际监听端口' \
-      'Client entry: auto-detected public address with the backend listen port'
+    t "客户端入口: 使用入口配置 $(nb_ingress_profile_name "${INGRESS_PROFILE_ID:-}") 的默认展示（不修改监听）" \
+      "Client entry: ingress profile $(nb_ingress_profile_name "${INGRESS_PROFILE_ID:-}") display default (listener unchanged)"
   elif [ "$PROTOCOL" = "BOTH" ]; then
     t "客户端配置将展示: ${ADVERTISE_HOST}，TCP ${ADVERTISE_PORT} / UDP $((ADVERTISE_PORT + 1))" \
       "Client configs will show: ${ADVERTISE_HOST}, TCP ${ADVERTISE_PORT} / UDP $((ADVERTISE_PORT + 1))"
@@ -452,6 +462,7 @@ collect_config_interactive() {
   local requested_protocol="$PROTOCOL" requested_mtu="$MTU_REQUEST"
   local requested_mux="$MULTIPLEXING" requested_handshake="$HANDSHAKE_MODE"
   local requested_traffic="$TRAFFIC_PATTERN" requested_low="$LOW_ENTROPY_MODE"
+  nb_prepare_ingress_request || return 1
   [ -n "$USERNAME" ] || USERNAME="$(random_token)"
   [ -n "$PASSWORD" ] || PASSWORD="$(random_token)"
   msg ""
@@ -478,27 +489,24 @@ collect_config_interactive() {
 
   msg ""
   if [ -z "$PORT" ] && [ -z "$PORT_RANGE" ]; then
-    local default_port input="" candidate="" base="" localip="" segment_hi=99
-    localip="$(detect_local_ip)"
-    [ "$PROTOCOL" = "BOTH" ] && segment_hi=98
-    if base="$(derive_port_base)"; then
-      if ! default_port="$(derive_port_from_ip)"; then
-        warn "$(t "IP 尾号端口段 $((base + 1))-$((base + segment_hi)) 当前没有可用端口，回退全局随机端口" \
-          "No available port in IP-derived range $((base + 1))-$((base + segment_hi)); falling back to a global random port")"
-        default_port="$(random_available_port)" \
-          || die "$(t '未找到可用监听端口' 'No available listen port found')"
-      fi
-      t "检测到本机 IP ${localip}，按尾号规则端口段 $((base + 1))-$((base + segment_hi))（${base} 留给 SSH，默认选择已校验的空闲端口）" \
-        "Detected local IP ${localip}; range $((base + 1))-$((base + segment_hi)) (${base} reserved for SSH); default is a verified free port"
+    local default_port="" input="" candidate="" bounds="" profile_name
+    profile_name="$(nb_ingress_profile_name "$INGRESS_PROFILE_ID")"
+    bounds="$(nb_ingress_profile_auto_range "$INGRESS_PROFILE_ID" 2>/dev/null || true)"
+    default_port="$(select_available_port 2>/dev/null || true)"
+    if [ -n "$bounds" ]; then
+      t "入口配置 ${profile_name} 的自动端口段: ${bounds%%|*}-${bounds#*|}（Derived 表示由所选本地 IPv4 尾号推导）" \
+        "Ingress profile ${profile_name} auto range: ${bounds%%|*}-${bounds#*|} (Derived means inferred from the selected local IPv4 tail)"
     else
-      default_port="$(random_available_port)" \
-        || die "$(t '未找到可用监听端口' 'No available listen port found')"
-      warn "$(t "无法按 IP 尾号推导端口（IP=${localip:-未知}，尾号过小或无法识别），回退随机端口" \
-        "Cannot derive port from IP last octet (IP=${localip:-unknown}); falling back to random port")"
+      t "入口配置 ${profile_name} 为 manual-only，必须输入端口" \
+        "Ingress profile ${profile_name} is manual-only; a port is required"
     fi
     while true; do
       input=""
-      read_tty input "$(t "监听端口 [${default_port}]: " "Listen port [${default_port}]: ")" || input=""
+      if [ -n "$default_port" ]; then
+        read_tty input "$(t "监听端口 [${default_port}]: " "Listen port [${default_port}]: ")" || input=""
+      else
+        read_tty input "$(t '监听端口: ' 'Listen port: ')" || input=""
+      fi
       candidate="${input:-$default_port}"
       if ! valid_port "$candidate"; then
         warn "$(t '非法端口，请重新输入' 'Invalid port; try again')"
@@ -520,10 +528,7 @@ collect_config_interactive() {
       [ -z "$input" ] && PORT_AUTO_SELECTED=1 || PORT_AUTO_SELECTED=0
       break
     done
-    if [ -n "$base" ] && { [ "$PORT" -lt "$((base + 1))" ] || [ "$PORT" -gt "$((base + segment_hi))" ]; }; then
-      warn "$(t "注意：端口 ${PORT} 不在 IP 尾号段 $((base + 1))-$((base + segment_hi)) 内，可能与按 IP 分配端口的约定冲突" \
-        "Note: port ${PORT} is outside the IP last-octet range $((base + 1))-$((base + segment_hi)); may break the per-IP port convention")"
-    fi
+    nb_warn_if_outside_recommended_range "$PORT" "$INGRESS_PROFILE_ID"
   elif [ -n "$PORT" ] && [ -n "$PORT_RANGE" ]; then
     die "$(t '不能同时指定端口与端口段' 'Cannot set both port and port range')"
   fi
@@ -644,6 +649,7 @@ collect_reconfigure_interactive() {
 
 ensure_config_noninteractive() {
   STAGE="参数校验"
+  nb_prepare_ingress_request || return 1
   apply_requested_profile_preserving_cli
   [ -n "$PORT" ] && [ -n "$PORT_RANGE" ] && \
     die "$(t '--port 与 --port-range 不能同时使用' 'Cannot use --port and --port-range together')"
@@ -661,12 +667,7 @@ ensure_config_noninteractive() {
   if [ -n "$PORT" ]; then
     valid_port "$PORT" || die "$(t '非法端口' 'Invalid port')"
     PORT="$(normalize_uint "$PORT")"
-    local _base
-    if _base="$(derive_port_base 2>/dev/null)" \
-       && { [ "$PORT" -lt "$((_base + 1))" ] || [ "$PORT" -gt "$((_base + 99))" ]; }; then
-      warn "$(t "端口 ${PORT} 不在本机 IP 尾号段 $((_base + 1))-$((_base + 99)) 内（如非本机 IP 可忽略）" \
-        "Port ${PORT} is outside this host's IP last-octet range $((_base + 1))-$((_base + 99)) (ignore if intended)")"
-    fi
+    nb_warn_if_outside_recommended_range "$PORT" "$INGRESS_PROFILE_ID"
   fi
   if [ -n "$PORT_RANGE" ]; then
     die "$(t 'v2 用户专属实例不支持 --port-range，请使用单个 --port' \

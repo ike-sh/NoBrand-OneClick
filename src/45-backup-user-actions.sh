@@ -134,6 +134,22 @@ for u in users:
     if not isinstance(enabled, bool):
         sys.exit(11)
     u["enabled"]=enabled
+    ingress_profile_id=str(u.get("ingress_profile_id") or "legacy-default-route").strip()
+    ingress_enforcement=str(u.get("ingress_enforcement") or "permissive").strip().lower()
+    ingress_method=str(u.get("ingress_enforcement_method") or "wildcard").strip().lower()
+    ingress_address=str(u.get("ingress_local_address") or "").strip()
+    if not ingress_profile_id or ingress_enforcement not in ("permissive","strict"):
+        sys.exit(20)
+    if ingress_enforcement == "permissive" and ingress_method != "wildcard":
+        sys.exit(20)
+    if ingress_enforcement == "strict":
+        if ingress_method != "firewall":
+            sys.exit(20)
+        try:
+            if ipaddress.ip_address(ingress_address).version != 4:
+                sys.exit(20)
+        except Exception:
+            sys.exit(20)
     expire=str(u.get("expire_at") or "").strip()
     if expire:
         try:
@@ -356,7 +372,7 @@ do_user_import() {
 
 print_user_outputs() {
   local name="$1"
-  local ip password port saved_user saved_pass saved_port saved_advertise_host saved_advertise_port
+  local ip password port saved_user saved_pass saved_port saved_advertise_host saved_advertise_port saved_ingress_profile_id
   password="$(users_get_field "$name" password)" || return 1
   port="$(users_get_field "$name" port)" || return 1
   saved_user="$USERNAME"
@@ -364,16 +380,21 @@ print_user_outputs() {
   saved_port="$PORT"
   saved_advertise_host="$ADVERTISE_HOST"
   saved_advertise_port="$ADVERTISE_PORT"
+  saved_ingress_profile_id="${INGRESS_PROFILE_ID:-}"
   USERNAME="$name"
   PASSWORD="$password"
   PORT="$port"
   ADVERTISE_HOST="$(users_get_field "$name" advertise_host 2>/dev/null || true)"
   ADVERTISE_PORT="$(users_get_field "$name" advertise_port 2>/dev/null || true)"
+  INGRESS_PROFILE_ID="$(users_get_field "$name" ingress_profile_id 2>/dev/null || true)"
+  [ -n "$INGRESS_PROFILE_ID" ] || INGRESS_PROFILE_ID="$NOBRAND_LEGACY_INGRESS_PROFILE_ID"
   ip="$(advertised_host || echo 'YOUR_SERVER_IP')"
   msg ""
   t "========== 用户 ${name} ==========" "========== User ${name} =========="
   t "  专属实例端口: ${port}（其它用户凭据无法在此实例认证）" \
     "  Dedicated instance port: ${port} (other users cannot authenticate on this instance)"
+  t "  网络入口: $(nb_ingress_profile_name "$INGRESS_PROFILE_ID")" \
+    "  Ingress: $(nb_ingress_profile_name "$INGRESS_PROFILE_ID")"
   local qmb qdays exp en pkg bw
   qmb="$(users_get_field "$name" quota_mb 2>/dev/null || echo 0)"
   qdays="$(users_get_field "$name" quota_days 2>/dev/null || echo 0)"
@@ -408,6 +429,7 @@ print_user_outputs() {
   PORT="$saved_port"
   ADVERTISE_HOST="$saved_advertise_host"
   ADVERTISE_PORT="$saved_advertise_port"
+  INGRESS_PROFILE_ID="$saved_ingress_profile_id"
 }
 
 open_firewall_for_pairs() {

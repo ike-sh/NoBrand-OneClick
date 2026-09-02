@@ -369,6 +369,9 @@ client_endpoint_is_independent() {
 advertised_host() {
   if [ -n "${ADVERTISE_HOST:-}" ]; then
     printf '%s' "$ADVERTISE_HOST"
+  elif [ -n "${INGRESS_PROFILE_ID:-}" ] \
+       && [ "$INGRESS_PROFILE_ID" != "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ]; then
+    nb_ingress_profile_display_host "$INGRESS_PROFILE_ID" 2>/dev/null || public_ip
   else
     public_ip
   fi
@@ -384,7 +387,13 @@ advertised_port_for_protocol() {
       printf '%s' "$canonical_port"
     fi
   else
-    port_for_protocol "$proto"
+    canonical_port="$(port_for_protocol "$proto")" || return 1
+    if [ -n "${INGRESS_PROFILE_ID:-}" ] \
+       && [ "$INGRESS_PROFILE_ID" != "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ]; then
+      nb_ingress_profile_display_port "$INGRESS_PROFILE_ID" "$canonical_port"
+    else
+      printf '%s' "$canonical_port"
+    fi
   fi
 }
 

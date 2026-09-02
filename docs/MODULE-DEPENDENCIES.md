@@ -13,6 +13,7 @@ Mieru 保留原 global/state 传递。管理锁继续使用 fd 8 与 `_ADMIN_LOC
 
 | Owner | Authority |
 |---|---|
+| Ingress Profiles / strict Mieru fallback | `/var/lib/nobrand-oneclick/ingress.json`, `ingress-firewall.json`, `/etc/nobrand-oneclick/ingress-firewall.nft`, and owned `inet nobrand_ingress` only |
 | Mieru | `/var/lib/mita-oneclick`, `/etc/mita` |
 | Snell | `/var/lib/nobrand-oneclick/snell`, `/etc/nobrand-oneclick/snell` |
 | HY2 | `/var/lib/nobrand-oneclick/hysteria2`, `/etc/nobrand-oneclick/hysteria2` |
@@ -26,11 +27,13 @@ Mieru 保留原 global/state 传递。管理锁继续使用 fd 8 与 `_ADMIN_LOC
 
 旧 Mieru single-instance state 必须先通过 `state_file_is_secure`，并在子 shell source。
 
-Port registry normalize transport；Snell v4、VLESS Sudoku 与 SSH Tunnel display endpoint 只使用 TCP，Snell v5 QUIC OFF 只申请 TCP、QUIC ON 申请同号 TCP+UDP，HY2 与 TUIC v5 只申请 UDP，Mieru 与 Forward 按 TCP/UDP/BOTH adapter 输出。SSH Tunnel 复用外部 sshd 的真实 listener，因此不注册或管理该 listener/firewall。Forward 禁用 rule 仍保留端口 ownership。自动分配提交前二次检查。同数字 TCP/UDP 可以共存，同 transport 冲突。
+Port registry normalize transport；Snell v4、VLESS REALITY、VLESS Sudoku 与 SSH Tunnel display endpoint 只使用 TCP，Snell v5 QUIC OFF 只申请 TCP、QUIC ON 申请同号 TCP+UDP，HY2 与 TUIC v5 只申请 UDP，Mieru 与 Forward 按 TCP/UDP/BOTH adapter 输出。SSH Tunnel 复用外部 sshd 的真实 listener，因此不注册或管理该 listener/firewall。Forward 禁用 rule 仍保留端口 ownership。自动分配提交前二次检查。同数字 TCP/UDP 可以共存，同 transport 冲突；strict Profile 也不放宽 host-global ownership。
+
+Ingress enforcement contract：missing field → `permissive`/`wildcard`；strict Snell/HY2/VLESS/Sudoku/REALITY/TUIC/Realm → native exact-address bind；strict nftables Forward → destination-address match；strict Mieru → counter-free owned firewall fallback。Strict address 只来自 Profile local address，不来自 Display Host。SSH Tunnel 是 `NOT_APPLICABLE_TO_SYSTEM_SSH`。
 
 Endpoint contract：`listen_*` 是服务端权威配置；`advertise_*` 只属客户端。setter 禁止调用 config writer、service、firewall、tc、quota。
 
-安装事务顺序：prepare → admin lock → snapshot → runtime/config compatibility → 收集请求 → 停旧实例 → TOCTOU → 临时 config/state/client → JSON/semantic/Xray validation → atomic server config → service/firewall → active+listener → atomic client/state commit → 清理旧 firewall。失败执行 ownership-aware rollback，且 listener 验收前不提交 VLESS state。
+安装事务顺序：prepare schema-v3 state → admin lock → snapshot → runtime/config compatibility → 收集请求 → 停旧实例 → TOCTOU → 临时 config/state/client → JSON/semantic/Xray validation → atomic server config → service/firewall → active+enforcement-resolved listener → atomic client/state commit → 清理旧 firewall。失败执行 ownership-aware rollback，且 listener 验收前不提交 VLESS state。Profile-wide enforcement migration 只有全部 non-SSH owners 验收后才提交 Profile；后段失败会恢复 exact Profile JSON 并补偿应用 old policy。
 
 共享 Xray upgrade：snapshot binary + HY2/VLESS state → 安装并用新 binary 校验两个现存配置 → 只重启升级前 active 的服务 → UDP/TCP listener acceptance → 更新两个 runtime metadata。任一步失败恢复旧 binary/state 并在旧 runtime 上重启原 active 集合。
 
@@ -38,10 +41,10 @@ Endpoint contract：`listen_*` 是服务端权威配置；`advertise_*` 只属�
 
 SSH Tunnel apply：snapshot sshd main/drop-in → stage dedicated account/key/marker/state → `sshd -t` 与 per-user `sshd -T -C` → reload → 启动 administrator watchdog。未确认新的管理员 SSH session 前不得确认 policy 变更；超时自动恢复旧 config 并 reload。账号、group、authorized-key 与 state commit 失败必须 ownership-aware rollback。
 
-Forward transaction：exact candidate state validation → snapshot Realm runtime/service、owned nft table、sysctl 与 firewall → Realm candidate temporary-listener probe or `nft -c` → minimum-interruption data-plane order → Realm service/PID/listener or nft ownership acceptance → firewall reconcile → atomic authoritative-state commit。任何失败恢复全部 side effects。Realm domain/IPv6 转 nftables 必须显式新 IPv4 target。
+Forward transaction：exact candidate state validation → snapshot Realm runtime/service、owned nft table、sysctl 与 firewall → Realm candidate temporary-listener probe or `nft -c` → minimum-interruption data-plane order → Realm service/PID/exact strict listener or nft destination-match ownership acceptance → firewall reconcile → atomic authoritative-state commit。任何失败恢复全部 side effects。Backend switch 保留 Profile/port/Display/Target/enforcement；Realm domain/IPv6 转 nftables 必须显式新 IPv4 target。
 
-Unified restore 把文件恢复和外部副作用视为同一事务：snapshot sshd config、TUIC runtime/template、Forward Realm/nft/sysctl 和现有 state/config，记录本轮创建的 exact SSH UID/GID/GECOS 与 staged resources；任何后续 acceptance 失败都恢复 snapshot 并删除本轮副作用。
+Unified restore 把文件恢复和外部副作用视为同一事务：snapshot sshd config、TUIC runtime/template、strict ingress firewall、Forward Realm/nft/sysctl 和现有 state/config，记录本轮创建的 exact SSH UID/GID/GECOS 与 staged resources；先恢复 strict Mieru firewall 再启动其 wildcard runtime，任何后续 acceptance 失败都恢复 snapshot 并删除本轮副作用。
 
 Plain VLESS contract：server `decryption=none`、client `encryption=none`、TCP、`security=none`、FinalMask `tcp[0].type=sudoku`。不存在 Encryption key pair、method、RTT、ticket 或 key-generation dependency。
 
-节点内部行：`protocol|name|display endpoint|status|transport`；Stopped 不丢弃。Running 必须同时满足 service active 和 listener。
+节点内部行：`protocol|name|display endpoint|status|transport`；Stopped 不丢弃。展示契约分行输出 Actual、Display、Ingress、Enforcement。Running 必须同时满足 service active 和 enforcement-resolved listener/firewall acceptance。

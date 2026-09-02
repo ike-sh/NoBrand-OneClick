@@ -14,7 +14,7 @@ nobrand_version() {
 
 nobrand_usage() {
   cat <<EOF
-NoBrand-OneClick 3.1.0 — Mieru / Snell v4-v5 / Hysteria2 / TUIC v5 / VLESS + FinalMask + Sudoku / SSH Tunnel / Port Forward
+NoBrand-OneClick 3.2.0 — Multi-Ingress / Mieru / Snell v4-v5 / Hysteria2 / TUIC v5 / VLESS REALITY / VLESS + FinalMask + Sudoku / SSH Tunnel / Port Forward
 
 用法:
   nobrand                         打开统一菜单
@@ -24,6 +24,11 @@ NoBrand-OneClick 3.1.0 — Mieru / Snell v4-v5 / Hysteria2 / TUIC v5 / VLESS + F
   nobrand status                  综合状态
   nobrand nodes [--protocol P]    查看全部或指定协议节点
   nobrand doctor                  综合诊断（默认不输出 secret）
+  nobrand ingress list|doctor     查看入口配置或执行只读 Ingress Doctor
+  nobrand ingress show PROFILE    查看入口配置
+  nobrand ingress add             新增 public/mapped 入口配置
+  nobrand ingress modify|delete PROFILE
+  nobrand ingress set-default PROFILE | unset-default
   nobrand backup create [FILE]    备份 NoBrand schema-v3 全部 state 与配置
   nobrand backup restore FILE     恢复 NoBrand 备份
   nobrand uninstall [-y]          统一卸载 Mieru/Snell/HY2/TUIC/VLESS/SSH/Forward/Common
@@ -37,6 +42,7 @@ NoBrand-OneClick 3.1.0 — Mieru / Snell v4-v5 / Hysteria2 / TUIC v5 / VLESS + F
   nobrand mieru user-scan|user-quota-reset|user-set-rate|user-usage
   nobrand mieru user-backup|user-restore|user-export|user-import|user-export-clients
   Mieru 参数: --port --protocol --profile --advertise-host --advertise-port --advertise-auto
+    --ingress-profile PROFILE
     --mtu --traffic-pattern --low-entropy --multiplexing --handshake-mode
     --mieru-channel --mieru-version --user --password --package --quota-mb
     --quota-days --quota-mode --expire --bandwidth --op-user --enable-bbr --lang
@@ -58,6 +64,16 @@ NoBrand-OneClick 3.1.0 — Mieru / Snell v4-v5 / Hysteria2 / TUIC v5 / VLESS + F
       [--advertise-host HOST --advertise-port PORT | --advertise-auto] [-y]
   nobrand vless-sudoku show|status|doctor|smoke|start|stop|restart|remove
   nobrand vless-sudoku set-endpoint
+      [--advertise-host HOST --advertise-port PORT | --advertise-auto]
+
+  nobrand vless-reality install --name NAME [--target HOST] [--target-port PORT]
+      [--ingress-profile PROFILE] [--port PORT]
+      [--advertise-host HOST --advertise-port PORT | --advertise-auto] [-y]
+      Default camouflage host: auto-select from the release-qualified pool and persist the selected hostname.
+      An explicit host is used exactly; host and target port are independently configurable.
+      443 is the camouflage target port default, not the public REALITY listen port.
+  nobrand vless-reality show|export|status|doctor|start|stop|restart|remove [--name NAME]
+  nobrand vless-reality set-endpoint --name NAME
       [--advertise-host HOST --advertise-port PORT | --advertise-auto]
 
   nobrand tuic install --name NAME --user USER [--port PORT] [--sni SNI]
@@ -85,6 +101,7 @@ NoBrand-OneClick 3.1.0 — Mieru / Snell v4-v5 / Hysteria2 / TUIC v5 / VLESS + F
   - Display Endpoint 只影响客户端输出，不创建 DNAT/IPLC 转发，也不改 listener。
   - 非交互 -y 必须明确给出完整 Display Endpoint 或 --advertise-auto。
   - VLESS Sudoku = plain VLESS + FinalMask(sudoku) + TCP。
+  - VLESS REALITY = VLESS + TCP + REALITY + xtls-rprx-vision；public Profile 推荐，mapped 仅警告。
   - VLESS Encryption: NOT USED；不调用密钥生成子命令，不保存加密密钥。
   - TUIC 只支持 v5：official sing-box、UDP/QUIC、每用户独立 UUID + password。
   - SSH Tunnel 复用现有 sshd；允许 -L/-D/-R TCP forwarding，不允许 shell/exec/TTY/SFTP/SCP。
@@ -92,7 +109,9 @@ NoBrand-OneClick 3.1.0 — Mieru / Snell v4-v5 / Hysteria2 / TUIC v5 / VLESS + F
   - SSH Tunnel 不拥有 sshd listener、SSH firewall、host keys 或 admin authentication。
   - Port Forward: nftables 为 IPv4 kernel NAT；Realm 为 official userspace relay，可使用 IP/domain target。
   - Forward 的 Display Endpoint 仅为 metadata；xx00 对 nftables/Realm 和 TCP/UDP 均保留。
-  - PROTOCOL_FEATURE_FREEZE=${PROTOCOL_FEATURE_FREEZE}（3.1.0 后仅维护、安全、修复、导出、Doctor、UI 与兼容性改进）。
+  - Ingress 决定端口策略、展示默认值和入口身份；Linux 系统路由继续独立决定 Egress。
+  - Ingress Profile 不修改网卡、地址、路由、ip rule、sysctl、SSH 或 provider mapping。
+  - PROTOCOL_FEATURE_FREEZE=${PROTOCOL_FEATURE_FREEZE}（VLESS REALITY 是 3.2 最后一个协议功能）。
   - Mieru 官方 runtime 仍名为 mita，但它不是管理命令；管理入口只有 nobrand/nb。
   - v3 state 必须带 schema_version=3；旧 state 不读取、不导入、不删除。
   - 正式安装器: ${NOBRAND_RELEASE_INSTALLER_URL}
@@ -156,14 +175,25 @@ nb_mieru_instance_running() {
 
 # protocol|name|display endpoint|status|transport
 nb_mieru_node_rows() {
-  local auto_host instance_id name port protocol advertise_host advertise_port effective_host effective_port status
+  local instance_id name port protocol advertise_host advertise_port ingress_profile_id
+  local effective_host effective_port status
   [ -s "$MITA_USERS_STATE" ] || return 0
   command -v python3 >/dev/null 2>&1 || return 0
-  auto_host="$(public_ip 2>/dev/null || printf 'YOUR_SERVER_IP')"
-  while IFS=$'\t' read -r instance_id name port protocol advertise_host advertise_port; do
+  # Use a non-whitespace delimiter so empty custom endpoint fields keep their
+  # column positions before the trailing Profile association.
+  while IFS='|' read -r instance_id name port protocol advertise_host advertise_port ingress_profile_id; do
     [ -n "$name" ] || continue
-    effective_host="${advertise_host:-$auto_host}"
-    effective_port="${advertise_port:-$port}"
+    ingress_profile_id="${ingress_profile_id:-$NOBRAND_LEGACY_INGRESS_PROFILE_ID}"
+    if [ -n "$advertise_host" ]; then
+      effective_host="$advertise_host"
+    else
+      effective_host="$(nb_effective_advertise_host auto '' "$ingress_profile_id")"
+    fi
+    if [ -n "$advertise_port" ]; then
+      effective_port="$advertise_port"
+    else
+      effective_port="$(nb_effective_advertise_port auto '' "$port" "$ingress_profile_id")"
+    fi
     status=Stopped
     nb_mieru_instance_running "$instance_id" "$protocol" "$port" && status=Running
     if [ "$protocol" = BOTH ]; then
@@ -181,9 +211,10 @@ except Exception:
     raise SystemExit(0)
 protocol=str(state.get("protocol") or "TCP").upper()
 for user in state.get("users") or []:
-    print("\t".join(str(v or "") for v in (
+    print("|".join(str(v or "") for v in (
         user.get("instance_id"), user.get("name"), user.get("port"), protocol,
-        user.get("advertise_host"), user.get("advertise_port"))))
+        user.get("advertise_host"), user.get("advertise_port"),
+        user.get("ingress_profile_id"))))
 PY
   )
 }
@@ -197,6 +228,7 @@ nb_all_node_rows() {
       snell_node_rows
       hysteria2_node_rows
       tuic_node_rows
+      reality_node_rows
       vless_sudoku_node_rows
       ssh_tunnel_node_rows
       forward_node_rows
@@ -205,15 +237,158 @@ nb_all_node_rows() {
     snell) snell_node_rows ;;
     hy2|hysteria2) hysteria2_node_rows ;;
     tuic) tuic_node_rows ;;
-    vless-sudoku|sudoku|vless) vless_sudoku_node_rows ;;
+    vless-reality|reality) reality_node_rows ;;
+    vless-sudoku|sudoku) vless_sudoku_node_rows ;;
+    vless) reality_node_rows; vless_sudoku_node_rows ;;
     ssh|ssh-tunnel) ssh_tunnel_node_rows ;;
     forward|port-forward) forward_node_rows ;;
-    *) die "--protocol 只支持 mieru、snell、hy2、tuic、vless-sudoku、ssh、forward" ;;
+    *) die "--protocol 只支持 mieru、snell、hy2、tuic、vless-reality、vless-sudoku、ssh、forward" ;;
   esac
 }
 
+nb_owner_ingress_profile_id() {
+  local owner="$1" id
+  case "$owner" in
+    snell:*) snell_state_field "${owner#snell:}" ingress_profile_id 2>/dev/null || true ;;
+    hy2:*) hysteria2_state_field ingress_profile_id 2>/dev/null || true ;;
+    vless-sudoku:*) vless_sudoku_state_field ingress_profile_id 2>/dev/null || true ;;
+    vless-reality:*) reality_state_field "${owner#vless-reality:}" ingress_profile_id 2>/dev/null || true ;;
+    tuic:*) tuic_state_field "${owner#tuic:}" ingress_profile_id 2>/dev/null || true ;;
+    forward:*)
+      jq -r --arg id "${owner#forward:}" '.rules[]|select(.rule_id==$id)|.ingress_profile_id // empty' \
+        "$NOBRAND_FORWARD_STATE_FILE" 2>/dev/null || true
+      ;;
+    mieru:*)
+      id="${owner#mieru:}"
+      jq -r --arg id "$id" '.users[]|select((.instance_id // .name // (.port|tostring))==$id)|.ingress_profile_id // empty' \
+        "$MITA_USERS_STATE" 2>/dev/null || true
+      ;;
+  esac
+}
+
+nb_owner_state_file() {
+  case "$1" in
+    snell:*) snell_state_path "${1#snell:}" ;;
+    hy2:*) printf '%s' "$NOBRAND_HY2_STATE_FILE" ;;
+    vless-sudoku:*) printf '%s' "$NOBRAND_VLESS_STATE_FILE" ;;
+    vless-reality:*) reality_state_file "${1#vless-reality:}" ;;
+    tuic:*) tuic_state_file "${1#tuic:}" ;;
+    *) return 1 ;;
+  esac
+}
+
+nb_owner_ingress_enforcement() {
+  local owner="$1" path id
+  case "$owner" in
+    forward:*)
+      id="${owner#forward:}"
+      jq -r --arg id "$id" '.rules[]|select(.rule_id==$id)|.ingress_enforcement // "permissive"' \
+        "$NOBRAND_FORWARD_STATE_FILE" 2>/dev/null
+      ;;
+    mieru:*)
+      id="${owner#mieru:}"
+      jq -r --arg id "$id" '.users[]|select((.instance_id // .name // (.port|tostring))==$id)|.ingress_enforcement // "permissive"' \
+        "$MITA_USERS_STATE" 2>/dev/null
+      ;;
+    ssh-tunnel:*) printf not-applicable ;;
+    *) path="$(nb_owner_state_file "$owner")" && nb_ingress_state_enforcement "$path" ;;
+  esac
+}
+
+nb_owner_ingress_method() {
+  local owner="$1" path id
+  case "$owner" in
+    forward:*)
+      id="${owner#forward:}"
+      jq -r --arg id "$id" '.rules[]|select(.rule_id==$id)|.ingress_enforcement_method // "wildcard"' \
+        "$NOBRAND_FORWARD_STATE_FILE" 2>/dev/null
+      ;;
+    mieru:*)
+      id="${owner#mieru:}"
+      jq -r --arg id "$id" '.users[]|select((.instance_id // .name // (.port|tostring))==$id)|.ingress_enforcement_method // "wildcard"' \
+        "$MITA_USERS_STATE" 2>/dev/null
+      ;;
+    ssh-tunnel:*) printf system-ssh ;;
+    *) path="$(nb_owner_state_file "$owner")" && nb_ingress_state_method "$path" ;;
+  esac
+}
+
+nb_owner_ingress_local_address() {
+  local owner="$1" path id profile_id
+  profile_id="$(nb_owner_ingress_profile_id "$owner" 2>/dev/null || true)"
+  case "$owner" in
+    forward:*)
+      id="${owner#forward:}"
+      jq -r --arg id "$id" '.rules[]|select(.rule_id==$id)|.ingress_local_address // empty' \
+        "$NOBRAND_FORWARD_STATE_FILE" 2>/dev/null
+      ;;
+    mieru:*)
+      id="${owner#mieru:}"
+      jq -r --arg id "$id" '.users[]|select((.instance_id // .name // (.port|tostring))==$id)|.ingress_local_address // empty' \
+        "$MITA_USERS_STATE" 2>/dev/null
+      ;;
+    ssh-tunnel:*) return 0 ;;
+    *) path="$(nb_owner_state_file "$owner")" && nb_ingress_state_local_address "$path" "$profile_id" ;;
+  esac
+}
+
+nb_owner_enabled() {
+  local owner="$1" path id
+  case "$owner" in
+    forward:*) id="${owner#forward:}"; jq -r --arg id "$id" '.rules[]|select(.rule_id==$id)|.enabled' "$NOBRAND_FORWARD_STATE_FILE" 2>/dev/null ;;
+    mieru:*) id="${owner#mieru:}"; jq -r --arg id "$id" '.users[]|select((.instance_id // .name // (.port|tostring))==$id)|.enabled' "$MITA_USERS_STATE" 2>/dev/null ;;
+    ssh-tunnel:*) printf true ;;
+    *) path="$(nb_owner_state_file "$owner")" && jq -r '.enabled // true' "$path" 2>/dev/null ;;
+  esac
+}
+
+nb_node_detail_rows() {
+  local filter owner transport port advertise_host advertise_port profile_id display_host display_port enforcement method address actual
+  filter="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
+  while IFS='|' read -r owner transport port advertise_host advertise_port; do
+    [ -n "$owner" ] || continue
+    case "$filter:$owner" in
+      :*|all:*|mieru:mieru:*|snell:snell:*|hy2:hy2:*|hysteria2:hy2:*|tuic:tuic:*|vless-reality:vless-reality:*|reality:vless-reality:*|vless-sudoku:vless-sudoku:*|sudoku:vless-sudoku:*|vless:vless-*|forward:forward:*|port-forward:forward:*) ;;
+      *) continue ;;
+    esac
+    profile_id="$(nb_owner_ingress_profile_id "$owner")"
+    [ -n "$profile_id" ] || profile_id="$NOBRAND_LEGACY_INGRESS_PROFILE_ID"
+    if [ -n "$advertise_host" ]; then
+      display_host="$advertise_host"
+    else
+      display_host="$(nb_effective_advertise_host auto '' "$profile_id")"
+    fi
+    if [ -n "$advertise_port" ]; then
+      display_port="$advertise_port"
+    else
+      display_port="$(nb_effective_advertise_port auto '' "$port" "$profile_id")"
+    fi
+    enforcement="$(nb_owner_ingress_enforcement "$owner" 2>/dev/null || printf permissive)"
+    method="$(nb_owner_ingress_method "$owner" 2>/dev/null || printf wildcard)"
+    address="$(nb_owner_ingress_local_address "$owner" 2>/dev/null || true)"
+    case "$enforcement:$method" in
+      strict:native-bind|strict:address-match) actual="${address}:${port}/${transport}" ;;
+      strict:firewall) actual="*:${port}/${transport} (firewall restricted to ${address})" ;;
+      *) actual="*:${port}/${transport}" ;;
+    esac
+    printf '%s|%s|%s:%s|%s|%s (%s)\n' "$owner" "$actual" "$display_host" "$display_port" \
+      "$(nb_ingress_profile_name "$profile_id")" "$enforcement" "$method"
+  done < <(nb_registry_rows)
+  if { [ -z "$filter" ] || [ "$filter" = all ] || [ "$filter" = ssh ] || [ "$filter" = ssh-tunnel ]; } \
+     && ssh_tunnel_state_exists; then
+    profile_id="$(ssh_tunnel_state_field ingress_profile_id 2>/dev/null || true)"
+    [ -n "$profile_id" ] || profile_id="$NOBRAND_LEGACY_INGRESS_PROFILE_ID"
+    while IFS= read -r owner; do
+      [ -n "$owner" ] || continue
+      printf 'ssh-tunnel:%s|*:%s/TCP (system sshd)|%s:%s|%s|Not applicable (system sshd)\n' "$owner" \
+        "$(ssh_tunnel_state_field real_port)" "$(ssh_tunnel_effective_host)" \
+        "$(ssh_tunnel_state_field advertise_port)" "$(nb_ingress_profile_name "$profile_id")"
+    done < <(jq -r '.users[]?.display_name' "$NOBRAND_SSH_STATE_FILE")
+  fi
+}
+
 nobrand_nodes() {
-  local rows protocol name endpoint status transport
+  local rows details protocol name endpoint status transport owner actual display ingress enforcement
   rows="$(nb_all_node_rows "${NOBRAND_PROTOCOL_FILTER:-}")"
   nobrand_print_banner
   msg ""
@@ -228,6 +403,16 @@ nobrand_nodes() {
     [ -n "$protocol" ] || continue
     printf '%-17s %-17s %-40s %s\n' "$protocol" "$name" "$endpoint" "$status"
   done <<<"$rows"
+  details="$(nb_node_detail_rows "${NOBRAND_PROTOCOL_FILTER:-}")"
+  if [ -n "$details" ]; then
+    msg ''
+    t 'Actual / Display / Ingress Profile（展示修改不影响监听）' \
+      'Actual / Display / Ingress Profile (display changes do not affect listeners)'
+    while IFS='|' read -r owner actual display ingress enforcement; do
+      printf '%s\n  Actual: %s\n  Display: %s\n  Ingress: %s\n  Enforcement: %s\n' \
+        "$owner" "$actual" "$display" "$ingress" "$enforcement"
+    done <<<"$details"
+  fi
 }
 
 nobrand_status() {
@@ -235,7 +420,9 @@ nobrand_status() {
   local mieru_total=0 mieru_running=0 snell_total=0 snell_running=0 hy2_total=0 hy2_running=0
   local tuic_total=0 tuic_running=0 ssh_total=0 ssh_ready=0
   local forward_nft_total=0 forward_nft_healthy=0 forward_realm_total=0 forward_realm_healthy=0
-  local vless_total=0 vless_running=0 vless_port=""
+  local vless_total=0 vless_running=0 vless_port="" reality_total=0 reality_running=0
+  local ingress_id ingress_name ingress_type
+  local ingress_interface ingress_address ingress_policy ingress_host ingress_range
   rows="$(nb_all_node_rows)"
   while IFS='|' read -r protocol _name _endpoint status _transport; do
     case "$protocol" in
@@ -255,6 +442,10 @@ nobrand_status() {
         [ "$status" != Running ] || vless_running=$((vless_running + 1))
         vless_port="$(vless_sudoku_state_field listen_port 2>/dev/null || true)"
         ;;
+      'VLESS REALITY')
+        reality_total=$((reality_total + 1))
+        [ "$status" != Running ] || reality_running=$((reality_running + 1))
+        ;;
     esac
   done <<<"$rows"
   nobrand_print_banner
@@ -270,10 +461,25 @@ nobrand_status() {
     "$([ "$vless_total" -gt 0 ] && printf yes || printf no)" \
     "$([ "$vless_running" -gt 0 ] && printf yes || printf no)" \
     "${vless_port:--}"
+  printf 'VLESS REALITY\n  Instances: %s\n  Running: %s/%s\n' \
+    "$reality_total" "$reality_running" "$reality_total"
   printf 'SSH Tunnel\n  Users: %s\n  Ready: %s/%s\n  Listener ownership: external sshd\n' \
     "$ssh_total" "$ssh_ready" "$ssh_total"
   printf 'Port Forward\n  nftables: %s/%s healthy\n  Realm: %s/%s healthy\n' \
     "$forward_nft_healthy" "$forward_nft_total" "$forward_realm_healthy" "$forward_realm_total"
+  msg 'Ingress'
+  printf '  Default Profile: %s\n  Explicit profiles: %s\n' \
+    "$(nb_ingress_profile_name "$(nb_ingress_default_profile_id 2>/dev/null || true)")" \
+    "$([ -s "$NOBRAND_INGRESS_STATE_FILE" ] && jq '.profiles|length' "$NOBRAND_INGRESS_STATE_FILE" 2>/dev/null || printf 0)"
+  if nb_ingress_state_valid; then
+    while IFS=$'\t' read -r ingress_id ingress_name ingress_type ingress_interface ingress_address ingress_policy ingress_host; do
+      ingress_range="$(nb_ingress_profile_auto_range "$ingress_id" 2>/dev/null | tr '|' '-' || printf manual)"
+      printf '  %s: %s %s/%s, %s (%s), display=%s\n' \
+        "$ingress_name" "$ingress_type" "$ingress_interface" "$ingress_address" \
+        "$ingress_policy" "$ingress_range" "${ingress_host:--}"
+    done < <(jq -r '.profiles[]|[.profile_id,.name,.type,.interface,.local_address,.port_policy,.display_host_default]|@tsv' \
+      "$NOBRAND_INGRESS_STATE_FILE")
+  fi
 }
 
 nb_doctor_line() {
@@ -326,6 +532,9 @@ nobrand_doctor() {
   msg ''
   msg 'Common Core'
   nobrand_doctor_common || failed=1
+  msg ''
+  msg 'Ingress (read-only; does not verify provider mapping)'
+  nb_ingress_doctor || failed=1
   if mita_installed 2>/dev/null || [ -s "$MITA_USERS_STATE" ]; then
     msg ''
     msg 'Mieru'
@@ -343,6 +552,9 @@ nobrand_doctor() {
   msg ''
   msg 'VLESS + FinalMask + Sudoku (TCP)'
   vless_sudoku_doctor || failed=1
+  msg ''
+  msg 'VLESS + TCP + REALITY + XTLS Vision'
+  reality_doctor_all || failed=1
   msg ''
   msg 'SSH Tunnel (existing OpenSSH)'
   ssh_tunnel_doctor || failed=1
@@ -436,7 +648,8 @@ nobrand_restore_protocol_runtimes() {
     esac
   done < <(snell_instance_ids)
   if [ "$need_snell4" -eq 1 ] || [ "$need_snell5" -eq 1 ] \
-     || hysteria2_state_exists || vless_sudoku_state_exists; then
+     || hysteria2_state_exists || vless_sudoku_state_exists \
+     || [ -n "$(reality_instance_ids)" ]; then
     nobrand_prepare_common || return 1
   fi
   [ "$need_snell4" -eq 0 ] || snell_install_runtime 4 0 || return 1
@@ -449,7 +662,7 @@ nobrand_restore_protocol_runtimes() {
     done < <(snell_instance_ids)
   fi
 
-  if hysteria2_state_exists || vless_sudoku_state_exists; then
+  if hysteria2_state_exists || vless_sudoku_state_exists || [ -n "$(reality_instance_ids)" ]; then
     nobrand_install_xray_runtime 0 || return 1
     nobrand_xray_validate_managed_configs || return 1
   fi
@@ -459,6 +672,7 @@ nobrand_restore_protocol_runtimes() {
   if vless_sudoku_state_exists; then
     nobrand_write_vless_sudoku_service || return 1
   fi
+  reality_restore_runtime || return 1
   tuic_restore_runtime || return 1
   forward_realm_restore_runtime || return 1
 }
@@ -475,7 +689,7 @@ nobrand_fresh_restore_runtime_preflight() {
     "$NOBRAND_LIB_DIR" \
     "$MITA_INSTANCE_SYSTEMD_TEMPLATE" "$MITA_INSTANCE_TMPFILES" \
     "$NOBRAND_SNELL_SYSTEMD_TEMPLATE" "$NOBRAND_HY2_SYSTEMD_SERVICE" \
-    "$NOBRAND_VLESS_SYSTEMD_SERVICE" "$NOBRAND_TUIC_SYSTEMD_TEMPLATE" \
+    "$NOBRAND_VLESS_SYSTEMD_SERVICE" "$NOBRAND_REALITY_SYSTEMD_TEMPLATE" "$NOBRAND_TUIC_SYSTEMD_TEMPLATE" \
     "$NOBRAND_REALM_SYSTEMD_SERVICE"; do
     [ ! -e "$path" ] && [ ! -L "$path" ] || return 1
   done
@@ -522,6 +736,8 @@ nobrand_remove_fresh_restore_protocol_resources() {
     ! _has_user mita || failed=1
     ! _has_group mita || failed=1
   fi
+  nb_strict_firewall_clear_all >/dev/null 2>&1 || failed=1
+  rm -f "$NOBRAND_INGRESS_FIREWALL_STATE_FILE" "$NOBRAND_INGRESS_FIREWALL_RULESET"
 
   while IFS= read -r id; do
     [ -n "$id" ] || continue
@@ -542,7 +758,14 @@ nobrand_remove_fresh_restore_protocol_resources() {
     nobrand_remove_vless_sudoku_service >/dev/null 2>&1 || failed=1
     [ -z "$port" ] || nb_firewall_close_pairs "TCP|${port}" >/dev/null 2>&1 || failed=1
   fi
-  rm -f "$NOBRAND_XRAY_BIN" || failed=1
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    port="$(reality_state_field "$id" listen_port 2>/dev/null || true)"
+    reality_remove_service "$id" >/dev/null 2>&1 || failed=1
+    [ -z "$port" ] || nb_firewall_close_pairs "TCP|${port}" >/dev/null 2>&1 || failed=1
+  done < <(reality_instance_ids)
+  reality_remove_service_runtime_if_owned || failed=1
+  nobrand_remove_xray_runtime_files || failed=1
   [ "$(nb_service_manager)" != systemd ] || systemctl daemon-reload >/dev/null 2>&1 || failed=1
   rmdir "$NOBRAND_BIN_DIR" "$NOBRAND_LIB_DIR" 2>/dev/null || true
   return "$failed"
@@ -571,6 +794,14 @@ nobrand_backup_restore() {
   if [ -s "$stage/state/forward/state.json" ]; then
     forward_state_valid "$stage/state/forward/state.json" \
       || { rm -rf -- "$stage"; die 'Port Forward restore state 无效'; }
+  fi
+  if [ -s "$stage/state/ingress.json" ]; then
+    nb_ingress_state_valid "$stage/state/ingress.json" \
+      || { rm -rf -- "$stage"; die 'Ingress profile restore state 无效'; }
+  fi
+  if [ -s "$stage/state/ingress-firewall.json" ]; then
+    nb_strict_firewall_state_valid "$stage/state/ingress-firewall.json" \
+      || { rm -rf -- "$stage"; die 'Strict-ingress firewall restore state 无效'; }
   fi
   find "$stage/state" "$stage/config" -type f -name '*.json' -print0 2>/dev/null \
     | while IFS= read -r -d '' file; do jq empty "$file" >/dev/null || exit 1; done \
@@ -747,8 +978,8 @@ nobrand_uninstall() {
   ensure_manager_state_layout 0
   nb_schema_v3_file_valid || die '未检测到有效的 NoBrand schema v3 state，拒绝卸载未知资源'
   if [ "${YES:-0}" -ne 1 ]; then
-    confirm '确认完整卸载 NoBrand 3 管理的 Mieru/Snell/HY2/TUIC/VLESS/SSH Tunnel/Forward/Common？[y/N]: ' \
-      'Completely uninstall NoBrand-3-managed Mieru/Snell/HY2/TUIC/VLESS/SSH Tunnel/Forward/Common resources? [y/N]: ' \
+    confirm '确认完整卸载 NoBrand 3 管理的 Mieru/Snell/HY2/TUIC/VLESS REALITY/VLESS Sudoku/SSH Tunnel/Forward/Common？[y/N]: ' \
+      'Completely uninstall NoBrand-3-managed Mieru/Snell/HY2/TUIC/VLESS REALITY/VLESS Sudoku/SSH Tunnel/Forward/Common resources? [y/N]: ' \
       n \
       || { t '已取消' 'Cancelled'; return 0; }
   fi
@@ -795,6 +1026,12 @@ nobrand_uninstall() {
   fi
   while IFS= read -r id; do
     [ -n "$id" ] || continue
+    port="$(reality_state_field "$id" listen_port 2>/dev/null || true)"
+    reality_remove_service "$id" || failed=1
+    [ -z "$port" ] || nb_firewall_close_pairs "TCP|${port}" || failed=1
+  done < <(reality_instance_ids)
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
     port="$(tuic_state_field "$id" listen_port 2>/dev/null || true)"
     tuic_remove_service "$id" || failed=1
     [ -z "$port" ] || nb_firewall_close_pairs "UDP|${port}" || failed=1
@@ -819,6 +1056,7 @@ nobrand_uninstall() {
   case "$NOBRAND_TUIC_SYSTEMD_TEMPLATE" in
     /etc/systemd/system/nobrand-tuic@.service) rm -f "$NOBRAND_TUIC_SYSTEMD_TEMPLATE" ;;
   esac
+  reality_remove_service_runtime_if_owned || failed=1
   [ "$(nb_service_manager)" != systemd ] || systemctl daemon-reload 2>/dev/null || true
   admin_lock_release
 
@@ -828,6 +1066,8 @@ nobrand_uninstall() {
     do_uninstall || { YES="$saved_yes"; return 1; }
     YES="$saved_yes"
   fi
+  nb_strict_firewall_clear_all || return 1
+  rm -f "$NOBRAND_INGRESS_FIREWALL_STATE_FILE" "$NOBRAND_INGRESS_FIREWALL_RULESET"
 
   # State/config/lib roots are exact, validated NoBrand roots. Command removal
   # deliberately happens only after every protocol/resource cleanup succeeds.
@@ -839,8 +1079,8 @@ nobrand_uninstall() {
   nobrand_remove_owned_command "$NOBRAND_COMMAND_PATH" || failed=1
   nobrand_remove_owned_command "$NOBRAND_INSTALL_SCRIPT_PATH" || failed=1
   [ "$failed" -eq 0 ] || return 1
-  t 'NoBrand 3 的 Mieru/Snell/HY2/TUIC/VLESS/SSH Tunnel/Forward/Common 资源与 nobrand/nb 已完整删除；外部资源未触碰' \
-    'NoBrand 3 Mieru/Snell/HY2/TUIC/VLESS/SSH Tunnel/Forward/Common resources and nobrand/nb were removed; external resources were untouched'
+  t 'NoBrand 3 的 Mieru/Snell/HY2/TUIC/VLESS REALITY/VLESS Sudoku/SSH Tunnel/Forward/Common 资源与 nobrand/nb 已完整删除；外部资源未触碰' \
+    'NoBrand 3 Mieru/Snell/HY2/TUIC/VLESS REALITY/VLESS Sudoku/SSH Tunnel/Forward/Common resources and nobrand/nb were removed; external resources were untouched'
 }
 
 nobrand_stop_all_services() {
@@ -855,6 +1095,10 @@ nobrand_stop_all_services() {
     && nobrand_vless_sudoku_service_action stop >/dev/null 2>&1 || true
   while IFS= read -r id; do
     [ -n "$id" ] || continue
+    reality_service_action "$id" stop >/dev/null 2>&1 || true
+  done < <(reality_instance_ids)
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
     tuic_service_action "$id" stop >/dev/null 2>&1 || true
   done < <(tuic_instance_ids)
   forward_realm_service_action stop >/dev/null 2>&1 || true
@@ -862,6 +1106,7 @@ nobrand_stop_all_services() {
 
 nobrand_start_enabled_services() {
   local id enabled port pairs failed=0
+  nb_strict_firewall_restore_authoritative >/dev/null 2>&1 || failed=1
   if users_state_exists && [ "$(users_count)" -gt 0 ]; then
     if load_install_state \
        && reconcile_isolated_instances >/dev/null 2>&1 \
@@ -889,14 +1134,27 @@ nobrand_start_enabled_services() {
      && [ "$(hysteria2_state_field enabled 2>/dev/null || printf false)" = true ]; then
     port="$(hysteria2_state_field listen_port)"
     nobrand_hy2_service_action start >/dev/null 2>&1 \
-      && nb_wait_for_listener UDP "$port" 25 || failed=1
+      && hysteria2_running || failed=1
   fi
   if vless_sudoku_state_exists \
      && [ "$(vless_sudoku_state_field enabled 2>/dev/null || printf false)" = true ]; then
     port="$(vless_sudoku_state_field listen_port)"
     nobrand_vless_sudoku_service_action start >/dev/null 2>&1 \
-      && nb_wait_for_listener TCP "$port" 25 || failed=1
+      && vless_sudoku_running || failed=1
   fi
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    enabled="$(reality_state_field "$id" enabled 2>/dev/null || printf false)"
+    [ "$enabled" = true ] || continue
+    port="$(reality_state_field "$id" listen_port)"
+    reality_install_service_runtime >/dev/null 2>&1 \
+      && reality_ensure_openrc_service "$id" >/dev/null 2>&1 \
+      && reality_config_matches_state "$id" \
+      && nobrand_xray_test_config "$(reality_config_file "$id")" \
+      && nb_firewall_open_pairs "TCP|${port}" >/dev/null 2>&1 \
+      && reality_service_action "$id" start >/dev/null 2>&1 \
+      && reality_running "$id" || failed=1
+  done < <(reality_instance_ids)
   while IFS= read -r id; do
     [ -n "$id" ] || continue
     enabled="$(tuic_state_field "$id" enabled 2>/dev/null || printf false)"
@@ -907,8 +1165,7 @@ nobrand_start_enabled_services() {
       && tuic_validate_config "$(tuic_config_file "$id")" \
       && nb_firewall_open_pairs "UDP|${port}" >/dev/null 2>&1 \
       && tuic_service_action "$id" start >/dev/null 2>&1 \
-      && nb_wait_for_listener UDP "$port" 25 \
-      && tuic_listener_owned_by_service "$id" "$port" || failed=1
+      && tuic_running "$id" || failed=1
   done < <(tuic_instance_ids)
   if [ -s "$NOBRAND_FORWARD_STATE_FILE" ]; then
     forward_realm_restore_runtime >/dev/null 2>&1 \

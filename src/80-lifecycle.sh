@@ -1,10 +1,19 @@
+mieru_prepare_noninteractive_ingress_endpoint() {
+  # Resolve the explicit/default Profile before enforcing the unattended
+  # Display Endpoint guard.  A first-class Profile with a stable display host
+  # is sufficient input; legacy-default-route still requires an explicit
+  # endpoint or --advertise-auto.
+  nb_prepare_ingress_request || return 1
+  nb_require_explicit_endpoint_noninteractive
+}
+
 do_install() {
   require_root
   require_linux
   require_cmd curl
   ensure_manager_state_layout 1
 
-  local pm arch ver url tmp tx reinstall_existing=0 managed_existing=0
+  local pm arch ver url tmp tx runtime_tx reinstall_existing=0 managed_existing=0
   pm="$(detect_pkg_manager)"
   arch="$(detect_arch)"
   ensure_management_dependencies "$pm"
@@ -51,9 +60,7 @@ do_install() {
   if [ "$reinstall_existing" -eq 1 ]; then
     ensure_config_noninteractive
   elif [ "$YES" -eq 1 ]; then
-    [ "${ADVERTISE_CLI:-0}" -eq 1 ] || die "$(t \
-      '非交互安装必须显式提供 --advertise-host/--advertise-port，或用 --advertise-auto 确认自动入口。' \
-      'Non-interactive install requires --advertise-host/--advertise-port, or --advertise-auto to explicitly confirm automatic endpoint selection.')"
+    mieru_prepare_noninteractive_ingress_endpoint || return 1
     ensure_config_noninteractive
   else
     collect_config_interactive
@@ -65,12 +72,25 @@ do_install() {
     ensure_install_port_available
   fi
 
-  ver="$(target_mieru_version)"
-  url="$(package_url "$ver" "$pm" "$arch")"
+  mieru_resolve_runtime "${MIERU_CHANNEL:-stable}" "${MIERU_VERSION:-}" "$pm" "$arch" \
+    || die "$(t '无法解析并验证官方 Mieru release' \
+      'Failed to resolve and validate the official Mieru release')"
+  ver="$MIERU_RUNTIME_RESOLVED_VERSION"
+  url="$MIERU_RUNTIME_RESOLVED_URL"
   tmp="$(mktemp_file)"
-  download_package "$url" "$tmp"
-  install_package "$tmp" "$pm"
+  download_package "$url" "$tmp" \
+    "$MIERU_RUNTIME_RESOLVED_SHA256" \
+    "$MIERU_RUNTIME_RESOLVED_CHECKSUM_URL"
+  runtime_tx="$(mieru_runtime_snapshot)" || { rm -f "$tmp"; return 1; }
+  if ! ( install_package "$tmp" "$pm" ) || ! mieru_assert_runtime_version "$ver"; then
+    rm -f "$tmp"
+    mieru_runtime_rollback "$runtime_tx" 2>/dev/null || true
+    die "$(t 'Mieru runtime 安装验证失败，已恢复原有 managed runtime' \
+      'Mieru runtime installation validation failed; the previous managed runtime was restored')"
+    return 1
+  fi
   rm -f "$tmp"
+  mieru_runtime_commit "$runtime_tx" || return 1
   MIERU_VERSION="$ver"
 
   add_op_user "$OP_USER"
@@ -384,6 +404,18 @@ json.dump(d, open(path, "w"), indent=2)
   print_summary current
 }
 
+mieru_upgrade_rollback() {
+  local runtime_tx="$1" users_tx="$2" old_channel="$3" old_version="$4" rc=0
+  MIERU_CHANNEL="$old_channel"
+  MIERU_VERSION="$old_version"
+  mieru_runtime_rollback "$runtime_tx" || rc=1
+  users_tx_rollback "$users_tx" 0
+  isolated_stop_all 2>/dev/null || true
+  reconcile_isolated_instances 2>/dev/null || rc=1
+  verify_mita_running 2>/dev/null || rc=1
+  return "$rc"
+}
+
 do_upgrade() {
   require_root
   require_linux
@@ -392,7 +424,7 @@ do_upgrade() {
     'mita is not installed; perform a fresh install first')"
   mita_v3_install_state_valid || die "$(t 'schema v3 Mieru 安装状态缺失或损坏，拒绝升级' \
     'Schema-v3 Mieru install state is missing or invalid; refusing upgrade')"
-  local pm arch ver url tmp tx
+  local pm arch ver url tmp tx runtime_tx cur state_channel state_version
   local requested_channel="$MIERU_CHANNEL" requested_version="$MIERU_VERSION"
   local requested_channel_cli="${MIERU_CHANNEL_CLI:-0}" requested_version_cli="${MIERU_VERSION_CLI:-0}"
   pm="$(detect_pkg_manager)"
@@ -400,6 +432,8 @@ do_upgrade() {
   ensure_management_dependencies "$pm"
   MIERU_CHANNEL_CLI=0 MIERU_VERSION_CLI=0
   load_install_state
+  state_channel="$MIERU_CHANNEL"
+  state_version="$MIERU_VERSION"
   users_isolated_mode || die "$(t 'schema v3 Mieru 状态必须使用 isolated-v2' \
     'Schema-v3 Mieru state must use isolated-v2')"
   [ "$(users_count 2>/dev/null || printf 0)" -gt 0 ] \
@@ -412,8 +446,10 @@ do_upgrade() {
   if [ "$MIERU_VERSION_CLI" -eq 1 ]; then
     MIERU_VERSION="$requested_version"
   fi
-  ver="$(target_mieru_version)"
-  local cur
+  mieru_resolve_runtime "${MIERU_CHANNEL:-stable}" "${MIERU_VERSION:-}" "$pm" "$arch" \
+    || die "$(t '无法解析并验证官方 Mieru release' \
+      'Failed to resolve and validate the official Mieru release')"
+  ver="$MIERU_RUNTIME_RESOLVED_VERSION"
   cur="$(installed_version || true)"
   if version_is_current "$cur" "$ver"; then
     MIERU_VERSION="$ver"
@@ -435,24 +471,59 @@ do_upgrade() {
     [ "${MENU_MODE:-0}" -eq 1 ] && return 0
     exit 0
   fi
-  url="$(package_url "$ver" "$pm" "$arch")"
+  if [ "${YES:-0}" -ne 1 ] && [ -t 0 ]; then
+    t "已安装: ${cur:-unknown}" "Installed: ${cur:-unknown}"
+    t "最新稳定版: ${ver}" "Latest stable: ${ver}"
+    if ! confirm '升级？[Y/n]: ' 'Upgrade? [Y/n]: ' y; then
+      [ "${MENU_MODE:-0}" -eq 1 ] && return 0
+      exit 0
+    fi
+  fi
+  url="$MIERU_RUNTIME_RESOLVED_URL"
   tmp="$(mktemp_file)"
-  download_package "$url" "$tmp"
-  install_package "$tmp" "$pm"
+  download_package "$url" "$tmp" \
+    "$MIERU_RUNTIME_RESOLVED_SHA256" \
+    "$MIERU_RUNTIME_RESOLVED_CHECKSUM_URL"
+  install_self_script
+  admin_lock_acquire || { rm -f "$tmp"; return 1; }
+  runtime_tx="$(mieru_runtime_snapshot)" \
+    || { rm -f "$tmp"; admin_lock_release; return 1; }
+  tx="$(users_tx_snapshot)" || {
+    rm -f "$tmp"
+    mieru_runtime_commit "$runtime_tx" 2>/dev/null || true
+    admin_lock_release
+    return 1
+  }
+  if ! ( install_package "$tmp" "$pm" ) || ! mieru_assert_runtime_version "$ver"; then
+    rm -f "$tmp"
+    mieru_upgrade_rollback "$runtime_tx" "$tx" "$state_channel" "$state_version" \
+      || warn "$(t 'Mieru runtime 回滚后服务恢复不完整，请立即运行 doctor' \
+        'Mieru services were not fully restored after runtime rollback; run doctor immediately')"
+    admin_lock_release
+    die "$(t 'Mieru runtime 升级验证失败，已恢复旧 runtime 与节点状态' \
+      'Mieru runtime upgrade validation failed; the old runtime and node state were restored')"
+    return 1
+  fi
   rm -f "$tmp"
   MIERU_VERSION="$ver"
-  install_self_script
-  admin_lock_acquire || return 1
-  tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
   isolated_stop_all
-  if ! apply_users_config "$tx"; then
+  if ! ( apply_users_config "$tx" ) \
+     || ! verify_mita_running \
+     || { [ ! -f "$MITA_STATE" ] || ! save_install_state; }; then
+    mieru_upgrade_rollback "$runtime_tx" "$tx" "$state_channel" "$state_version" \
+      || warn "$(t 'Mieru runtime 回滚后服务恢复不完整，请立即运行 doctor' \
+        'Mieru services were not fully restored after runtime rollback; run doctor immediately')"
     admin_lock_release
+    die "$(t 'Mieru 升级应用失败，已恢复旧 runtime、服务与状态' \
+      'Mieru upgrade application failed; the old runtime, services, and state were restored')"
     return 1
   fi
   users_tx_commit "$tx"
+  mieru_runtime_commit "$runtime_tx" || {
+    admin_lock_release
+    return 1
+  }
   admin_lock_release
-  verify_mita_running
-  [ -f "$MITA_STATE" ] && save_install_state
   t "已升级至 ${ver}（$(mieru_channel_label)）" \
     "Upgraded to ${ver} ($(mieru_channel_label))"
 }
@@ -594,6 +665,18 @@ verify_mita_uninstalled() {
       failed=1
     fi
   done
+  if [ -e "$NOBRAND_INGRESS_FIREWALL_STATE_FILE" ]; then
+    if ! nb_strict_firewall_state_valid "$NOBRAND_INGRESS_FIREWALL_STATE_FILE"; then
+      warn "$(t '卸载验收失败: Strict Ingress 防火墙状态无效' \
+        'Uninstall verification failed: Strict Ingress firewall state is invalid')"
+      failed=1
+    elif jq -e 'any(.rules[]; .owner | startswith("mieru:"))' \
+      "$NOBRAND_INGRESS_FIREWALL_STATE_FILE" >/dev/null; then
+      warn "$(t '卸载残留: Strict Ingress 中仍有 Mieru 所有者规则' \
+        'Uninstall residue: Strict Ingress still contains Mieru-owned rules')"
+      failed=1
+    fi
+  fi
   [ "$failed" -eq 0 ]
 }
 
@@ -641,6 +724,8 @@ do_uninstall() {
   stop_mita_for_uninstall
   STAGE="清理防火墙规则"
   firewall_clear_all_owned
+  STAGE="清理 Strict Ingress 防火墙规则"
+  mieru_clear_strict_firewall
   STAGE="卸载 mita 软件包"
   if [ "$UNINSTALL_PRESERVE_PACKAGE" -eq 0 ]; then
     case "$pm" in

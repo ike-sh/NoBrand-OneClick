@@ -142,13 +142,21 @@ forward_realm_options_valid_json() {
 }
 
 forward_port_allowed() {
-  local port="${1:-}" protocol transport ignore_owner="${3:-}"
+  local port="${1:-}" protocol transport ignore_owner="${3:-}" profile_id="${4:-${INGRESS_PROFILE_ID:-$NOBRAND_LEGACY_INGRESS_PROFILE_ID}}"
   protocol="$(forward_normalize_protocol "${2:-}")" || return 1
   nb_valid_port "$port" || return 1
-  nb_port_is_tail_base_reserved "$port" && return 1
+  nb_ingress_port_is_reserved "$profile_id" "$port" && return 1
   while IFS= read -r transport; do
-    nb_port_available_for_transport "$port" "$transport" "$ignore_owner" || return 1
+    nb_port_available_for_profile "$port" "$transport" "$profile_id" "$ignore_owner" || return 1
   done < <(forward_protocol_transports "$protocol")
+}
+
+forward_select_available_port() {
+  local protocol="$1" profile_id="$2" bounds lo hi selected
+  bounds="$(nb_ingress_profile_auto_range "$profile_id" 2>/dev/null)" || return 1
+  lo="${bounds%%|*}"; hi="${bounds#*|}"
+  selected="$(nb_scan_port_span "$lo" "$hi" forward_port_allowed "$protocol" '' "$profile_id")" || return 1
+  printf '%s' "$selected"
 }
 
 forward_init_state() {
@@ -174,9 +182,21 @@ forward_state_valid() {
     .schema_version==3 and .ownership=="nobrand-v3" and .feature=="port-forward" and
     (.rules|type)=="array" and
     all(.rules[];
-      (keys|sort)==["backend","backend_options","created_at","display_host","display_mode",
+      ((keys-["ingress_profile_id","ingress_enforcement","ingress_enforcement_method","ingress_local_address"]|sort)==["backend","backend_options","created_at","display_host","display_mode",
                     "display_port","enabled","listen_host","listen_port","name","note",
-                    "ownership_metadata","protocol","rule_id","target_host","target_port","updated_at"] and
+                    "ownership_metadata","protocol","rule_id","target_host","target_port","updated_at"]) and
+      ((has("ingress_profile_id")|not) or (.ingress_profile_id|type=="string" and length>0)) and
+      ((has("ingress_enforcement")|not) or
+        (.ingress_enforcement=="permissive" or .ingress_enforcement=="strict")) and
+      ((has("ingress_enforcement_method")|not) or
+        (.ingress_enforcement_method=="wildcard" or .ingress_enforcement_method=="native-bind" or
+         .ingress_enforcement_method=="address-match")) and
+      ((has("ingress_local_address")|not) or (.ingress_local_address|type=="string")) and
+      (if (.ingress_enforcement // "permissive")=="strict" then
+         (.ingress_local_address|type=="string" and length>0) and .listen_host==.ingress_local_address and
+         (if .backend=="nftables" then .ingress_enforcement_method=="address-match"
+          else .ingress_enforcement_method=="native-bind" end)
+       else (.ingress_enforcement_method // "wildcard")=="wildcard" end) and
       (.rule_id|type)=="string" and (.rule_id|test("^f[0-9a-f]{16}$")) and
       (.name|type)=="string" and (.name|length)>0 and (.name|length)<=64 and
         (.name|test("[[:cntrl:]]")|not) and
@@ -642,6 +662,20 @@ forward_nft_rule_owned() {
   grep -F "nobrand:${id}:dnat:" <<<"$listing" >/dev/null
 }
 
+forward_nft_rule_ingress_owned() {
+  local id="$1" rule listing enforcement address
+  rule="$(forward_rule_json "$NOBRAND_FORWARD_STATE_FILE" "$id")" || return 1
+  [ -n "$rule" ] || return 1
+  forward_nft_rule_owned "$id" || return 1
+  enforcement="$(jq -r '.ingress_enforcement // "permissive"' <<<"$rule")"
+  [ "$enforcement" = strict ] || return 0
+  address="$(jq -r '.ingress_local_address // empty' <<<"$rule")"
+  [ -n "$address" ] || return 1
+  listing="$(nft list table "$NOBRAND_FORWARD_NFT_FAMILY" "$NOBRAND_FORWARD_NFT_TABLE" 2>/dev/null)" \
+    || return 1
+  grep -Fq "ip daddr ${address}" <<<"$listing"
+}
+
 forward_apply_nft_state() {
   local state="$1" candidate batch count
   count="$(jq '[.rules[]|select(.enabled and .backend=="nftables")]|length' "$state")" || return 1
@@ -912,18 +946,22 @@ forward_realm_service_action() {
 }
 
 forward_realm_listener_owned() {
-  local state="$1" pid protocol port transport found
+  local state="$1" pid protocol port transport found listen_host enforcement
   pid="$(forward_realm_service_pid 2>/dev/null || true)"
   [[ "$pid" =~ ^[0-9]+$ ]] && [ "$pid" -gt 1 ] || return 1
-  while IFS=$'\t' read -r protocol port; do
+  while IFS=$'\t' read -r protocol port listen_host enforcement; do
     while IFS= read -r transport; do
       found=0
       while IFS= read -r listener_pid; do
         [ "$listener_pid" != "$pid" ] || found=1
       done < <(nb_port_listener_pids "$transport" "$port")
       [ "$found" -eq 1 ] || return 1
+      if [ "$enforcement" = strict ]; then
+        nb_listener_has_local_address "$transport" "$port" "$listen_host" || return 1
+      fi
     done < <(forward_protocol_transports "$protocol")
-  done < <(jq -r '.rules[]|select(.enabled and .backend=="realm")|[.protocol,(.listen_port|tostring)]|@tsv' "$state")
+  done < <(jq -r '.rules[]|select(.enabled and .backend=="realm")|
+    [.protocol,(.listen_port|tostring),.listen_host,(.ingress_enforcement // "permissive")]|@tsv' "$state")
 }
 
 forward_realm_probe_config() {
@@ -990,10 +1028,12 @@ forward_realm_apply_state() {
     && forward_generate_realm_probe_config "$state" "$probe" \
     && forward_realm_probe_config "$probe" \
     || { rm -f "$candidate" "$probe"; return 1; }
-  nb_atomic_install_file "$candidate" "$NOBRAND_FORWARD_REALM_CONFIG" 0600 \
+  [ "${NOBRAND_TEST_INGRESS_SERVICE_FAIL:-0}" -eq 0 ] \
+    && nb_atomic_install_file "$candidate" "$NOBRAND_FORWARD_REALM_CONFIG" 0600 \
     && forward_realm_install_service \
     && forward_realm_service_action restart \
     && forward_realm_service_active \
+    && [ "${NOBRAND_TEST_INGRESS_LISTENER_FAIL:-0}" -eq 0 ] \
     && forward_realm_listener_owned "$state"
   local rc=$?
   rm -f "$candidate" "$probe"
@@ -1121,12 +1161,28 @@ forward_default_options_json() {
   esac
 }
 
+forward_prepare_ingress_enforcement() {
+  local backend="$1" profile_id="$2" capability
+  case "$backend" in
+    nftables) capability='address-match' ;;
+    realm) capability=native-bind ;;
+    *) return 1 ;;
+  esac
+  nb_prepare_ingress_deployment "$profile_id" "$capability" || return 1
+  if [ "$INGRESS_ENFORCEMENT_RESOLVED" = strict ]; then
+    FORWARD_LISTEN_HOST="$INGRESS_LISTEN_HOST"
+  else
+    FORWARD_LISTEN_HOST="${FORWARD_LISTEN_HOST:-0.0.0.0}"
+  fi
+}
+
 forward_validate_requested_rule() {
   local ignore_owner="${1:-}" transport old_json="${2:-}" old_port="" old_protocol=""
   [ -n "$FORWARD_NAME" ] && [ "${#FORWARD_NAME}" -le 64 ] && ! has_control_chars "$FORWARD_NAME" || return 1
   [ "${#FORWARD_NOTE}" -le 256 ] && ! has_control_chars "$FORWARD_NOTE" || return 1
   case "$FORWARD_BACKEND" in nftables|realm) ;; *) return 1 ;; esac
   FORWARD_PROTOCOL="$(forward_normalize_protocol "$FORWARD_PROTOCOL")" || return 1
+  [ -n "${INGRESS_PROFILE_ID:-}" ] || nb_prepare_ingress_request || return 1
   FORWARD_LISTEN_HOST="${FORWARD_LISTEN_HOST:-0.0.0.0}"
   forward_listen_host_valid "$FORWARD_BACKEND" "$FORWARD_LISTEN_HOST" || return 1
   nb_valid_port "$FORWARD_LISTEN_PORT" && nb_valid_port "$FORWARD_TARGET_PORT" || return 1
@@ -1142,8 +1198,11 @@ forward_validate_requested_rule() {
     old_protocol="$(jq -r .protocol <<<"$old_json")"
   fi
   if [ "$old_port" != "$FORWARD_LISTEN_PORT" ] || [ "$old_protocol" != "$FORWARD_PROTOCOL" ]; then
-    forward_port_allowed "$FORWARD_LISTEN_PORT" "$FORWARD_PROTOCOL" "$ignore_owner" || return 1
+    forward_port_allowed "$FORWARD_LISTEN_PORT" "$FORWARD_PROTOCOL" "$ignore_owner" "$INGRESS_PROFILE_ID" || return 1
+  else
+    nb_ingress_port_is_reserved "$INGRESS_PROFILE_ID" "$FORWARD_LISTEN_PORT" && return 1
   fi
+  return 0
 }
 
 forward_requested_display_json() {
@@ -1160,9 +1219,17 @@ forward_requested_display_json() {
 forward_add_rule() {
   local id now options display rule candidate
   forward_init_state || return 1
+  nb_prepare_ingress_request || return 1
   [ -n "$FORWARD_NAME" ] && [ -n "$FORWARD_BACKEND" ] && [ -n "$FORWARD_PROTOCOL" ] \
-    && [ -n "$FORWARD_LISTEN_PORT" ] && [ -n "$FORWARD_TARGET_HOST" ] \
-    && [ -n "$FORWARD_TARGET_PORT" ] || die 'forward add 非交互模式需要 --name --backend --protocol --port --target --target-port'
+    && [ -n "$FORWARD_TARGET_HOST" ] && [ -n "$FORWARD_TARGET_PORT" ] \
+    || die 'forward add 非交互模式需要 --name --backend --protocol --target --target-port'
+  FORWARD_PROTOCOL="$(forward_normalize_protocol "$FORWARD_PROTOCOL")" || die 'Forward protocol 无效'
+  forward_prepare_ingress_enforcement "$FORWARD_BACKEND" "$INGRESS_PROFILE_ID" \
+    || die '所选 Ingress strict local address cannot be enforced by Forward'
+  if [ -z "$FORWARD_LISTEN_PORT" ]; then
+    FORWARD_LISTEN_PORT="$(forward_select_available_port "$FORWARD_PROTOCOL" "$INGRESS_PROFILE_ID")" \
+      || die '所选入口配置没有可用 Forward 自动端口；manual-only 必须显式使用 --port'
+  fi
   forward_validate_requested_rule || die 'Forward rule 参数无效、端口冲突或命中 xx00 保留端口'
   jq -e --arg name "$FORWARD_NAME" 'all(.rules[];.name!=$name)' "$NOBRAND_FORWARD_STATE_FILE" >/dev/null \
     || die 'Forward rule name 已存在'
@@ -1176,12 +1243,16 @@ forward_add_rule() {
     --arg target_host "$FORWARD_TARGET_HOST" --argjson target_port "$FORWARD_TARGET_PORT" \
     --arg display_mode "$(jq -r .mode <<<"$display")" --arg display_host "$(jq -r .host <<<"$display")" \
     --argjson display_port "$(jq -r .port <<<"$display")" --arg now "$now" \
-    --argjson options "$options" '
+    --argjson options "$options" --arg ingress_profile_id "$INGRESS_PROFILE_ID" \
+    --arg ingress_enforcement "$INGRESS_ENFORCEMENT_RESOLVED" \
+    --arg ingress_method "$INGRESS_ENFORCEMENT_METHOD" --arg ingress_address "$INGRESS_LOCAL_ADDRESS" '
       {rule_id:$id,name:$name,note:$note,backend:$backend,enabled:true,protocol:$protocol,
        listen_host:$listen_host,listen_port:$listen_port,target_host:$target_host,target_port:$target_port,
        display_host:$display_host,display_port:$display_port,display_mode:$display_mode,
        created_at:$now,updated_at:$now,
-       ownership_metadata:{managed_listener:true,managed_firewall:true},backend_options:$options}
+       ownership_metadata:{managed_listener:true,managed_firewall:true},backend_options:$options,
+        ingress_profile_id:$ingress_profile_id,ingress_enforcement:$ingress_enforcement,
+        ingress_enforcement_method:$ingress_method,ingress_local_address:$ingress_address}
     ')" || return 1
   candidate="$(mktemp_file .forward-add)" || return 1
   jq --argjson rule "$rule" '.rules += [$rule]' "$NOBRAND_FORWARD_STATE_FILE" >"$candidate" \
@@ -1221,10 +1292,16 @@ forward_set_enabled() {
 forward_modify_rule() {
   local id old old_backend options candidate new_name new_note new_protocol new_listen_host
   local new_listen_port new_target_host new_target_port display
-  local new_display_mode new_display_host new_display_port
+  local new_display_mode new_display_host new_display_port old_ingress_profile_id
   id="$(forward_resolve_rule_id "$FORWARD_RULE_ID")" || die 'Forward rule 不存在'
   old="$(forward_rule_json "$NOBRAND_FORWARD_STATE_FILE" "$id")"
   old_backend="$(jq -r .backend <<<"$old")"
+  old_ingress_profile_id="$(jq -r '.ingress_profile_id // "legacy-default-route"' <<<"$old")"
+  if [ "$INGRESS_PROFILE_CLI" -eq 1 ]; then
+    INGRESS_PROFILE_ID="$(nb_resolve_ingress_profile "$INGRESS_PROFILE")" || return 1
+  else
+    INGRESS_PROFILE_ID="$old_ingress_profile_id"
+  fi
   [ -z "$FORWARD_BACKEND" ] || [ "$FORWARD_BACKEND" = "$old_backend" ] \
     || die 'modify 不切换 backend；请使用 switch-backend'
   FORWARD_BACKEND="$old_backend"
@@ -1238,6 +1315,13 @@ forward_modify_rule() {
   FORWARD_NAME="$new_name" FORWARD_NOTE="$new_note" FORWARD_PROTOCOL="$new_protocol"
   FORWARD_LISTEN_HOST="$new_listen_host" FORWARD_LISTEN_PORT="$new_listen_port"
   FORWARD_TARGET_HOST="$new_target_host" FORWARD_TARGET_PORT="$new_target_port"
+  forward_prepare_ingress_enforcement "$FORWARD_BACKEND" "$INGRESS_PROFILE_ID" \
+    || die 'Modified Forward rule cannot enforce the selected Ingress profile'
+  if [ "$INGRESS_ENFORCEMENT_RESOLVED" = permissive ] \
+     && [ "$(jq -r '.ingress_enforcement // "permissive"' <<<"$old")" = strict ] \
+     && [ "${FORWARD_LISTEN_HOST_CLI:-0}" -eq 0 ]; then
+    FORWARD_LISTEN_HOST=0.0.0.0
+  fi
   forward_validate_requested_rule "forward:${id}" "$old" || die 'Forward 修改参数无效、冲突或命中 xx00'
   if [ "$ADVERTISE_CLI" -eq 1 ]; then
     display="$(forward_requested_display_json)" || die 'Forward Display Endpoint 无效'
@@ -1273,11 +1357,15 @@ forward_modify_rule() {
     --argjson listen_port "$FORWARD_LISTEN_PORT" --arg target_host "$FORWARD_TARGET_HOST" \
     --argjson target_port "$FORWARD_TARGET_PORT" --arg display_mode "$new_display_mode" \
     --arg display_host "$new_display_host" --argjson display_port "$new_display_port" \
-    --argjson options "$options" --arg now "$(forward_now)" '
+    --argjson options "$options" --arg ingress_profile_id "$INGRESS_PROFILE_ID" --arg now "$(forward_now)" \
+    --arg ingress_enforcement "$INGRESS_ENFORCEMENT_RESOLVED" \
+    --arg ingress_method "$INGRESS_ENFORCEMENT_METHOD" --arg ingress_address "$INGRESS_LOCAL_ADDRESS" '
       (.rules[]|select(.rule_id==$id)) |=
         (.name=$name|.note=$note|.protocol=$protocol|.listen_host=$listen_host|.listen_port=$listen_port|
          .target_host=$target_host|.target_port=$target_port|.display_mode=$display_mode|
-         .display_host=$display_host|.display_port=$display_port|.backend_options=$options|.updated_at=$now)
+         .display_host=$display_host|.display_port=$display_port|.backend_options=$options|
+         .ingress_profile_id=$ingress_profile_id|.ingress_enforcement=$ingress_enforcement|
+         .ingress_enforcement_method=$ingress_method|.ingress_local_address=$ingress_address|.updated_at=$now)
     ' "$NOBRAND_FORWARD_STATE_FILE" >"$candidate" \
     && forward_transaction_commit "$candidate" modify "$old_backend" "$old_backend"
   local rc=$?
@@ -1286,7 +1374,7 @@ forward_modify_rule() {
 }
 
 forward_switch_backend() {
-  local id old old_backend new_backend options target candidate
+  local id old old_backend new_backend options target candidate profile_id
   id="$(forward_resolve_rule_id "$FORWARD_RULE_ID")" || die 'Forward rule 不存在'
   old="$(forward_rule_json "$NOBRAND_FORWARD_STATE_FILE" "$id")"
   old_backend="$(jq -r .backend <<<"$old")"
@@ -1309,15 +1397,21 @@ forward_switch_backend() {
   FORWARD_TARGET_HOST="$target"
   FORWARD_TARGET_PORT="${FORWARD_TARGET_PORT:-$(jq -r .target_port <<<"$old")}"
   FORWARD_BACKEND="$new_backend"
+  profile_id="$(jq -r '.ingress_profile_id // "legacy-default-route"' <<<"$old")"
+  forward_prepare_ingress_enforcement "$new_backend" "$profile_id" \
+    || die 'Backend switch cannot enforce the retained Ingress profile'
   forward_validate_requested_rule "forward:${id}" "$old" || die 'Backend switch 参数无效'
   options="$(forward_default_options_json "$new_backend")" || die 'Backend options 无效'
   candidate="$(mktemp_file .forward-switch)" || return 1
   jq --arg id "$id" --arg backend "$new_backend" --arg listen_host "$FORWARD_LISTEN_HOST" \
     --arg target_host "$FORWARD_TARGET_HOST" --argjson target_port "$FORWARD_TARGET_PORT" \
-    --argjson options "$options" --arg now "$(forward_now)" '
+    --argjson options "$options" --arg now "$(forward_now)" \
+    --arg ingress_enforcement "$INGRESS_ENFORCEMENT_RESOLVED" \
+    --arg ingress_method "$INGRESS_ENFORCEMENT_METHOD" --arg ingress_address "$INGRESS_LOCAL_ADDRESS" '
       (.rules[]|select(.rule_id==$id)) |=
        (.backend=$backend|.listen_host=$listen_host|.target_host=$target_host|.target_port=$target_port|
-        .backend_options=$options|.updated_at=$now)
+         .backend_options=$options|.ingress_enforcement=$ingress_enforcement|
+         .ingress_enforcement_method=$ingress_method|.ingress_local_address=$ingress_address|.updated_at=$now)
     ' "$NOBRAND_FORWARD_STATE_FILE" >"$candidate" \
     && forward_transaction_commit "$candidate" switch-backend "$old_backend" "$new_backend"
   local rc=$?
@@ -1325,14 +1419,50 @@ forward_switch_backend() {
   return "$rc"
 }
 
+forward_apply_ingress_enforcement() {
+  local id="$1" rule backend profile_id candidate rc
+  rule="$(forward_rule_json "$NOBRAND_FORWARD_STATE_FILE" "$id")" || return 1
+  [ -n "$rule" ] || return 1
+  backend="$(jq -r .backend <<<"$rule")"
+  profile_id="$(jq -r '.ingress_profile_id // "legacy-default-route"' <<<"$rule")"
+  FORWARD_LISTEN_HOST="$(jq -r .listen_host <<<"$rule")"
+  forward_prepare_ingress_enforcement "$backend" "$profile_id" || return 1
+  [ "$INGRESS_ENFORCEMENT_RESOLVED" != permissive ] || FORWARD_LISTEN_HOST=0.0.0.0
+  candidate="$(mktemp_file .forward-ingress-apply)" || return 1
+  jq --arg id "$id" --arg listen "$FORWARD_LISTEN_HOST" \
+    --arg policy "$INGRESS_ENFORCEMENT_RESOLVED" --arg method "$INGRESS_ENFORCEMENT_METHOD" \
+    --arg address "$INGRESS_LOCAL_ADDRESS" --arg now "$(forward_now)" '
+      (.rules[]|select(.rule_id==$id)) |=
+        (.listen_host=$listen|.ingress_enforcement=$policy|
+         .ingress_enforcement_method=$method|.ingress_local_address=$address|.updated_at=$now)
+    ' "$NOBRAND_FORWARD_STATE_FILE" >"$candidate" \
+    && forward_transaction_commit "$candidate" ingress-enforcement "$backend" "$backend"
+  rc=$?
+  rm -f "$candidate"
+  return "$rc"
+}
+
+forward_listener_enforcement_owned() {
+  local id="$1" rule backend
+  rule="$(forward_rule_json "$NOBRAND_FORWARD_STATE_FILE" "$id")" || return 1
+  [ -n "$rule" ] || return 1
+  backend="$(jq -r .backend <<<"$rule")"
+  case "$backend" in
+    nftables) forward_nft_rule_ingress_owned "$id" ;;
+    realm) forward_realm_service_active && forward_realm_listener_owned "$NOBRAND_FORWARD_STATE_FILE" ;;
+    *) return 1 ;;
+  esac
+}
+
 forward_list_rules() {
   forward_init_state || return 1
-  printf '%-18s %-20s %-10s %-6s %-22s %-28s %s\n' ID NAME BACKEND PROTO LISTEN TARGET STATUS
+  printf '%-18s %-20s %-10s %-6s %-22s %-11s %-28s %s\n' ID NAME BACKEND PROTO LISTEN ENFORCEMENT TARGET STATUS
   jq -r '.rules|sort_by(.rule_id)[]|[.rule_id,.name,.backend,.protocol,
-    (.listen_host+":"+(.listen_port|tostring)),(.target_host+":"+(.target_port|tostring)),
+    (.listen_host+":"+(.listen_port|tostring)),(.ingress_enforcement // "permissive"),(.target_host+":"+(.target_port|tostring)),
     (if .enabled then "Enabled" else "Disabled" end)]|@tsv' "$NOBRAND_FORWARD_STATE_FILE" \
-    | while IFS=$'\t' read -r id name backend protocol listen target status; do
-        printf '%-18s %-20s %-10s %-6s %-22s %-28s %s\n' "$id" "$name" "$backend" "$protocol" "$listen" "$target" "$status"
+    | while IFS=$'\t' read -r id name backend protocol listen enforcement target status; do
+        printf '%-18s %-20s %-10s %-6s %-22s %-11s %-28s %s\n' \
+          "$id" "$name" "$backend" "$protocol" "$listen" "$enforcement" "$target" "$status"
       done
 }
 
@@ -1341,11 +1471,14 @@ forward_node_rows() {
   local effective_host effective_port status
   [ -s "$NOBRAND_FORWARD_STATE_FILE" ] || return 0
   auto_host="$(public_ip 2>/dev/null || printf 'YOUR_SERVER_IP')"
-  while IFS=$'\x1f' read -r id name backend enabled protocol display_mode display_host display_port listen_port; do
+  local ingress_profile_id
+  while IFS=$'\x1f' read -r id name backend enabled protocol display_mode display_host display_port listen_port ingress_profile_id; do
     effective_host="$display_host"
-    [ "$display_mode" = custom ] || effective_host="$auto_host"
+    [ "$display_mode" = custom ] \
+      || effective_host="$(nb_effective_advertise_host auto '' "$ingress_profile_id")"
     effective_port="$display_port"
-    [ "$display_mode" = custom ] || effective_port="$listen_port"
+    [ "$display_mode" = custom ] \
+      || effective_port="$(nb_effective_advertise_port auto '' "$listen_port" "$ingress_profile_id")"
     status=Disabled
     if [ "$enabled" = true ]; then
       if [ "$backend" = nftables ]; then
@@ -1359,7 +1492,7 @@ forward_node_rows() {
     printf 'Port Forward/%s|%s|%s:%s|%s|%s\n' \
       "$backend" "$name" "$effective_host" "$effective_port" "$status" "$(printf '%s' "$protocol" | tr '[:lower:]' '[:upper:]')"
   done < <(jq -r '.rules|sort_by(.rule_id)[]|[.rule_id,.name,.backend,(.enabled|tostring),.protocol,
-    .display_mode,.display_host,(.display_port|tostring),(.listen_port|tostring)]|join("\u001f")' \
+    .display_mode,.display_host,(.display_port|tostring),(.listen_port|tostring),(.ingress_profile_id // "legacy-default-route")]|join("\u001f")' \
     "$NOBRAND_FORWARD_STATE_FILE")
 }
 
@@ -1367,9 +1500,9 @@ forward_show_rule() {
   local id rule display_host display_port
   id="$(forward_resolve_rule_id "$FORWARD_RULE_ID")" || die 'Forward rule 不存在'
   rule="$(forward_rule_json "$NOBRAND_FORWARD_STATE_FILE" "$id")"
-  display_host="$(nb_effective_advertise_host "$(jq -r .display_mode <<<"$rule")" "$(jq -r .display_host <<<"$rule")")"
+  display_host="$(nb_effective_advertise_host "$(jq -r .display_mode <<<"$rule")" "$(jq -r .display_host <<<"$rule")" "$(jq -r '.ingress_profile_id // "legacy-default-route"' <<<"$rule")")"
   display_port="$(nb_effective_advertise_port "$(jq -r .display_mode <<<"$rule")" \
-    "$(jq -r .display_port <<<"$rule")" "$(jq -r .listen_port <<<"$rule")")"
+    "$(jq -r .display_port <<<"$rule")" "$(jq -r .listen_port <<<"$rule")" "$(jq -r '.ingress_profile_id // "legacy-default-route"' <<<"$rule")")"
   printf 'ID: %s\nName: %s\nNote: %s\nBackend: %s\nEnabled: %s\nProtocol: %s\n' \
     "$id" "$(jq -r .name <<<"$rule")" "$(jq -r .note <<<"$rule")" "$(jq -r .backend <<<"$rule")" \
     "$(jq -r .enabled <<<"$rule")" "$(jq -r .protocol <<<"$rule")"
@@ -1377,6 +1510,11 @@ forward_show_rule() {
     "$(jq -r .listen_host <<<"$rule")" "$(jq -r .listen_port <<<"$rule")" \
     "$(jq -r .target_host <<<"$rule")" "$(jq -r .target_port <<<"$rule")" \
     "$display_host" "$display_port" "$(jq -r .display_mode <<<"$rule")"
+  printf 'Ingress Profile: %s\n' "$(nb_ingress_profile_name "$(jq -r '.ingress_profile_id // "legacy-default-route"' <<<"$rule")")"
+  printf 'Ingress Enforcement: %s (%s)\nIngress Local Address: %s\n' \
+    "$(jq -r '.ingress_enforcement // "permissive"' <<<"$rule")" \
+    "$(jq -r '.ingress_enforcement_method // "wildcard"' <<<"$rule")" \
+    "$(jq -r '.ingress_local_address // empty' <<<"$rule")"
   printf 'Backend options: %s\n' "$(jq -c .backend_options <<<"$rule")"
 }
 
@@ -1393,7 +1531,7 @@ forward_doctor() {
     forward_target_valid "$backend" "$target" || { warn "${id} target: FAIL"; failed=1; }
     [ "$enabled" = true ] || continue
     if [ "$backend" = nftables ]; then
-      forward_nft_rule_owned "$id" \
+      forward_nft_rule_ingress_owned "$id" \
         || { warn "${id} nft ownership: FAIL"; failed=1; }
       [ "$(sysctl -n net.ipv4.ip_forward 2>/dev/null || true)" = 1 ] \
         || { warn "${id} ip_forward: FAIL"; failed=1; }
@@ -1576,7 +1714,8 @@ nobrand_run_forward_action() {
   case "$FORWARD_ACTION" in
     add|delete|modify|enable|disable|set-endpoint|switch-backend|import|upgrade-runtime|uninstall)
       lock_required=1
-      require_root
+      require_root || return 1
+      nb_init_state_layout || return 1
       ensure_management_dependencies "$(detect_pkg_manager)" || return 1
       admin_lock_acquire || return 1
       ;;

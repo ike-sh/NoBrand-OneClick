@@ -110,7 +110,7 @@ hysteria2_build_share_link() {
 }
 
 hysteria2_current_share_link() {
-  local auth sni obfs listen_port mode advertise_host advertise_port host port
+  local auth sni obfs listen_port mode advertise_host advertise_port ingress_profile_id host port
   hysteria2_state_exists || return 1
   auth="$(hysteria2_state_field auth)"
   sni="$(hysteria2_state_field sni)"
@@ -119,13 +119,14 @@ hysteria2_current_share_link() {
   mode="$(hysteria2_state_field advertise_mode)"
   advertise_host="$(hysteria2_state_field advertise_host)"
   advertise_port="$(hysteria2_state_field advertise_port)"
-  host="$(nb_effective_advertise_host "$mode" "$advertise_host")"
-  port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port")"
+  ingress_profile_id="$(hysteria2_state_field ingress_profile_id 2>/dev/null || true)"
+  host="$(nb_effective_advertise_host "$mode" "$advertise_host" "$ingress_profile_id")"
+  port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port" "$ingress_profile_id")"
   hysteria2_build_share_link "$auth" "$host" "$port" "$sni" "$obfs"
 }
 
 hysteria2_export_values() {
-  local auth sni obfs listen_port mode advertise_host advertise_port host port
+  local auth sni obfs listen_port mode advertise_host advertise_port ingress_profile_id host port
   hysteria2_state_exists || return 1
   auth="$(hysteria2_state_field auth)"
   sni="$(hysteria2_state_field sni)"
@@ -134,8 +135,9 @@ hysteria2_export_values() {
   mode="$(hysteria2_state_field advertise_mode)"
   advertise_host="$(hysteria2_state_field advertise_host)"
   advertise_port="$(hysteria2_state_field advertise_port)"
-  host="$(nb_effective_advertise_host "$mode" "$advertise_host")"
-  port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port")"
+  ingress_profile_id="$(hysteria2_state_field ingress_profile_id 2>/dev/null || true)"
+  host="$(nb_effective_advertise_host "$mode" "$advertise_host" "$ingress_profile_id")"
+  port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port" "$ingress_profile_id")"
   printf '%s\t%s\t%s\t%s\t%s\n' "$auth" "$sni" "$obfs" "$host" "$port"
 }
 
@@ -179,17 +181,18 @@ hysteria2_generate_state() {
   local output="$1" listen="$2" port="$3" auth="$4" sni="$5" obfs="$6"
   local advertise_mode="$7" advertise_host="$8" advertise_port="$9"
   local created_at="${10:-}" updated_at link effective_host effective_port runtime_version
+  local ingress_profile_id="${11:-}"
   [ -n "$created_at" ] || created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   updated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  effective_host="$(nb_effective_advertise_host "$advertise_mode" "$advertise_host")"
-  effective_port="$(nb_effective_advertise_port "$advertise_mode" "$advertise_port" "$port")"
+  effective_host="$(nb_effective_advertise_host "$advertise_mode" "$advertise_host" "$ingress_profile_id")"
+  effective_port="$(nb_effective_advertise_port "$advertise_mode" "$advertise_port" "$port" "$ingress_profile_id")"
   link="$(hysteria2_build_share_link "$auth" "$effective_host" "$effective_port" "$sni" "$obfs")" || return 1
   runtime_version="$(nobrand_xray_version 2>/dev/null || printf unknown)"
   jq -n --arg auth "$auth" --arg sni "$sni" --arg obfs "$obfs" \
     --arg listen "$listen" --arg port "$port" --arg mode "$advertise_mode" \
     --arg advertise_host "$advertise_host" --arg advertise_port "$advertise_port" \
     --arg tag "$NOBRAND_HY2_TAG" --arg link "$link" --arg runtime "$runtime_version" \
-    --arg created "$created_at" --arg updated "$updated_at" '
+    --arg created "$created_at" --arg updated "$updated_at" --arg ingress_profile_id "$ingress_profile_id" '
     {
       "protocol":"hysteria2",
       "auth":$auth,
@@ -208,6 +211,7 @@ hysteria2_generate_state() {
       "created_at":$created,
       "updated_at":$updated
     }
+    + if $ingress_profile_id=="" then {} else {ingress_profile_id:$ingress_profile_id} end
   ' >"$output"
 }
 
@@ -228,16 +232,26 @@ hysteria2_restore_snapshot_file() {
 
 hysteria2_configure_requests() {
   local interactive="${1:-0}" old_port="" conflict_owner=""
-  HY2_LISTEN="0.0.0.0"
+  if hysteria2_state_exists && [ "${INGRESS_PROFILE_CLI:-0}" -eq 0 ]; then
+    INGRESS_PROFILE_ID="$(hysteria2_state_field ingress_profile_id 2>/dev/null || true)"
+    [ -n "$INGRESS_PROFILE_ID" ] || INGRESS_PROFILE_ID="$NOBRAND_LEGACY_INGRESS_PROFILE_ID"
+  else
+    nb_prepare_ingress_request || return 1
+  fi
+  nb_prepare_ingress_deployment "$INGRESS_PROFILE_ID" native-bind \
+    || die '所选 Ingress strict local address cannot be bound by Hysteria2'
+  HY2_LISTEN="$INGRESS_LISTEN_HOST"
   hysteria2_state_exists && old_port="$(hysteria2_state_field listen_port 2>/dev/null || true)"
   if [ -z "${PORT:-}" ]; then
-    PORT="$(nb_select_available_port UDP)" || die '未找到可用 Hysteria2 UDP 端口'
+    PORT="$(nb_select_available_port UDP "$INGRESS_PROFILE_ID")" \
+      || die '所选入口配置没有可用 Hysteria2 UDP 自动端口；manual-only 必须显式使用 --port'
     PORT_AUTO_SELECTED=1
   else
     nb_valid_port "$PORT" || die 'Hysteria2 端口必须是 1-65535'
     PORT="$(normalize_uint "$PORT")"
-    nb_warn_if_outside_recommended_range "$PORT"
-    if [ "$PORT" != "$old_port" ] && ! nb_port_available_for_transport "$PORT" UDP 'hy2:default'; then
+    nb_warn_if_outside_recommended_range "$PORT" "$INGRESS_PROFILE_ID"
+    if [ "$PORT" != "$old_port" ] \
+       && ! nb_port_available_for_profile "$PORT" UDP "$INGRESS_PROFILE_ID" 'hy2:default'; then
       warn "Hysteria2 UDP/${PORT} 已占用"
       nb_describe_port_conflict UDP "$PORT"
       return 1
@@ -317,7 +331,7 @@ install_hysteria2() {
     }
   fi
   # TOCTOU 二次检测：旧实例同端口需先停止自身 listener。
-  if ! nb_port_available_for_transport "$PORT" UDP 'hy2:default'; then
+  if ! nb_port_available_for_profile "$PORT" UDP "$INGRESS_PROFILE_ID" 'hy2:default'; then
     warn "提交前发现 UDP/${PORT} 已被其它进程占用"
     nb_describe_port_conflict UDP "$PORT"
     hysteria2_install_rollback "$snapshot" "$was_active" 0
@@ -339,7 +353,8 @@ install_hysteria2() {
   if ! hysteria2_generate_config "$config_tmp" "$HY2_LISTEN" "$PORT" "$HY2_AUTH" "$HY2_SNI" "$HY2_OBFS" \
      || ! nobrand_xray_test_config "$config_tmp" \
      || ! hysteria2_generate_state "$state_tmp" "$HY2_LISTEN" "$PORT" "$HY2_AUTH" "$HY2_SNI" "$HY2_OBFS" \
-          "$advertise_mode" "$ADVERTISE_HOST" "$ADVERTISE_PORT" "$old_created" \
+          "$advertise_mode" "$ADVERTISE_HOST" "$ADVERTISE_PORT" "$old_created" "$INGRESS_PROFILE_ID" \
+     || ! nb_ingress_stamp_state_file "$state_tmp" "$INGRESS_PROFILE_ID" native-bind \
      || ! nb_atomic_install_file "$config_tmp" "$NOBRAND_HY2_CONFIG_FILE" 0600 \
      || ! nb_atomic_install_file "$state_tmp" "$NOBRAND_HY2_STATE_FILE" 0600 \
      || ! nobrand_write_hy2_service \
@@ -353,7 +368,8 @@ install_hysteria2() {
   nb_firewall_binding_owned UDP "$PORT" && [ "$binding_was_owned" -eq 0 ] && binding_now_owned=1
   if ! nobrand_hy2_service_action restart \
      || ! nobrand_hy2_service_active \
-     || ! nb_wait_for_listener UDP "$PORT" 25; then
+     || ! nb_wait_for_enforced_listener "$INGRESS_ENFORCEMENT_RESOLVED" "$INGRESS_ENFORCEMENT_METHOD" \
+          UDP "$PORT" "$INGRESS_LOCAL_ADDRESS" 'hy2:default' 25; then
     hysteria2_install_rollback "$snapshot" "$was_active" "$binding_now_owned"
     rm -rf -- "$snapshot"; admin_lock_release
     warn 'Hysteria2 服务启动或 UDP listener 验收失败，已回滚'
@@ -369,7 +385,7 @@ install_hysteria2() {
 }
 
 hysteria2_set_endpoint() {
-  local interactive=0 tmp mode owner auth sni obfs host port link
+  local interactive=0 tmp mode owner auth sni obfs host port link ingress_profile_id
   require_root
   hysteria2_state_exists || die 'Hysteria2 未安装'
   [ "${YES:-0}" -eq 1 ] || interactive=1
@@ -390,8 +406,10 @@ hysteria2_set_endpoint() {
   auth="$(hysteria2_state_field auth)"
   sni="$(hysteria2_state_field sni)"
   obfs="$(hysteria2_state_field obfs)"
-  host="$(nb_effective_advertise_host "$mode" "$ADVERTISE_HOST")"
-  port="$(nb_effective_advertise_port "$mode" "$ADVERTISE_PORT" "$PORT")"
+  ingress_profile_id="$(hysteria2_state_field ingress_profile_id 2>/dev/null || true)"
+  [ -n "$ingress_profile_id" ] || ingress_profile_id="$NOBRAND_LEGACY_INGRESS_PROFILE_ID"
+  host="$(nb_effective_advertise_host "$mode" "$ADVERTISE_HOST" "$ingress_profile_id")"
+  port="$(nb_effective_advertise_port "$mode" "$ADVERTISE_PORT" "$PORT" "$ingress_profile_id")"
   link="$(hysteria2_build_share_link "$auth" "$host" "$port" "$sni" "$obfs")" \
     || { rm -f "$tmp"; admin_lock_release; return 1; }
   if ! jq --arg mode "$mode" --arg host "$ADVERTISE_HOST" --arg port "$ADVERTISE_PORT" \
@@ -414,10 +432,60 @@ hysteria2_set_endpoint() {
 }
 
 hysteria2_running() {
-  local port
+  local port policy method address
   hysteria2_state_exists || return 1
   port="$(hysteria2_state_field listen_port)"
-  nobrand_hy2_service_active && nb_port_is_listening UDP "$port"
+  policy="$(hysteria2_state_field ingress_enforcement 2>/dev/null || printf permissive)"
+  method="$(hysteria2_state_field ingress_enforcement_method 2>/dev/null || printf wildcard)"
+  address="$(hysteria2_state_field ingress_local_address 2>/dev/null || true)"
+  nobrand_hy2_service_active \
+    && nb_wait_for_enforced_listener "$policy" "$method" UDP "$port" "$address" 'hy2:default' 1
+}
+
+hysteria2_apply_ingress_enforcement() {
+  local profile_id port auth sni obfs candidate_state candidate_config snapshot was_active=0 rc=0
+  hysteria2_state_exists || return 1
+  profile_id="$(hysteria2_state_field ingress_profile_id 2>/dev/null || true)"
+  [ -n "$profile_id" ] || profile_id="$NOBRAND_LEGACY_INGRESS_PROFILE_ID"
+  nb_prepare_ingress_deployment "$profile_id" native-bind || return 1
+  port="$(hysteria2_state_field listen_port)"
+  auth="$(hysteria2_state_field auth)"
+  sni="$(hysteria2_state_field sni)"
+  obfs="$(hysteria2_state_field obfs)"
+  candidate_state="$(mktemp_file .hy2-ingress-state)" || return 1
+  candidate_config="$(mktemp_file .hy2-ingress-config)" || { rm -f "$candidate_state"; return 1; }
+  snapshot="$(mktemp_dir)" || { rm -f "$candidate_state" "$candidate_config"; return 1; }
+  cp -a "$NOBRAND_HY2_STATE_FILE" "$snapshot/state" \
+    && cp -a "$NOBRAND_HY2_CONFIG_FILE" "$snapshot/config" || rc=1
+  if [ "$rc" -eq 0 ]; then
+    jq --arg listen "$INGRESS_LISTEN_HOST" '.listen_host=$listen' "$NOBRAND_HY2_STATE_FILE" >"$candidate_state" \
+      && nb_ingress_stamp_state_file "$candidate_state" "$profile_id" native-bind \
+      && hysteria2_generate_config "$candidate_config" "$INGRESS_LISTEN_HOST" "$port" "$auth" "$sni" "$obfs" \
+      && nobrand_xray_test_config "$candidate_config" || rc=1
+  fi
+  nobrand_hy2_service_active && was_active=1
+  if [ "$rc" -eq 0 ]; then
+    nb_atomic_install_file "$candidate_config" "$NOBRAND_HY2_CONFIG_FILE" 0600 \
+      && nb_atomic_install_file "$candidate_state" "$NOBRAND_HY2_STATE_FILE" 0600 || rc=1
+  fi
+  if [ "$rc" -eq 0 ] && [ "$was_active" -eq 1 ]; then
+    [ "${NOBRAND_TEST_INGRESS_SERVICE_FAIL:-0}" -eq 0 ] \
+      && nobrand_hy2_service_action restart \
+      && [ "${NOBRAND_TEST_INGRESS_LISTENER_FAIL:-0}" -eq 0 ] \
+      && hysteria2_running || rc=1
+  fi
+  if [ "$rc" -ne 0 ]; then
+    nb_atomic_install_file "$snapshot/config" "$NOBRAND_HY2_CONFIG_FILE" 0600 >/dev/null 2>&1 || true
+    nb_atomic_install_file "$snapshot/state" "$NOBRAND_HY2_STATE_FILE" 0600 >/dev/null 2>&1 || true
+    if [ "$was_active" -eq 1 ]; then
+      nobrand_hy2_service_action restart >/dev/null 2>&1 && hysteria2_running >/dev/null 2>&1 || true
+    else
+      nobrand_hy2_service_action stop >/dev/null 2>&1 || true
+    fi
+  fi
+  rm -f "$candidate_state" "$candidate_config"
+  rm -rf -- "$snapshot"
+  return "$rc"
 }
 
 hysteria2_state_set_enabled() {
@@ -439,8 +507,8 @@ hysteria2_node_rows() {
   advertise_host="$(hysteria2_state_field advertise_host)"
   advertise_port="$(hysteria2_state_field advertise_port)"
   listen_port="$(hysteria2_state_field listen_port)"
-  host="$(nb_effective_advertise_host "$mode" "$advertise_host")"
-  port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port")"
+  host="$(nb_effective_advertise_host "$mode" "$advertise_host" "$(hysteria2_state_field ingress_profile_id 2>/dev/null || true)")"
+  port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port" "$(hysteria2_state_field ingress_profile_id 2>/dev/null || true)")"
   status=Stopped; hysteria2_running && status=Running
   printf 'Hysteria2|default|%s:%s/UDP|%s|UDP\n' "$host" "$port" "$status"
 }
@@ -452,8 +520,8 @@ print_hysteria2_result() {
   listen_host="$(hysteria2_state_field listen_host)"; listen_port="$(hysteria2_state_field listen_port)"
   mode="$(hysteria2_state_field advertise_mode)"; advertise_host="$(hysteria2_state_field advertise_host)"
   advertise_port="$(hysteria2_state_field advertise_port)"
-  host="$(nb_effective_advertise_host "$mode" "$advertise_host")"
-  port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port")"
+  host="$(nb_effective_advertise_host "$mode" "$advertise_host" "$(hysteria2_state_field ingress_profile_id 2>/dev/null || true)")"
+  port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port" "$(hysteria2_state_field ingress_profile_id 2>/dev/null || true)")"
   status=Stopped; hysteria2_running && status=Running
   link="$(hysteria2_build_share_link "$auth" "$host" "$port" "$sni" "$obfs")"
   nobrand_print_banner
@@ -462,6 +530,8 @@ print_hysteria2_result() {
   printf '协议        Hysteria2\n节点        default\n状态        %s\n' "$status"
   msg ''
   printf '真实监听\n  Address   %s\n  Port      %s\n  Transport UDP\n' "$listen_host" "$listen_port"
+  msg ''
+  printf '网络入口\n  Profile   %s\n' "$(nb_ingress_profile_name "$(hysteria2_state_field ingress_profile_id 2>/dev/null || true)")"
   msg ''
   printf '客户端入口\n  Host      %s\n  Port      %s\n  Mode      %s\n' "$host" "$port" "$mode"
   msg ''
@@ -492,7 +562,7 @@ hysteria2_service_command() {
   case "$action" in
     start)
       nb_firewall_open_pairs "UDP|${port}" || return 1
-      if ! nobrand_hy2_service_action start || ! nb_wait_for_listener UDP "$port" 25 \
+      if ! nobrand_hy2_service_action start || ! hysteria2_running \
          || ! hysteria2_state_set_enabled true; then
         nobrand_hy2_service_action stop >/dev/null 2>&1 || true
         [ "$was_enabled" = true ] || hysteria2_state_set_enabled false >/dev/null 2>&1 || true
@@ -506,7 +576,7 @@ hysteria2_service_command() {
         return 1
       fi
       ;;
-    restart) nobrand_hy2_service_action restart && nb_wait_for_listener UDP "$port" 25 ;;
+    restart) nobrand_hy2_service_action restart && hysteria2_running ;;
     status)
       if hysteria2_running; then msg 'Hysteria2: Running'; else msg 'Hysteria2: Stopped'; return 1; fi
       ;;

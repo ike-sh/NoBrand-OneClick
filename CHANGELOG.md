@@ -1,5 +1,49 @@
 # Changelog
 
+## 3.2.0 — Unreleased release candidate
+
+### Added
+
+- Added first-class Ingress Profiles for public and mapped service entries. Profiles record entry identity, selected local interface/IPv4, port policy, reserved ports, Display Endpoint defaults, enablement, and stable profile IDs without managing Linux network configuration.
+- Added `derived-tail`, `custom-range`, and `manual-only` port policies, plus explicit default-profile selection and `--ingress-profile` support for Mieru, Snell v4/v5, Hysteria2, TUIC v5, Plain VLESS/Sudoku, SSH Tunnel metadata, and nftables/Realm Forward rules.
+- Added Dual VPS / multi-ingress foundations, profile list/show/add/modify/delete/default/Doctor CLI and menu flows, profile-aware status/nodes output, backup/restore coverage, and Debian/Ubuntu/Rocky/Alpine parser/state qualification.
+- Added independent named-instance VLESS REALITY with the fixed `VLESS + TCP + REALITY + xtls-rprx-vision` stack, per-instance UUID/X25519 keypair/short ID/target/service/TCP port/firewall/Profile/Display state, enforcement-resolved Xray listeners, and public-Profile recommendation with mapped-Profile warning-only behavior.
+- Added standard REALITY `vless://`, current Xray 26.3.27 JSON (`realitySettings.password` for public material), Mihomo 1.19.30 rule-mode YAML, and sing-box 1.13.20 JSON exporters. Complete Mihomo/sing-box configs have no DIRECT member or fallback.
+- Added REALITY status/nodes/Doctor, exact key-derivation and config validation, root-only private-key handling, shared-Xray transactional upgrade/rollback, backup/restore, formal removal, unified uninstall, platform-matrix generation, and three-client local runtime qualification.
+- Added a per-instance VLESS REALITY loopback defender: the public REALITY `target` points to an automatically owned `127.0.0.1` dokodemo-door listener; exact sniffed SNI alone reaches a fixed redirect to the validated camouflage target, while wrong/no SNI and random probes hit an adjacent catch-all block. Private destinations, selected dangerous TCP ports, and BitTorrent remain blocked before the allow rule.
+- Added transactional private Xray `geoip.dat`/`geosite.dat` installation from the same verified 26.3.27 archive, defender listener/same-process acceptance, internal-port collision ownership, Doctor, backup/restore, rollback, removal, and Xray/Mihomo/sing-box anti-probe runtime coverage.
+- Added server-side REALITY `minClientVer="0.0.0"` while keeping the field out of all client exporters and URIs.
+- Added automatic REALITY camouflage-host selection from an immutable release-qualified pool. Interactive blank host and non-interactive missing host select candidates in randomized order without replacement, validate the actual requested target port, persist both `camouflage_mode="auto"` and the selected hostname, and fail closed with transactional rollback on pool exhaustion. Explicit hosts record `camouflage_mode="custom"`, are used exactly, and never silently fall back to auto. The default camouflage target port remains 443 and remains independent from the public REALITY listener and internal defender ports.
+- Added Profile-level `permissive` and `strict` ingress enforcement. Missing enforcement remains permissive; `--enforcement`, explicit `--apply-existing`, and `nobrand ingress apply PROFILE` provide transactional runtime migration.
+- Added native strict binds for Snell v4/v5, Hysteria2, VLESS/Sudoku, VLESS REALITY, TUIC, and Realm Forward; destination-address matching for nftables Forward; and a counter-free NoBrand-owned `inet nobrand_ingress` firewall fallback for Mieru runtimes without a server listen-address field.
+- Added real network-namespace TCP/UDP cross-entry isolation tests, strict firewall removal/reapply/cleanup coverage, Profile-wide rollback injection, native-listener rollback, Forward strict import/export, and four-platform strict/permissive parsing and generation checks.
+
+### Changed
+
+- Kept `schema_version=3`. Existing 3.1-style schema-v3 state without ingress fields remains valid and byte-stable during read-only startup through the implicit `legacy-default-route` adapter.
+- REALITY state without an explicit `target_port` is interpreted read-only as 443, while state without `camouflage_mode` is interpreted as explicit/custom, without rewriting either file. Existing Microsoft or other explicit hostname state remains unchanged even when the hostname is absent from the qualified automatic pool.
+- Port ownership remains host-global and transport-aware in both permissive and strict modes. `TCP:P` and `UDP:P` may coexist; two owners of the same transport and numeric port may not, even when their profiles differ.
+- Ingress selection now controls actual-port allocation and automatic Display Endpoint metadata independently of the Linux default-route egress. Profiles do not change addresses, routes, policy rules, `rp_filter`, SSH listeners, provider mappings, or unrelated firewall state.
+- Strict enforcement always uses the Profile local address, never the Display Host. It does not add policy routing, `fwmark`, routing tables, default-route changes, per-ingress accounting, quotas, shaping, or `rp_filter` changes. SSH Tunnel remains `NOT_APPLICABLE_TO_SYSTEM_SSH` because its listener is the external system sshd.
+- Backup restore now establishes authoritative strict Mieru firewall state before starting wildcard Mieru runtimes; uninstall stops Mieru before clearing that owned table. Forward backend switches preserve Profile, port, Display, Target, and enforcement and restore the old data plane on failure.
+- Pinned the shared NoBrand Xray runtime to exact 26.3.27 Linux amd64/arm64 assets with official SHA-256 verification. REALITY uses current `target` server semantics; the legacy Sudoku product remains plain VLESS/TCP/FinalMask with `security=none` and no VLESS Encryption.
+- Changed default Mieru install/upgrade resolution to the highest official strict-semver stable release (`draft=false`, `prerelease=false`). A transaction pins exact release metadata, platform asset, API digest, official checksum manifest, downloaded bytes, and installed runtime identity; explicit versions remain pinned overrides.
+- Qualified Mieru 3.36.0 as the 2026-09-01 latest stable and last-known-good fallback. Only metadata-fetch failure may use that explicit fallback warning; malformed metadata or an invalid/missing/duplicate asset fails closed. Upgrade rollback restores the previous managed binary, users, services, ports, and credentials.
+- Set `PROTOCOL_FEATURE_FREEZE=true`: VLESS REALITY is the final planned protocol feature for 3.2.
+
+### Fixed
+
+- Fixed the TUIC Mihomo exporter to use rule mode so exported configurations keep proxy traffic on the selected TUIC transport instead of permitting a direct bypass.
+- Fixed Hysteria2 and VLESS/Sudoku automatic Display Endpoint resets so they resolve through each node's stored Ingress Profile rather than falling back to default-route metadata.
+- Redacted REALITY `privateKey`, public material, UUID, short IDs, password, and auth values from Xray validation diagnostics, and made REALITY systemd/OpenRC template replacement/removal fail closed for unowned files.
+- Fixed first-use ingress and Forward administrative action ordering so the schema-v3 ownership root is initialized before the lock directory; dispatchers preserve exact action failure status and release only their own re-entrant lock level.
+- Fixed BusyBox/Alpine administrative locking by using bounded `timeout` around BusyBox `flock`, and fixed interactive enforcement request leakage between Profile menu operations.
+
+### Known limitations
+
+- Hysteria2: Normal HTTPS/TCP use tested PASS. Some larger SOCKS5 UDP datagrams may experience integrity/time-out issues. This is not classified as Dual-specific, and no upstream defect has been confirmed.
+- Port Forward: maximum usable raw UDP datagram size depends on the provider, NAT, tunnel, and Internet path. NoBrand transparently forwards application datagrams without fragmenting, resizing, or clamping them; a controlled backend path can therefore pass a tested size that a particular external path drops.
+
 ## 3.1.0 — 2026-08-31
 
 ### Added

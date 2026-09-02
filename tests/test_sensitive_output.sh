@@ -41,6 +41,23 @@ ssh_tunnel_generate_state "$NOBRAND_SSH_STATE_FILE" custom entry.example.test 44
 jq '.policy_applied=true' "$NOBRAND_SSH_STATE_FILE" >"$fixture/ssh-state.tmp"
 mv -f "$fixture/ssh-state.tmp" "$NOBRAND_SSH_STATE_FILE"
 
+reality_id="r$(openssl rand -hex 8)"
+reality_uuid="$(tr -d '\r\n' </proc/sys/kernel/random/uuid)"
+reality_private="$(openssl rand -base64 32 | tr '/+' '_-' | tr -d '=\r\n')"
+reality_public="$(openssl rand -base64 32 | tr '/+' '_-' | tr -d '=\r\n')"
+reality_short="$(openssl rand -hex 8)"
+reality_ingress="$NOBRAND_LEGACY_INGRESS_PROFILE_ID"
+mkdir -p "$(dirname "$(reality_state_file "$reality_id")")" \
+  "$(reality_instance_config_dir "$reality_id")"
+printf '%s\n' "$reality_private" >"$(reality_private_key_file "$reality_id")"
+chmod 0600 "$(reality_private_key_file "$reality_id")"
+reality_generate_server_config "$(reality_config_file "$reality_id")" "$reality_id" \
+  0.0.0.0 24444 "$reality_uuid" "$reality_private" "$reality_short" example.com 443 22444
+reality_generate_state "$(reality_state_file "$reality_id")" "$reality_id" output-reality \
+  0.0.0.0 24444 custom reality.example.test 444 "$reality_uuid" "$reality_public" \
+  "$(reality_private_key_file "$reality_id")" "$reality_short" example.com 443 chrome / \
+  "$TESTED_XRAY_VERSION" "$reality_ingress" 22444 2026-09-01T00:00:00Z
+
 tuic_service_active() { return 1; }
 nb_service_manager() { printf none; }
 read_tty() { printf -v "$1" '%s' 0; }
@@ -54,7 +71,8 @@ ordinary_output="$({
   nobrand_menu_loop
 } 2>&1)"
 set -e
-for secret in "$tuic_password" "$tuic_uuid" "$ssh_private" 'SENSITIVE_TUIC_TLS_KEY_3_1_TEST'; do
+for secret in "$tuic_password" "$tuic_uuid" "$ssh_private" 'SENSITIVE_TUIC_TLS_KEY_3_1_TEST' \
+  "$reality_private" "$reality_uuid" "$reality_public" "$reality_short"; do
   assert_not_contains "$ordinary_output" "$secret" 'ordinary status/doctor/nodes/menu output secret boundary'
 done
 
@@ -63,5 +81,9 @@ assert_contains "$tuic_explicit" "$tuic_password" 'explicit TUIC show reveals re
 assert_contains "$tuic_explicit" "$tuic_uuid" 'explicit TUIC show reveals requested UUID'
 ssh_explicit="$(ssh_tunnel_export_user output-user)"
 assert_contains "$ssh_explicit" "$ssh_private" 'explicit SSH export reveals requested private key'
+reality_explicit="$(reality_show "$reality_id")"
+assert_contains "$reality_explicit" "$reality_public" 'explicit REALITY show reveals requested public key'
+assert_contains "$reality_explicit" "$reality_uuid" 'explicit REALITY show reveals requested UUID'
+assert_not_contains "$reality_explicit" "$reality_private" 'explicit REALITY show never reveals private key'
 
 pass 'ordinary status/doctor/nodes/menu output is secret-free; explicit credential actions remain explicit'

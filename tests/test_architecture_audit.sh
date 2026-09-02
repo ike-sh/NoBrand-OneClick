@@ -44,6 +44,14 @@ print("FUNCTION_DUPLICATE_COUNT=0")
 print("ACCIDENTAL_OVERRIDE_COUNT=0")
 PY
 
+for source_path in "$TEST_ROOT"/src/*.sh; do
+  source_name="${source_path##*/}"
+  lint_count="$(grep -F -c "source \"\${SOURCE_ROOT}/src/${source_name}\"" \
+    "$TEST_ROOT/scripts/shellcheck-src.sh" || true)"
+  [ "$lint_count" -eq 1 ] \
+    || fail "ShellCheck source model must include src/${source_name} exactly once"
+done
+
 for removed in \
   install_mita_systemd install_mita_openrc install_mita_service \
   ensure_mita_daemon wait_mita_socket apply_config collect_ports_from_mita \

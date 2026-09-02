@@ -27,6 +27,18 @@ parse_forward() {
       "$ADVERTISE_HOST" "$ADVERTISE_PORT"
   ' test "$TEST_ROOT/install-nobrand.sh" "$@"
 }
+parse_reality() {
+  bash -c '
+    set -euo pipefail
+    MITA_SOURCE_ONLY=1
+    installer="$1"
+    shift
+    source "$installer"
+    printf "%s|%s|%s|%s|%s|%s\n" \
+      "$ACTION" "$VLESS_REALITY_ACTION" "$VLESS_REALITY_NAME" \
+      "$VLESS_REALITY_TARGET" "$VLESS_REALITY_TARGET_PORT" "$INGRESS_PROFILE"
+  ' test "$TEST_ROOT/install-nobrand.sh" "$@"
+}
 export TEST_ROOT
 cli_fixture="$(mktemp -d)"
 trap 'rm -rf -- "$cli_fixture"' EXIT
@@ -49,6 +61,16 @@ vless="$(parse install-nobrand.sh vless-sudoku install --port 3613 --advertise-a
 assert_eq 'nobrand-vless-sudoku||5|||install|1|1||0|||||' "$vless" 'VLESS Sudoku CLI parser'
 alias_vless="$(parse install-nobrand.sh sudoku smoke)"
 assert_eq 'nobrand-vless-sudoku||5|||smoke|0|0||0|||||' "$alias_vless" 'Sudoku canonical-backend alias'
+reality="$(parse_reality vless-reality install --name public --target example.com \
+  --target-port 443 --ingress-profile Japan-Public --port 32052 --advertise-auto -y)"
+assert_eq 'nobrand-vless-reality|install|public|example.com|443|Japan-Public' "$reality" \
+  'VLESS REALITY CLI parser'
+reality_defaults="$(parse_reality vless-reality install --name defaults \
+  --ingress-profile Japan-Public --port 32053 --advertise-auto -y)"
+assert_eq 'nobrand-vless-reality|install|defaults||443|Japan-Public' "$reality_defaults" \
+  'VLESS REALITY CLI parser accepts omitted camouflage host and port defaults'
+reality_alias="$(parse_reality reality export --name public)"
+assert_eq 'nobrand-vless-reality|export|public||443|' "$reality_alias" 'REALITY canonical alias'
 
 tuic="$(parse install-nobrand.sh tuic install --name primary --user alice --port 3614 --sni www.microsoft.com --advertise-auto -y)"
 assert_eq 'nobrand-tuic||5||||1|1||0|install|primary|alice||' "$tuic" 'TUIC CLI parser'
@@ -94,6 +116,9 @@ fi
 if parse install-nobrand.sh vless-sudoku install --advertise-host >/dev/null 2>&1; then
   fail 'missing --advertise-host value must be rejected without a shift loop'
 fi
+if parse_reality vless-reality install --target >/dev/null 2>&1; then
+  fail 'missing REALITY --target value must be rejected without a shift loop'
+fi
 
 if bash -c '
   set --
@@ -111,6 +136,8 @@ assert_contains "$help" 'Snell v4-v5' 'NoBrand help protocols'
 assert_not_contains "$help" 'Snell v6' 'NoBrand help removed v6'
 assert_contains "$help" 'set-quic' 'NoBrand help QUIC toggle'
 assert_contains "$help" 'VLESS + FinalMask + Sudoku' 'NoBrand VLESS help protocol'
+assert_contains "$help" 'VLESS REALITY' 'NoBrand REALITY help protocol'
+assert_contains "$help" 'nobrand vless-reality install' 'NoBrand REALITY CLI help'
 assert_contains "$help" 'VLESS Encryption: NOT USED' 'NoBrand plain VLESS help notice'
 assert_contains "$help" 'nobrand tuic install' 'NoBrand TUIC v5 help'
 assert_contains "$help" 'nobrand ssh install' 'NoBrand SSH Tunnel help'
@@ -129,7 +156,7 @@ if parse install-nobrand.sh manager upgrade extra >/dev/null 2>&1; then
 fi
 
 version="$(bash "$TEST_ROOT/install-nobrand.sh" --version)"
-assert_eq $'NoBrand-OneClick 3.1.0\nAuthor: ike' "$version" 'NoBrand product version output'
+assert_eq $'NoBrand-OneClick 3.2.0\nAuthor: ike' "$version" 'NoBrand product version output'
 cp "$TEST_ROOT/install-nobrand.sh" "$cli_fixture/nb"
 short_version="$(bash "$cli_fixture/nb" --version)"
 assert_eq "$version" "$short_version" 'nb version alias'

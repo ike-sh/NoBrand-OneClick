@@ -57,8 +57,8 @@ nb_legacy_state_detected() {
 
 nb_fail_legacy_state() {
   die "$(t \
-    '检测到旧版安装数据。NoBrand-OneClick 3.1.0 不提供旧用户自动迁移；请先备份并清理旧安装后重新部署。' \
-    'Legacy installation data was detected. NoBrand-OneClick 3.1.0 does not migrate old users; back it up, clean the old installation, then deploy fresh.')"
+    '检测到旧版安装数据。NoBrand-OneClick 3.2.0 不提供旧用户自动迁移；请先备份并清理旧安装后重新部署。' \
+    'Legacy installation data was detected. NoBrand-OneClick 3.2.0 does not migrate old users; back it up, clean the old installation, then deploy fresh.')"
 }
 
 nb_validate_authoritative_state_boundary() {
@@ -480,7 +480,13 @@ admin_lock_acquire() {
     return 0
   fi
   exec 8>"$MITA_ADMIN_LOCK"
-  if flock -w 120 8; then
+  if { flock --help 2>&1 || true; } | grep -q -- '-w' \
+     && flock -w 120 8; then
+    _ADMIN_LOCK_HELD=1
+    return 0
+  elif ! { flock --help 2>&1 || true; } | grep -q -- '-w' \
+       && command -v timeout >/dev/null 2>&1 \
+       && timeout 120 flock 8; then
     _ADMIN_LOCK_HELD=1
     return 0
   fi

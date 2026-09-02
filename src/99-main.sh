@@ -83,9 +83,11 @@ main() {
     nobrand-snell) nobrand_run_snell_action ;;
     nobrand-hy2) nobrand_run_hy2_action ;;
     nobrand-vless-sudoku) nobrand_run_vless_sudoku_action ;;
+    nobrand-vless-reality) nobrand_run_vless_reality_action ;;
     nobrand-tuic) nobrand_run_tuic_action ;;
     nobrand-ssh-tunnel) nobrand_run_ssh_tunnel_action ;;
     nobrand-forward) nobrand_run_forward_action ;;
+    nobrand-ingress) nobrand_run_ingress_action ;;
     nobrand-mieru-menu) menu_loop ;;
     help) usage; exit 0 ;;
     menu)

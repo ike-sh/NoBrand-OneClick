@@ -125,8 +125,14 @@ ssh_tunnel_detect_real_port() {
 }
 
 ssh_tunnel_default_display_port() {
-  local ip base real_port
-  ip="$(nb_detect_local_ipv4 2>/dev/null || true)"
+  local ip base real_port profile
+  if [ -n "${INGRESS_PROFILE_ID:-}" ] \
+     && [ "$INGRESS_PROFILE_ID" != "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ]; then
+    profile="$(nb_ingress_profile_json "$INGRESS_PROFILE_ID" 2>/dev/null || true)"
+    ip="$(jq -r '.local_address // empty' <<<"$profile" 2>/dev/null || true)"
+  else
+    ip="$(nb_detect_local_ipv4 2>/dev/null || true)"
+  fi
   if [ -n "$ip" ]; then
     base="$(nb_port_base_for_ip "$ip" 2>/dev/null || true)"
     if [ -n "$base" ]; then
@@ -142,6 +148,7 @@ ssh_tunnel_default_display_port() {
 ssh_tunnel_generate_state() {
   local output="$1" advertise_mode="$2" advertise_host="$3" advertise_port="$4"
   local real_port="$5" strategy="$6" managed_path="$7" users="$8" created_at="${9:-}"
+  local ingress_profile_id="${10:-}"
   local updated_at
   [ -n "$created_at" ] || created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   updated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -149,7 +156,7 @@ ssh_tunnel_generate_state() {
     --arg advertise_port "$advertise_port" --arg real_port "$real_port" \
     --arg group "$NOBRAND_SSH_GROUP" --arg strategy "$strategy" \
     --arg managed_path "$managed_path" --argjson users "$users" \
-    --arg created "$created_at" --arg updated "$updated_at" '
+    --arg created "$created_at" --arg updated "$updated_at" --arg ingress_profile_id "$ingress_profile_id" '
     {
       schema_version:3,
       ownership:"nobrand-v3",
@@ -172,6 +179,7 @@ ssh_tunnel_generate_state() {
       created_at:$created,
       updated_at:$updated
     }
+    + if $ingress_profile_id=="" then {} else {ingress_profile_id:$ingress_profile_id} end
   ' >"$output"
 }
 
@@ -918,10 +926,11 @@ ssh_tunnel_set_endpoint_state() {
 }
 
 ssh_tunnel_effective_host() {
-  local mode host
+  local mode host ingress_profile_id
   mode="$(ssh_tunnel_state_field advertise_mode)"
   host="$(ssh_tunnel_state_field advertise_host)"
-  nb_effective_advertise_host "$mode" "$host"
+  ingress_profile_id="$(ssh_tunnel_state_field ingress_profile_id 2>/dev/null || true)"
+  nb_effective_advertise_host "$mode" "$host" "$ingress_profile_id"
 }
 
 ssh_tunnel_host_public_key() {
@@ -951,8 +960,9 @@ ssh_tunnel_show_user() {
   host="$(ssh_tunnel_effective_host)"
   port="$(ssh_tunnel_state_field advertise_port)"
   key_path="$(ssh_tunnel_key_dir "$account_id")/id_ed25519"
-  printf 'SSH Tunnel user: %s\nLinux identity: %s\nDisplay Endpoint: %s:%s\n' \
-    "$label" "$linux_user" "$host" "$port"
+  printf 'SSH Tunnel user: %s\nLinux identity: %s\nIngress Profile: %s\nIngress Enforcement: Not applicable (system sshd)\nActual system listener: *:%s/TCP\nDisplay Endpoint: %s:%s\n' \
+    "$label" "$linux_user" "$(nb_ingress_profile_name "$(ssh_tunnel_state_field ingress_profile_id 2>/dev/null || true)")" \
+    "$(ssh_tunnel_state_field real_port)" "$host" "$port"
   printf 'Connection: ssh -N -i %s -p %s %s@%s\n' "$key_path" "$port" "$linux_user" "$host"
   printf 'TCP forwarding: -L / -D / -R\nGatewayPorts=no; shell/exec/TTY/SFTP/SCP are disabled.\n'
 }
@@ -1029,6 +1039,7 @@ ssh_tunnel_doctor() {
       || { nb_doctor_line FAIL "private-key mode $(jq -r .display_name <<<"$user_json")"; failed=1; }
   done < <(jq -c '.users[]?' "$NOBRAND_SSH_STATE_FILE")
   nb_doctor_line PASS 'external_listener=true managed_listener=false managed_firewall=false'
+  nb_doctor_line INFO 'NOT_APPLICABLE_TO_SYSTEM_SSH: system sshd / external mapped entry'
   return "$failed"
 }
 
@@ -1058,6 +1069,7 @@ ssh_tunnel_install() {
   require_root
   require_linux
   nobrand_prepare_common
+  nb_prepare_ingress_request || return 1
   command -v ssh-keygen >/dev/null 2>&1 || die 'SSH Tunnel 需要 OpenSSH ssh-keygen'
   ssh_tunnel_sshd_binary >/dev/null || die '未检测到现有 OpenSSH sshd'
   ssh_tunnel_sshd_test "$NOBRAND_SSH_CONFIG_MAIN" || die '现有 sshd_config 无法通过 sshd -t'
@@ -1071,9 +1083,16 @@ ssh_tunnel_install() {
     mode=custom host="$ADVERTISE_HOST" port="$(normalize_uint "$ADVERTISE_PORT")"
   else
     [ "${YES:-0}" -ne 1 ] || [ "${ADVERTISE_AUTO_REQUESTED:-0}" -eq 1 ] \
-      || die '非交互 SSH install 必须明确 Display Endpoint 或 --advertise-auto'
-    mode=auto host="" port="$(ssh_tunnel_default_display_port)" \
+      || [ -n "$(nb_ingress_profile_display_host "$INGRESS_PROFILE_ID" 2>/dev/null || true)" ] \
+      || die '非交互 SSH install 必须明确 Display Endpoint、--advertise-auto 或选择带展示主机的入口配置'
+    mode=auto host=""
+    if [ -n "${ADVERTISE_PORT:-}" ]; then
+      valid_advertise_port "$ADVERTISE_PORT" || die 'SSH Display port 无效'
+      port="$(normalize_uint "$ADVERTISE_PORT")"
+    else
+      port="$(ssh_tunnel_default_display_port)" \
       || die '无法安全推导 SSH Display port；请明确指定'
+    fi
   fi
   _has_group "$NOBRAND_SSH_GROUP" && group_preexisting=1
   ssh_tunnel_create_group || die '无法创建 SSH Tunnel group'
@@ -1084,7 +1103,7 @@ ssh_tunnel_install() {
     return 1
   }
   ssh_tunnel_generate_state "$state_tmp" "$mode" "$host" "$port" "$real_port" \
-    "$strategy" "$managed_path" "$users" || {
+    "$strategy" "$managed_path" "$users" "" "$INGRESS_PROFILE_ID" || {
       rm -f "$state_tmp"
       ssh_tunnel_rollback_empty_install "$group_preexisting" || true
       return 1
@@ -1120,6 +1139,7 @@ ssh_tunnel_status() {
     "$(ssh_tunnel_state_field policy_applied)" "$(ssh_tunnel_state_field real_port)" \
     "$(ssh_tunnel_effective_host)" "$(ssh_tunnel_state_field advertise_port)" \
     "$(jq '.users | length' "$NOBRAND_SSH_STATE_FILE")"
+  printf '  Ingress Profile: %s\n' "$(nb_ingress_profile_name "$(ssh_tunnel_state_field ingress_profile_id 2>/dev/null || true)")"
   printf '  Ownership: external_listener=true managed_listener=false managed_firewall=false\n'
 }
 

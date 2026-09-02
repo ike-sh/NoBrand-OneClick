@@ -21,6 +21,8 @@ assert_eq 711 "$(stat -c %a "$NOBRAND_CONFIG_DIR")" 'schema-v3 config root is tr
 assert_eq 711 "$(stat -c %a "$NOBRAND_SSH_CONFIG_DIR")" 'SSH config root is traversable but not listable'
 assert_eq 755 "$(stat -c %a "$NOBRAND_SSH_AUTHORIZED_KEYS_DIR")" 'sshd can traverse authorized-keys directory'
 assert_eq 700 "$(stat -c %a "$NOBRAND_TUIC_CONFIG_DIR")" 'TUIC secret config directory remains private'
+assert_eq 700 "$(stat -c %a "$NOBRAND_REALITY_STATE_DIR")" 'REALITY state instance root remains private'
+assert_eq 700 "$(stat -c %a "$NOBRAND_REALITY_CONFIG_DIR")" 'REALITY secret config instance root remains private'
 assert_eq 755 "$(stat -c %a "$NOBRAND_LIB_DIR")" 'runtime library root is service-traversable'
 assert_eq 755 "$(stat -c %a "$NOBRAND_BIN_DIR")" 'runtime binary directory is service-traversable'
 assert_eq 755 "$(stat -c %a "$NOBRAND_SNELL_RUNTIME_DIR")" 'Snell runtime directory is service-traversable'
@@ -45,8 +47,8 @@ legacy="$NOBRAND_LEGACY_MIERU_STATE_DIR"
 mkdir -p "$legacy"
 printf 'do-not-read-or-change\n' >"$legacy/users.json"
 legacy_hash="$(sha256sum "$legacy/users.json")"
-NOBRAND_LEGACY_MIERU_STATE_DIR="$legacy" bash "$TEST_ROOT/install-nobrand.sh" --version   | grep -qx 'NoBrand-OneClick 3.1.0' || fail 'version must bypass legacy state'
-NOBRAND_LEGACY_MIERU_STATE_DIR="$legacy" bash "$TEST_ROOT/install-nobrand.sh" --help   | grep -q 'NoBrand-OneClick 3.1.0' || fail 'help must bypass legacy state'
+NOBRAND_LEGACY_MIERU_STATE_DIR="$legacy" bash "$TEST_ROOT/install-nobrand.sh" --version   | grep -qx 'NoBrand-OneClick 3.2.0' || fail 'version must bypass legacy state'
+NOBRAND_LEGACY_MIERU_STATE_DIR="$legacy" bash "$TEST_ROOT/install-nobrand.sh" --help   | grep -q 'NoBrand-OneClick 3.2.0' || fail 'help must bypass legacy state'
 if NOBRAND_LEGACY_MIERU_STATE_DIR="$legacy"    NOBRAND_STATE_DIR="$fixture/unused-state"    bash "$TEST_ROOT/install-nobrand.sh" status >/dev/null 2>&1; then
   fail 'stateful action must fail closed when a legacy Mieru root exists'
 fi

@@ -15,15 +15,24 @@
 set -euo pipefail
 umask 077
 
-SCRIPT_VERSION="3.1.0"
+SCRIPT_VERSION="3.2.0"
 SCRIPT_AUTHOR="ike"
 SCRIPT_NAME="NoBrand-OneClick"
 SCRIPT_REPO="ike-sh/NoBrand-OneClick"
 NOBRAND_SCHEMA_VERSION=3
 UPSTREAM_REPO="enfein/mieru"
-TESTED_MIERU_VERSION="3.35.0"
-GITHUB_API="https://api.github.com/repos/${UPSTREAM_REPO}/releases/latest"
+LAST_KNOWN_GOOD_MIERU_VERSION="3.36.0"
+# Retained as a source-compatible public constant for parity consumers.
+# shellcheck disable=SC2034
+TESTED_MIERU_VERSION="$LAST_KNOWN_GOOD_MIERU_VERSION"
+NOBRAND_MIERU_RELEASES_API="https://api.github.com/repos/${UPSTREAM_REPO}/releases"
 GITHUB_DL="https://github.com/${UPSTREAM_REPO}/releases/download"
+LAST_KNOWN_GOOD_MIERU_AMD64_DEB_SHA256="44622bea7fac732984ac6cf1189e555fd9add1969001e9b2d7cdea9416b5919a"
+LAST_KNOWN_GOOD_MIERU_ARM64_DEB_SHA256="a43dbc4d75dcb18978ea79b924ce859e2485af8b776dfc981b29a7b60644157c"
+LAST_KNOWN_GOOD_MIERU_AMD64_RPM_SHA256="9504eefed0009b79246c58f5e27a7a24ac2edb6c48710099eb53afde847e84a2"
+LAST_KNOWN_GOOD_MIERU_ARM64_RPM_SHA256="5cba9b07771998263447607212cf91bc2c7feb7ec51d96f026c788ff055e378a"
+LAST_KNOWN_GOOD_MIERU_AMD64_TAR_SHA256="d61f35c463f101580a108dd6b969e1a3dca1b84836332b2533302a62e70f04bb"
+LAST_KNOWN_GOOD_MIERU_ARM64_TAR_SHA256="12b811bc00364bed2188d6e13e38cb7e727d149e488a3805f8c97f3f7f6e3bd6"
 
 # NoBrand 3.0 has one authoritative root. A directory without the exact v3
 # state marker is legacy/unknown input and is never imported or modified.
@@ -34,6 +43,11 @@ NOBRAND_BIN_DIR="${NOBRAND_BIN_DIR:-${NOBRAND_LIB_DIR}/bin}"
 NOBRAND_BACKUP_DIR="${NOBRAND_BACKUP_DIR:-${NOBRAND_STATE_DIR}/backups}"
 NOBRAND_LOCK_DIR="${NOBRAND_LOCK_DIR:-${NOBRAND_STATE_DIR}/locks}"
 NOBRAND_REGISTRY_FILE="${NOBRAND_REGISTRY_FILE:-${NOBRAND_STATE_DIR}/state.json}"
+NOBRAND_INGRESS_STATE_FILE="${NOBRAND_INGRESS_STATE_FILE:-${NOBRAND_STATE_DIR}/ingress.json}"
+NOBRAND_INGRESS_FIREWALL_STATE_FILE="${NOBRAND_INGRESS_FIREWALL_STATE_FILE:-${NOBRAND_STATE_DIR}/ingress-firewall.json}"
+NOBRAND_INGRESS_FIREWALL_RULESET="${NOBRAND_INGRESS_FIREWALL_RULESET:-${NOBRAND_CONFIG_DIR}/ingress-firewall.nft}"
+NOBRAND_INGRESS_NFT_FAMILY="${NOBRAND_INGRESS_NFT_FAMILY:-inet}"
+NOBRAND_INGRESS_NFT_TABLE="${NOBRAND_INGRESS_NFT_TABLE:-nobrand_ingress}"
 NOBRAND_FIREWALL_OWNED_STATE="${NOBRAND_FIREWALL_OWNED_STATE:-${NOBRAND_STATE_DIR}/firewall-owned.bindings}"
 NOBRAND_FIREWALL_COMMENT="nobrand-oneclick"
 NOBRAND_INSTALL_SCRIPT_PATH="${NOBRAND_INSTALL_SCRIPT_PATH:-/usr/local/bin/install-nobrand}"
@@ -101,7 +115,10 @@ NOBRAND_XRAY_ASSET_DIR="${NOBRAND_XRAY_ASSET_DIR:-${NOBRAND_LIB_DIR}/xray-assets
 NOBRAND_HY2_SERVICE_NAME="nobrand-hysteria2"
 NOBRAND_HY2_SYSTEMD_SERVICE="${NOBRAND_HY2_SYSTEMD_SERVICE:-/etc/systemd/system/nobrand-hysteria2.service}"
 NOBRAND_HY2_OPENRC_SERVICE="${NOBRAND_HY2_OPENRC_SERVICE:-/etc/init.d/nobrand-hysteria2}"
-NOBRAND_XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
+TESTED_XRAY_VERSION="26.3.27"
+TESTED_XRAY_AMD64_SHA256="23cd9af937744d97776ee35ecad4972cf4b2109d1e0fe6be9930467608f7c8ae"
+TESTED_XRAY_ARM64_SHA256="4d30283ae614e3057f730f67cd088a42be6fdf91f8639d82cb69e48cde80413c"
+NOBRAND_XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/tags/v${TESTED_XRAY_VERSION}"
 NOBRAND_HY2_TAG="nobrand-hysteria2-in"
 
 NOBRAND_VLESS_STATE_DIR="${NOBRAND_VLESS_STATE_DIR:-${NOBRAND_STATE_DIR}/vless-sudoku}"
@@ -113,6 +130,34 @@ NOBRAND_VLESS_SERVICE_NAME="nobrand-vless-sudoku"
 NOBRAND_VLESS_SYSTEMD_SERVICE="${NOBRAND_VLESS_SYSTEMD_SERVICE:-/etc/systemd/system/nobrand-vless-sudoku.service}"
 NOBRAND_VLESS_OPENRC_SERVICE="${NOBRAND_VLESS_OPENRC_SERVICE:-/etc/init.d/nobrand-vless-sudoku}"
 NOBRAND_VLESS_TAG="nobrand-vless-sudoku-in"
+
+# VLESS REALITY is an independent, named-instance product. It shares only the
+# private official Xray runtime with HY2 and VLESS/Sudoku; state, configs,
+# services, credentials, ports, firewall rows, and Ingress association are
+# isolated per instance.
+NOBRAND_REALITY_STATE_DIR="${NOBRAND_REALITY_STATE_DIR:-${NOBRAND_STATE_DIR}/vless-reality/instances}"
+NOBRAND_REALITY_CONFIG_DIR="${NOBRAND_REALITY_CONFIG_DIR:-${NOBRAND_CONFIG_DIR}/vless-reality/instances}"
+NOBRAND_REALITY_SYSTEMD_TEMPLATE="${NOBRAND_REALITY_SYSTEMD_TEMPLATE:-/etc/systemd/system/nobrand-vless-reality@.service}"
+NOBRAND_REALITY_OPENRC_PREFIX="${NOBRAND_REALITY_OPENRC_PREFIX:-/etc/init.d/nobrand-vless-reality-}"
+NOBRAND_REALITY_DEFENDER_PORT_MIN="${NOBRAND_REALITY_DEFENDER_PORT_MIN:-20000}"
+NOBRAND_REALITY_DEFENDER_PORT_MAX="${NOBRAND_REALITY_DEFENDER_PORT_MAX:-29999}"
+NOBRAND_REALITY_DEFENDER_DISPATCH_HOST="${NOBRAND_REALITY_DEFENDER_DISPATCH_HOST:-nobrand.invalid}"
+NOBRAND_REALITY_DEFAULT_CAMOUFLAGE_MODE="auto"
+NOBRAND_REALITY_DEFAULT_CAMOUFLAGE_PORT="443"
+NOBRAND_REALITY_MIN_CLIENT_VER="0.0.0"
+# This immutable release pool contains only Xray-OneClick discovery candidates
+# that passed the exact NoBrand v3.2 REALITY/Vision + loopback-defender stack on
+# Xray 26.3.27, Mihomo 1.19.30, and sing-box 1.13.20. Microsoft remains valid
+# as an explicit user target, but its authenticated REALITY gate failed and it
+# is intentionally absent from automatic selection.
+REALITY_AUTO_QUALIFIED_CANDIDATES=(
+  "www.abmindustriesgroup.com"
+  "www.oracle.com"
+  "www.ibm.com"
+  "www.amazon.com"
+  "www.samsung.com"
+  "www.nvidia.com"
+)
 
 # TUIC v5 is the only supported TUIC generation. The tested runtime is an
 # official, non-prerelease sing-box release; NoBrand never uses a system
@@ -243,9 +288,19 @@ MIERU_CHANNEL="stable"
 MIERU_CHANNEL_CLI=0
 MIERU_VERSION=""
 MIERU_VERSION_CLI=0
+MIERU_RUNTIME_RESOLVED_VERSION=""
+MIERU_RUNTIME_RESOLVED_ASSET=""
+MIERU_RUNTIME_RESOLVED_URL=""
+MIERU_RUNTIME_RESOLVED_CHECKSUM_URL=""
+MIERU_RUNTIME_RESOLVED_SHA256=""
+MIERU_RUNTIME_RESOLVED_CHANNEL=""
+MIERU_RUNTIME_RESOLUTION_FALLBACK=0
 PORT_CLI=0
 PORT_RANGE_CLI=0
 PORT_AUTO_SELECTED=0
+INGRESS_PROFILE=""
+INGRESS_PROFILE_CLI=0
+INGRESS_PROFILE_ID=""
 CLIENT_RPC_PORT=8964
 CLIENT_SOCKS5_PORT=1080
 CLIENT_HTTP_PORT=8080
@@ -292,6 +347,15 @@ VLESS_SUDOKU_UUID=""
 VLESS_SUDOKU_PASSWORD=""
 VLESS_SUDOKU_LISTEN="0.0.0.0"
 VLESS_SUDOKU_CLIENT_SOCKS_PORT="${VLESS_SUDOKU_CLIENT_SOCKS_PORT:-18080}"
+VLESS_REALITY_ACTION=""
+VLESS_REALITY_NAME=""
+VLESS_REALITY_TARGET=""
+VLESS_REALITY_TARGET_CLI=0
+VLESS_REALITY_CAMOUFLAGE_MODE="$NOBRAND_REALITY_DEFAULT_CAMOUFLAGE_MODE"
+VLESS_REALITY_TARGET_PORT="$NOBRAND_REALITY_DEFAULT_CAMOUFLAGE_PORT"
+VLESS_REALITY_TARGET_PORT_CLI=0
+VLESS_REALITY_FINGERPRINT="chrome"
+VLESS_REALITY_SPIDER_X="/"
 TUIC_ACTION=""
 TUIC_NAME=""
 TUIC_USER=""
@@ -315,6 +379,7 @@ FORWARD_NOTE=""
 FORWARD_BACKEND=""
 FORWARD_PROTOCOL=""
 FORWARD_LISTEN_HOST=""
+FORWARD_LISTEN_HOST_CLI=0
 FORWARD_LISTEN_PORT=""
 FORWARD_TARGET_HOST=""
 FORWARD_TARGET_PORT=""
@@ -340,6 +405,39 @@ FORWARD_REMOTE_TRANSPORT=""
 FORWARD_EXTRA_TARGETS=""
 FORWARD_BALANCE="off"
 FORWARD_WEIGHTS=""
+INGRESS_ACTION=""
+INGRESS_PROFILE_SELECTOR=""
+INGRESS_NAME=""
+INGRESS_TYPE=""
+INGRESS_INTERFACE=""
+INGRESS_ADDRESS=""
+INGRESS_PORT_POLICY=""
+INGRESS_RANGE_START=""
+INGRESS_RANGE_END=""
+INGRESS_RESERVED_PORTS=""
+INGRESS_DISPLAY_HOST_DEFAULT=""
+INGRESS_DISPLAY_PORT_POLICY=""
+INGRESS_DISPLAY_PORT=""
+INGRESS_ENABLED=""
+INGRESS_ENFORCEMENT=""
+INGRESS_APPLY_EXISTING=0
+INGRESS_ENFORCEMENT_RESOLVED=""
+INGRESS_ENFORCEMENT_METHOD=""
+INGRESS_LOCAL_ADDRESS=""
+INGRESS_LISTEN_HOST=""
+INGRESS_NAME_CLI=0
+INGRESS_TYPE_CLI=0
+INGRESS_INTERFACE_CLI=0
+INGRESS_ADDRESS_CLI=0
+INGRESS_PORT_POLICY_CLI=0
+INGRESS_RANGE_START_CLI=0
+INGRESS_RANGE_END_CLI=0
+INGRESS_RESERVED_CLI=0
+INGRESS_DISPLAY_HOST_CLI=0
+INGRESS_DISPLAY_PORT_POLICY_CLI=0
+INGRESS_DISPLAY_PORT_CLI=0
+INGRESS_ENABLED_CLI=0
+INGRESS_ENFORCEMENT_CLI=0
 
 if [ -z "${BASH_VERSION:-}" ]; then
   echo "[错误] 请使用 bash 运行此脚本" >&2
@@ -502,6 +600,12 @@ parse_nobrand_common_option() {
       [ -n "$PORT" ] && [[ "$PORT" != --* ]] || die "--port 需要端口号"
       return 2
       ;;
+    --ingress-profile)
+      INGRESS_PROFILE="${2:-}"
+      INGRESS_PROFILE_CLI=1
+      [ -n "$INGRESS_PROFILE" ] && [[ "$INGRESS_PROFILE" != --* ]] || die "--ingress-profile 需要入口配置 ID 或名称"
+      return 2
+      ;;
     --advertise-host)
       ADVERTISE_HOST="${2:-}"
       ADVERTISE_CLI=1
@@ -525,6 +629,70 @@ parse_nobrand_common_option() {
     *) return 1 ;;
   esac
   return 0
+}
+
+parse_nobrand_ingress_args() {
+  INGRESS_ACTION="${1:-list}"
+  [ "$#" -eq 0 ] || shift
+  case "$INGRESS_ACTION" in
+    create) INGRESS_ACTION=add ;;
+    remove) INGRESS_ACTION=delete ;;
+    default) INGRESS_ACTION='set-default' ;;
+    list|show|add|modify|delete|set-default|unset-default|apply|doctor) ;;
+    help|-h|--help) INGRESS_ACTION=help ;;
+    *) die "未知 Ingress 操作: $INGRESS_ACTION" ;;
+  esac
+  if [ "$#" -gt 0 ] && [[ "$1" != --* ]]; then
+    case "$INGRESS_ACTION" in show|modify|delete|set-default|apply) INGRESS_PROFILE_SELECTOR="$1"; shift ;; esac
+  fi
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --id|--profile)
+        INGRESS_PROFILE_SELECTOR="${2:-}"
+        [ -n "$INGRESS_PROFILE_SELECTOR" ] && [[ "$INGRESS_PROFILE_SELECTOR" != --* ]] || die "$1 需要入口配置 ID 或名称"
+        shift 2
+        ;;
+      --name) INGRESS_NAME="${2:-}"; INGRESS_NAME_CLI=1; [ -n "$INGRESS_NAME" ] || die '--name 需要名称'; shift 2 ;;
+      --type) INGRESS_TYPE="$(printf '%s' "${2:-}" | tr '[:upper:]' '[:lower:]')"; INGRESS_TYPE_CLI=1; shift 2 ;;
+      --interface) INGRESS_INTERFACE="${2:-}"; INGRESS_INTERFACE_CLI=1; [ -n "$INGRESS_INTERFACE" ] || die '--interface 需要网卡名'; shift 2 ;;
+      --address) INGRESS_ADDRESS="${2:-}"; INGRESS_ADDRESS_CLI=1; [ -n "$INGRESS_ADDRESS" ] || die '--address 需要本地 IPv4'; shift 2 ;;
+      --port-policy) INGRESS_PORT_POLICY="$(printf '%s' "${2:-}" | tr '_' '-' | tr '[:upper:]' '[:lower:]')"; INGRESS_PORT_POLICY_CLI=1; shift 2 ;;
+      --range-start) INGRESS_RANGE_START="${2:-}"; INGRESS_RANGE_START_CLI=1; shift 2 ;;
+      --range-end) INGRESS_RANGE_END="${2:-}"; INGRESS_RANGE_END_CLI=1; shift 2 ;;
+      --reserve|--reserved)
+        [ -n "${2:-}" ] && [[ "${2:-}" != --* ]] || die "$1 需要端口或逗号分隔端口"
+        INGRESS_RESERVED_PORTS="${INGRESS_RESERVED_PORTS}${INGRESS_RESERVED_PORTS:+,}${2}"
+        INGRESS_RESERVED_CLI=1
+        shift 2
+        ;;
+      --advertise-host|--display-host)
+        INGRESS_DISPLAY_HOST_DEFAULT="${2:-}"; INGRESS_DISPLAY_HOST_CLI=1
+        [ -n "$INGRESS_DISPLAY_HOST_DEFAULT" ] && [[ "$INGRESS_DISPLAY_HOST_DEFAULT" != --* ]] || die "$1 需要地址"
+        shift 2
+        ;;
+      --clear-advertise-host|--clear-display-host) INGRESS_DISPLAY_HOST_DEFAULT=""; INGRESS_DISPLAY_HOST_CLI=1; shift ;;
+      --display-port-policy)
+        INGRESS_DISPLAY_PORT_POLICY="$(printf '%s' "${2:-}" | tr '_' '-' | tr '[:upper:]' '[:lower:]')"
+        INGRESS_DISPLAY_PORT_POLICY_CLI=1; shift 2
+        ;;
+      --display-port) INGRESS_DISPLAY_PORT="${2:-}"; INGRESS_DISPLAY_PORT_CLI=1; shift 2 ;;
+      --enable) INGRESS_ENABLED=true; INGRESS_ENABLED_CLI=1; shift ;;
+      --disable) INGRESS_ENABLED=false; INGRESS_ENABLED_CLI=1; shift ;;
+      --enforcement)
+        INGRESS_ENFORCEMENT="$(printf '%s' "${2:-}" | tr '[:upper:]' '[:lower:]')"
+        INGRESS_ENFORCEMENT_CLI=1
+        shift 2
+        ;;
+      --apply-existing) INGRESS_APPLY_EXISTING=1; shift ;;
+      --yes|-y) YES=1; shift ;;
+      *) die "未知 Ingress 参数: $1" ;;
+    esac
+  done
+  case "$INGRESS_ACTION" in
+    show|modify|delete|set-default|apply) [ -n "$INGRESS_PROFILE_SELECTOR" ] || die "${INGRESS_ACTION} 需要入口配置 ID 或名称" ;;
+  esac
+  ACTION="nobrand-ingress"
+  NOBRAND_ARGS_HANDLED=1
 }
 
 parse_nobrand_snell_args() {
@@ -651,6 +819,63 @@ parse_nobrand_vless_sudoku_args() {
     shift "$consumed"
   done
   ACTION="nobrand-vless-sudoku"
+  NOBRAND_ARGS_HANDLED=1
+}
+
+parse_nobrand_vless_reality_args() {
+  local consumed rc
+  VLESS_REALITY_ACTION="${1:-menu}"
+  [ "$#" -eq 0 ] || shift
+  case "$VLESS_REALITY_ACTION" in
+    add|create) VLESS_REALITY_ACTION=install ;;
+    nodes) VLESS_REALITY_ACTION=show ;;
+    delete) VLESS_REALITY_ACTION=remove ;;
+    endpoint) VLESS_REALITY_ACTION=set-endpoint ;;
+    menu|install|show|export|set-endpoint|remove|uninstall|start|stop|restart|status|doctor|upgrade) ;;
+    help|-h|--help) VLESS_REALITY_ACTION=help ;;
+    *) die "未知 VLESS REALITY 操作: $VLESS_REALITY_ACTION" ;;
+  esac
+  if [ "$#" -gt 0 ] && [[ "$1" != --* ]]; then
+    case "$VLESS_REALITY_ACTION" in
+      show|export|set-endpoint|remove|uninstall|start|stop|restart|status|doctor)
+        VLESS_REALITY_NAME="$1"; shift ;;
+    esac
+  fi
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --name)
+        VLESS_REALITY_NAME="${2:-}"
+        [ -n "$VLESS_REALITY_NAME" ] && [[ "$VLESS_REALITY_NAME" != --* ]] \
+          || die '--name 需要 VLESS REALITY instance name'
+        shift 2
+        ;;
+      --target|--server-name|--sni)
+        VLESS_REALITY_TARGET="${2:-}"
+        [ -n "$VLESS_REALITY_TARGET" ] && [[ "$VLESS_REALITY_TARGET" != --* ]] \
+          || die "$1 需要公网 hostname"
+        VLESS_REALITY_TARGET_CLI=1
+        shift 2
+        ;;
+      --target-port)
+        VLESS_REALITY_TARGET_PORT="${2:-}"
+        [ -n "$VLESS_REALITY_TARGET_PORT" ] && [[ "$VLESS_REALITY_TARGET_PORT" != --* ]] \
+          || die '--target-port 需要端口'
+        VLESS_REALITY_TARGET_PORT_CLI=1
+        shift 2
+        ;;
+      *)
+        consumed=0; rc=0
+        parse_nobrand_common_option "$1" "${2:-}" || rc=$?
+        case "$rc" in
+          0) consumed=1 ;;
+          2) consumed=2 ;;
+          *) die "未知 VLESS REALITY 参数: $1" ;;
+        esac
+        shift "$consumed"
+        ;;
+    esac
+  done
+  ACTION="nobrand-vless-reality"
   NOBRAND_ARGS_HANDLED=1
 }
 
@@ -830,6 +1055,7 @@ parse_nobrand_forward_args() {
         ;;
       --listen|--listen-host)
         FORWARD_LISTEN_HOST="${2:-}"
+        FORWARD_LISTEN_HOST_CLI=1
         [ -n "$FORWARD_LISTEN_HOST" ] && [[ "$FORWARD_LISTEN_HOST" != --* ]] || die "$1 需要监听地址"
         shift 2
         ;;
@@ -877,7 +1103,7 @@ parse_nobrand_forward_args() {
         [ "$FORWARD_ACTION" = import ] && FORWARD_IMPORT_FILE="$value" || FORWARD_EXPORT_FILE="$value"
         shift 2
         ;;
-      --advertise-host|--advertise-port|--advertise-auto|--yes|-y|--dry-run)
+      --advertise-host|--advertise-port|--advertise-auto|--ingress-profile|--yes|-y|--dry-run)
         local consumed=0 rc=0
         parse_nobrand_common_option "$1" "${2:-}" || rc=$?
         case "$rc" in 0) consumed=1 ;; 2) consumed=2 ;; *) die "未知 Forward 参数: $1" ;; esac
@@ -917,6 +1143,10 @@ detect_nobrand_entry() {
       shift
       parse_nobrand_vless_sudoku_args "$@"
       ;;
+    vless-reality|reality)
+      shift
+      parse_nobrand_vless_reality_args "$@"
+      ;;
     tuic)
       shift
       parse_nobrand_tuic_args "$@"
@@ -928,6 +1158,10 @@ detect_nobrand_entry() {
     forward|port-forward)
       shift
       parse_nobrand_forward_args "$@"
+      ;;
+    ingress)
+      shift
+      parse_nobrand_ingress_args "$@"
       ;;
     manager)
       shift
@@ -951,7 +1185,7 @@ detect_nobrand_entry() {
           --protocol)
             NOBRAND_PROTOCOL_FILTER="${2:-}"
             [ -n "$NOBRAND_PROTOCOL_FILTER" ] \
-              || die "--protocol 需要 mieru、snell、hy2、tuic、vless-sudoku 或 ssh"
+              || die "--protocol 需要 mieru、snell、hy2、tuic、vless-reality、vless-sudoku、ssh 或 forward"
             shift 2
             ;;
           *) die "未知 nodes 参数: $1" ;;
@@ -1145,6 +1379,12 @@ while [ "$NOBRAND_ARGS_HANDLED" -eq 0 ] && [ $# -gt 0 ]; do
       PORT="${2:-}"
       PORT_CLI=1
       [ -n "$PORT" ] || die "--port 需要端口号"
+      shift
+      ;;
+    --ingress-profile)
+      INGRESS_PROFILE="${2:-}"
+      INGRESS_PROFILE_CLI=1
+      [ -n "$INGRESS_PROFILE" ] && [[ "$INGRESS_PROFILE" != --* ]] || die "--ingress-profile 需要入口配置 ID 或名称"
       shift
       ;;
     --port-range)
@@ -1360,8 +1600,8 @@ nb_legacy_state_detected() {
 
 nb_fail_legacy_state() {
   die "$(t \
-    '检测到旧版安装数据。NoBrand-OneClick 3.1.0 不提供旧用户自动迁移；请先备份并清理旧安装后重新部署。' \
-    'Legacy installation data was detected. NoBrand-OneClick 3.1.0 does not migrate old users; back it up, clean the old installation, then deploy fresh.')"
+    '检测到旧版安装数据。NoBrand-OneClick 3.2.0 不提供旧用户自动迁移；请先备份并清理旧安装后重新部署。' \
+    'Legacy installation data was detected. NoBrand-OneClick 3.2.0 does not migrate old users; back it up, clean the old installation, then deploy fresh.')"
 }
 
 nb_validate_authoritative_state_boundary() {
@@ -1783,7 +2023,13 @@ admin_lock_acquire() {
     return 0
   fi
   exec 8>"$MITA_ADMIN_LOCK"
-  if flock -w 120 8; then
+  if { flock --help 2>&1 || true; } | grep -q -- '-w' \
+     && flock -w 120 8; then
+    _ADMIN_LOCK_HELD=1
+    return 0
+  elif ! { flock --help 2>&1 || true; } | grep -q -- '-w' \
+       && command -v timeout >/dev/null 2>&1 \
+       && timeout 120 flock 8; then
     _ADMIN_LOCK_HELD=1
     return 0
   fi
@@ -2197,6 +2443,7 @@ nb_registry_rows() {
   NOBRAND_SNELL_STATE_DIR="$NOBRAND_SNELL_STATE_DIR" \
   NOBRAND_HY2_STATE_FILE="$NOBRAND_HY2_STATE_FILE" \
   NOBRAND_VLESS_STATE_FILE="$NOBRAND_VLESS_STATE_FILE" \
+  NOBRAND_REALITY_STATE_DIR="$NOBRAND_REALITY_STATE_DIR" \
   NOBRAND_TUIC_STATE_DIR="$NOBRAND_TUIC_STATE_DIR" \
   NOBRAND_FORWARD_STATE_FILE="$NOBRAND_FORWARD_STATE_FILE" \
   MITA_USERS_STATE="$MITA_USERS_STATE" \
@@ -2242,6 +2489,20 @@ if vless_path and os.path.isfile(vless_path):
     try:
         state = json.load(open(vless_path, encoding="utf-8"))
         emit("vless-sudoku:default", "TCP", state.get("listen_port"),
+             state.get("advertise_host"), state.get("advertise_port"))
+    except Exception:
+        pass
+
+reality_dir = os.environ.get("NOBRAND_REALITY_STATE_DIR", "")
+for path in sorted(glob.glob(os.path.join(reality_dir, "*", "state.json"))):
+    try:
+        state = json.load(open(path, encoding="utf-8"))
+        instance_id = str(state.get("instance_id") or "")
+        if (state.get("schema_version") != 3 or state.get("ownership") != "nobrand-v3"
+                or state.get("protocol") != "vless-reality"
+                or os.path.basename(os.path.dirname(path)) != instance_id):
+            continue
+        emit("vless-reality:" + instance_id, "TCP", state.get("listen_port"),
              state.get("advertise_host"), state.get("advertise_port"))
     except Exception:
         pass
@@ -2315,26 +2576,35 @@ nb_registry_port_owner() {
 
 nb_port_available_for_transport() {
   local port="$1" transport="$2" ignore_owner="${3:-}"
+  nb_port_available_for_profile "$port" "$transport" "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" "$ignore_owner"
+}
+
+nb_port_available_for_profile() {
+  local port="$1" transport="$2" profile_id="${3:-$NOBRAND_LEGACY_INGRESS_PROFILE_ID}" ignore_owner="${4:-}"
   nb_valid_port "$port" || return 1
   transport="$(nb_normalize_transport "$transport")" || return 1
-  nb_port_is_tail_base_reserved "$port" && return 1
+  nb_ingress_profile_json "$profile_id" >/dev/null 2>&1 || return 1
+  nb_ingress_port_is_reserved "$profile_id" "$port" && return 1
   nb_registry_port_owner "$transport" "$port" "$ignore_owner" >/dev/null 2>&1 && return 1
   nb_port_is_listening "$transport" "$port" && return 1
   return 0
 }
 
 nb_select_available_port() {
-  local transport ip bounds lo hi selected attempt random_value
+  local transport profile_id="${2:-$NOBRAND_LEGACY_INGRESS_PROFILE_ID}" bounds lo hi selected attempt random_value rc=0
   transport="$(nb_normalize_transport "$1")" || return 1
-  ip="$(nb_detect_local_ipv4 2>/dev/null || true)"
-  if bounds="$(nb_tail_port_bounds "$ip" 2>/dev/null)"; then
+  bounds="$(nb_ingress_profile_auto_range "$profile_id" 2>/dev/null)" || rc=$?
+  if [ "$rc" -eq 0 ] && [ -n "$bounds" ]; then
     lo="${bounds%%|*}"
     hi="${bounds#*|}"
-    if selected="$(nb_scan_port_span "$lo" "$hi" nb_port_available_for_transport "$transport")"; then
+    if selected="$(nb_scan_port_span "$lo" "$hi" nb_port_available_for_profile "$transport" "$profile_id")"; then
       printf '%s' "$selected"
       return 0
     fi
   fi
+  # Explicit profiles fail closed. manual-only has no pool, while exhausted
+  # derived/custom ranges never silently escape into an unrelated random port.
+  [ "$profile_id" = "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ] || return 1
   attempt=0
   while [ "$attempt" -lt 512 ]; do
     if command -v openssl >/dev/null 2>&1; then
@@ -2357,31 +2627,1228 @@ nb_select_available_port() {
 }
 
 nb_warn_if_outside_recommended_range() {
-  local port="$1" ip bounds lo hi
-  ip="$(nb_detect_local_ipv4 2>/dev/null || true)"
-  bounds="$(nb_tail_port_bounds "$ip" 2>/dev/null || true)"
+  local port="$1" profile_id="${2:-$NOBRAND_LEGACY_INGRESS_PROFILE_ID}" profile_name bounds lo hi
+  profile_name="$(nb_ingress_profile_name "$profile_id" 2>/dev/null || printf '%s' "$profile_id")"
+  bounds="$(nb_ingress_profile_auto_range "$profile_id" 2>/dev/null || true)"
   [ -n "$bounds" ] || return 0
   lo="${bounds%%|*}"
   hi="${bounds#*|}"
-  if nb_port_is_tail_base_reserved "$port"; then
-    warn "$(t "指定端口 ${port} 是本机尾号段的保留基准端口，不允许代理绑定" \
-      "Port ${port} is the reserved base of this host's tail-port range and cannot be used by a proxy")"
+  if nb_ingress_port_is_reserved "$profile_id" "$port"; then
+    warn "$(t "指定端口 ${port} 是入口配置 ${profile_name} 的保留端口，不允许代理绑定" \
+      "Port ${port} is reserved by ingress profile ${profile_name} and cannot be used by a proxy")"
     return 0
   fi
   if [ "$port" -lt "$lo" ] || [ "$port" -gt "$hi" ]; then
-    warn "$(t "指定端口 ${port} 不在本机 ${ip} 的推荐段 ${lo}-${hi}；确认空闲后仍允许使用" \
-      "Port ${port} is outside the recommended ${lo}-${hi} range for ${ip}; it is still allowed when free")"
+    warn "$(t "指定端口 ${port} 不在入口配置 ${profile_name} 的自动段 ${lo}-${hi}；确认空闲后仍允许使用" \
+      "Port ${port} is outside ingress profile ${profile_name}'s auto range ${lo}-${hi}; it is still allowed when free")"
   fi
 }
 
 nb_describe_port_conflict() {
-  local transport="$1" port="$2" owner reservation details
-  reservation="$(nb_tail_base_reservation_owner "$port" 2>/dev/null || true)"
-  [ -z "$reservation" ] || msg "  reserved owner: ${reservation} (tail-port base; external NAT/SSH ownership may be invisible inside the guest)"
+  local transport="$1" port="$2" profile_id="${3:-$NOBRAND_LEGACY_INGRESS_PROFILE_ID}" owner details
+  if nb_ingress_port_is_reserved "$profile_id" "$port"; then
+    msg "  reserved by ingress profile: $(nb_ingress_profile_name "$profile_id")"
+  fi
   owner="$(nb_registry_port_owner "$transport" "$port" 2>/dev/null || true)"
   [ -z "$owner" ] || msg "  state owner: ${owner}"
   details="$(nb_port_listener_details "$transport" "$port" 2>/dev/null || true)"
   [ -z "$details" ] || printf '%s\n' "$details" | sed 's/^/  listener: /'
+}
+
+# ---------- NoBrand Common Core: ingress profiles (schema-v3 optional state) ----------
+
+NOBRAND_LEGACY_INGRESS_PROFILE_ID="legacy-default-route"
+
+nb_ingress_now() {
+  date -u +%Y-%m-%dT%H:%M:%SZ
+}
+
+nb_ingress_valid_ipv4() {
+  local value="${1:-}"
+  command -v python3 >/dev/null 2>&1 || {
+    [[ "$value" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+    local part
+    IFS=. read -r -a _nb_ipv4_parts <<<"$value"
+    for part in "${_nb_ipv4_parts[@]}"; do
+      [[ "$part" =~ ^[0-9]+$ ]] && [ "$((10#$part))" -le 255 ] || return 1
+    done
+    return 0
+  }
+  python3 - "$value" <<'PY' >/dev/null 2>&1
+import ipaddress, sys
+try:
+    value = ipaddress.ip_address(sys.argv[1])
+except ValueError:
+    raise SystemExit(1)
+raise SystemExit(0 if value.version == 4 and not value.is_loopback and not value.is_link_local else 1)
+PY
+}
+
+# interface|IPv4|state|default-route-marker. Tests may provide exact rows
+# through NOBRAND_TEST_INTERFACE_ROWS without changing the host network.
+nb_ingress_interface_rows() {
+  local default_iface=""
+  if [ -n "${NOBRAND_TEST_INTERFACE_ROWS:-}" ]; then
+    printf '%s\n' "$NOBRAND_TEST_INTERFACE_ROWS" | sed '/^$/d'
+    return 0
+  fi
+  command -v ip >/dev/null 2>&1 || return 0
+  default_iface="$(ip -o -4 route show default 2>/dev/null \
+    | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')"
+  ip -o -4 addr show scope global 2>/dev/null | awk -v default_iface="$default_iface" '
+    {
+      iface=$2; sub(/@.*/, "", iface); split($4, address, "/")
+      state="UNKNOWN"
+      command="ip -o link show dev \"" iface "\" 2>/dev/null"
+      if ((command | getline link) > 0) {
+        if (link ~ /state UP/) state="UP"; else if (link ~ /state DOWN/) state="DOWN"
+      }
+      close(command)
+      print iface "|" address[1] "|" state "|" (iface==default_iface ? "1" : "0")
+    }
+  '
+}
+
+nb_ingress_interface_exists() {
+  local expected="$1" iface _address _state _default
+  while IFS='|' read -r iface _address _state _default; do
+    [ "$iface" = "$expected" ] && return 0
+  done < <(nb_ingress_interface_rows)
+  return 1
+}
+
+nb_ingress_address_on_interface() {
+  local expected_iface="$1" expected_address="$2" iface address _state _default
+  nb_ingress_valid_ipv4 "$expected_address" || return 1
+  while IFS='|' read -r iface address _state _default; do
+    [ "$iface" = "$expected_iface" ] && [ "$address" = "$expected_address" ] && return 0
+  done < <(nb_ingress_interface_rows)
+  return 1
+}
+
+nb_ingress_default_egress() {
+  local iface="" address=""
+  if [ -n "${NOBRAND_TEST_DEFAULT_EGRESS:-}" ]; then
+    printf '%s' "$NOBRAND_TEST_DEFAULT_EGRESS"
+    return 0
+  fi
+  if command -v ip >/dev/null 2>&1; then
+    iface="$(ip -o -4 route show default 2>/dev/null \
+      | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')"
+    address="$(ip -4 route get 1.1.1.1 2>/dev/null \
+      | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')"
+  fi
+  [ -n "$iface$address" ] || return 1
+  printf '%s|%s' "$iface" "$address"
+}
+
+nb_ingress_state_valid() {
+  local path="${1:-$NOBRAND_INGRESS_STATE_FILE}" address policy display_host
+  [ -f "$path" ] && [ ! -L "$path" ] && [ -s "$path" ] || return 1
+  jq -e --argjson schema "$NOBRAND_SCHEMA_VERSION" '
+    (keys|sort) == ["default_profile_id","feature","ownership","profiles","schema_version"]
+    and .schema_version == $schema and .ownership == "nobrand-v3"
+    and .feature == "ingress-profiles"
+    and ((.default_profile_id == null) or (.default_profile_id|type == "string"))
+    and (.profiles|type == "array")
+    and (([.profiles[].profile_id]|length) == ([.profiles[].profile_id]|unique|length))
+    and (([.profiles[].name]|length) == ([.profiles[].name]|unique|length))
+    and ([.profiles[].profile_id] as $ids |
+         all(.profiles[];
+           . as $profile |
+           $profile.name != "legacy-default-route" and $profile.name != "Legacy Default Route"
+           and ($ids|index($profile.name)|not)))
+    and all(.profiles[];
+      ((keys-["ingress_enforcement"]|sort) == ["created_at","display_host_default","display_port","display_port_policy","enabled",
+                      "interface","local_address","name","port_policy","profile_id","range_end","range_start",
+                      "reserved_ports","type","updated_at"])
+      and ((has("ingress_enforcement")|not) or
+           (.ingress_enforcement == "permissive" or .ingress_enforcement == "strict"))
+      and (.profile_id|type == "string" and test("^i[0-9a-f]{16}$"))
+      and (.name|type == "string" and length > 0 and length <= 64 and (test("[[:cntrl:]]")|not))
+      and (.type == "public" or .type == "mapped")
+      and (.interface|type == "string" and test("^[A-Za-z0-9_.:-]{1,64}$"))
+      and (.local_address|type == "string" and length > 0)
+      and (.port_policy == "derived-tail" or .port_policy == "custom-range" or .port_policy == "manual-only")
+      and (.reserved_ports|type == "array")
+      and (all(.reserved_ports[]; type == "number" and floor == . and . >= 1 and . <= 65535))
+      and ((.reserved_ports|length) == (.reserved_ports|unique|length))
+      and (if .port_policy == "custom-range" then
+             (.range_start|type == "number") and (.range_end|type == "number")
+             and .range_start >= 1025 and .range_end <= 65535 and .range_start <= .range_end
+           else .range_start == null and .range_end == null end)
+      and (.display_port_policy == "follow-actual" or .display_port_policy == "custom")
+      and (if .display_port_policy == "custom" then
+             ((.display_port|type) == "number" and .display_port >= 1 and .display_port <= 65535)
+           else .display_port == null end)
+      and (.display_host_default|type == "string")
+      and (if .type == "mapped" then (.display_host_default|length > 0) else true end)
+      and (.enabled|type == "boolean")
+      and (.created_at|type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))
+      and (.updated_at|type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))
+    )
+    and (.default_profile_id as $default |
+         if $default == null then true
+         else any(.profiles[]; .profile_id == $default and .enabled) end)
+  ' "$path" >/dev/null 2>&1 || return 1
+  while IFS=$'\t' read -r address policy display_host; do
+    nb_ingress_valid_ipv4 "$address" || return 1
+    [ "$policy" != derived-tail ] || nb_port_base_for_ip "$address" >/dev/null || return 1
+    [ -z "$display_host" ] || valid_advertise_host "$display_host" || return 1
+  done < <(jq -r '.profiles[]|[.local_address,.port_policy,.display_host_default]|@tsv' "$path")
+}
+
+nb_ingress_ensure_state() {
+  local tmp
+  nb_init_state_layout || return 1
+  if [ -e "$NOBRAND_INGRESS_STATE_FILE" ]; then
+    nb_ingress_state_valid || die 'Ingress profile state is invalid; refusing to overwrite it'
+    return 0
+  fi
+  tmp="$(mktemp_file .ingress.json)" || return 1
+  jq -n --argjson schema "$NOBRAND_SCHEMA_VERSION" \
+    '{schema_version:$schema,ownership:"nobrand-v3",feature:"ingress-profiles",default_profile_id:null,profiles:[]}' \
+    >"$tmp" || { rm -f "$tmp"; return 1; }
+  nb_atomic_install_file "$tmp" "$NOBRAND_INGRESS_STATE_FILE" 0600
+  local rc=$?
+  rm -f "$tmp"
+  return "$rc"
+}
+
+nb_ingress_generate_id() {
+  local id attempt=0
+  while [ "$attempt" -lt 64 ]; do
+    id="i$(openssl rand -hex 8 2>/dev/null || printf '%016x' "$((RANDOM * 32768 + RANDOM))")"
+    [[ "$id" =~ ^i[0-9a-f]{16}$ ]] || { attempt=$((attempt + 1)); continue; }
+    if [ ! -s "$NOBRAND_INGRESS_STATE_FILE" ] \
+       || jq -e --arg id "$id" 'all(.profiles[];.profile_id!=$id)' "$NOBRAND_INGRESS_STATE_FILE" >/dev/null; then
+      printf '%s' "$id"
+      return 0
+    fi
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+
+nb_ingress_legacy_profile_json() {
+  local ip iface="" base="" range_start=null range_end=null reserved='[]'
+  ip="$(nb_detect_local_ipv4 2>/dev/null || true)"
+  if command -v ip >/dev/null 2>&1 && [ -n "$ip" ]; then
+    iface="$(ip -o -4 addr show scope global 2>/dev/null \
+      | awk -v ip="$ip" '{split($4,a,"/"); if(a[1]==ip){x=$2; sub(/@.*/,"",x); print x; exit}}')"
+  fi
+  if base="$(nb_port_base_for_ip "$ip" 2>/dev/null)"; then
+    range_start=$((base + 1)); range_end=$((base + 99)); reserved="[$base]"
+  fi
+  jq -n --arg id "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" --arg name 'Legacy Default Route' \
+    --arg interface "$iface" --arg address "$ip" --argjson range_start "$range_start" \
+    --argjson range_end "$range_end" --argjson reserved "$reserved" '
+      {profile_id:$id,name:$name,type:"legacy",interface:$interface,local_address:$address,
+       port_policy:"derived-tail",range_start:$range_start,range_end:$range_end,
+       reserved_ports:$reserved,display_host_default:"",display_port_policy:"follow-actual",
+       display_port:null,ingress_enforcement:"permissive",enabled:true,built_in:true,created_at:"",updated_at:""}
+    '
+}
+
+nb_ingress_profile_json() {
+  local selector="${1:-}" id
+  [ -n "$selector" ] || return 1
+  if [ "$selector" = "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ] || [ "$selector" = 'Legacy Default Route' ]; then
+    nb_ingress_legacy_profile_json
+    return 0
+  fi
+  nb_ingress_state_valid || return 1
+  id="$(jq -r --arg value "$selector" '
+    [.profiles[]|select(.profile_id==$value or .name==$value)|.profile_id] as $ids |
+    if ($ids|length)==1 then $ids[0] else empty end
+  ' "$NOBRAND_INGRESS_STATE_FILE")"
+  [ -n "$id" ] || return 1
+  jq -c --arg id "$id" '.profiles[]|select(.profile_id==$id)' "$NOBRAND_INGRESS_STATE_FILE"
+}
+
+nb_ingress_profile_id() {
+  local json
+  json="$(nb_ingress_profile_json "$1")" || return 1
+  jq -r .profile_id <<<"$json"
+}
+
+nb_ingress_default_profile_id() {
+  if nb_ingress_state_valid; then
+    jq -r '.default_profile_id // empty' "$NOBRAND_INGRESS_STATE_FILE"
+  fi
+}
+
+# Resolution for a newly-created object: explicit request, then configured
+# default, then the immutable 3.1 legacy adapter.
+nb_resolve_ingress_profile() {
+  local requested="${1:-}" resolved=""
+  if [ -n "$requested" ]; then
+    resolved="$(nb_ingress_profile_id "$requested" 2>/dev/null || true)"
+    [ -n "$resolved" ] || die "Ingress profile not found or ambiguous: ${requested}"
+  else
+    resolved="$(nb_ingress_default_profile_id 2>/dev/null || true)"
+    [ -n "$resolved" ] || resolved="$NOBRAND_LEGACY_INGRESS_PROFILE_ID"
+  fi
+  local profile
+  profile="$(nb_ingress_profile_json "$resolved")" || return 1
+  [ "$(jq -r .enabled <<<"$profile")" = true ] || die "Ingress profile is disabled: ${resolved}"
+  printf '%s' "$resolved"
+}
+
+nb_prepare_ingress_request() {
+  INGRESS_PROFILE_ID="$(nb_resolve_ingress_profile "${INGRESS_PROFILE:-}")" || return 1
+}
+
+nb_ingress_profile_enforcement() {
+  local profile
+  profile="$(nb_ingress_profile_json "${1:-}")" || return 1
+  jq -r '.ingress_enforcement // "permissive"' <<<"$profile"
+}
+
+# Resolve the exact deployment contract for a managed listener.  The
+# capability argument is an implementation fact established by the pinned
+# runtime audit, not a user-selectable mode.
+nb_prepare_ingress_deployment() {
+  local profile_id="$1" capability="$2" profile policy address
+  profile="$(nb_ingress_profile_json "$profile_id")" || return 1
+  policy="$(nb_ingress_profile_enforcement "$profile_id")" || return 1
+  address="$(jq -r '.local_address // empty' <<<"$profile")"
+  INGRESS_LOCAL_ADDRESS="$address"
+  case "$capability" in
+    not-applicable)
+      INGRESS_ENFORCEMENT_RESOLVED=not-applicable
+      INGRESS_ENFORCEMENT_METHOD=system-ssh
+      INGRESS_LISTEN_HOST=0.0.0.0
+      return 0
+      ;;
+    native-bind|firewall|address-match) ;;
+    *) return 1 ;;
+  esac
+  case "$policy" in
+    permissive)
+      INGRESS_ENFORCEMENT_RESOLVED=permissive
+      INGRESS_ENFORCEMENT_METHOD=wildcard
+      INGRESS_LISTEN_HOST=0.0.0.0
+      ;;
+    strict)
+      [ "$profile_id" != "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ] || return 1
+      nb_ingress_valid_ipv4 "$address" || return 1
+      nb_ingress_address_on_interface "$(jq -r .interface <<<"$profile")" "$address" || return 1
+      INGRESS_ENFORCEMENT_RESOLVED=strict
+      INGRESS_ENFORCEMENT_METHOD="$capability"
+      case "$capability" in
+        native-bind|address-match) INGRESS_LISTEN_HOST="$address" ;;
+        firewall) INGRESS_LISTEN_HOST=0.0.0.0 ;;
+      esac
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+nb_ingress_stamp_state_file() {
+  local path="$1" profile_id="$2" capability="$3" tmp
+  [ -s "$path" ] && jq empty "$path" >/dev/null 2>&1 || return 1
+  nb_prepare_ingress_deployment "$profile_id" "$capability" || return 1
+  tmp="$(mktemp_file .ingress-stamp)" || return 1
+  jq --arg policy "$INGRESS_ENFORCEMENT_RESOLVED" --arg method "$INGRESS_ENFORCEMENT_METHOD" \
+    --arg address "$INGRESS_LOCAL_ADDRESS" \
+    '.ingress_enforcement=$policy | .ingress_enforcement_method=$method | .ingress_local_address=$address' \
+    "$path" >"$tmp" && mv -f "$tmp" "$path"
+  local rc=$?
+  rm -f "$tmp"
+  return "$rc"
+}
+
+nb_ingress_state_enforcement() {
+  jq -r '.ingress_enforcement // "permissive"' "$1" 2>/dev/null
+}
+
+nb_ingress_state_method() {
+  jq -r '.ingress_enforcement_method // "wildcard"' "$1" 2>/dev/null
+}
+
+nb_ingress_state_local_address() {
+  local path="$1" profile_id="$2" value
+  value="$(jq -r '.ingress_local_address // empty' "$path" 2>/dev/null || true)"
+  if [ -z "$value" ]; then
+    value="$(nb_ingress_profile_json "$profile_id" 2>/dev/null | jq -r '.local_address // empty' || true)"
+  fi
+  printf '%s' "$value"
+}
+
+nb_listener_has_local_address() {
+  local transport="$1" port="$2" address="$3" flags line field
+  command -v ss >/dev/null 2>&1 || return 1
+  case "$transport" in
+    TCP) flags='-Hln4t' ;;
+    UDP) flags='-Hln4u' ;;
+    *) return 1 ;;
+  esac
+  while IFS= read -r line; do
+    for field in $line; do
+      [ "$field" = "${address}:${port}" ] && return 0
+    done
+  done < <(ss "$flags" 2>/dev/null)
+  return 1
+}
+
+nb_wait_for_listener_address() {
+  local transport="$1" port="$2" address="$3" timeout="${4:-25}" i=0
+  while [ "$i" -lt "$timeout" ]; do
+    nb_listener_has_local_address "$transport" "$port" "$address" && return 0
+    sleep 1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+nb_wait_for_enforced_listener() {
+  local policy="${1:-permissive}" method="${2:-wildcard}" transport="$3" port="$4" address="$5" owner="$6" timeout="${7:-25}"
+  case "$policy:$method" in
+    permissive:wildcard) nb_wait_for_listener "$transport" "$port" "$timeout" ;;
+    strict:native-bind) nb_wait_for_listener_address "$transport" "$port" "$address" "$timeout" ;;
+    strict:firewall)
+      nb_wait_for_listener "$transport" "$port" "$timeout" \
+        && nb_strict_firewall_rule_owned "$owner" "$transport" "$port" "$address"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+nb_strict_firewall_empty_state() {
+  jq -n --argjson schema "$NOBRAND_SCHEMA_VERSION" \
+    '{schema_version:$schema,ownership:"nobrand-v3",feature:"ingress-enforcement-firewall",rules:[]}'
+}
+
+nb_strict_firewall_state_valid() {
+  local path="${1:-$NOBRAND_INGRESS_FIREWALL_STATE_FILE}" owner transport address
+  [ -s "$path" ] || return 1
+  jq -e --argjson schema "$NOBRAND_SCHEMA_VERSION" '
+    (keys|sort)==["feature","ownership","rules","schema_version"] and
+    .schema_version==$schema and .ownership=="nobrand-v3" and
+    .feature=="ingress-enforcement-firewall" and (.rules|type)=="array" and
+    all(.rules[];
+      (keys|sort)==["ingress_profile_id","local_address","owner","port","transport"] and
+      (.owner|type)=="string" and (.owner|test("^[A-Za-z0-9:._-]{1,128}$")) and
+      (.ingress_profile_id|type)=="string" and (.ingress_profile_id|length)>0 and
+      (.local_address|type)=="string" and (.local_address|length)>0 and
+      (.transport=="TCP" or .transport=="UDP") and
+      (.port|type)=="number" and .port>=1 and .port<=65535 and (.port|floor)==.port) and
+    ([.rules[]|(.owner+"|"+.transport+"|"+(.port|tostring))]|length)==
+      ([.rules[]|(.owner+"|"+.transport+"|"+(.port|tostring))]|unique|length)
+  ' "$path" >/dev/null 2>&1 || return 1
+  while IFS=$'\t' read -r owner transport address; do
+    [ -n "$owner" ] || continue
+    nb_ingress_valid_ipv4 "$address" || return 1
+    case "$transport" in TCP|UDP) ;; *) return 1 ;; esac
+  done < <(jq -r '.rules[]|[.owner,.transport,.local_address]|@tsv' "$path")
+}
+
+nb_strict_firewall_table_owned() {
+  local listing
+  command -v nft >/dev/null 2>&1 || return 1
+  listing="$(nft list table "$NOBRAND_INGRESS_NFT_FAMILY" "$NOBRAND_INGRESS_NFT_TABLE" 2>/dev/null)" \
+    || return 1
+  grep -Fq 'comment "Owned by NoBrand-OneClick Strict Ingress"' <<<"$listing"
+}
+
+nb_strict_firewall_remove_table() {
+  command -v nft >/dev/null 2>&1 || return 0
+  nft list table "$NOBRAND_INGRESS_NFT_FAMILY" "$NOBRAND_INGRESS_NFT_TABLE" >/dev/null 2>&1 \
+    || return 0
+  nb_strict_firewall_table_owned || return 1
+  nft delete table "$NOBRAND_INGRESS_NFT_FAMILY" "$NOBRAND_INGRESS_NFT_TABLE"
+}
+
+nb_strict_firewall_ensure_dependency() {
+  command -v nft >/dev/null 2>&1 && return 0
+  if declare -F forward_ensure_nftables_dependency >/dev/null 2>&1; then
+    forward_ensure_nftables_dependency
+  else
+    return 1
+  fi
+}
+
+nb_strict_firewall_generate_ruleset() {
+  local state="$1" output="$2" tmp owner transport port address proto
+  nb_strict_firewall_state_valid "$state" || return 1
+  tmp="$(mktemp_file .ingress-firewall.nft)" || return 1
+  {
+    printf 'table %s %s {\n' "$NOBRAND_INGRESS_NFT_FAMILY" "$NOBRAND_INGRESS_NFT_TABLE"
+    printf '  comment "Owned by NoBrand-OneClick Strict Ingress"\n'
+    printf '  chain input {\n    type filter hook input priority -10; policy accept;\n'
+    while IFS=$'\t' read -r owner transport port address; do
+      [ -n "$owner" ] || continue
+      proto="$(printf '%s' "$transport" | tr '[:upper:]' '[:lower:]')"
+      printf '    ip daddr != %s %s dport %s drop comment "nobrand:strict:%s:%s"\n' \
+        "$address" "$proto" "$port" "$owner" "$proto"
+    done < <(jq -r '.rules|sort_by(.owner,.transport,.port)[]|
+      [.owner,.transport,(.port|tostring),.local_address]|@tsv' "$state")
+    printf '  }\n}\n'
+  } >"$tmp" || { rm -f "$tmp"; return 1; }
+  mkdir -p "$(dirname "$output")" || { rm -f "$tmp"; return 1; }
+  install -m 0600 "$tmp" "$output"
+  local rc=$?
+  rm -f "$tmp"
+  return "$rc"
+}
+
+nb_strict_firewall_apply_state() {
+  local state="$1" count candidate batch
+  nb_strict_firewall_state_valid "$state" || return 1
+  [ "${NOBRAND_TEST_STRICT_FIREWALL_APPLY_FAIL:-0}" -eq 0 ] || return 1
+  count="$(jq '.rules|length' "$state")" || return 1
+  if [ "$count" -eq 0 ]; then
+    nb_strict_firewall_remove_table || return 1
+    rm -f "$NOBRAND_INGRESS_FIREWALL_RULESET"
+    return 0
+  fi
+  nb_strict_firewall_ensure_dependency || return 1
+  candidate="$(mktemp_file .ingress-firewall-candidate.nft)" || return 1
+  batch="$(mktemp_file .ingress-firewall-batch.nft)" || { rm -f "$candidate"; return 1; }
+  nb_strict_firewall_generate_ruleset "$state" "$candidate" || { rm -f "$candidate" "$batch"; return 1; }
+  {
+    if nft list table "$NOBRAND_INGRESS_NFT_FAMILY" "$NOBRAND_INGRESS_NFT_TABLE" >/dev/null 2>&1; then
+      nb_strict_firewall_table_owned || { rm -f "$candidate" "$batch"; return 1; }
+      printf 'delete table %s %s\n' "$NOBRAND_INGRESS_NFT_FAMILY" "$NOBRAND_INGRESS_NFT_TABLE"
+    fi
+    cat "$candidate"
+  } >"$batch"
+  nft -c -f "$batch" >/dev/null 2>&1 && nft -f "$batch" \
+    && nb_atomic_install_file "$candidate" "$NOBRAND_INGRESS_FIREWALL_RULESET" 0600
+  local rc=$?
+  rm -f "$candidate" "$batch"
+  return "$rc"
+}
+
+nb_strict_firewall_current_or_empty() {
+  local output="$1"
+  if [ -e "$NOBRAND_INGRESS_FIREWALL_STATE_FILE" ]; then
+    nb_strict_firewall_state_valid "$NOBRAND_INGRESS_FIREWALL_STATE_FILE" || return 1
+    cp -a "$NOBRAND_INGRESS_FIREWALL_STATE_FILE" "$output"
+  else
+    nb_strict_firewall_empty_state >"$output"
+  fi
+}
+
+nb_strict_firewall_commit_candidate() {
+  local candidate="$1" old old_existed=0 rollback_failed=0
+  nb_strict_firewall_state_valid "$candidate" || return 1
+  old="$(mktemp_file .ingress-firewall-old)" || return 1
+  [ ! -e "$NOBRAND_INGRESS_FIREWALL_STATE_FILE" ] || old_existed=1
+  nb_strict_firewall_current_or_empty "$old" || { rm -f "$old"; return 1; }
+  if nb_strict_firewall_apply_state "$candidate" \
+     && nb_atomic_install_file "$candidate" "$NOBRAND_INGRESS_FIREWALL_STATE_FILE" 0600; then
+    rm -f "$old"
+    return 0
+  fi
+  nb_strict_firewall_apply_state "$old" >/dev/null 2>&1 || rollback_failed=1
+  if [ "$old_existed" -eq 1 ]; then
+    nb_atomic_install_file "$old" "$NOBRAND_INGRESS_FIREWALL_STATE_FILE" 0600 >/dev/null 2>&1 \
+      || rollback_failed=1
+  else
+    rm -f "$NOBRAND_INGRESS_FIREWALL_STATE_FILE" || rollback_failed=1
+  fi
+  rm -f "$old"
+  [ "$rollback_failed" -eq 0 ] || warn 'Strict-ingress firewall rollback failed; run doctor immediately'
+  return 1
+}
+
+nb_strict_firewall_remove_owner() {
+  local owner="$1" candidate
+  candidate="$(mktemp_file .ingress-firewall-remove)" || return 1
+  nb_strict_firewall_current_or_empty "$candidate" || { rm -f "$candidate"; return 1; }
+  jq --arg owner "$owner" '.rules|=map(select(.owner!=$owner))' "$candidate" >"${candidate}.next" \
+    && mv -f "${candidate}.next" "$candidate" \
+    && nb_strict_firewall_commit_candidate "$candidate"
+  local rc=$?
+  rm -f "$candidate" "${candidate}.next"
+  return "$rc"
+}
+
+nb_strict_firewall_rule_owned() {
+  local owner="$1" transport="$2" port="$3" address="$4" listing proto
+  nb_strict_firewall_state_valid "$NOBRAND_INGRESS_FIREWALL_STATE_FILE" || return 1
+  jq -e --arg owner "$owner" --arg transport "$transport" --arg address "$address" \
+    --argjson port "$port" \
+    'any(.rules[];.owner==$owner and .transport==$transport and .port==$port and .local_address==$address)' \
+    "$NOBRAND_INGRESS_FIREWALL_STATE_FILE" >/dev/null || return 1
+  nb_strict_firewall_table_owned || return 1
+  listing="$(nft list table "$NOBRAND_INGRESS_NFT_FAMILY" "$NOBRAND_INGRESS_NFT_TABLE" 2>/dev/null)" \
+    || return 1
+  proto="$(printf '%s' "$transport" | tr '[:upper:]' '[:lower:]')"
+  grep -Fq "nobrand:strict:${owner}:${proto}" <<<"$listing" \
+    && grep -Fq "ip daddr != ${address}" <<<"$listing"
+}
+
+nb_strict_firewall_clear_all() {
+  local empty
+  empty="$(mktemp_file .ingress-firewall-empty)" || return 1
+  nb_strict_firewall_empty_state >"$empty"
+  nb_strict_firewall_commit_candidate "$empty"
+  local rc=$?
+  rm -f "$empty"
+  return "$rc"
+}
+
+nb_strict_firewall_restore_authoritative() {
+  local state tmp
+  if [ -e "$NOBRAND_INGRESS_FIREWALL_STATE_FILE" ]; then
+    state="$NOBRAND_INGRESS_FIREWALL_STATE_FILE"
+    nb_strict_firewall_state_valid "$state" || return 1
+  else
+    tmp="$(mktemp_file .ingress-firewall-restore-empty)" || return 1
+    nb_strict_firewall_empty_state >"$tmp"
+    state="$tmp"
+  fi
+  nb_strict_firewall_apply_state "$state"
+  local rc=$?
+  [ -z "${tmp:-}" ] || rm -f "$tmp"
+  return "$rc"
+}
+
+nb_ingress_profile_name() {
+  local profile_id="${1:-}"
+  [ -n "$profile_id" ] || { printf 'Legacy Default Route'; return 0; }
+  nb_ingress_profile_json "$profile_id" 2>/dev/null | jq -r '.name // "Unknown"' \
+    || printf 'Unknown'
+}
+
+nb_ingress_profile_display_host() {
+  local profile_id="${1:-}" profile
+  [ -n "$profile_id" ] || return 1
+  [ "$profile_id" != "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ] || return 1
+  profile="$(nb_ingress_profile_json "$profile_id")" || return 1
+  jq -r '.display_host_default // empty' <<<"$profile"
+}
+
+nb_ingress_profile_display_port() {
+  local profile_id="$1" actual_port="$2" profile policy
+  profile="$(nb_ingress_profile_json "$profile_id")" || { printf '%s' "$actual_port"; return 0; }
+  policy="$(jq -r .display_port_policy <<<"$profile")"
+  if [ "$policy" = custom ]; then jq -r .display_port <<<"$profile"; else printf '%s' "$actual_port"; fi
+}
+
+nb_ingress_normalize_reserved() {
+  local raw="${1:-}" item canonical output="" seen='|'
+  raw="${raw//,/ }"
+  for item in $raw; do
+    canonical="$(normalize_uint "$item" 2>/dev/null || true)"
+    nb_valid_port "$canonical" || return 1
+    case "$seen" in *"|${canonical}|"*) continue ;; esac
+    seen="${seen}${canonical}|"
+    output="${output}${output:+,}${canonical}"
+  done
+  printf '%s' "$output"
+}
+
+nb_ingress_reserved_json() {
+  local normalized item json='[]'
+  normalized="$(nb_ingress_normalize_reserved "${1:-}")" || return 1
+  for item in ${normalized//,/ }; do
+    json="$(jq --argjson value "$item" '. + [$value]' <<<"$json")" || return 1
+  done
+  printf '%s' "$json"
+}
+
+nb_ingress_validate_profile_values() {
+  local type="$1" interface="$2" address="$3" policy="$4" range_start="$5" range_end="$6"
+  local reserved="$7" display_host="$8" display_port_policy="$9" display_port="${10}" enforcement="${11:-permissive}" base item
+  case "$type" in public|mapped) ;; *) return 1 ;; esac
+  nb_ingress_interface_exists "$interface" || return 1
+  nb_ingress_address_on_interface "$interface" "$address" || return 1
+  case "$policy" in
+    derived-tail)
+      base="$(nb_port_base_for_ip "$address")" || return 1
+      [ -z "$range_start$range_end" ] || return 1
+      ;;
+    custom-range)
+      nb_valid_port "$range_start" && nb_valid_port "$range_end" || return 1
+      range_start="$(normalize_uint "$range_start")"; range_end="$(normalize_uint "$range_end")"
+      [ "$range_start" -ge 1025 ] && [ "$range_start" -le "$range_end" ] || return 1
+      ;;
+    manual-only) [ -z "$range_start$range_end" ] || return 1 ;;
+    *) return 1 ;;
+  esac
+  reserved="$(nb_ingress_normalize_reserved "$reserved")" || return 1
+  for item in ${reserved//,/ }; do nb_valid_port "$item" || return 1; done
+  if [ "$type" = mapped ]; then valid_advertise_host "$display_host" || return 1; fi
+  [ -z "$display_host" ] || valid_advertise_host "$display_host" || return 1
+  case "$display_port_policy" in
+    follow-actual) [ -z "$display_port" ] || return 1 ;;
+    custom) valid_advertise_port "$display_port" || return 1 ;;
+    *) return 1 ;;
+  esac
+  case "$enforcement" in permissive|strict) ;; *) return 1 ;; esac
+}
+
+nb_ingress_reserved_conflicts() {
+  local reserved="${1:-}" owner transport port _host _display item
+  while IFS='|' read -r owner transport port _host _display; do
+    [ -n "$owner" ] || continue
+    for item in ${reserved//,/ }; do
+      if [ "$port" = "$item" ]; then printf '%s|%s|%s' "$owner" "$transport" "$port"; return 0; fi
+    done
+  done < <(nb_registry_rows)
+  return 1
+}
+
+nb_ingress_add() {
+  local id now base reserved_json range_start_json=null range_end_json=null display_port_json=null tmp profile conflict enabled
+  require_root
+  [ -n "$INGRESS_NAME" ] && [ -n "$INGRESS_TYPE" ] && [ -n "$INGRESS_INTERFACE" ] \
+    && [ -n "$INGRESS_ADDRESS" ] && [ -n "$INGRESS_PORT_POLICY" ] \
+    || die 'ingress add requires --name --type --interface --address --port-policy'
+  [ "${#INGRESS_NAME}" -le 64 ] && ! has_control_chars "$INGRESS_NAME" || die 'Ingress profile name is invalid'
+  case "$INGRESS_NAME" in
+    "$NOBRAND_LEGACY_INGRESS_PROFILE_ID"|'Legacy Default Route')
+      die 'Ingress profile name conflicts with a reserved profile selector'
+      ;;
+  esac
+  [[ ! "$INGRESS_NAME" =~ ^i[0-9a-f]{16}$ ]] \
+    || die 'Ingress profile name conflicts with the profile-ID namespace'
+  INGRESS_DISPLAY_PORT_POLICY="${INGRESS_DISPLAY_PORT_POLICY:-follow-actual}"
+  INGRESS_ENFORCEMENT="${INGRESS_ENFORCEMENT:-permissive}"
+  enabled="${INGRESS_ENABLED:-true}"
+  case "$enabled" in true|false) ;; *) die 'Ingress enabled state is invalid' ;; esac
+  if [ "$INGRESS_TYPE" = public ] && [ -z "$INGRESS_DISPLAY_HOST_DEFAULT" ]; then
+    INGRESS_DISPLAY_HOST_DEFAULT="$INGRESS_ADDRESS"
+  fi
+  if [ "$INGRESS_PORT_POLICY" = derived-tail ] && [ "$INGRESS_RESERVED_CLI" -eq 0 ]; then
+    base="$(nb_port_base_for_ip "$INGRESS_ADDRESS" 2>/dev/null || true)"
+    [ -n "$base" ] || die 'Derived-tail is invalid for this IPv4; use custom-range or manual-only'
+    INGRESS_RESERVED_PORTS="$base"
+  fi
+  nb_ingress_validate_profile_values "$INGRESS_TYPE" "$INGRESS_INTERFACE" "$INGRESS_ADDRESS" \
+    "$INGRESS_PORT_POLICY" "$INGRESS_RANGE_START" "$INGRESS_RANGE_END" "$INGRESS_RESERVED_PORTS" \
+    "$INGRESS_DISPLAY_HOST_DEFAULT" "$INGRESS_DISPLAY_PORT_POLICY" "$INGRESS_DISPLAY_PORT" "$INGRESS_ENFORCEMENT" \
+    || die 'Ingress profile values are invalid or the local IPv4 is not assigned to the selected interface'
+  INGRESS_RESERVED_PORTS="$(nb_ingress_normalize_reserved "$INGRESS_RESERVED_PORTS")"
+  if conflict="$(nb_ingress_reserved_conflicts "$INGRESS_RESERVED_PORTS" 2>/dev/null)"; then
+    die "Reserved port conflicts with an existing managed listener: ${conflict}"
+  fi
+  nb_ingress_ensure_state || return 1
+  jq -e --arg name "$INGRESS_NAME" 'all(.profiles[];.name!=$name)' "$NOBRAND_INGRESS_STATE_FILE" >/dev/null \
+    || die "Ingress profile name already exists: ${INGRESS_NAME}"
+  id="$(nb_ingress_generate_id)" || return 1
+  now="$(nb_ingress_now)"
+  reserved_json="$(nb_ingress_reserved_json "$INGRESS_RESERVED_PORTS")" || return 1
+  if [ "$INGRESS_PORT_POLICY" = custom-range ]; then
+    range_start_json="$(normalize_uint "$INGRESS_RANGE_START")"
+    range_end_json="$(normalize_uint "$INGRESS_RANGE_END")"
+  fi
+  [ "$INGRESS_DISPLAY_PORT_POLICY" != custom ] || display_port_json="$(normalize_uint "$INGRESS_DISPLAY_PORT")"
+  profile="$(jq -n --arg id "$id" --arg name "$INGRESS_NAME" --arg type "$INGRESS_TYPE" \
+    --arg interface "$INGRESS_INTERFACE" --arg address "$INGRESS_ADDRESS" \
+    --arg policy "$INGRESS_PORT_POLICY" --argjson range_start "$range_start_json" \
+    --argjson range_end "$range_end_json" --argjson reserved "$reserved_json" \
+    --arg display_host "$INGRESS_DISPLAY_HOST_DEFAULT" \
+    --arg display_port_policy "$INGRESS_DISPLAY_PORT_POLICY" --argjson display_port "$display_port_json" \
+    --arg enforcement "$INGRESS_ENFORCEMENT" --arg now "$now" --argjson enabled "$enabled" '
+      {profile_id:$id,name:$name,type:$type,interface:$interface,local_address:$address,
+       port_policy:$policy,range_start:$range_start,range_end:$range_end,reserved_ports:$reserved,
+       display_host_default:$display_host,display_port_policy:$display_port_policy,display_port:$display_port,
+       ingress_enforcement:$enforcement,enabled:$enabled,created_at:$now,updated_at:$now}
+    ')" || return 1
+  tmp="$(mktemp_file .ingress-add)" || return 1
+  jq --argjson profile "$profile" '.profiles += [$profile]' "$NOBRAND_INGRESS_STATE_FILE" >"$tmp" \
+    && nb_ingress_state_valid "$tmp" && nb_atomic_install_file "$tmp" "$NOBRAND_INGRESS_STATE_FILE" 0600
+  local rc=$?
+  rm -f "$tmp"
+  [ "$rc" -ne 0 ] || printf 'Ingress profile created: %s (%s)\n' "$id" "$INGRESS_NAME"
+  return "$rc"
+}
+
+nb_ingress_profile_reference_rows() {
+  local profile_id="$1"
+  NOBRAND_SNELL_STATE_DIR="$NOBRAND_SNELL_STATE_DIR" NOBRAND_HY2_STATE_FILE="$NOBRAND_HY2_STATE_FILE" \
+  NOBRAND_VLESS_STATE_FILE="$NOBRAND_VLESS_STATE_FILE" NOBRAND_TUIC_STATE_DIR="$NOBRAND_TUIC_STATE_DIR" \
+  NOBRAND_REALITY_STATE_DIR="$NOBRAND_REALITY_STATE_DIR" \
+  NOBRAND_SSH_STATE_FILE="$NOBRAND_SSH_STATE_FILE" NOBRAND_FORWARD_STATE_FILE="$NOBRAND_FORWARD_STATE_FILE" \
+  MITA_USERS_STATE="$MITA_USERS_STATE" python3 - "$profile_id" <<'PY'
+import glob, json, os, sys
+profile = sys.argv[1]
+def load(path):
+    try: return json.load(open(path, encoding="utf-8"))
+    except Exception: return None
+def emit(owner, value):
+    if not value: return
+    if profile == "*": print(str(value) + "|" + owner)
+    elif value == profile: print(owner)
+for path in glob.glob(os.path.join(os.environ.get("NOBRAND_SNELL_STATE_DIR", ""), "*.json")):
+    state=load(path)
+    if state: emit("snell:" + str(state.get("instance_id") or path), state.get("ingress_profile_id"))
+for env, owner in (("NOBRAND_HY2_STATE_FILE","hy2:default"),("NOBRAND_VLESS_STATE_FILE","vless-sudoku:default")):
+    state=load(os.environ.get(env,""))
+    if state: emit(owner, state.get("ingress_profile_id"))
+for path in glob.glob(os.path.join(os.environ.get("NOBRAND_TUIC_STATE_DIR", ""), "*", "state.json")):
+    state=load(path)
+    if state: emit("tuic:" + str(state.get("instance_id") or path), state.get("ingress_profile_id"))
+for path in glob.glob(os.path.join(os.environ.get("NOBRAND_REALITY_STATE_DIR", ""), "*", "state.json")):
+    state=load(path)
+    if state: emit("vless-reality:" + str(state.get("instance_id") or path), state.get("ingress_profile_id"))
+state=load(os.environ.get("NOBRAND_SSH_STATE_FILE", ""))
+if state:
+    emit("ssh-tunnel:policy", state.get("ingress_profile_id"))
+    for user in state.get("users") or []:
+        emit("ssh-tunnel:" + str(user.get("account_id") or user.get("label")), user.get("ingress_profile_id"))
+state=load(os.environ.get("NOBRAND_FORWARD_STATE_FILE", ""))
+if state:
+    for rule in state.get("rules") or []:
+        emit("forward:" + str(rule.get("rule_id")), rule.get("ingress_profile_id"))
+state=load(os.environ.get("MITA_USERS_STATE", ""))
+if state:
+    for user in state.get("users") or []:
+        emit("mieru:" + str(user.get("instance_id") or user.get("name")), user.get("ingress_profile_id"))
+PY
+}
+
+nb_ingress_delete() {
+  local id refs tmp
+  require_root
+  id="$(nb_ingress_profile_id "$INGRESS_PROFILE_SELECTOR" 2>/dev/null || true)"
+  [ -n "$id" ] && [ "$id" != "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ] || die 'Ingress profile not found or built-in profile cannot be deleted'
+  refs="$(nb_ingress_profile_reference_rows "$id")"
+  [ -z "$refs" ] || { printf 'Ingress profile is referenced by:\n%s\n' "$refs" >&2; return 1; }
+  tmp="$(mktemp_file .ingress-delete)" || return 1
+  jq --arg id "$id" '
+    .profiles |= map(select(.profile_id!=$id)) |
+    if .default_profile_id==$id then .default_profile_id=null else . end
+  ' "$NOBRAND_INGRESS_STATE_FILE" >"$tmp" \
+    && nb_ingress_state_valid "$tmp" && nb_atomic_install_file "$tmp" "$NOBRAND_INGRESS_STATE_FILE" 0600
+  local rc=$?
+  rm -f "$tmp"
+  return "$rc"
+}
+
+nb_ingress_modify() {
+  local id old name type interface address policy range_start range_end reserved display_host display_policy display_port enabled enforcement
+  local old_enforcement old_interface old_address runtime_change=0 refs="" snapshot=""
+  local base reserved_json range_start_json=null range_end_json=null display_port_json=null conflict tmp
+  require_root
+  id="$(nb_ingress_profile_id "$INGRESS_PROFILE_SELECTOR" 2>/dev/null || true)"
+  [ -n "$id" ] && [ "$id" != "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ] || die 'Ingress profile not found or built-in profile cannot be modified'
+  old="$(nb_ingress_profile_json "$id")"
+  name="$(jq -r .name <<<"$old")"; type="$(jq -r .type <<<"$old")"
+  interface="$(jq -r .interface <<<"$old")"; address="$(jq -r .local_address <<<"$old")"
+  old_interface="$interface"; old_address="$address"
+  policy="$(jq -r .port_policy <<<"$old")"
+  range_start="$(jq -r '.range_start // empty' <<<"$old")"; range_end="$(jq -r '.range_end // empty' <<<"$old")"
+  reserved="$(jq -r '.reserved_ports|join(",")' <<<"$old")"
+  display_host="$(jq -r .display_host_default <<<"$old")"; display_policy="$(jq -r .display_port_policy <<<"$old")"
+  display_port="$(jq -r '.display_port // empty' <<<"$old")"; enabled="$(jq -r .enabled <<<"$old")"
+  enforcement="$(jq -r '.ingress_enforcement // "permissive"' <<<"$old")"; old_enforcement="$enforcement"
+  [ "$INGRESS_NAME_CLI" -eq 0 ] || name="$INGRESS_NAME"
+  [ "$INGRESS_TYPE_CLI" -eq 0 ] || type="$INGRESS_TYPE"
+  [ "$INGRESS_INTERFACE_CLI" -eq 0 ] || interface="$INGRESS_INTERFACE"
+  [ "$INGRESS_ADDRESS_CLI" -eq 0 ] || address="$INGRESS_ADDRESS"
+  if [ "$INGRESS_PORT_POLICY_CLI" -eq 1 ]; then
+    policy="$INGRESS_PORT_POLICY"; range_start=""; range_end=""
+  fi
+  [ "$INGRESS_RANGE_START_CLI" -eq 0 ] || range_start="$INGRESS_RANGE_START"
+  [ "$INGRESS_RANGE_END_CLI" -eq 0 ] || range_end="$INGRESS_RANGE_END"
+  [ "$INGRESS_RESERVED_CLI" -eq 0 ] || reserved="$INGRESS_RESERVED_PORTS"
+  [ "$INGRESS_DISPLAY_HOST_CLI" -eq 0 ] || display_host="$INGRESS_DISPLAY_HOST_DEFAULT"
+  if [ "$INGRESS_DISPLAY_PORT_POLICY_CLI" -eq 1 ]; then
+    display_policy="$INGRESS_DISPLAY_PORT_POLICY"; display_port=""
+  fi
+  [ "$INGRESS_DISPLAY_PORT_CLI" -eq 0 ] || display_port="$INGRESS_DISPLAY_PORT"
+  [ "$INGRESS_ENABLED_CLI" -eq 0 ] || enabled="$INGRESS_ENABLED"
+  [ "$INGRESS_ENFORCEMENT_CLI" -eq 0 ] || enforcement="$INGRESS_ENFORCEMENT"
+  case "$name" in
+    "$NOBRAND_LEGACY_INGRESS_PROFILE_ID"|'Legacy Default Route')
+      die 'Ingress profile name conflicts with a reserved profile selector'
+      ;;
+  esac
+  [[ ! "$name" =~ ^i[0-9a-f]{16}$ ]] \
+    || die 'Ingress profile name conflicts with the profile-ID namespace'
+  if [ "$enabled" = false ] \
+     && [ "$(nb_ingress_default_profile_id 2>/dev/null || true)" = "$id" ]; then
+    die 'Unset the default ingress profile before disabling it'
+  fi
+  if [ "$policy" = derived-tail ]; then
+    base="$(nb_port_base_for_ip "$address" 2>/dev/null || true)"
+    [ -n "$base" ] || die 'Derived-tail is invalid for this IPv4; use custom-range or manual-only'
+    [ "$INGRESS_PORT_POLICY_CLI" -eq 0 ] || [ "$INGRESS_RESERVED_CLI" -eq 1 ] || reserved="$base"
+  fi
+  [ "$policy" = custom-range ] || { range_start=""; range_end=""; }
+  [ "$display_policy" = custom ] || display_port=""
+  nb_ingress_validate_profile_values "$type" "$interface" "$address" "$policy" "$range_start" "$range_end" \
+    "$reserved" "$display_host" "$display_policy" "$display_port" "$enforcement" \
+    || die 'Modified ingress profile values are invalid'
+  reserved="$(nb_ingress_normalize_reserved "$reserved")"
+  if conflict="$(nb_ingress_reserved_conflicts "$reserved" 2>/dev/null)"; then
+    die "Reserved port conflicts with an existing managed listener: ${conflict}"
+  fi
+  jq -e --arg id "$id" --arg name "$name" 'all(.profiles[]; .profile_id==$id or .name!=$name)' \
+    "$NOBRAND_INGRESS_STATE_FILE" >/dev/null || die "Ingress profile name already exists: ${name}"
+  reserved_json="$(nb_ingress_reserved_json "$reserved")" || return 1
+  if [ "$policy" = custom-range ]; then range_start_json="$range_start"; range_end_json="$range_end"; fi
+  [ "$display_policy" != custom ] || display_port_json="$display_port"
+  if [ "$old_enforcement" != "$enforcement" ] \
+     || { [ "$enforcement" = strict ] \
+          && { [ "$old_interface" != "$interface" ] || [ "$old_address" != "$address" ]; }; }; then
+    runtime_change=1
+  fi
+  if [ "$runtime_change" -eq 1 ]; then
+    refs="$(nb_ingress_profile_reference_rows "$id" | grep -Ev '^ssh-tunnel:' || true)"
+    if [ -n "$refs" ] && [ "${INGRESS_APPLY_EXISTING:-0}" -ne 1 ]; then
+      printf 'Ingress enforcement/listen identity change affects managed nodes:\n%s\n' "$refs" >&2
+      die 'Re-run with --apply-existing for explicit transactional migration'
+    fi
+  fi
+  tmp="$(mktemp_file .ingress-modify)" || return 1
+  jq --arg id "$id" --arg name "$name" --arg type "$type" --arg interface "$interface" --arg address "$address" \
+    --arg policy "$policy" --argjson range_start "$range_start_json" --argjson range_end "$range_end_json" \
+    --argjson reserved "$reserved_json" --arg display_host "$display_host" --arg display_policy "$display_policy" \
+    --argjson display_port "$display_port_json" --arg enforcement "$enforcement" \
+    --argjson enabled "$enabled" --arg updated "$(nb_ingress_now)" '
+      (.profiles[]|select(.profile_id==$id)) |=
+       (.name=$name|.type=$type|.interface=$interface|.local_address=$address|.port_policy=$policy|
+        .range_start=$range_start|.range_end=$range_end|.reserved_ports=$reserved|
+        .display_host_default=$display_host|.display_port_policy=$display_policy|.display_port=$display_port|
+        .ingress_enforcement=$enforcement|.enabled=$enabled|.updated_at=$updated)
+    ' "$NOBRAND_INGRESS_STATE_FILE" >"$tmp" \
+    && nb_ingress_state_valid "$tmp"
+  local rc=$?
+  if [ "$rc" -eq 0 ]; then
+    snapshot="$(mktemp_file .ingress-profile-rollback)" || rc=1
+  fi
+  if [ "$rc" -eq 0 ]; then
+    cp -a "$NOBRAND_INGRESS_STATE_FILE" "$snapshot" \
+      && nb_atomic_install_file "$tmp" "$NOBRAND_INGRESS_STATE_FILE" 0600 || rc=1
+  fi
+  if [ "$rc" -eq 0 ] && [ "$runtime_change" -eq 1 ] && [ -n "$refs" ]; then
+    if ! nb_ingress_apply_profile "$id"; then
+      nb_atomic_install_file "$snapshot" "$NOBRAND_INGRESS_STATE_FILE" 0600 >/dev/null 2>&1 || true
+      nb_ingress_apply_profile "$id" >/dev/null 2>&1 \
+        || warn 'Ingress profile metadata was restored but one or more listener rollbacks failed; run doctor immediately'
+      rc=1
+    fi
+  fi
+  rm -f "$tmp"
+  [ -z "$snapshot" ] || rm -f "$snapshot"
+  return "$rc"
+}
+
+nb_ingress_set_default() {
+  local id tmp
+  require_root
+  id="$(nb_ingress_profile_id "$INGRESS_PROFILE_SELECTOR" 2>/dev/null || true)"
+  [ -n "$id" ] && [ "$id" != "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ] || die 'Default ingress must be an enabled explicit profile'
+  [ "$(nb_ingress_profile_json "$id" | jq -r .enabled)" = true ] || die 'Disabled ingress profile cannot be the default'
+  nb_ingress_ensure_state || return 1
+  tmp="$(mktemp_file .ingress-default)" || return 1
+  jq --arg id "$id" '.default_profile_id=$id' "$NOBRAND_INGRESS_STATE_FILE" >"$tmp" \
+    && nb_ingress_state_valid "$tmp" && nb_atomic_install_file "$tmp" "$NOBRAND_INGRESS_STATE_FILE" 0600
+  local rc=$?
+  rm -f "$tmp"
+  return "$rc"
+}
+
+nb_ingress_unset_default() {
+  local tmp
+  require_root
+  nb_ingress_ensure_state || return 1
+  tmp="$(mktemp_file .ingress-default)" || return 1
+  jq '.default_profile_id=null' "$NOBRAND_INGRESS_STATE_FILE" >"$tmp" \
+    && nb_ingress_state_valid "$tmp" && nb_atomic_install_file "$tmp" "$NOBRAND_INGRESS_STATE_FILE" 0600
+  local rc=$?
+  rm -f "$tmp"
+  return "$rc"
+}
+
+nb_ingress_profile_auto_range() {
+  local profile_id="$1" profile policy address base
+  profile="$(nb_ingress_profile_json "$profile_id")" || return 1
+  policy="$(jq -r .port_policy <<<"$profile")"
+  case "$policy" in
+    derived-tail)
+      address="$(jq -r .local_address <<<"$profile")"
+      if [ "$profile_id" = "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ]; then
+        nb_tail_port_bounds "$address"
+      else
+        base="$(nb_port_base_for_ip "$address")" || return 1
+        printf '%s|%s' "$((base + 1))" "$((base + 99))"
+      fi
+      ;;
+    custom-range) jq -r '[.range_start,.range_end]|join("|")' <<<"$profile" ;;
+    manual-only) return 2 ;;
+    *) return 1 ;;
+  esac
+}
+
+nb_ingress_port_is_reserved() {
+  local profile_id="$1" port profile
+  port="$(normalize_uint "$2")" || return 1
+  if [ -z "$profile_id" ] || [ "$profile_id" = "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ]; then
+    nb_port_is_tail_base_reserved "$port"
+    return $?
+  fi
+  profile="$(nb_ingress_profile_json "$profile_id")" || return 1
+  jq -e --argjson port "$port" 'any(.reserved_ports[]; .==$port)' <<<"$profile" >/dev/null
+}
+
+nb_ingress_list() {
+  local default_id id name type interface address policy enforcement is_default range
+  default_id="$(nb_ingress_default_profile_id 2>/dev/null || true)"
+  printf '%-19s %-24s %-8s %-12s %-15s %-14s %-11s %-13s %s\n' \
+    ID NAME TYPE INTERFACE ADDRESS PORT-POLICY ENFORCEMENT AUTO-RANGE DEFAULT
+  printf '%-19s %-24s %-8s %-12s %-15s %-14s %-11s %-13s %s\n' \
+    "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" 'Legacy Default Route' built-in '(system)' \
+    "$(nb_detect_local_ipv4 2>/dev/null || printf unavailable)" derived-tail permissive \
+    "$(nb_ingress_profile_auto_range "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" 2>/dev/null | tr '|' '-' || printf fallback)" \
+    "$([ -z "$default_id" ] && printf yes || printf no)"
+  nb_ingress_state_valid || return 0
+  while IFS=$'\t' read -r id name type interface address policy enforcement is_default; do
+        range="$(nb_ingress_profile_auto_range "$id" 2>/dev/null | tr '|' '-' || printf manual)"
+        printf '%-19s %-24s %-8s %-12s %-15s %-14s %-11s %-13s %s\n' \
+          "$id" "$name" "$type" "$interface" "$address" "$policy" "$enforcement" "$range" "$is_default"
+  done < <(jq -r --arg default "$default_id" '.profiles|sort_by(.name)[]|[
+    .profile_id,.name,.type,.interface,.local_address,.port_policy,(.ingress_enforcement // "permissive"),
+    (if .profile_id==$default then "yes" else "no" end)]|@tsv' "$NOBRAND_INGRESS_STATE_FILE")
+}
+
+nb_ingress_show() {
+  local profile selector="${INGRESS_PROFILE_SELECTOR:-}" range
+  profile="$(nb_ingress_profile_json "$selector")" || die "Ingress profile not found: ${selector}"
+  range="$(nb_ingress_profile_auto_range "$(jq -r .profile_id <<<"$profile")" 2>/dev/null | tr '|' '-' || printf none)"
+  jq -r --arg range "$range" '
+    "ID: \(.profile_id)\nName: \(.name)\nType: \(.type)\nInterface: \(.interface)\nLocal address: \(.local_address)\n"+
+    "Port policy: \(.port_policy)\nIngress enforcement: \(.ingress_enforcement // "permissive")\nAuto range: \($range)\nReserved: \(.reserved_ports|join(","))\n"+
+    "Display host default: \(.display_host_default)\nDisplay port policy: \(.display_port_policy)"+
+    (if .display_port==null then "" else "\nDisplay port: \(.display_port)" end)+"\nEnabled: \(.enabled)"
+  ' <<<"$profile"
+}
+
+nb_ingress_owner_capability() {
+  case "$1" in
+    mieru:*) printf firewall ;;
+    snell:*|hy2:*|vless-sudoku:*|vless-reality:*|tuic:*) printf native-bind ;;
+    forward:*)
+      if [ "$(nb_owner_ingress_method "$1" 2>/dev/null || true)" = address-match ]; then
+        printf address-match
+      elif [ "$(jq -r --arg id "${1#forward:}" '.rules[]|select(.rule_id==$id)|.backend // empty' \
+          "$NOBRAND_FORWARD_STATE_FILE" 2>/dev/null || true)" = nftables ]; then
+        printf address-match
+      else
+        printf native-bind
+      fi
+      ;;
+    ssh-tunnel:*) printf not-applicable ;;
+    *) return 1 ;;
+  esac
+}
+
+nb_ingress_apply_owner() {
+  local owner="$1"
+  case "$owner" in
+    mieru:*) mieru_apply_ingress_enforcement "${owner#mieru:}" ;;
+    snell:*) snell_apply_ingress_enforcement "${owner#snell:}" ;;
+    hy2:*) hysteria2_apply_ingress_enforcement ;;
+    vless-sudoku:*) vless_sudoku_apply_ingress_enforcement ;;
+    vless-reality:*) reality_apply_ingress_enforcement "${owner#vless-reality:}" ;;
+    tuic:*) tuic_apply_ingress_enforcement "${owner#tuic:}" ;;
+    forward:*) forward_apply_ingress_enforcement "${owner#forward:}" ;;
+    ssh-tunnel:*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+nb_ingress_apply_profile() {
+  local profile_id="$1" owner failed=0 seen='|'
+  nb_ingress_profile_json "$profile_id" >/dev/null || return 1
+  while IFS= read -r owner; do
+    [ -n "$owner" ] || continue
+    case "$seen" in *"|${owner}|"*) continue ;; esac
+    seen="${seen}${owner}|"
+    case "$owner" in ssh-tunnel:*) continue ;; esac
+    if ! nb_ingress_apply_owner "$owner"; then
+      warn "Ingress enforcement migration failed for ${owner}"
+      failed=1
+      break
+    fi
+  done < <(nb_ingress_profile_reference_rows "$profile_id")
+  return "$failed"
+}
+
+nb_ingress_apply() {
+  local id
+  require_root
+  id="$(nb_ingress_profile_id "$INGRESS_PROFILE_SELECTOR" 2>/dev/null || true)"
+  [ -n "$id" ] && [ "$id" != "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ] \
+    || die 'Ingress profile not found or built-in profile cannot be applied'
+  nb_ingress_apply_profile "$id" || return 1
+  printf 'Ingress enforcement applied: %s (%s)\n' "$id" "$(nb_ingress_profile_name "$id")"
+}
+
+nb_ingress_doctor() {
+  local failed=0 default_id profile id name interface address policy range port owner refs egress
+  local referenced_profile referenced_owner transport key seen='|' profile_id lo hi duplicate_count=0
+  local _advertise_host _advertise_port expected_policy expected_method actual_policy actual_method actual_address capability enabled
+  if [ ! -e "$NOBRAND_INGRESS_STATE_FILE" ]; then
+    nb_doctor_line PASS 'Ingress state: legacy-compatible (no explicit profiles)'
+  elif nb_ingress_state_valid; then
+    nb_doctor_line PASS 'Ingress profile JSON/state valid (schema v3)'
+  else
+    nb_doctor_line FAIL 'Ingress profile JSON/state invalid'
+    return 1
+  fi
+  default_id="$(nb_ingress_default_profile_id 2>/dev/null || true)"
+  [ -z "$default_id" ] || nb_doctor_line PASS "Default ingress profile exists: $(nb_ingress_profile_name "$default_id")"
+  if nb_ingress_state_valid; then
+    while IFS= read -r profile; do
+      id="$(jq -r .profile_id <<<"$profile")"; name="$(jq -r .name <<<"$profile")"
+      interface="$(jq -r .interface <<<"$profile")"; address="$(jq -r .local_address <<<"$profile")"
+      policy="$(jq -r .port_policy <<<"$profile")"
+      if nb_ingress_address_on_interface "$interface" "$address"; then
+        nb_doctor_line PASS "${name}: ${interface}/${address} present"
+      else
+        nb_doctor_line FAIL "${name}: local address is not present on interface"
+        failed=1
+      fi
+      expected_policy="$(jq -r '.ingress_enforcement // "permissive"' <<<"$profile")"
+      case "$expected_policy" in
+        strict) nb_doctor_line PASS "${name}: ingress enforcement policy strict" ;;
+        permissive) nb_doctor_line INFO "PERMISSIVE_WILDCARD: ${name}" ;;
+      esac
+      if [ "$policy" = manual-only ]; then
+        nb_doctor_line PASS "${name}: manual-only (no auto pool)"
+      elif range="$(nb_ingress_profile_auto_range "$id" 2>/dev/null)"; then
+        nb_doctor_line PASS "${name}: Derived/explicit range ${range//|/-} valid"
+      else
+        nb_doctor_line FAIL "${name}: auto pool invalid"
+        failed=1
+      fi
+      while IFS= read -r port; do
+        [ -n "$port" ] || continue
+        owner="$(nb_registry_rows | awk -F'|' -v p="$port" '$3==p{print $1; exit}')"
+        [ -z "$owner" ] || { nb_doctor_line FAIL "${name}: reserved ${port} used by ${owner}"; failed=1; }
+      done < <(jq -r '.reserved_ports[]?' <<<"$profile")
+      refs="$(nb_ingress_profile_reference_rows "$id")"
+      [ -z "$refs" ] || nb_doctor_line PASS "${name}: profile associations readable"
+    done < <(jq -c '.profiles[]' "$NOBRAND_INGRESS_STATE_FILE")
+  fi
+  while IFS='|' read -r referenced_profile referenced_owner; do
+    [ -n "$referenced_profile" ] || continue
+    if ! nb_ingress_profile_json "$referenced_profile" >/dev/null 2>&1; then
+      nb_doctor_line FAIL "${referenced_owner}: unknown ingress profile ${referenced_profile}"
+      failed=1
+    fi
+  done < <(nb_ingress_profile_reference_rows '*')
+  while IFS='|' read -r owner transport port _advertise_host _advertise_port; do
+    [ -n "$owner" ] || continue
+    key="${transport}:${port}"
+    case "$seen" in
+      *"|${key}|"*)
+        nb_doctor_line FAIL "Duplicate host-global port ownership: ${key} (${owner})"
+        failed=1
+        duplicate_count=$((duplicate_count + 1))
+        ;;
+      *) seen="${seen}${key}|" ;;
+    esac
+    profile_id="$(nb_owner_ingress_profile_id "$owner" 2>/dev/null || true)"
+    [ -n "$profile_id" ] || profile_id="$NOBRAND_LEGACY_INGRESS_PROFILE_ID"
+    if ! profile="$(nb_ingress_profile_json "$profile_id" 2>/dev/null)"; then
+      nb_doctor_line FAIL "${owner}: unknown ingress profile ${profile_id}"
+      failed=1
+      continue
+    fi
+    if [ "$profile_id" != "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ]; then
+      policy="$(jq -r .port_policy <<<"$profile")"
+      if [ "$policy" != manual-only ] && range="$(nb_ingress_profile_auto_range "$profile_id" 2>/dev/null)"; then
+        lo="${range%%|*}"; hi="${range#*|}"
+        if { [ "$port" -lt "$lo" ] || [ "$port" -gt "$hi" ]; } \
+           && ! nb_ingress_port_is_reserved "$profile_id" "$port"; then
+          nb_doctor_line WARN "OUTSIDE_CURRENT_AUTO_POOL: ${owner} ${transport}/${port} (${lo}-${hi})"
+        fi
+      fi
+    fi
+    case "$owner" in ssh-tunnel:*)
+      nb_doctor_line INFO "${owner}: NOT_APPLICABLE_TO_SYSTEM_SSH"
+      continue
+      ;;
+    esac
+    expected_policy="$(jq -r '.ingress_enforcement // "permissive"' <<<"$profile")"
+    actual_policy="$(nb_owner_ingress_enforcement "$owner" 2>/dev/null || printf permissive)"
+    actual_method="$(nb_owner_ingress_method "$owner" 2>/dev/null || printf wildcard)"
+    actual_address="$(nb_owner_ingress_local_address "$owner" 2>/dev/null || true)"
+    capability="$(nb_ingress_owner_capability "$owner" 2>/dev/null || true)"
+    if [ "$expected_policy" = permissive ]; then
+      expected_method=wildcard
+    else
+      expected_method="$capability"
+    fi
+    if [ "$actual_policy" != "$expected_policy" ] || [ "$actual_method" != "$expected_method" ]; then
+      nb_doctor_line FAIL "ENFORCEMENT_DRIFT: ${owner} expected=${expected_policy}/${expected_method} actual=${actual_policy}/${actual_method}"
+      failed=1
+      continue
+    fi
+    enabled="$(nb_owner_enabled "$owner" 2>/dev/null || printf true)"
+    if [ "$expected_policy" = strict ]; then
+      if [ -z "$actual_address" ] || [ "$actual_address" != "$(jq -r .local_address <<<"$profile")" ]; then
+        nb_doctor_line FAIL "PROFILE_LOCAL_ADDRESS_MISSING: ${owner}"
+        failed=1
+      elif [ "$enabled" != true ]; then
+        nb_doctor_line PASS "${owner}: strict enforcement state valid (node disabled)"
+      elif [ "$actual_method" = firewall ]; then
+        nb_strict_firewall_rule_owned "$owner" "$transport" "$port" "$actual_address" \
+          && nb_doctor_line PASS "STRICT_FIREWALL_ENFORCEMENT: ${owner} ${transport}/${port}" \
+          || { nb_doctor_line FAIL "STRICT_FIREWALL_ENFORCEMENT: ${owner} ${transport}/${port}"; failed=1; }
+      elif [ "$actual_method" = address-match ]; then
+        forward_listener_enforcement_owned "${owner#forward:}" \
+          && nb_doctor_line PASS "STRICT_ADDRESS_MATCH: ${owner} ${transport}/${port} address=${actual_address}" \
+          || { nb_doctor_line FAIL "STRICT_ADDRESS_MATCH: ${owner} ${transport}/${port}"; failed=1; }
+      elif nb_listener_has_local_address "$transport" "$port" "$actual_address"; then
+        nb_doctor_line PASS "STRICT_NATIVE_BIND: ${owner} ${transport}/${port} address=${actual_address}"
+      else
+        nb_doctor_line FAIL "STRICT_NATIVE_BIND: ${owner} ${transport}/${port} missing exact listener"
+        failed=1
+      fi
+    elif [ "$actual_method" = wildcard ]; then
+      nb_doctor_line INFO "PERMISSIVE_WILDCARD: ${owner} ${transport}/${port}"
+    fi
+  done < <(nb_registry_rows)
+  if [ -e "$NOBRAND_INGRESS_FIREWALL_STATE_FILE" ] && ! nb_strict_firewall_state_valid; then
+    nb_doctor_line FAIL 'Strict-ingress firewall state invalid'
+    failed=1
+  fi
+  [ "$duplicate_count" -ne 0 ] || nb_doctor_line PASS 'Host-global, transport-aware actual port ownership valid'
+  egress="$(nb_ingress_default_egress 2>/dev/null || true)"
+  if [ -n "$egress" ]; then
+    nb_doctor_line INFO "Current system default egress (read-only): ${egress%%|*} / ${egress#*|}"
+  else
+    nb_doctor_line INFO 'Current system default egress unavailable (read-only observation only)'
+  fi
+  [ "$failed" -eq 0 ] && nb_doctor_line PASS 'Ingress Doctor'
+  [ "$failed" -eq 0 ]
+}
+
+nobrand_run_ingress_action() {
+  local lock_required=0 rc=0
+  case "${INGRESS_ACTION:-list}" in
+    add|modify|delete|set-default|unset-default|apply)
+      lock_required=1
+      require_root || return 1
+      nb_init_state_layout || return 1
+      admin_lock_acquire || return 1
+      ;;
+  esac
+  case "${INGRESS_ACTION:-list}" in
+    list) nb_ingress_list || rc=$? ;;
+    show) nb_ingress_show || rc=$? ;;
+    add) nb_ingress_add || rc=$? ;;
+    modify) nb_ingress_modify || rc=$? ;;
+    apply) nb_ingress_apply || rc=$? ;;
+    delete) nb_ingress_delete || rc=$? ;;
+    set-default) nb_ingress_set_default || rc=$? ;;
+    unset-default) nb_ingress_unset_default || rc=$? ;;
+    doctor) nb_ingress_doctor || rc=$? ;;
+    help) nobrand_usage || rc=$? ;;
+    *) rc=2 ;;
+  esac
+  [ "$lock_required" -eq 0 ] || admin_lock_release
+  return "$rc"
 }
 
 # ---------- NoBrand Common Core: state、Endpoint、firewall/service adapters ----------
@@ -2395,11 +3862,11 @@ nb_init_state_layout() {
   mkdir -p "$NOBRAND_BACKUP_DIR" "$NOBRAND_LOCK_DIR" \
     "$MITA_MANAGER_STATE_DIR" "$MITA_USERS_BACKUP_DIR" \
     "$NOBRAND_SNELL_STATE_DIR" "$NOBRAND_HY2_STATE_DIR" \
-    "$NOBRAND_VLESS_STATE_DIR" "$NOBRAND_TUIC_STATE_DIR" \
+    "$NOBRAND_VLESS_STATE_DIR" "$NOBRAND_REALITY_STATE_DIR" "$NOBRAND_TUIC_STATE_DIR" \
     "$NOBRAND_SSH_STATE_DIR" "$NOBRAND_SSH_KEYS_DIR" "$NOBRAND_SSH_WATCHDOG_DIR" \
     "$NOBRAND_FORWARD_STATE_DIR" \
     "$NOBRAND_CONFIG_DIR" "$NOBRAND_SNELL_CONFIG_DIR" "$NOBRAND_HY2_CONFIG_DIR" \
-    "$NOBRAND_VLESS_CONFIG_DIR" "$NOBRAND_TUIC_CONFIG_DIR" "$NOBRAND_FORWARD_CONFIG_DIR" \
+    "$NOBRAND_VLESS_CONFIG_DIR" "$NOBRAND_REALITY_CONFIG_DIR" "$NOBRAND_TUIC_CONFIG_DIR" "$NOBRAND_FORWARD_CONFIG_DIR" \
     "$NOBRAND_SSH_CONFIG_DIR" "$NOBRAND_SSH_AUTHORIZED_KEYS_DIR" \
     "$NOBRAND_SSH_ACCOUNT_MARKER_DIR" \
     "$NOBRAND_BIN_DIR" "$NOBRAND_SNELL_RUNTIME_DIR" "$NOBRAND_LIB_DIR" \
@@ -2407,11 +3874,11 @@ nb_init_state_layout() {
   chmod 0700 "$NOBRAND_STATE_DIR" "$NOBRAND_BACKUP_DIR" "$NOBRAND_LOCK_DIR" \
     "$MITA_MANAGER_STATE_DIR" "$MITA_USERS_BACKUP_DIR" \
     "$NOBRAND_SNELL_STATE_DIR" "$NOBRAND_HY2_STATE_DIR" \
-    "$NOBRAND_VLESS_STATE_DIR" "$NOBRAND_TUIC_STATE_DIR" \
+    "$NOBRAND_VLESS_STATE_DIR" "$NOBRAND_REALITY_STATE_DIR" "$NOBRAND_TUIC_STATE_DIR" \
     "$NOBRAND_SSH_STATE_DIR" "$NOBRAND_SSH_KEYS_DIR" "$NOBRAND_SSH_WATCHDOG_DIR" \
     "$NOBRAND_FORWARD_STATE_DIR" \
     "$NOBRAND_SNELL_CONFIG_DIR" "$NOBRAND_HY2_CONFIG_DIR" \
-    "$NOBRAND_VLESS_CONFIG_DIR" "$NOBRAND_TUIC_CONFIG_DIR" "$NOBRAND_FORWARD_CONFIG_DIR" \
+    "$NOBRAND_VLESS_CONFIG_DIR" "$NOBRAND_REALITY_CONFIG_DIR" "$NOBRAND_TUIC_CONFIG_DIR" "$NOBRAND_FORWARD_CONFIG_DIR" \
     "$NOBRAND_SSH_ACCOUNT_MARKER_DIR" || return 1
   # sshd reads AuthorizedKeysFile after switching to the target identity. Keep
   # the shared and SSH config roots traversable but not listable; every other
@@ -2498,6 +3965,13 @@ nb_endpoint_conflict_owner() {
 
 nb_require_explicit_endpoint_noninteractive() {
   [ "${YES:-0}" -eq 1 ] || return 0
+  # An explicit/default mapped or public ingress profile supplies a stable
+  # display host. Its follow-actual policy supplies the listener port.
+  if [ -n "${INGRESS_PROFILE_ID:-}" ] \
+     && [ "${INGRESS_PROFILE_ID}" != "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ] \
+     && [ -n "$(nb_ingress_profile_display_host "$INGRESS_PROFILE_ID" 2>/dev/null || true)" ]; then
+    return 0
+  fi
   if [ "${ADVERTISE_AUTO_REQUESTED:-0}" -eq 1 ]; then
     return 0
   fi
@@ -2509,13 +3983,18 @@ nb_require_explicit_endpoint_noninteractive() {
 }
 
 nb_collect_advertise_endpoint_interactive() {
-  local protocol_name="$1" listen_port="$2" detected="" choice="" host="" port=""
-  detected="$(public_ip 2>/dev/null || true)"
+  local protocol_name="$1" listen_port="$2" detected="" choice="" host="" port="" profile_name=""
+  detected="$(nb_ingress_profile_display_host "${INGRESS_PROFILE_ID:-}" 2>/dev/null || true)"
+  if [ -n "$detected" ]; then
+    profile_name="$(nb_ingress_profile_name "$INGRESS_PROFILE_ID")"
+  else
+    detected="$(public_ip 2>/dev/null || true)"
+  fi
   msg ""
   t "${protocol_name} 真实监听端口: ${listen_port}" "${protocol_name} real listen port: ${listen_port}"
   if [ -n "$detected" ]; then
-    t "自动检测到客户端入口建议: ${detected}:${listen_port}" \
-      "Detected client entry suggestion: ${detected}:${listen_port}"
+    t "客户端入口建议: ${detected}:$(nb_ingress_profile_display_port "${INGRESS_PROFILE_ID:-$NOBRAND_LEGACY_INGRESS_PROFILE_ID}" "$listen_port")${profile_name:+（来自入口配置 ${profile_name}）}" \
+      "Client entry suggestion: ${detected}:$(nb_ingress_profile_display_port "${INGRESS_PROFILE_ID:-$NOBRAND_LEGACY_INGRESS_PROFILE_ID}" "$listen_port")${profile_name:+ (from ingress profile ${profile_name})}"
   else
     warn "$(t '未检测到公网入口；IPLC/NAT 环境请填写实际前置入口' \
       'No public entry detected; enter the actual IPLC/NAT frontend endpoint')"
@@ -2555,18 +4034,24 @@ nb_collect_advertise_endpoint_interactive() {
 }
 
 nb_effective_advertise_host() {
-  local mode="${1:-auto}" host="${2:-}"
+  local mode="${1:-auto}" host="${2:-}" profile_id="${3:-}" profile_host=""
   if [ "$mode" = custom ] && [ -n "$host" ]; then
     printf '%s' "$host"
+  elif [ -n "$profile_id" ] && [ "$profile_id" != "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ] \
+       && profile_host="$(nb_ingress_profile_display_host "$profile_id" 2>/dev/null)" \
+       && [ -n "$profile_host" ]; then
+    printf '%s' "$profile_host"
   else
     public_ip 2>/dev/null || printf 'YOUR_SERVER_IP'
   fi
 }
 
 nb_effective_advertise_port() {
-  local mode="${1:-auto}" advertise_port="${2:-}" listen_port="${3:-}"
+  local mode="${1:-auto}" advertise_port="${2:-}" listen_port="${3:-}" profile_id="${4:-}"
   if [ "$mode" = custom ] && [ -n "$advertise_port" ]; then
     printf '%s' "$advertise_port"
+  elif [ -n "$profile_id" ] && [ "$profile_id" != "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ]; then
+    nb_ingress_profile_display_port "$profile_id" "$listen_port"
   else
     printf '%s' "$listen_port"
   fi
@@ -2640,7 +4125,7 @@ nobrand_version() {
 
 nobrand_usage() {
   cat <<EOF
-NoBrand-OneClick 3.1.0 — Mieru / Snell v4-v5 / Hysteria2 / TUIC v5 / VLESS + FinalMask + Sudoku / SSH Tunnel / Port Forward
+NoBrand-OneClick 3.2.0 — Multi-Ingress / Mieru / Snell v4-v5 / Hysteria2 / TUIC v5 / VLESS REALITY / VLESS + FinalMask + Sudoku / SSH Tunnel / Port Forward
 
 用法:
   nobrand                         打开统一菜单
@@ -2650,6 +4135,11 @@ NoBrand-OneClick 3.1.0 — Mieru / Snell v4-v5 / Hysteria2 / TUIC v5 / VLESS + F
   nobrand status                  综合状态
   nobrand nodes [--protocol P]    查看全部或指定协议节点
   nobrand doctor                  综合诊断（默认不输出 secret）
+  nobrand ingress list|doctor     查看入口配置或执行只读 Ingress Doctor
+  nobrand ingress show PROFILE    查看入口配置
+  nobrand ingress add             新增 public/mapped 入口配置
+  nobrand ingress modify|delete PROFILE
+  nobrand ingress set-default PROFILE | unset-default
   nobrand backup create [FILE]    备份 NoBrand schema-v3 全部 state 与配置
   nobrand backup restore FILE     恢复 NoBrand 备份
   nobrand uninstall [-y]          统一卸载 Mieru/Snell/HY2/TUIC/VLESS/SSH/Forward/Common
@@ -2663,6 +4153,7 @@ NoBrand-OneClick 3.1.0 — Mieru / Snell v4-v5 / Hysteria2 / TUIC v5 / VLESS + F
   nobrand mieru user-scan|user-quota-reset|user-set-rate|user-usage
   nobrand mieru user-backup|user-restore|user-export|user-import|user-export-clients
   Mieru 参数: --port --protocol --profile --advertise-host --advertise-port --advertise-auto
+    --ingress-profile PROFILE
     --mtu --traffic-pattern --low-entropy --multiplexing --handshake-mode
     --mieru-channel --mieru-version --user --password --package --quota-mb
     --quota-days --quota-mode --expire --bandwidth --op-user --enable-bbr --lang
@@ -2684,6 +4175,16 @@ NoBrand-OneClick 3.1.0 — Mieru / Snell v4-v5 / Hysteria2 / TUIC v5 / VLESS + F
       [--advertise-host HOST --advertise-port PORT | --advertise-auto] [-y]
   nobrand vless-sudoku show|status|doctor|smoke|start|stop|restart|remove
   nobrand vless-sudoku set-endpoint
+      [--advertise-host HOST --advertise-port PORT | --advertise-auto]
+
+  nobrand vless-reality install --name NAME [--target HOST] [--target-port PORT]
+      [--ingress-profile PROFILE] [--port PORT]
+      [--advertise-host HOST --advertise-port PORT | --advertise-auto] [-y]
+      Default camouflage host: auto-select from the release-qualified pool and persist the selected hostname.
+      An explicit host is used exactly; host and target port are independently configurable.
+      443 is the camouflage target port default, not the public REALITY listen port.
+  nobrand vless-reality show|export|status|doctor|start|stop|restart|remove [--name NAME]
+  nobrand vless-reality set-endpoint --name NAME
       [--advertise-host HOST --advertise-port PORT | --advertise-auto]
 
   nobrand tuic install --name NAME --user USER [--port PORT] [--sni SNI]
@@ -2711,6 +4212,7 @@ NoBrand-OneClick 3.1.0 — Mieru / Snell v4-v5 / Hysteria2 / TUIC v5 / VLESS + F
   - Display Endpoint 只影响客户端输出，不创建 DNAT/IPLC 转发，也不改 listener。
   - 非交互 -y 必须明确给出完整 Display Endpoint 或 --advertise-auto。
   - VLESS Sudoku = plain VLESS + FinalMask(sudoku) + TCP。
+  - VLESS REALITY = VLESS + TCP + REALITY + xtls-rprx-vision；public Profile 推荐，mapped 仅警告。
   - VLESS Encryption: NOT USED；不调用密钥生成子命令，不保存加密密钥。
   - TUIC 只支持 v5：official sing-box、UDP/QUIC、每用户独立 UUID + password。
   - SSH Tunnel 复用现有 sshd；允许 -L/-D/-R TCP forwarding，不允许 shell/exec/TTY/SFTP/SCP。
@@ -2718,7 +4220,9 @@ NoBrand-OneClick 3.1.0 — Mieru / Snell v4-v5 / Hysteria2 / TUIC v5 / VLESS + F
   - SSH Tunnel 不拥有 sshd listener、SSH firewall、host keys 或 admin authentication。
   - Port Forward: nftables 为 IPv4 kernel NAT；Realm 为 official userspace relay，可使用 IP/domain target。
   - Forward 的 Display Endpoint 仅为 metadata；xx00 对 nftables/Realm 和 TCP/UDP 均保留。
-  - PROTOCOL_FEATURE_FREEZE=${PROTOCOL_FEATURE_FREEZE}（3.1.0 后仅维护、安全、修复、导出、Doctor、UI 与兼容性改进）。
+  - Ingress 决定端口策略、展示默认值和入口身份；Linux 系统路由继续独立决定 Egress。
+  - Ingress Profile 不修改网卡、地址、路由、ip rule、sysctl、SSH 或 provider mapping。
+  - PROTOCOL_FEATURE_FREEZE=${PROTOCOL_FEATURE_FREEZE}（VLESS REALITY 是 3.2 最后一个协议功能）。
   - Mieru 官方 runtime 仍名为 mita，但它不是管理命令；管理入口只有 nobrand/nb。
   - v3 state 必须带 schema_version=3；旧 state 不读取、不导入、不删除。
   - 正式安装器: ${NOBRAND_RELEASE_INSTALLER_URL}
@@ -2782,14 +4286,25 @@ nb_mieru_instance_running() {
 
 # protocol|name|display endpoint|status|transport
 nb_mieru_node_rows() {
-  local auto_host instance_id name port protocol advertise_host advertise_port effective_host effective_port status
+  local instance_id name port protocol advertise_host advertise_port ingress_profile_id
+  local effective_host effective_port status
   [ -s "$MITA_USERS_STATE" ] || return 0
   command -v python3 >/dev/null 2>&1 || return 0
-  auto_host="$(public_ip 2>/dev/null || printf 'YOUR_SERVER_IP')"
-  while IFS=$'\t' read -r instance_id name port protocol advertise_host advertise_port; do
+  # Use a non-whitespace delimiter so empty custom endpoint fields keep their
+  # column positions before the trailing Profile association.
+  while IFS='|' read -r instance_id name port protocol advertise_host advertise_port ingress_profile_id; do
     [ -n "$name" ] || continue
-    effective_host="${advertise_host:-$auto_host}"
-    effective_port="${advertise_port:-$port}"
+    ingress_profile_id="${ingress_profile_id:-$NOBRAND_LEGACY_INGRESS_PROFILE_ID}"
+    if [ -n "$advertise_host" ]; then
+      effective_host="$advertise_host"
+    else
+      effective_host="$(nb_effective_advertise_host auto '' "$ingress_profile_id")"
+    fi
+    if [ -n "$advertise_port" ]; then
+      effective_port="$advertise_port"
+    else
+      effective_port="$(nb_effective_advertise_port auto '' "$port" "$ingress_profile_id")"
+    fi
     status=Stopped
     nb_mieru_instance_running "$instance_id" "$protocol" "$port" && status=Running
     if [ "$protocol" = BOTH ]; then
@@ -2807,9 +4322,10 @@ except Exception:
     raise SystemExit(0)
 protocol=str(state.get("protocol") or "TCP").upper()
 for user in state.get("users") or []:
-    print("\t".join(str(v or "") for v in (
+    print("|".join(str(v or "") for v in (
         user.get("instance_id"), user.get("name"), user.get("port"), protocol,
-        user.get("advertise_host"), user.get("advertise_port"))))
+        user.get("advertise_host"), user.get("advertise_port"),
+        user.get("ingress_profile_id"))))
 PY
   )
 }
@@ -2823,6 +4339,7 @@ nb_all_node_rows() {
       snell_node_rows
       hysteria2_node_rows
       tuic_node_rows
+      reality_node_rows
       vless_sudoku_node_rows
       ssh_tunnel_node_rows
       forward_node_rows
@@ -2831,15 +4348,158 @@ nb_all_node_rows() {
     snell) snell_node_rows ;;
     hy2|hysteria2) hysteria2_node_rows ;;
     tuic) tuic_node_rows ;;
-    vless-sudoku|sudoku|vless) vless_sudoku_node_rows ;;
+    vless-reality|reality) reality_node_rows ;;
+    vless-sudoku|sudoku) vless_sudoku_node_rows ;;
+    vless) reality_node_rows; vless_sudoku_node_rows ;;
     ssh|ssh-tunnel) ssh_tunnel_node_rows ;;
     forward|port-forward) forward_node_rows ;;
-    *) die "--protocol 只支持 mieru、snell、hy2、tuic、vless-sudoku、ssh、forward" ;;
+    *) die "--protocol 只支持 mieru、snell、hy2、tuic、vless-reality、vless-sudoku、ssh、forward" ;;
   esac
 }
 
+nb_owner_ingress_profile_id() {
+  local owner="$1" id
+  case "$owner" in
+    snell:*) snell_state_field "${owner#snell:}" ingress_profile_id 2>/dev/null || true ;;
+    hy2:*) hysteria2_state_field ingress_profile_id 2>/dev/null || true ;;
+    vless-sudoku:*) vless_sudoku_state_field ingress_profile_id 2>/dev/null || true ;;
+    vless-reality:*) reality_state_field "${owner#vless-reality:}" ingress_profile_id 2>/dev/null || true ;;
+    tuic:*) tuic_state_field "${owner#tuic:}" ingress_profile_id 2>/dev/null || true ;;
+    forward:*)
+      jq -r --arg id "${owner#forward:}" '.rules[]|select(.rule_id==$id)|.ingress_profile_id // empty' \
+        "$NOBRAND_FORWARD_STATE_FILE" 2>/dev/null || true
+      ;;
+    mieru:*)
+      id="${owner#mieru:}"
+      jq -r --arg id "$id" '.users[]|select((.instance_id // .name // (.port|tostring))==$id)|.ingress_profile_id // empty' \
+        "$MITA_USERS_STATE" 2>/dev/null || true
+      ;;
+  esac
+}
+
+nb_owner_state_file() {
+  case "$1" in
+    snell:*) snell_state_path "${1#snell:}" ;;
+    hy2:*) printf '%s' "$NOBRAND_HY2_STATE_FILE" ;;
+    vless-sudoku:*) printf '%s' "$NOBRAND_VLESS_STATE_FILE" ;;
+    vless-reality:*) reality_state_file "${1#vless-reality:}" ;;
+    tuic:*) tuic_state_file "${1#tuic:}" ;;
+    *) return 1 ;;
+  esac
+}
+
+nb_owner_ingress_enforcement() {
+  local owner="$1" path id
+  case "$owner" in
+    forward:*)
+      id="${owner#forward:}"
+      jq -r --arg id "$id" '.rules[]|select(.rule_id==$id)|.ingress_enforcement // "permissive"' \
+        "$NOBRAND_FORWARD_STATE_FILE" 2>/dev/null
+      ;;
+    mieru:*)
+      id="${owner#mieru:}"
+      jq -r --arg id "$id" '.users[]|select((.instance_id // .name // (.port|tostring))==$id)|.ingress_enforcement // "permissive"' \
+        "$MITA_USERS_STATE" 2>/dev/null
+      ;;
+    ssh-tunnel:*) printf not-applicable ;;
+    *) path="$(nb_owner_state_file "$owner")" && nb_ingress_state_enforcement "$path" ;;
+  esac
+}
+
+nb_owner_ingress_method() {
+  local owner="$1" path id
+  case "$owner" in
+    forward:*)
+      id="${owner#forward:}"
+      jq -r --arg id "$id" '.rules[]|select(.rule_id==$id)|.ingress_enforcement_method // "wildcard"' \
+        "$NOBRAND_FORWARD_STATE_FILE" 2>/dev/null
+      ;;
+    mieru:*)
+      id="${owner#mieru:}"
+      jq -r --arg id "$id" '.users[]|select((.instance_id // .name // (.port|tostring))==$id)|.ingress_enforcement_method // "wildcard"' \
+        "$MITA_USERS_STATE" 2>/dev/null
+      ;;
+    ssh-tunnel:*) printf system-ssh ;;
+    *) path="$(nb_owner_state_file "$owner")" && nb_ingress_state_method "$path" ;;
+  esac
+}
+
+nb_owner_ingress_local_address() {
+  local owner="$1" path id profile_id
+  profile_id="$(nb_owner_ingress_profile_id "$owner" 2>/dev/null || true)"
+  case "$owner" in
+    forward:*)
+      id="${owner#forward:}"
+      jq -r --arg id "$id" '.rules[]|select(.rule_id==$id)|.ingress_local_address // empty' \
+        "$NOBRAND_FORWARD_STATE_FILE" 2>/dev/null
+      ;;
+    mieru:*)
+      id="${owner#mieru:}"
+      jq -r --arg id "$id" '.users[]|select((.instance_id // .name // (.port|tostring))==$id)|.ingress_local_address // empty' \
+        "$MITA_USERS_STATE" 2>/dev/null
+      ;;
+    ssh-tunnel:*) return 0 ;;
+    *) path="$(nb_owner_state_file "$owner")" && nb_ingress_state_local_address "$path" "$profile_id" ;;
+  esac
+}
+
+nb_owner_enabled() {
+  local owner="$1" path id
+  case "$owner" in
+    forward:*) id="${owner#forward:}"; jq -r --arg id "$id" '.rules[]|select(.rule_id==$id)|.enabled' "$NOBRAND_FORWARD_STATE_FILE" 2>/dev/null ;;
+    mieru:*) id="${owner#mieru:}"; jq -r --arg id "$id" '.users[]|select((.instance_id // .name // (.port|tostring))==$id)|.enabled' "$MITA_USERS_STATE" 2>/dev/null ;;
+    ssh-tunnel:*) printf true ;;
+    *) path="$(nb_owner_state_file "$owner")" && jq -r '.enabled // true' "$path" 2>/dev/null ;;
+  esac
+}
+
+nb_node_detail_rows() {
+  local filter owner transport port advertise_host advertise_port profile_id display_host display_port enforcement method address actual
+  filter="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
+  while IFS='|' read -r owner transport port advertise_host advertise_port; do
+    [ -n "$owner" ] || continue
+    case "$filter:$owner" in
+      :*|all:*|mieru:mieru:*|snell:snell:*|hy2:hy2:*|hysteria2:hy2:*|tuic:tuic:*|vless-reality:vless-reality:*|reality:vless-reality:*|vless-sudoku:vless-sudoku:*|sudoku:vless-sudoku:*|vless:vless-*|forward:forward:*|port-forward:forward:*) ;;
+      *) continue ;;
+    esac
+    profile_id="$(nb_owner_ingress_profile_id "$owner")"
+    [ -n "$profile_id" ] || profile_id="$NOBRAND_LEGACY_INGRESS_PROFILE_ID"
+    if [ -n "$advertise_host" ]; then
+      display_host="$advertise_host"
+    else
+      display_host="$(nb_effective_advertise_host auto '' "$profile_id")"
+    fi
+    if [ -n "$advertise_port" ]; then
+      display_port="$advertise_port"
+    else
+      display_port="$(nb_effective_advertise_port auto '' "$port" "$profile_id")"
+    fi
+    enforcement="$(nb_owner_ingress_enforcement "$owner" 2>/dev/null || printf permissive)"
+    method="$(nb_owner_ingress_method "$owner" 2>/dev/null || printf wildcard)"
+    address="$(nb_owner_ingress_local_address "$owner" 2>/dev/null || true)"
+    case "$enforcement:$method" in
+      strict:native-bind|strict:address-match) actual="${address}:${port}/${transport}" ;;
+      strict:firewall) actual="*:${port}/${transport} (firewall restricted to ${address})" ;;
+      *) actual="*:${port}/${transport}" ;;
+    esac
+    printf '%s|%s|%s:%s|%s|%s (%s)\n' "$owner" "$actual" "$display_host" "$display_port" \
+      "$(nb_ingress_profile_name "$profile_id")" "$enforcement" "$method"
+  done < <(nb_registry_rows)
+  if { [ -z "$filter" ] || [ "$filter" = all ] || [ "$filter" = ssh ] || [ "$filter" = ssh-tunnel ]; } \
+     && ssh_tunnel_state_exists; then
+    profile_id="$(ssh_tunnel_state_field ingress_profile_id 2>/dev/null || true)"
+    [ -n "$profile_id" ] || profile_id="$NOBRAND_LEGACY_INGRESS_PROFILE_ID"
+    while IFS= read -r owner; do
+      [ -n "$owner" ] || continue
+      printf 'ssh-tunnel:%s|*:%s/TCP (system sshd)|%s:%s|%s|Not applicable (system sshd)\n' "$owner" \
+        "$(ssh_tunnel_state_field real_port)" "$(ssh_tunnel_effective_host)" \
+        "$(ssh_tunnel_state_field advertise_port)" "$(nb_ingress_profile_name "$profile_id")"
+    done < <(jq -r '.users[]?.display_name' "$NOBRAND_SSH_STATE_FILE")
+  fi
+}
+
 nobrand_nodes() {
-  local rows protocol name endpoint status transport
+  local rows details protocol name endpoint status transport owner actual display ingress enforcement
   rows="$(nb_all_node_rows "${NOBRAND_PROTOCOL_FILTER:-}")"
   nobrand_print_banner
   msg ""
@@ -2854,6 +4514,16 @@ nobrand_nodes() {
     [ -n "$protocol" ] || continue
     printf '%-17s %-17s %-40s %s\n' "$protocol" "$name" "$endpoint" "$status"
   done <<<"$rows"
+  details="$(nb_node_detail_rows "${NOBRAND_PROTOCOL_FILTER:-}")"
+  if [ -n "$details" ]; then
+    msg ''
+    t 'Actual / Display / Ingress Profile（展示修改不影响监听）' \
+      'Actual / Display / Ingress Profile (display changes do not affect listeners)'
+    while IFS='|' read -r owner actual display ingress enforcement; do
+      printf '%s\n  Actual: %s\n  Display: %s\n  Ingress: %s\n  Enforcement: %s\n' \
+        "$owner" "$actual" "$display" "$ingress" "$enforcement"
+    done <<<"$details"
+  fi
 }
 
 nobrand_status() {
@@ -2861,7 +4531,9 @@ nobrand_status() {
   local mieru_total=0 mieru_running=0 snell_total=0 snell_running=0 hy2_total=0 hy2_running=0
   local tuic_total=0 tuic_running=0 ssh_total=0 ssh_ready=0
   local forward_nft_total=0 forward_nft_healthy=0 forward_realm_total=0 forward_realm_healthy=0
-  local vless_total=0 vless_running=0 vless_port=""
+  local vless_total=0 vless_running=0 vless_port="" reality_total=0 reality_running=0
+  local ingress_id ingress_name ingress_type
+  local ingress_interface ingress_address ingress_policy ingress_host ingress_range
   rows="$(nb_all_node_rows)"
   while IFS='|' read -r protocol _name _endpoint status _transport; do
     case "$protocol" in
@@ -2881,6 +4553,10 @@ nobrand_status() {
         [ "$status" != Running ] || vless_running=$((vless_running + 1))
         vless_port="$(vless_sudoku_state_field listen_port 2>/dev/null || true)"
         ;;
+      'VLESS REALITY')
+        reality_total=$((reality_total + 1))
+        [ "$status" != Running ] || reality_running=$((reality_running + 1))
+        ;;
     esac
   done <<<"$rows"
   nobrand_print_banner
@@ -2896,10 +4572,25 @@ nobrand_status() {
     "$([ "$vless_total" -gt 0 ] && printf yes || printf no)" \
     "$([ "$vless_running" -gt 0 ] && printf yes || printf no)" \
     "${vless_port:--}"
+  printf 'VLESS REALITY\n  Instances: %s\n  Running: %s/%s\n' \
+    "$reality_total" "$reality_running" "$reality_total"
   printf 'SSH Tunnel\n  Users: %s\n  Ready: %s/%s\n  Listener ownership: external sshd\n' \
     "$ssh_total" "$ssh_ready" "$ssh_total"
   printf 'Port Forward\n  nftables: %s/%s healthy\n  Realm: %s/%s healthy\n' \
     "$forward_nft_healthy" "$forward_nft_total" "$forward_realm_healthy" "$forward_realm_total"
+  msg 'Ingress'
+  printf '  Default Profile: %s\n  Explicit profiles: %s\n' \
+    "$(nb_ingress_profile_name "$(nb_ingress_default_profile_id 2>/dev/null || true)")" \
+    "$([ -s "$NOBRAND_INGRESS_STATE_FILE" ] && jq '.profiles|length' "$NOBRAND_INGRESS_STATE_FILE" 2>/dev/null || printf 0)"
+  if nb_ingress_state_valid; then
+    while IFS=$'\t' read -r ingress_id ingress_name ingress_type ingress_interface ingress_address ingress_policy ingress_host; do
+      ingress_range="$(nb_ingress_profile_auto_range "$ingress_id" 2>/dev/null | tr '|' '-' || printf manual)"
+      printf '  %s: %s %s/%s, %s (%s), display=%s\n' \
+        "$ingress_name" "$ingress_type" "$ingress_interface" "$ingress_address" \
+        "$ingress_policy" "$ingress_range" "${ingress_host:--}"
+    done < <(jq -r '.profiles[]|[.profile_id,.name,.type,.interface,.local_address,.port_policy,.display_host_default]|@tsv' \
+      "$NOBRAND_INGRESS_STATE_FILE")
+  fi
 }
 
 nb_doctor_line() {
@@ -2952,6 +4643,9 @@ nobrand_doctor() {
   msg ''
   msg 'Common Core'
   nobrand_doctor_common || failed=1
+  msg ''
+  msg 'Ingress (read-only; does not verify provider mapping)'
+  nb_ingress_doctor || failed=1
   if mita_installed 2>/dev/null || [ -s "$MITA_USERS_STATE" ]; then
     msg ''
     msg 'Mieru'
@@ -2969,6 +4663,9 @@ nobrand_doctor() {
   msg ''
   msg 'VLESS + FinalMask + Sudoku (TCP)'
   vless_sudoku_doctor || failed=1
+  msg ''
+  msg 'VLESS + TCP + REALITY + XTLS Vision'
+  reality_doctor_all || failed=1
   msg ''
   msg 'SSH Tunnel (existing OpenSSH)'
   ssh_tunnel_doctor || failed=1
@@ -3062,7 +4759,8 @@ nobrand_restore_protocol_runtimes() {
     esac
   done < <(snell_instance_ids)
   if [ "$need_snell4" -eq 1 ] || [ "$need_snell5" -eq 1 ] \
-     || hysteria2_state_exists || vless_sudoku_state_exists; then
+     || hysteria2_state_exists || vless_sudoku_state_exists \
+     || [ -n "$(reality_instance_ids)" ]; then
     nobrand_prepare_common || return 1
   fi
   [ "$need_snell4" -eq 0 ] || snell_install_runtime 4 0 || return 1
@@ -3075,7 +4773,7 @@ nobrand_restore_protocol_runtimes() {
     done < <(snell_instance_ids)
   fi
 
-  if hysteria2_state_exists || vless_sudoku_state_exists; then
+  if hysteria2_state_exists || vless_sudoku_state_exists || [ -n "$(reality_instance_ids)" ]; then
     nobrand_install_xray_runtime 0 || return 1
     nobrand_xray_validate_managed_configs || return 1
   fi
@@ -3085,6 +4783,7 @@ nobrand_restore_protocol_runtimes() {
   if vless_sudoku_state_exists; then
     nobrand_write_vless_sudoku_service || return 1
   fi
+  reality_restore_runtime || return 1
   tuic_restore_runtime || return 1
   forward_realm_restore_runtime || return 1
 }
@@ -3101,7 +4800,7 @@ nobrand_fresh_restore_runtime_preflight() {
     "$NOBRAND_LIB_DIR" \
     "$MITA_INSTANCE_SYSTEMD_TEMPLATE" "$MITA_INSTANCE_TMPFILES" \
     "$NOBRAND_SNELL_SYSTEMD_TEMPLATE" "$NOBRAND_HY2_SYSTEMD_SERVICE" \
-    "$NOBRAND_VLESS_SYSTEMD_SERVICE" "$NOBRAND_TUIC_SYSTEMD_TEMPLATE" \
+    "$NOBRAND_VLESS_SYSTEMD_SERVICE" "$NOBRAND_REALITY_SYSTEMD_TEMPLATE" "$NOBRAND_TUIC_SYSTEMD_TEMPLATE" \
     "$NOBRAND_REALM_SYSTEMD_SERVICE"; do
     [ ! -e "$path" ] && [ ! -L "$path" ] || return 1
   done
@@ -3148,6 +4847,8 @@ nobrand_remove_fresh_restore_protocol_resources() {
     ! _has_user mita || failed=1
     ! _has_group mita || failed=1
   fi
+  nb_strict_firewall_clear_all >/dev/null 2>&1 || failed=1
+  rm -f "$NOBRAND_INGRESS_FIREWALL_STATE_FILE" "$NOBRAND_INGRESS_FIREWALL_RULESET"
 
   while IFS= read -r id; do
     [ -n "$id" ] || continue
@@ -3168,7 +4869,14 @@ nobrand_remove_fresh_restore_protocol_resources() {
     nobrand_remove_vless_sudoku_service >/dev/null 2>&1 || failed=1
     [ -z "$port" ] || nb_firewall_close_pairs "TCP|${port}" >/dev/null 2>&1 || failed=1
   fi
-  rm -f "$NOBRAND_XRAY_BIN" || failed=1
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    port="$(reality_state_field "$id" listen_port 2>/dev/null || true)"
+    reality_remove_service "$id" >/dev/null 2>&1 || failed=1
+    [ -z "$port" ] || nb_firewall_close_pairs "TCP|${port}" >/dev/null 2>&1 || failed=1
+  done < <(reality_instance_ids)
+  reality_remove_service_runtime_if_owned || failed=1
+  nobrand_remove_xray_runtime_files || failed=1
   [ "$(nb_service_manager)" != systemd ] || systemctl daemon-reload >/dev/null 2>&1 || failed=1
   rmdir "$NOBRAND_BIN_DIR" "$NOBRAND_LIB_DIR" 2>/dev/null || true
   return "$failed"
@@ -3197,6 +4905,14 @@ nobrand_backup_restore() {
   if [ -s "$stage/state/forward/state.json" ]; then
     forward_state_valid "$stage/state/forward/state.json" \
       || { rm -rf -- "$stage"; die 'Port Forward restore state 无效'; }
+  fi
+  if [ -s "$stage/state/ingress.json" ]; then
+    nb_ingress_state_valid "$stage/state/ingress.json" \
+      || { rm -rf -- "$stage"; die 'Ingress profile restore state 无效'; }
+  fi
+  if [ -s "$stage/state/ingress-firewall.json" ]; then
+    nb_strict_firewall_state_valid "$stage/state/ingress-firewall.json" \
+      || { rm -rf -- "$stage"; die 'Strict-ingress firewall restore state 无效'; }
   fi
   find "$stage/state" "$stage/config" -type f -name '*.json' -print0 2>/dev/null \
     | while IFS= read -r -d '' file; do jq empty "$file" >/dev/null || exit 1; done \
@@ -3373,8 +5089,8 @@ nobrand_uninstall() {
   ensure_manager_state_layout 0
   nb_schema_v3_file_valid || die '未检测到有效的 NoBrand schema v3 state，拒绝卸载未知资源'
   if [ "${YES:-0}" -ne 1 ]; then
-    confirm '确认完整卸载 NoBrand 3 管理的 Mieru/Snell/HY2/TUIC/VLESS/SSH Tunnel/Forward/Common？[y/N]: ' \
-      'Completely uninstall NoBrand-3-managed Mieru/Snell/HY2/TUIC/VLESS/SSH Tunnel/Forward/Common resources? [y/N]: ' \
+    confirm '确认完整卸载 NoBrand 3 管理的 Mieru/Snell/HY2/TUIC/VLESS REALITY/VLESS Sudoku/SSH Tunnel/Forward/Common？[y/N]: ' \
+      'Completely uninstall NoBrand-3-managed Mieru/Snell/HY2/TUIC/VLESS REALITY/VLESS Sudoku/SSH Tunnel/Forward/Common resources? [y/N]: ' \
       n \
       || { t '已取消' 'Cancelled'; return 0; }
   fi
@@ -3421,6 +5137,12 @@ nobrand_uninstall() {
   fi
   while IFS= read -r id; do
     [ -n "$id" ] || continue
+    port="$(reality_state_field "$id" listen_port 2>/dev/null || true)"
+    reality_remove_service "$id" || failed=1
+    [ -z "$port" ] || nb_firewall_close_pairs "TCP|${port}" || failed=1
+  done < <(reality_instance_ids)
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
     port="$(tuic_state_field "$id" listen_port 2>/dev/null || true)"
     tuic_remove_service "$id" || failed=1
     [ -z "$port" ] || nb_firewall_close_pairs "UDP|${port}" || failed=1
@@ -3445,6 +5167,7 @@ nobrand_uninstall() {
   case "$NOBRAND_TUIC_SYSTEMD_TEMPLATE" in
     /etc/systemd/system/nobrand-tuic@.service) rm -f "$NOBRAND_TUIC_SYSTEMD_TEMPLATE" ;;
   esac
+  reality_remove_service_runtime_if_owned || failed=1
   [ "$(nb_service_manager)" != systemd ] || systemctl daemon-reload 2>/dev/null || true
   admin_lock_release
 
@@ -3454,6 +5177,8 @@ nobrand_uninstall() {
     do_uninstall || { YES="$saved_yes"; return 1; }
     YES="$saved_yes"
   fi
+  nb_strict_firewall_clear_all || return 1
+  rm -f "$NOBRAND_INGRESS_FIREWALL_STATE_FILE" "$NOBRAND_INGRESS_FIREWALL_RULESET"
 
   # State/config/lib roots are exact, validated NoBrand roots. Command removal
   # deliberately happens only after every protocol/resource cleanup succeeds.
@@ -3465,8 +5190,8 @@ nobrand_uninstall() {
   nobrand_remove_owned_command "$NOBRAND_COMMAND_PATH" || failed=1
   nobrand_remove_owned_command "$NOBRAND_INSTALL_SCRIPT_PATH" || failed=1
   [ "$failed" -eq 0 ] || return 1
-  t 'NoBrand 3 的 Mieru/Snell/HY2/TUIC/VLESS/SSH Tunnel/Forward/Common 资源与 nobrand/nb 已完整删除；外部资源未触碰' \
-    'NoBrand 3 Mieru/Snell/HY2/TUIC/VLESS/SSH Tunnel/Forward/Common resources and nobrand/nb were removed; external resources were untouched'
+  t 'NoBrand 3 的 Mieru/Snell/HY2/TUIC/VLESS REALITY/VLESS Sudoku/SSH Tunnel/Forward/Common 资源与 nobrand/nb 已完整删除；外部资源未触碰' \
+    'NoBrand 3 Mieru/Snell/HY2/TUIC/VLESS REALITY/VLESS Sudoku/SSH Tunnel/Forward/Common resources and nobrand/nb were removed; external resources were untouched'
 }
 
 nobrand_stop_all_services() {
@@ -3481,6 +5206,10 @@ nobrand_stop_all_services() {
     && nobrand_vless_sudoku_service_action stop >/dev/null 2>&1 || true
   while IFS= read -r id; do
     [ -n "$id" ] || continue
+    reality_service_action "$id" stop >/dev/null 2>&1 || true
+  done < <(reality_instance_ids)
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
     tuic_service_action "$id" stop >/dev/null 2>&1 || true
   done < <(tuic_instance_ids)
   forward_realm_service_action stop >/dev/null 2>&1 || true
@@ -3488,6 +5217,7 @@ nobrand_stop_all_services() {
 
 nobrand_start_enabled_services() {
   local id enabled port pairs failed=0
+  nb_strict_firewall_restore_authoritative >/dev/null 2>&1 || failed=1
   if users_state_exists && [ "$(users_count)" -gt 0 ]; then
     if load_install_state \
        && reconcile_isolated_instances >/dev/null 2>&1 \
@@ -3515,14 +5245,27 @@ nobrand_start_enabled_services() {
      && [ "$(hysteria2_state_field enabled 2>/dev/null || printf false)" = true ]; then
     port="$(hysteria2_state_field listen_port)"
     nobrand_hy2_service_action start >/dev/null 2>&1 \
-      && nb_wait_for_listener UDP "$port" 25 || failed=1
+      && hysteria2_running || failed=1
   fi
   if vless_sudoku_state_exists \
      && [ "$(vless_sudoku_state_field enabled 2>/dev/null || printf false)" = true ]; then
     port="$(vless_sudoku_state_field listen_port)"
     nobrand_vless_sudoku_service_action start >/dev/null 2>&1 \
-      && nb_wait_for_listener TCP "$port" 25 || failed=1
+      && vless_sudoku_running || failed=1
   fi
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    enabled="$(reality_state_field "$id" enabled 2>/dev/null || printf false)"
+    [ "$enabled" = true ] || continue
+    port="$(reality_state_field "$id" listen_port)"
+    reality_install_service_runtime >/dev/null 2>&1 \
+      && reality_ensure_openrc_service "$id" >/dev/null 2>&1 \
+      && reality_config_matches_state "$id" \
+      && nobrand_xray_test_config "$(reality_config_file "$id")" \
+      && nb_firewall_open_pairs "TCP|${port}" >/dev/null 2>&1 \
+      && reality_service_action "$id" start >/dev/null 2>&1 \
+      && reality_running "$id" || failed=1
+  done < <(reality_instance_ids)
   while IFS= read -r id; do
     [ -n "$id" ] || continue
     enabled="$(tuic_state_field "$id" enabled 2>/dev/null || printf false)"
@@ -3533,8 +5276,7 @@ nobrand_start_enabled_services() {
       && tuic_validate_config "$(tuic_config_file "$id")" \
       && nb_firewall_open_pairs "UDP|${port}" >/dev/null 2>&1 \
       && tuic_service_action "$id" start >/dev/null 2>&1 \
-      && nb_wait_for_listener UDP "$port" 25 \
-      && tuic_listener_owned_by_service "$id" "$port" || failed=1
+      && tuic_running "$id" || failed=1
   done < <(tuic_instance_ids)
   if [ -s "$NOBRAND_FORWARD_STATE_FILE" ]; then
     forward_realm_restore_runtime >/dev/null 2>&1 \
@@ -3599,19 +5341,21 @@ reinstall_mita_package() {
   esac
   arch="$(detect_arch 2>/dev/null || true)"
   [ -n "$arch" ] || return 1
-  ver="$(installed_version 2>/dev/null || true)"
-  if [ -z "$ver" ]; then
-    load_install_state 2>/dev/null || true
-    ver="$(target_mieru_version 2>/dev/null || true)"
+  load_install_state 2>/dev/null || true
+  if ! mieru_resolve_runtime "${MIERU_CHANNEL:-stable}" "${MIERU_VERSION:-}" "$pm" "$arch"; then
+    return 1
   fi
-  [ -n "$ver" ] || return 1
+  ver="$MIERU_RUNTIME_RESOLVED_VERSION"
   warn "$(t "mita 二进制缺失，正在自动重新下载并安装 v${ver}（apt 源中没有该包）..." \
     "mita binary missing; auto re-downloading and installing v${ver} (not in apt repo)...")"
-  url="$(package_url "$ver" "$pm" "$arch" 2>/dev/null || true)"
-  [ -n "$url" ] || return 1
+  url="$MIERU_RUNTIME_RESOLVED_URL"
   tmp="$(mktemp_file)"
   # 子 shell 包裹：download/install 内部的 die→exit 只会终止子 shell，不会杀掉主流程
-  if ( download_package "$url" "$tmp" && install_package "$tmp" "$pm" ); then
+  if ( download_package "$url" "$tmp" \
+         "$MIERU_RUNTIME_RESOLVED_SHA256" \
+         "$MIERU_RUNTIME_RESOLVED_CHECKSUM_URL" \
+       && install_package "$tmp" "$pm" ) \
+     && mieru_assert_runtime_version "$ver"; then
     rm -f "$tmp"
     hash -r 2>/dev/null || true
     return 0
@@ -3674,15 +5418,6 @@ service_manager() {
   fi
 }
 
-arch_tar_suffix() {
-  local arch="$1"
-  case "$arch" in
-    amd64) echo linux_amd64 ;;
-    arm64) echo linux_arm64 ;;
-    *) die "$(t 'Alpine 不支持该架构' 'Unsupported arch for Alpine tarball')" ;;
-  esac
-}
-
 detect_arch() {
   STAGE="检测 CPU 架构"
   local m
@@ -3692,23 +5427,6 @@ detect_arch() {
     aarch64|arm64) echo arm64 ;;
     *) die "$(t "不支持的架构：${m}（仅 amd64/arm64）" "Unsupported arch: ${m} (amd64/arm64 only)")" ;;
   esac
-}
-
-query_latest_version() {
-  STAGE="查询最新版本"
-  require_cmd curl
-  local body="" tag="" effective=""
-  body="$(curl -fsSL --connect-timeout 15 --max-time 30 "$GITHUB_API" 2>/dev/null || true)"
-  tag="$(printf '%s' "$body" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)"
-  if [ -z "$tag" ]; then
-    effective="$(curl -fsSL --connect-timeout 15 --max-time 30 -o /dev/null \
-      -w '%{url_effective}' "https://github.com/${UPSTREAM_REPO}/releases/latest" 2>/dev/null || true)"
-    tag="${effective##*/}"
-  fi
-  tag="${tag#v}"
-  [[ "$tag" =~ ^[0-9]+([.][0-9]+){2}([.-][0-9A-Za-z.]+)?$ ]] \
-    || die "$(t '无法取得合法的最新版本号' 'Failed to obtain a valid latest release version')"
-  printf '%s' "$tag"
 }
 
 normalize_mieru_channel() {
@@ -3724,25 +5442,171 @@ valid_mieru_version() {
   [[ "${1:-}" =~ ^[0-9]+([.][0-9]+){2}([.-][0-9A-Za-z.]+)?$ ]]
 }
 
-target_mieru_version() {
-  MIERU_CHANNEL="$(normalize_mieru_channel "${MIERU_CHANNEL:-stable}")" || \
-    die "$(t '非法 Mieru 通道（stable/latest）' 'Invalid Mieru channel (stable/latest)')"
-  case "$MIERU_CHANNEL" in
-    stable) printf '%s' "$TESTED_MIERU_VERSION" ;;
-    latest) query_latest_version ;;
+mieru_stable_version() {
+  [[ "${1:-}" =~ ^[0-9]+[.][0-9]+[.][0-9]+$ ]]
+}
+
+mieru_runtime_asset_name() {
+  local version="$1" pm="$2" arch="$3"
+  valid_mieru_version "$version" || return 1
+  case "${pm}:${arch}" in
+    deb:amd64) printf 'mita_%s_amd64.deb' "$version" ;;
+    deb:arm64) printf 'mita_%s_arm64.deb' "$version" ;;
+    rpm:amd64) printf 'mita-%s-1.x86_64.rpm' "$version" ;;
+    rpm:arm64) printf 'mita-%s-1.aarch64.rpm' "$version" ;;
+    alpine:amd64) printf 'mita_%s_linux_amd64.tar.gz' "$version" ;;
+    alpine:arm64) printf 'mita_%s_linux_arm64.tar.gz' "$version" ;;
+    *) return 1 ;;
+  esac
+}
+
+mieru_last_known_good_digest() {
+  case "$1" in
+    mita_3.36.0_amd64.deb) printf '%s' "$LAST_KNOWN_GOOD_MIERU_AMD64_DEB_SHA256" ;;
+    mita_3.36.0_arm64.deb) printf '%s' "$LAST_KNOWN_GOOD_MIERU_ARM64_DEB_SHA256" ;;
+    mita-3.36.0-1.x86_64.rpm) printf '%s' "$LAST_KNOWN_GOOD_MIERU_AMD64_RPM_SHA256" ;;
+    mita-3.36.0-1.aarch64.rpm) printf '%s' "$LAST_KNOWN_GOOD_MIERU_ARM64_RPM_SHA256" ;;
+    mita_3.36.0_linux_amd64.tar.gz) printf '%s' "$LAST_KNOWN_GOOD_MIERU_AMD64_TAR_SHA256" ;;
+    mita_3.36.0_linux_arm64.tar.gz) printf '%s' "$LAST_KNOWN_GOOD_MIERU_ARM64_TAR_SHA256" ;;
+    *) return 1 ;;
+  esac
+}
+
+mieru_fetch_releases_metadata() {
+  local output="$1"
+  curl -fsSL --connect-timeout 15 --max-time 90 --retry 3 --retry-delay 2 --retry-all-errors \
+    -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' \
+    -H 'User-Agent: NoBrand-OneClick' "${NOBRAND_MIERU_RELEASES_API}?per_page=100" -o "$output"
+}
+
+mieru_fetch_tag_metadata() {
+  local version="$1" output="$2"
+  curl -fsSL --connect-timeout 15 --max-time 90 --retry 3 --retry-delay 2 --retry-all-errors \
+    -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' \
+    -H 'User-Agent: NoBrand-OneClick' "${NOBRAND_MIERU_RELEASES_API}/tags/v${version}" -o "$output"
+}
+
+mieru_reset_runtime_resolution() {
+  MIERU_RUNTIME_RESOLVED_VERSION=""
+  MIERU_RUNTIME_RESOLVED_ASSET=""
+  MIERU_RUNTIME_RESOLVED_URL=""
+  MIERU_RUNTIME_RESOLVED_CHECKSUM_URL=""
+  MIERU_RUNTIME_RESOLVED_SHA256=""
+  MIERU_RUNTIME_RESOLVED_CHANNEL=""
+  MIERU_RUNTIME_RESOLUTION_FALLBACK=0
+}
+
+mieru_apply_last_known_good_resolution() {
+  local channel="$1" pm="$2" arch="$3" version asset digest
+  version="$LAST_KNOWN_GOOD_MIERU_VERSION"
+  mieru_stable_version "$version" || return 1
+  asset="$(mieru_runtime_asset_name "$version" "$pm" "$arch")" || return 1
+  digest="$(mieru_last_known_good_digest "$asset")" || return 1
+  MIERU_RUNTIME_RESOLVED_VERSION="$version"
+  MIERU_RUNTIME_RESOLVED_ASSET="$asset"
+  MIERU_RUNTIME_RESOLVED_URL="${GITHUB_DL}/v${version}/${asset}"
+  MIERU_RUNTIME_RESOLVED_CHECKSUM_URL="${MIERU_RUNTIME_RESOLVED_URL}.sha256.txt"
+  MIERU_RUNTIME_RESOLVED_SHA256="$digest"
+  MIERU_RUNTIME_RESOLVED_CHANNEL="$channel"
+  # Resolver result fields are consumed by callers after this function returns.
+  # shellcheck disable=SC2034
+  MIERU_RUNTIME_RESOLUTION_FALLBACK=1
+  warn 'LATEST_RESOLUTION_FAILED' >&2
+  warn "USING_LAST_KNOWN_GOOD=${version}" >&2
+}
+
+mieru_resolve_runtime() {
+  local channel requested_version pm arch metadata release tag version asset checksum_asset
+  local asset_count checksum_count url checksum_url digest expected_prefix
+  channel="$(normalize_mieru_channel "${1:-stable}")" || return 1
+  requested_version="${2:-}"
+  pm="$3"
+  arch="$4"
+  mieru_reset_runtime_resolution
+  metadata="$(mktemp_file .mieru-release.json)" || return 1
+
+  case "$channel" in
+    stable|latest)
+      if ! mieru_fetch_releases_metadata "$metadata"; then
+        rm -f "$metadata"
+        mieru_apply_last_known_good_resolution "$channel" "$pm" "$arch"
+        return $?
+      fi
+      if ! release="$(jq -ce '
+          select(type == "array")
+          | [ .[]
+              | select(.draft == false and .prerelease == false)
+              | select((.tag_name | type) == "string")
+              | select(.tag_name | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))
+              | . + {nobrand_semver:(.tag_name[1:] | split(".") | map(tonumber))}
+            ]
+          | sort_by(.nobrand_semver)
+          | last
+          | select(type == "object")
+        ' "$metadata" 2>/dev/null)"; then
+        rm -f "$metadata"
+        return 1
+      fi
+      ;;
     pinned)
-      valid_mieru_version "${MIERU_VERSION:-}" || \
-        die "$(t 'pinned 通道需要合法的 --mieru-version' \
-          'The pinned channel requires a valid --mieru-version')"
-      printf '%s' "$MIERU_VERSION"
+      valid_mieru_version "$requested_version" || { rm -f "$metadata"; return 1; }
+      if ! mieru_fetch_tag_metadata "$requested_version" "$metadata"; then
+        rm -f "$metadata"
+        return 1
+      fi
+      if ! release="$(jq -ce --arg tag "v${requested_version}" '
+          select(type == "object" and .draft == false and .tag_name == $tag)
+        ' "$metadata" 2>/dev/null)"; then
+        rm -f "$metadata"
+        return 1
+      fi
       ;;
   esac
+  rm -f "$metadata"
+  [ -n "$release" ] || return 1
+  tag="$(jq -r '.tag_name // empty' <<<"$release")"
+  version="${tag#v}"
+  if [ "$channel" = pinned ]; then
+    valid_mieru_version "$version" || return 1
+  else
+    mieru_stable_version "$version" || return 1
+  fi
+  asset="$(mieru_runtime_asset_name "$version" "$pm" "$arch")" || return 1
+  checksum_asset="${asset}.sha256.txt"
+  asset_count="$(jq -r --arg asset "$asset" \
+    'if (.assets | type) == "array" then [.assets[] | select(.name==$asset)] | length else 0 end' \
+    <<<"$release")"
+  checksum_count="$(jq -r --arg asset "$checksum_asset" \
+    'if (.assets | type) == "array" then [.assets[] | select(.name==$asset)] | length else 0 end' \
+    <<<"$release")"
+  [ "$asset_count" = 1 ] && [ "$checksum_count" = 1 ] || return 1
+  url="$(jq -r --arg asset "$asset" '.assets[] | select(.name==$asset) | .browser_download_url' <<<"$release")"
+  checksum_url="$(jq -r --arg asset "$checksum_asset" '.assets[] | select(.name==$asset) | .browser_download_url' <<<"$release")"
+  digest="$(jq -r --arg asset "$asset" '.assets[] | select(.name==$asset) | .digest // empty' <<<"$release")"
+  digest="${digest#sha256:}"
+  [[ "$digest" =~ ^[0-9a-fA-F]{64}$ ]] || return 1
+  digest="$(printf '%s' "$digest" | tr '[:upper:]' '[:lower:]')"
+  expected_prefix="${GITHUB_DL}/v${version}/"
+  [[ "$url" = "${expected_prefix}${asset}" ]] || return 1
+  [[ "$checksum_url" = "${expected_prefix}${checksum_asset}" ]] || return 1
+  if [ "$version" = "$LAST_KNOWN_GOOD_MIERU_VERSION" ]; then
+    [ "$digest" = "$(mieru_last_known_good_digest "$asset")" ] || return 1
+  fi
+  MIERU_RUNTIME_RESOLVED_VERSION="$version"
+  # Resolver result fields are consumed by callers after this function returns.
+  # shellcheck disable=SC2034
+  MIERU_RUNTIME_RESOLVED_ASSET="$asset"
+  MIERU_RUNTIME_RESOLVED_URL="$url"
+  MIERU_RUNTIME_RESOLVED_CHECKSUM_URL="$checksum_url"
+  MIERU_RUNTIME_RESOLVED_SHA256="$digest"
+  # shellcheck disable=SC2034
+  MIERU_RUNTIME_RESOLVED_CHANNEL="$channel"
 }
 
 mieru_channel_label() {
   case "$(normalize_mieru_channel "${MIERU_CHANNEL:-stable}" 2>/dev/null || printf stable)" in
-    stable) t 'stable（项目测试版）' 'stable (project-tested)' ;;
-    latest) t 'latest（上游最新版）' 'latest (upstream newest)' ;;
+    stable) t 'stable（官方最新稳定版）' 'stable (official latest stable)' ;;
+    latest) t 'latest（官方最新稳定版兼容名）' 'latest (official latest-stable alias)' ;;
     pinned) t "pinned (${MIERU_VERSION:-unknown})" "pinned (${MIERU_VERSION:-unknown})" ;;
   esac
 }
@@ -3773,10 +5637,77 @@ mita_bin() {
   printf '%s' "$MITA_BIN"
 }
 
+mieru_runtime_version() {
+  local binary="${1:-$(mita_bin)}" output
+  [ -x "$binary" ] || return 1
+  output="$("$binary" version 2>/dev/null | sed -n '1p')" || return 1
+  [[ "$output" =~ ^v?([0-9]+[.][0-9]+[.][0-9]+)([[:space:]]|$) ]] || return 1
+  printf '%s' "${BASH_REMATCH[1]}"
+}
+
 installed_version() {
-  if mita_installed; then
-    "$(mita_bin)" version 2>/dev/null | sed -n '1p' | tr -d 'v'
+  mita_installed || return 1
+  mieru_runtime_version "$(mita_bin)"
+}
+
+mieru_assert_runtime_version() {
+  local expected="$1" actual
+  actual="$(mieru_runtime_version "${2:-$(mita_bin)}")" || return 1
+  [ "$actual" = "$expected" ] || {
+    warn "$(t "mita runtime 身份不匹配：期望 ${expected}，实际 ${actual}" \
+      "mita runtime identity mismatch: expected ${expected}, got ${actual}")"
+    return 1
+  }
+}
+
+mieru_runtime_snapshot() {
+  local snapshot
+  snapshot="$(mktemp_dir)" || return 1
+  if [ -f "$MITA_BIN" ] && [ ! -L "$MITA_BIN" ]; then
+    cp -p "$MITA_BIN" "$snapshot/mita" || { rm -rf -- "$snapshot"; return 1; }
+  else
+    : >"$snapshot/binary.absent"
   fi
+  if [ -f "$MITA_MARKER" ] && [ ! -L "$MITA_MARKER" ]; then
+    cp -p "$MITA_MARKER" "$snapshot/marker" || { rm -rf -- "$snapshot"; return 1; }
+  else
+    : >"$snapshot/marker.absent"
+  fi
+  printf '%s' "$snapshot"
+}
+
+mieru_runtime_snapshot_valid() {
+  local snapshot="${1:-}"
+  [[ "$snapshot" = /tmp/mita.* || "$snapshot" = /tmp/mita_* ]] \
+    && [ -d "$snapshot" ] && [ ! -L "$snapshot" ]
+}
+
+mieru_runtime_rollback() {
+  local snapshot="$1" rc=0
+  mieru_runtime_snapshot_valid "$snapshot" || return 1
+  run install -d -o root -g root -m 0755 "$NOBRAND_BIN_DIR" "$(dirname "$MITA_MARKER")" || rc=1
+  if [ -f "$snapshot/mita" ]; then
+    run install -m 0755 "$snapshot/mita" "$MITA_BIN" || rc=1
+  elif [ -f "$snapshot/binary.absent" ]; then
+    run rm -f "$MITA_BIN" || rc=1
+  else
+    rc=1
+  fi
+  if [ -f "$snapshot/marker" ]; then
+    run install -m 0600 "$snapshot/marker" "$MITA_MARKER" || rc=1
+  elif [ -f "$snapshot/marker.absent" ]; then
+    run rm -f "$MITA_MARKER" || rc=1
+  else
+    rc=1
+  fi
+  rm -rf -- "$snapshot"
+  return "$rc"
+}
+
+mieru_runtime_commit() {
+  local snapshot="$1"
+  mieru_runtime_snapshot_valid "$snapshot" || return 1
+  rm -rf -- "$snapshot"
 }
 
 version_is_current() {
@@ -3786,35 +5717,27 @@ version_is_current() {
   [ "$(printf '%s\n%s' "$current" "$available" | sort -V | tail -n1)" = "$current" ]
 }
 
-package_url() {
-  local ver="$1"
-  local pm="$2"
-  local arch="$3"
-  case "${pm}:${arch}" in
-    deb:amd64) echo "${GITHUB_DL}/v${ver}/mita_${ver}_amd64.deb" ;;
-    deb:arm64) echo "${GITHUB_DL}/v${ver}/mita_${ver}_arm64.deb" ;;
-    rpm:amd64) echo "${GITHUB_DL}/v${ver}/mita-${ver}-1.x86_64.rpm" ;;
-    rpm:arm64) echo "${GITHUB_DL}/v${ver}/mita-${ver}-1.aarch64.rpm" ;;
-    alpine:amd64|alpine:arm64)
-      echo "${GITHUB_DL}/v${ver}/mita_${ver}_$(arch_tar_suffix "$arch").tar.gz"
-      ;;
-    *) die "$(t '无法构造下载链接' 'Cannot build download URL')" ;;
-  esac
-}
-
 download_package() {
   local url="$1"
   local dest="$2"
+  local pinned_sha256="${3:-}" checksum_url="${4:-${url}.sha256.txt}" actual
   STAGE="下载安装包"
   info "$(t "下载 ${url}" "Downloading ${url}")"
   run curl -fL --connect-timeout 30 --retry 3 --retry-delay 2 -o "$dest" "$url"
   [ -s "$dest" ] || die "$(t '下载文件为空' 'Downloaded file is empty')"
-  verify_package_sha256 "$dest" "${url}.sha256.txt"
+  if [ -n "$pinned_sha256" ]; then
+    [[ "$pinned_sha256" =~ ^[0-9a-f]{64}$ ]] || return 1
+    actual="$(nobrand_sha256_file "$dest")" || return 1
+    [ "$actual" = "$pinned_sha256" ] \
+      || die "$(t '安装包与已解析 release digest 不一致' 'Package does not match the resolved release digest')"
+  fi
+  verify_package_sha256 "$dest" "$checksum_url" "$pinned_sha256"
 }
 
 verify_package_sha256() {
   local file="$1"
   local sha_url="$2"
+  local pinned_sha256="${3:-}"
   [ "$DRY_RUN" -eq 1 ] && return 0
   STAGE="校验安装包 SHA256"
   local sha_file expected actual
@@ -3832,6 +5755,11 @@ verify_package_sha256() {
     return 1
   }
   expected="$(printf '%s' "$expected" | tr '[:upper:]' '[:lower:]')"
+  [ -z "$pinned_sha256" ] || [ "$expected" = "$pinned_sha256" ] || {
+    rm -f "$sha_file"
+    die "$(t '校验清单与 release digest 不一致' 'Checksum manifest disagrees with the release digest')"
+    return 1
+  }
   if command -v sha256sum >/dev/null 2>&1; then
     actual="$(sha256sum "$file" | awk '{print $1}')"
   elif command -v shasum >/dev/null 2>&1; then
@@ -4101,14 +6029,26 @@ nobrand_xray_arch_asset() {
   esac
 }
 
+nobrand_xray_tested_digest() {
+  case "$1" in
+    Xray-linux-64.zip) printf '%s' "$TESTED_XRAY_AMD64_SHA256" ;;
+    Xray-linux-arm64-v8a.zip) printf '%s' "$TESTED_XRAY_ARM64_SHA256" ;;
+    *) return 1 ;;
+  esac
+}
+
 nobrand_xray_version() {
+  local output version
   [ -x "$NOBRAND_XRAY_BIN" ] || return 1
-  "$NOBRAND_XRAY_BIN" version 2>/dev/null \
-    | sed -nE 's/^Xray[[:space:]]+([^[:space:]]+).*/\1/p' | head -n1
+  output="$("$NOBRAND_XRAY_BIN" version 2>/dev/null)" || return 1
+  version="$(printf '%s\n' "$output" \
+    | sed -nE 's/^Xray[[:space:]]+([^[:space:]]+).*/\1/p' | head -n1)"
+  [ -n "$version" ] || return 1
+  printf '%s' "$version"
 }
 
 nobrand_xray_release_info() {
-  local asset metadata
+  local asset metadata version url digest expected
   asset="$(nobrand_xray_arch_asset)" || {
     warn "$(t 'NoBrand HY2 的 Xray runtime 仅测试 amd64/arm64' \
       'NoBrand HY2 Xray runtime is tested only on amd64/arm64')"
@@ -4122,15 +6062,18 @@ nobrand_xray_release_info() {
     rm -f "$metadata"
     return 1
   fi
-  jq -r --arg asset "$asset" '
+  IFS=$'\t' read -r version url digest < <(jq -r --arg asset "$asset" '
     .tag_name as $version |
     first(.assets[]? | select(.name == $asset)) as $matched |
     select($matched != null) |
     [$version, $matched.browser_download_url, ($matched.digest // "")] | @tsv
-  ' "$metadata"
+  ' "$metadata")
   local rc=$?
   rm -f "$metadata"
-  return "$rc"
+  [ "$rc" -eq 0 ] && [ "$version" = "v${TESTED_XRAY_VERSION}" ] || return 1
+  expected="$(nobrand_xray_tested_digest "$asset")" || return 1
+  [ "$digest" = "sha256:${expected}" ] || return 1
+  printf '%s\t%s\t%s\n' "$version" "$url" "$digest"
 }
 
 nobrand_sha256_file() {
@@ -4160,7 +6103,7 @@ nobrand_verify_release_digest() {
 }
 
 nobrand_download_xray_candidate() {
-  local output="$1" info_line version url digest archive_dir candidate
+  local output="$1" asset_output_dir="${2:-}" info_line version url digest archive_dir candidate asset
   info_line="$(nobrand_xray_release_info)" || return 1
   IFS=$'\t' read -r version url digest <<<"$info_line"
   [[ "$url" = https://github.com/XTLS/Xray-core/releases/download/* ]] || {
@@ -4183,53 +6126,163 @@ nobrand_download_xray_candidate() {
   chmod 0755 "$candidate" || { rm -rf -- "$archive_dir"; return 1; }
   "$candidate" version >/dev/null 2>&1 || { rm -rf -- "$archive_dir"; return 1; }
   install -m 0755 "$candidate" "$output" || { rm -rf -- "$archive_dir"; return 1; }
+  if [ -n "$asset_output_dir" ]; then
+    mkdir -p "$asset_output_dir" || { rm -rf -- "$archive_dir"; return 1; }
+    for asset in geoip.dat geosite.dat; do
+      [ -s "$archive_dir/unpacked/$asset" ] \
+        || { rm -rf -- "$archive_dir"; return 1; }
+      install -m 0644 "$archive_dir/unpacked/$asset" "$asset_output_dir/$asset" \
+        || { rm -rf -- "$archive_dir"; return 1; }
+    done
+  fi
   info "NoBrand isolated Xray-core asset resolved: ${version}"
   rm -rf -- "$archive_dir"
 }
 
+nobrand_xray_asset_dir_safe() {
+  [ -n "${NOBRAND_LIB_DIR:-}" ] && [ -n "${NOBRAND_XRAY_ASSET_DIR:-}" ] \
+    && [ "$NOBRAND_XRAY_ASSET_DIR" != / ] \
+    && [[ "$NOBRAND_XRAY_ASSET_DIR" == "$NOBRAND_LIB_DIR"/* ]]
+}
+
+nobrand_xray_assets_ready() {
+  nobrand_xray_asset_dir_safe \
+    && [ -s "$NOBRAND_XRAY_ASSET_DIR/geoip.dat" ] \
+    && [ -s "$NOBRAND_XRAY_ASSET_DIR/geosite.dat" ]
+}
+
+nobrand_remove_xray_runtime_files() {
+  nobrand_xray_asset_dir_safe || return 1
+  rm -f "$NOBRAND_XRAY_BIN" || return 1
+  rm -rf -- "$NOBRAND_XRAY_ASSET_DIR"
+}
+
 nobrand_install_xray_runtime() {
-  local force="${1:-0}" candidate backup="" had_old=0
-  if [ -x "$NOBRAND_XRAY_BIN" ] && [ "$force" -ne 1 ]; then
+  local force="${1:-0}" candidate candidate_assets snapshot new_assets
+  local had_runtime=0 had_assets=0 replace_runtime=1 rc=0
+  nobrand_xray_asset_dir_safe || return 1
+  if [ -x "$NOBRAND_XRAY_BIN" ] && nobrand_xray_assets_ready && [ "$force" -ne 1 ]; then
     return 0
   fi
+  if [ -x "$NOBRAND_XRAY_BIN" ] && [ "$force" -ne 1 ]; then
+    [ "$(nobrand_xray_version 2>/dev/null || true)" = "$TESTED_XRAY_VERSION" ] || return 1
+    replace_runtime=0
+  fi
   candidate="$(mktemp_file .xray)" || return 1
-  if ! nobrand_download_xray_candidate "$candidate"; then
+  candidate_assets="$(mktemp_dir)" || { rm -f "$candidate"; return 1; }
+  if ! nobrand_download_xray_candidate "$candidate" "$candidate_assets"; then
     rm -f "$candidate"
+    rm -rf -- "$candidate_assets"
     warn "$(t 'NoBrand 独立 Xray-core 下载或校验失败' \
       'NoBrand isolated Xray-core download or validation failed')"
     return 1
   fi
-  mkdir -p "$(dirname "$NOBRAND_XRAY_BIN")" || { rm -f "$candidate"; return 1; }
+  snapshot="$(mktemp_dir)" || { rm -f "$candidate"; rm -rf -- "$candidate_assets"; return 1; }
   if [ -e "$NOBRAND_XRAY_BIN" ]; then
-    backup="$(mktemp "${NOBRAND_XRAY_BIN}.rollback.XXXXXX")" || { rm -f "$candidate"; return 1; }
-    rm -f "$backup"
-    mv "$NOBRAND_XRAY_BIN" "$backup" || { rm -f "$candidate"; return 1; }
-    had_old=1
+    cp -a "$NOBRAND_XRAY_BIN" "$snapshot/xray" || rc=1
+    had_runtime=1
   fi
-  if ! install -m 0755 "$candidate" "${NOBRAND_XRAY_BIN}.new" \
-     || ! mv -f "${NOBRAND_XRAY_BIN}.new" "$NOBRAND_XRAY_BIN" \
-     || ! nobrand_xray_version >/dev/null; then
-    rm -f "$candidate" "${NOBRAND_XRAY_BIN}.new" "$NOBRAND_XRAY_BIN"
-    [ "$had_old" -eq 0 ] || mv "$backup" "$NOBRAND_XRAY_BIN" 2>/dev/null || true
-    return 1
+  if [ -d "$NOBRAND_XRAY_ASSET_DIR" ] && [ ! -L "$NOBRAND_XRAY_ASSET_DIR" ]; then
+    cp -a "$NOBRAND_XRAY_ASSET_DIR" "$snapshot/assets" || rc=1
+    had_assets=1
   fi
-  rm -f "$candidate"
-  if ! nobrand_xray_validate_managed_configs "$NOBRAND_XRAY_BIN"; then
+  new_assets="${NOBRAND_XRAY_ASSET_DIR}.new.$$"
+  if [ "$rc" -eq 0 ]; then
+    mkdir -p "$(dirname "$NOBRAND_XRAY_BIN")" "$(dirname "$NOBRAND_XRAY_ASSET_DIR")" \
+      && rm -rf -- "$new_assets" \
+      && mkdir -p "$new_assets" \
+      && install -m 0644 "$candidate_assets/geoip.dat" "$new_assets/geoip.dat" \
+      && install -m 0644 "$candidate_assets/geosite.dat" "$new_assets/geosite.dat" || rc=1
+  fi
+  if [ "$rc" -eq 0 ] && [ "$replace_runtime" -eq 1 ]; then
+    install -m 0755 "$candidate" "${NOBRAND_XRAY_BIN}.new" \
+      && mv -f "${NOBRAND_XRAY_BIN}.new" "$NOBRAND_XRAY_BIN" \
+      && [ "$(nobrand_xray_version 2>/dev/null || true)" = "$TESTED_XRAY_VERSION" ] || rc=1
+  fi
+  if [ "$rc" -eq 0 ]; then
+    rm -rf -- "$NOBRAND_XRAY_ASSET_DIR" \
+      && mv "$new_assets" "$NOBRAND_XRAY_ASSET_DIR" \
+      && nobrand_xray_assets_ready \
+      && nobrand_xray_validate_managed_configs "$NOBRAND_XRAY_BIN" || rc=1
+  fi
+  rm -f "$candidate" "${NOBRAND_XRAY_BIN}.new"
+  rm -rf -- "$candidate_assets" "$new_assets"
+  if [ "$rc" -ne 0 ]; then
     rm -f "$NOBRAND_XRAY_BIN"
-    [ "$had_old" -eq 0 ] || mv "$backup" "$NOBRAND_XRAY_BIN" 2>/dev/null || true
+    [ "$had_runtime" -eq 0 ] || install -m 0755 "$snapshot/xray" "$NOBRAND_XRAY_BIN" 2>/dev/null || true
+    rm -rf -- "$NOBRAND_XRAY_ASSET_DIR"
+    [ "$had_assets" -eq 0 ] \
+      || cp -a "$snapshot/assets" "$NOBRAND_XRAY_ASSET_DIR" 2>/dev/null || true
+    rm -rf -- "$snapshot"
     return 1
   fi
-  rm -f "$backup"
+  rm -rf -- "$snapshot"
+}
+
+nobrand_xray_redact_validation_log() {
+  local config="$1" log="$2"
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf '%s\n' '[validation details suppressed: redactor unavailable]' >&2
+    return 0
+  fi
+  python3 - "$config" "$log" >&2 <<'PY' || {
+import json
+import re
+import sys
+
+config_path, log_path = sys.argv[1:3]
+sensitive_keys = {
+    "auth", "password", "privatekey", "publickey", "uuid", "shortid", "shortids"
+}
+
+try:
+    with open(config_path, encoding="utf-8") as handle:
+        config = json.load(handle)
+    with open(log_path, encoding="utf-8", errors="replace") as handle:
+        text = handle.read()
+except Exception:
+    raise SystemExit(1)
+
+secrets = set()
+
+def collect(value):
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if str(key).casefold() in sensitive_keys:
+                values = child if isinstance(child, list) else [child]
+                for item in values:
+                    if isinstance(item, (str, int, float)) and str(item):
+                        secrets.add(str(item))
+            collect(child)
+    elif isinstance(value, list):
+        for child in value:
+            collect(child)
+
+collect(config)
+for secret in sorted(secrets, key=len, reverse=True):
+    text = text.replace(secret, "***REDACTED***")
+
+field = r'(?:auth|password|privateKey|publicKey|uuid|shortId|shortIds)'
+text = re.sub(
+    rf'(?i)((?:["\']?{field}["\']?)\s*[:=]\s*)(?:"[^"]*"|\'[^\']*\'|[^\s,}}\]]+)',
+    lambda match: match.group(1) + '***REDACTED***',
+    text,
+)
+sys.stdout.write(text)
+PY
+    printf '%s\n' '[validation details suppressed: redaction failed]' >&2
+  }
 }
 
 nobrand_xray_test_config() {
   local config="$1" binary="${2:-$NOBRAND_XRAY_BIN}" log
   [ -x "$binary" ] && jq empty "$config" >/dev/null 2>&1 || return 1
   log="$(mktemp_file .log)" || return 1
-  if ! "$binary" run -test -c "$config" >"$log" 2>&1; then
+  if ! XRAY_LOCATION_ASSET="$NOBRAND_XRAY_ASSET_DIR" \
+      "$binary" run -test -c "$config" >"$log" 2>&1; then
     warn "$(t 'NoBrand Xray 配置校验失败（已脱敏）:' \
       'NoBrand Xray config validation failed (redacted):')"
-    sed -E 's/(auth|password)(["=: ]+)[^," ]+/\1\2***REDACTED***/Ig' "$log" >&2 || true
+    nobrand_xray_redact_validation_log "$config" "$log"
     rm -f "$log"
     return 1
   fi
@@ -4237,20 +6290,31 @@ nobrand_xray_test_config() {
 }
 
 nobrand_xray_validate_managed_configs() {
-  local binary="${1:-$NOBRAND_XRAY_BIN}" config
+  local binary="${1:-$NOBRAND_XRAY_BIN}" config id
   for config in "$NOBRAND_HY2_CONFIG_FILE" "$NOBRAND_VLESS_CONFIG_FILE"; do
     [ -f "$config" ] || continue
     nobrand_xray_test_config "$config" "$binary" || return 1
   done
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    config="$(reality_config_file "$id")"
+    [ -f "$config" ] || return 1
+    nobrand_xray_test_config "$config" "$binary" || return 1
+  done < <(reality_instance_ids)
 }
 
 nobrand_restore_xray_upgrade_snapshot() {
-  local snapshot="$1" had_runtime="$2" hy2_had_state="$3" vless_had_state="$4"
-  local hy2_was_active="$5" vless_was_active="$6"
+  local snapshot="$1" had_runtime="$2" had_assets="$3" hy2_had_state="$4" vless_had_state="$5"
+  local hy2_was_active="$6" vless_was_active="$7" id
   if [ "$had_runtime" -eq 1 ]; then
     install -m 0755 "$snapshot/xray" "$NOBRAND_XRAY_BIN" || return 1
   else
     rm -f "$NOBRAND_XRAY_BIN"
+  fi
+  nobrand_xray_asset_dir_safe || return 1
+  rm -rf -- "$NOBRAND_XRAY_ASSET_DIR"
+  if [ "$had_assets" -eq 1 ]; then
+    cp -a "$snapshot/xray-assets" "$NOBRAND_XRAY_ASSET_DIR" || return 1
   fi
   if [ "$hy2_had_state" -eq 1 ]; then
     cp -a "$snapshot/hy2-state" "$NOBRAND_HY2_STATE_FILE" || return 1
@@ -4258,30 +6322,55 @@ nobrand_restore_xray_upgrade_snapshot() {
   if [ "$vless_had_state" -eq 1 ]; then
     cp -a "$snapshot/vless-state" "$NOBRAND_VLESS_STATE_FILE" || return 1
   fi
+  if [ -d "$snapshot/reality-states" ]; then
+    for id in "$snapshot/reality-states"/*.json; do
+      [ -f "$id" ] || continue
+      cp -a "$id" "$(reality_state_file "$(basename "$id" .json)")" || return 1
+    done
+  fi
   if [ "$had_runtime" -eq 1 ]; then
     [ "$hy2_was_active" -eq 0 ] \
       || nobrand_hy2_service_action restart >/dev/null 2>&1 || true
     [ "$vless_was_active" -eq 0 ] \
       || nobrand_vless_sudoku_service_action restart >/dev/null 2>&1 || true
+    if [ -s "$snapshot/reality-active.ids" ]; then
+      while IFS= read -r id; do
+        [ -n "$id" ] || continue
+        reality_service_action "$id" restart >/dev/null 2>&1 || true
+      done <"$snapshot/reality-active.ids"
+    fi
   else
     [ "$hy2_was_active" -eq 0 ] \
       || nobrand_hy2_service_action stop >/dev/null 2>&1 || true
     [ "$vless_was_active" -eq 0 ] \
       || nobrand_vless_sudoku_service_action stop >/dev/null 2>&1 || true
+    if [ -s "$snapshot/reality-active.ids" ]; then
+      while IFS= read -r id; do
+        [ -n "$id" ] || continue
+        reality_service_action "$id" stop >/dev/null 2>&1 || true
+      done <"$snapshot/reality-active.ids"
+    fi
   fi
 }
 
 nobrand_upgrade_xray_runtime() {
-  local snapshot had_runtime=0 hy2_had_state=0 vless_had_state=0
+  local snapshot had_runtime=0 had_assets=0 hy2_had_state=0 vless_had_state=0
   local hy2_was_active=0 vless_was_active=0 hy2_port="" vless_port=""
-  local failed=0
+  local failed=0 id port state tmp runtime
   nobrand_prepare_common
   admin_lock_acquire || return 1
   snapshot="$(mktemp_dir)" || { admin_lock_release; return 1; }
+  mkdir -p "$snapshot/reality-states" || { rm -rf -- "$snapshot"; admin_lock_release; return 1; }
+  : >"$snapshot/reality-active.ids"
   if [ -e "$NOBRAND_XRAY_BIN" ]; then
     cp -a "$NOBRAND_XRAY_BIN" "$snapshot/xray" \
       || { rm -rf -- "$snapshot"; admin_lock_release; return 1; }
     had_runtime=1
+  fi
+  if [ -d "$NOBRAND_XRAY_ASSET_DIR" ] && [ ! -L "$NOBRAND_XRAY_ASSET_DIR" ]; then
+    cp -a "$NOBRAND_XRAY_ASSET_DIR" "$snapshot/xray-assets" \
+      || { rm -rf -- "$snapshot"; admin_lock_release; return 1; }
+    had_assets=1
   fi
   if hysteria2_state_exists; then
     cp -a "$NOBRAND_HY2_STATE_FILE" "$snapshot/hy2-state" \
@@ -4297,8 +6386,17 @@ nobrand_upgrade_xray_runtime() {
   fi
   nobrand_hy2_service_active && hy2_was_active=1
   nobrand_vless_sudoku_service_active && vless_was_active=1
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    cp -a "$(reality_state_file "$id")" "$snapshot/reality-states/${id}.json" \
+      || { rm -rf -- "$snapshot"; admin_lock_release; return 1; }
+    reality_service_active "$id" && printf '%s\n' "$id" >>"$snapshot/reality-active.ids"
+  done < <(reality_instance_ids)
 
   if ! nobrand_install_xray_runtime 1; then
+    failed=1
+  elif ! runtime="$(nobrand_xray_version 2>/dev/null)" \
+       || [ -z "$runtime" ] || [ "$runtime" != "$TESTED_XRAY_VERSION" ]; then
     failed=1
   elif [ "$hy2_was_active" -eq 1 ] \
        && { ! nobrand_hy2_service_action restart \
@@ -4308,24 +6406,47 @@ nobrand_upgrade_xray_runtime() {
        && { ! nobrand_vless_sudoku_service_action restart \
          || ! nb_wait_for_listener TCP "$vless_port" 25; }; then
     failed=1
-  elif ! hysteria2_refresh_runtime_metadata \
-       || ! vless_sudoku_refresh_runtime_metadata; then
+  else
+    while IFS= read -r id; do
+      [ -n "$id" ] || continue
+      port="$(reality_state_field "$id" listen_port)"
+      if ! reality_service_action "$id" restart \
+         || ! nb_wait_for_listener TCP "$port" 25 \
+         || ! reality_listener_owned_by_service "$id" "$port"; then
+        failed=1
+        break
+      fi
+    done <"$snapshot/reality-active.ids"
+  fi
+  if [ "$failed" -eq 0 ] \
+     && { ! hysteria2_refresh_runtime_metadata || ! vless_sudoku_refresh_runtime_metadata; }; then
     failed=1
   fi
+  if [ "$failed" -eq 0 ]; then
+    while IFS= read -r id; do
+      [ -n "$id" ] || continue
+      state="$(reality_state_file "$id")"; tmp="$(mktemp_file .reality-state)" || { failed=1; break; }
+      jq --arg runtime "$TESTED_XRAY_VERSION" --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        '.runtime_version=$runtime | .updated_at=$updated' "$state" >"$tmp" \
+        && nb_atomic_install_file "$tmp" "$state" 0600 || failed=1
+      rm -f "$tmp"
+      [ "$failed" -eq 0 ] || break
+    done < <(reality_instance_ids)
+  fi
   if [ "$failed" -eq 1 ]; then
-    nobrand_restore_xray_upgrade_snapshot "$snapshot" "$had_runtime" \
+    nobrand_restore_xray_upgrade_snapshot "$snapshot" "$had_runtime" "$had_assets" \
       "$hy2_had_state" "$vless_had_state" "$hy2_was_active" "$vless_was_active" \
       || warn '共享 Xray runtime 回滚不完整；请立即运行 nobrand doctor'
     rm -rf -- "$snapshot"
     admin_lock_release
-    warn '共享 Xray 升级或双服务验收失败，已恢复升级前 runtime/state'
+    warn '共享 Xray 升级或活动服务验收失败，已恢复升级前 runtime/state'
     return 1
   fi
 
   rm -rf -- "$snapshot"
   admin_lock_release
-  t 'NoBrand 共享 Xray-core 升级完成；活动 HY2/VLESS 服务均已验收' \
-    'NoBrand shared Xray-core upgraded; active HY2/VLESS services passed acceptance'
+  t 'NoBrand 共享 Xray-core 升级完成；活动 HY2/VLESS Sudoku/VLESS REALITY 服务均已验收' \
+    'NoBrand shared Xray-core upgraded; active HY2/VLESS Sudoku/VLESS REALITY services passed acceptance'
 }
 
 nobrand_write_hy2_service() {
@@ -5310,6 +7431,201 @@ tuic_remove_service() {
   esac
 }
 
+# ---------- VLESS REALITY named-instance Xray services ----------
+
+reality_systemd_unit() { printf 'nobrand-vless-reality@%s.service' "$1"; }
+reality_openrc_service() { printf 'nobrand-vless-reality-%s' "$1"; }
+
+reality_systemd_template_owned() {
+  [ -f "$NOBRAND_REALITY_SYSTEMD_TEMPLATE" ] \
+    && grep -qxF '# Managed by NoBrand-OneClick' "$NOBRAND_REALITY_SYSTEMD_TEMPLATE" \
+    && grep -qxF "Environment=XRAY_LOCATION_ASSET=${NOBRAND_XRAY_ASSET_DIR}" \
+      "$NOBRAND_REALITY_SYSTEMD_TEMPLATE" \
+    && grep -qF "ExecStart=${NOBRAND_XRAY_BIN} run -c ${NOBRAND_REALITY_CONFIG_DIR}/%i/config.json" \
+      "$NOBRAND_REALITY_SYSTEMD_TEMPLATE"
+}
+
+reality_openrc_service_owned() {
+  local id="$1" path="${NOBRAND_REALITY_OPENRC_PREFIX}${1}"
+  [ -f "$path" ] \
+    && grep -qxF '# Managed by NoBrand-OneClick' "$path" \
+    && grep -qxF "export XRAY_LOCATION_ASSET=\"${NOBRAND_XRAY_ASSET_DIR}\"" "$path" \
+    && grep -qxF "command_args=\"run -c ${NOBRAND_REALITY_CONFIG_DIR}/${id}/config.json\"" "$path"
+}
+
+reality_remove_service_runtime_if_owned() {
+  if [ -e "$NOBRAND_REALITY_SYSTEMD_TEMPLATE" ]; then
+    reality_systemd_template_owned || {
+      warn "Refusing to remove unowned VLESS REALITY service template: ${NOBRAND_REALITY_SYSTEMD_TEMPLATE}"
+      return 1
+    }
+    rm -f "$NOBRAND_REALITY_SYSTEMD_TEMPLATE" || return 1
+  fi
+}
+
+reality_install_service_runtime() {
+  local manager tmp
+  manager="$(nb_service_manager)"
+  case "$manager" in
+    systemd)
+      if [ -e "$NOBRAND_REALITY_SYSTEMD_TEMPLATE" ] \
+         && ! reality_systemd_template_owned; then
+        warn "Refusing to replace unowned VLESS REALITY service template: ${NOBRAND_REALITY_SYSTEMD_TEMPLATE}"
+        return 1
+      fi
+      tmp="$(mktemp_file .reality-service)" || return 1
+      cat >"$tmp" <<EOF
+# Managed by NoBrand-OneClick
+[Unit]
+Description=NoBrand VLESS REALITY instance %i
+Documentation=https://github.com/ike-sh/NoBrand-OneClick
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Environment=XRAY_LOCATION_ASSET=${NOBRAND_XRAY_ASSET_DIR}
+ExecStart=${NOBRAND_XRAY_BIN} run -c ${NOBRAND_REALITY_CONFIG_DIR}/%i/config.json
+Restart=on-failure
+RestartSec=2
+LimitNOFILE=1048576
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadOnlyPaths=${NOBRAND_REALITY_CONFIG_DIR} ${NOBRAND_XRAY_BIN} ${NOBRAND_XRAY_ASSET_DIR}
+
+[Install]
+WantedBy=multi-user.target
+EOF
+      grep -qF "ExecStart=${NOBRAND_XRAY_BIN} run -c ${NOBRAND_REALITY_CONFIG_DIR}/%i/config.json" "$tmp" \
+        && nb_atomic_install_file "$tmp" "$NOBRAND_REALITY_SYSTEMD_TEMPLATE" 0644 \
+        || { rm -f "$tmp"; return 1; }
+      rm -f "$tmp"
+      systemctl daemon-reload
+      ;;
+    openrc) ;;
+    *) return 1 ;;
+  esac
+}
+
+reality_ensure_openrc_service() {
+  local id="$1" path tmp
+  [ "$(nb_service_manager)" = openrc ] || return 0
+  path="${NOBRAND_REALITY_OPENRC_PREFIX}${id}"
+  if [ -e "$path" ] && ! reality_openrc_service_owned "$id"; then
+    warn "Refusing to replace unowned VLESS REALITY OpenRC service: ${path}"
+    return 1
+  fi
+  tmp="$(mktemp_file .reality-openrc)" || return 1
+  cat >"$tmp" <<EOF
+#!/sbin/openrc-run
+# Managed by NoBrand-OneClick
+name="NoBrand VLESS REALITY ${id}"
+command="${NOBRAND_XRAY_BIN}"
+command_args="run -c ${NOBRAND_REALITY_CONFIG_DIR}/${id}/config.json"
+export XRAY_LOCATION_ASSET="${NOBRAND_XRAY_ASSET_DIR}"
+command_background="yes"
+pidfile="/run/nobrand-vless-reality-${id}.pid"
+output_log="/var/log/nobrand-vless-reality-${id}.log"
+error_log="/var/log/nobrand-vless-reality-${id}.err"
+depend() { use net; after firewall; }
+EOF
+  nb_atomic_install_file "$tmp" "$path" 0755 || { rm -f "$tmp"; return 1; }
+  rm -f "$tmp"
+  rc-update add "$(reality_openrc_service "$id")" default >/dev/null 2>&1
+}
+
+reality_service_action() {
+  local id="$1" action="$2" manager
+  manager="$(nb_service_manager)"
+  case "$manager" in
+    systemd)
+      [ "$action" != start ] \
+        || systemctl enable "$(reality_systemd_unit "$id")" >/dev/null 2>&1
+      [ "$action" != restart ] || systemctl daemon-reload
+      systemctl "$action" "$(reality_systemd_unit "$id")"
+      ;;
+    openrc)
+      reality_ensure_openrc_service "$id" || return 1
+      rc-service "$(reality_openrc_service "$id")" "$action"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+reality_service_active() {
+  local id="$1"
+  nb_service_is_active "$(reality_systemd_unit "$id")" "$(reality_openrc_service "$id")"
+}
+
+reality_service_pid() {
+  local id="$1" manager pid_file
+  manager="$(nb_service_manager)"
+  case "$manager" in
+    systemd) systemctl show -p MainPID --value "$(reality_systemd_unit "$id")" 2>/dev/null ;;
+    openrc)
+      pid_file="/run/nobrand-vless-reality-${id}.pid"
+      [ -s "$pid_file" ] && cat "$pid_file"
+      ;;
+  esac
+}
+
+reality_listener_owned_by_service() {
+  local id="$1" port="$2" expected pid
+  expected="$(reality_service_pid "$id" 2>/dev/null || true)"
+  [[ "$expected" =~ ^[0-9]+$ ]] && [ "$expected" -gt 1 ] || return 1
+  while IFS= read -r pid; do
+    [ "$pid" = "$expected" ] && return 0
+  done < <(nb_port_listener_pids TCP "$port")
+  return 1
+}
+
+reality_defender_listener_loopback_only() {
+  local port="$1" details
+  details="$(nb_port_listener_details TCP "$port" 2>/dev/null || true)"
+  [ -n "$details" ] || return 1
+  printf '%s\n' "$details" | awk -v port="$port" -v expected="127.0.0.1:${port}" '
+    BEGIN { found=0 }
+    {
+      for (i=1; i<=NF; i++) {
+        if ($i ~ (":" port "$") ) {
+          if ($i != expected) exit 1
+          found=1
+          break
+        }
+      }
+    }
+    END { exit(found ? 0 : 1) }
+  '
+}
+
+reality_defender_listener_owned_by_service() {
+  local id="$1" port="$2"
+  reality_defender_listener_loopback_only "$port" \
+    && reality_listener_owned_by_service "$id" "$port"
+}
+
+reality_remove_service() {
+  local id="$1" manager
+  manager="$(nb_service_manager)"
+  case "$manager" in
+    systemd)
+      reality_systemd_template_owned || return 1
+      systemctl disable --now "$(reality_systemd_unit "$id")" >/dev/null 2>&1 || true
+      ;;
+    openrc)
+      reality_openrc_service_owned "$id" || return 1
+      rc-service "$(reality_openrc_service "$id")" stop >/dev/null 2>&1 || true
+      rc-update del "$(reality_openrc_service "$id")" default >/dev/null 2>&1 || true
+      rm -f "${NOBRAND_REALITY_OPENRC_PREFIX}${id}"
+      ;;
+  esac
+}
+
 random_token() {
   if command -v openssl >/dev/null 2>&1; then
     openssl rand -base64 12 | tr -dc 'a-zA-Z0-9' | head -c 10
@@ -6209,7 +8525,129 @@ instance_start_proxy() {
     instance_log_tail "$id"
     return 1
   fi
+  mieru_instance_enforcement_valid "$id" 25 || return 1
   return 0
+}
+
+mieru_instance_enforcement_valid() {
+  local id="$1" timeout="${2:-25}" row policy method address profile_id port proto bind_transport bind_port
+  row="$(jq -r --arg id "$id" '.users[]|select((.instance_id // "")==$id)|[
+    (.ingress_enforcement // "permissive"),(.ingress_enforcement_method // "wildcard"),
+    (.ingress_local_address // ""),(.ingress_profile_id // "legacy-default-route"),(.port|tostring)]|@tsv' \
+    "$MITA_USERS_STATE" 2>/dev/null || true)"
+  [ -n "$row" ] || return 1
+  IFS=$'\t' read -r policy method address profile_id port <<<"$row"
+  proto="$(jq -r '.protocol // "TCP"' "$MITA_USERS_STATE")"
+  if [ "$proto" = BOTH ]; then
+    while IFS='|' read -r bind_transport bind_port; do
+      nb_wait_for_enforced_listener "$policy" "$method" "$bind_transport" "$bind_port" \
+        "$address" "mieru:${id}" "$timeout" || return 1
+    done <<<"TCP|${port}"$'\n'"UDP|$((port + 1))"
+  else
+    nb_wait_for_enforced_listener "$policy" "$method" "$proto" "$port" \
+      "$address" "mieru:${id}" "$timeout"
+  fi
+}
+
+mieru_build_strict_firewall_candidate() {
+  local output="$1" current
+  current="$(mktemp_file .mieru-firewall-current)" || return 1
+  nb_strict_firewall_current_or_empty "$current" || { rm -f "$current"; return 1; }
+  python3 - "$current" "$MITA_USERS_STATE" "$output" <<'PY'
+import json,sys
+current_path,users_path,output_path=sys.argv[1:]
+current=json.load(open(current_path,encoding="utf-8"))
+users=json.load(open(users_path,encoding="utf-8"))
+rules=[r for r in current.get("rules") or [] if not str(r.get("owner") or "").startswith("mieru:")]
+proto=str(users.get("protocol") or "TCP").upper()
+for user in users.get("users") or []:
+    if not user.get("enabled",True) or str(user.get("ingress_enforcement") or "permissive")!="strict":
+        continue
+    if str(user.get("ingress_enforcement_method") or "")!="firewall":
+        raise SystemExit(2)
+    owner="mieru:"+str(user.get("instance_id") or "")
+    address=str(user.get("ingress_local_address") or "")
+    profile=str(user.get("ingress_profile_id") or "")
+    port=int(user.get("port") or 0)
+    bindings=[("TCP",port),("UDP",port+1)] if proto=="BOTH" else [(proto,port)]
+    for transport,binding_port in bindings:
+        rules.append({"owner":owner,"ingress_profile_id":profile,"transport":transport,
+                      "port":binding_port,"local_address":address})
+current["rules"]=sorted(rules,key=lambda r:(r["owner"],r["transport"],r["port"]))
+json.dump(current,open(output_path,"w",encoding="utf-8"),indent=2)
+PY
+  local rc=$?
+  rm -f "$current"
+  [ "$rc" -eq 0 ] && nb_strict_firewall_state_valid "$output"
+}
+
+mieru_reconcile_strict_firewall() {
+  local candidate
+  users_state_exists || return 0
+  candidate="$(mktemp_file .mieru-firewall-candidate)" || return 1
+  mieru_build_strict_firewall_candidate "$candidate" \
+    && nb_strict_firewall_commit_candidate "$candidate"
+  local rc=$?
+  rm -f "$candidate"
+  return "$rc"
+}
+
+# Protocol uninstall removes every strict-ingress rule owned by Mieru before
+# deleting users.json.  Filtering the authoritative owner namespace is more
+# robust than enumerating the current users: it also clears a managed orphan
+# left by an interrupted user transaction without touching another protocol.
+mieru_clear_strict_firewall() {
+  local candidate rc
+  candidate="$(mktemp_file .mieru-firewall-clear)" || return 1
+  nb_strict_firewall_current_or_empty "$candidate" \
+    && jq '.rules |= map(select((.owner | startswith("mieru:")) | not))' \
+      "$candidate" >"${candidate}.next" \
+    && mv -f "${candidate}.next" "$candidate" \
+    && nb_strict_firewall_commit_candidate "$candidate"
+  rc=$?
+  rm -f "$candidate" "${candidate}.next"
+  return "$rc"
+}
+
+mieru_apply_ingress_enforcement() {
+  local id="$1" profile_id candidate snapshot firewall_old firewall_existed=0 old_protocol rc=0
+  users_state_exists || return 1
+  profile_id="$(jq -r --arg id "$id" '.users[]|select((.instance_id // "")==$id)|.ingress_profile_id // empty' \
+    "$MITA_USERS_STATE")"
+  [ -n "$profile_id" ] || profile_id="$NOBRAND_LEGACY_INGRESS_PROFILE_ID"
+  nb_prepare_ingress_deployment "$profile_id" firewall || return 1
+  candidate="$(mktemp_file .mieru-ingress-users)" || return 1
+  snapshot="$(mktemp_dir)" || { rm -f "$candidate"; return 1; }
+  firewall_old="$snapshot/firewall.json"
+  cp -a "$MITA_USERS_STATE" "$snapshot/users.json" || rc=1
+  [ ! -e "$NOBRAND_INGRESS_FIREWALL_STATE_FILE" ] || firewall_existed=1
+  [ "$rc" -ne 0 ] || nb_strict_firewall_current_or_empty "$firewall_old" || rc=1
+  if [ "$rc" -eq 0 ]; then
+    jq --arg id "$id" --arg policy "$INGRESS_ENFORCEMENT_RESOLVED" \
+      --arg method "$INGRESS_ENFORCEMENT_METHOD" --arg address "$INGRESS_LOCAL_ADDRESS" '
+        (.users[]|select((.instance_id // "")==$id)) |=
+          (.ingress_enforcement=$policy|.ingress_enforcement_method=$method|.ingress_local_address=$address)
+      ' "$MITA_USERS_STATE" >"$candidate" || rc=1
+  fi
+  old_protocol="${PROTOCOL:-TCP}"
+  [ "$rc" -ne 0 ] || PROTOCOL="$(jq -r '.protocol // "TCP"' "$candidate")"
+  if [ "$rc" -eq 0 ]; then
+    nb_atomic_install_file "$candidate" "$MITA_USERS_STATE" 0600 \
+      && [ "${NOBRAND_TEST_INGRESS_SERVICE_FAIL:-0}" -eq 0 ] \
+      && reconcile_isolated_instances \
+      && [ "${NOBRAND_TEST_INGRESS_LISTENER_FAIL:-0}" -eq 0 ] || rc=1
+  fi
+  if [ "$rc" -ne 0 ]; then
+    nb_atomic_install_file "$snapshot/users.json" "$MITA_USERS_STATE" 0600 >/dev/null 2>&1 || true
+    PROTOCOL="$(jq -r '.protocol // "TCP"' "$MITA_USERS_STATE" 2>/dev/null || printf '%s' "$old_protocol")"
+    reconcile_isolated_instances >/dev/null 2>&1 || true
+    nb_strict_firewall_commit_candidate "$firewall_old" >/dev/null 2>&1 || true
+    [ "$firewall_existed" -eq 1 ] || rm -f "$NOBRAND_INGRESS_FIREWALL_STATE_FILE"
+  fi
+  PROTOCOL="$old_protocol"
+  rm -f "$candidate"
+  rm -rf -- "$snapshot"
+  return "$rc"
 }
 
 isolated_stop_all() {
@@ -6241,6 +8679,7 @@ prune_orphan_instances() {
     [ -n "$id" ] || continue
     grep -qxF "$id" <<<"$all_ids" && continue
     instance_daemon_stop "$id" 1 || true
+    nb_strict_firewall_remove_owner "mieru:${id}" || true
     run rm -rf "${MITA_INSTANCES_DIR:?}/${id}" "${MITA_INSTANCE_METRICS_DIR:?}/${id}"
   done < <(printf '%s' "$candidates" | sed '/^[[:space:]]*$/d' | LC_ALL=C sort -u)
 }
@@ -6250,6 +8689,7 @@ reconcile_isolated_instances() {
   users_require_python || return 1
   users_ensure_instance_ids || return 1
   install_instance_runtime || return 1
+  mieru_reconcile_strict_firewall || return 1
 
   while IFS=$'\t' read -r id name port; do
     [ -n "$id" ] && [ -n "$name" ] && [ -n "$port" ] || continue
@@ -6317,6 +8757,10 @@ users_py_locked() {
       _U_EXPIRE="${_U_EXPIRE-}" _U_PACKAGE="${_U_PACKAGE-}" _U_ENABLED="${_U_ENABLED-}" \
       _U_BW="${_U_BW-}" _U_PRIMARY="${_U_PRIMARY-}" \
       _U_ADVERTISE_HOST="${_U_ADVERTISE_HOST-}" _U_ADVERTISE_PORT="${_U_ADVERTISE_PORT-}" \
+      _U_INGRESS_PROFILE_ID="${_U_INGRESS_PROFILE_ID-}" \
+      _U_INGRESS_ENFORCEMENT="${_U_INGRESS_ENFORCEMENT-}" \
+      _U_INGRESS_ENFORCEMENT_METHOD="${_U_INGRESS_ENFORCEMENT_METHOD-}" \
+      _U_INGRESS_LOCAL_ADDRESS="${_U_INGRESS_LOCAL_ADDRESS-}" \
       _U_DEPLOYMENT_MODEL="${_U_DEPLOYMENT_MODEL-}" \
       python3 -c "$code"
   else
@@ -6327,6 +8771,10 @@ users_py_locked() {
       _U_EXPIRE="${_U_EXPIRE-}" _U_PACKAGE="${_U_PACKAGE-}" _U_ENABLED="${_U_ENABLED-}" \
       _U_BW="${_U_BW-}" _U_PRIMARY="${_U_PRIMARY-}" \
       _U_ADVERTISE_HOST="${_U_ADVERTISE_HOST-}" _U_ADVERTISE_PORT="${_U_ADVERTISE_PORT-}" \
+      _U_INGRESS_PROFILE_ID="${_U_INGRESS_PROFILE_ID-}" \
+      _U_INGRESS_ENFORCEMENT="${_U_INGRESS_ENFORCEMENT-}" \
+      _U_INGRESS_ENFORCEMENT_METHOD="${_U_INGRESS_ENFORCEMENT_METHOD-}" \
+      _U_INGRESS_LOCAL_ADDRESS="${_U_INGRESS_LOCAL_ADDRESS-}" \
       _U_DEPLOYMENT_MODEL="${_U_DEPLOYMENT_MODEL-}" \
       python3 -c "$code"
   fi
@@ -6412,15 +8860,14 @@ port_required_bindings() {
 }
 
 port_available_for_mode() {
-  local p="$1" binding proto bind_port
+  local p="$1" binding proto bind_port profile_id="${INGRESS_PROFILE_ID:-$NOBRAND_LEGACY_INGRESS_PROFILE_ID}"
   valid_port "$p" || return 1
   if [ "${PROTOCOL:-TCP}" = "BOTH" ] && [ "$p" -ge 65535 ]; then
     return 1
   fi
   while IFS='|' read -r proto bind_port; do
     [ -n "$proto" ] && [ -n "$bind_port" ] || continue
-    nb_port_is_tail_base_reserved "$bind_port" && return 1
-    port_is_listening "$bind_port" "$proto" && return 1
+    nb_port_available_for_profile "$bind_port" "$proto" "$profile_id" || return 1
   done < <(port_required_bindings "$p")
   return 0
 }
@@ -6460,11 +8907,26 @@ port_listener_details() {
 }
 
 select_available_port() {
-  local selected=""
-  if selected="$(derive_port_from_ip 2>/dev/null)" && [ -n "$selected" ]; then
+  local selected="" profile_id="${INGRESS_PROFILE_ID:-$NOBRAND_LEGACY_INGRESS_PROFILE_ID}" bounds lo hi
+  if [ "${PROTOCOL:-TCP}" != BOTH ]; then
+    if [ "$profile_id" = "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ] \
+       && selected="$(derive_port_from_ip 2>/dev/null)" && [ -n "$selected" ]; then
+      printf '%s' "$selected"
+      return 0
+    fi
+    selected="$(nb_select_available_port "${PROTOCOL:-TCP}" "$profile_id")" || return 1
     printf '%s' "$selected"
     return 0
   fi
+  if bounds="$(nb_ingress_profile_auto_range "$profile_id" 2>/dev/null)"; then
+    lo="${bounds%%|*}"; hi="${bounds#*|}"
+    [ "$hi" -le 65534 ] || hi=65534
+    if selected="$(nb_scan_port_span "$lo" "$hi" port_available_for_mode)"; then
+      printf '%s' "$selected"
+      return 0
+    fi
+  fi
+  [ "$profile_id" = "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ] || return 1
   selected="$(random_available_port 2>/dev/null)" || return 1
   [ -n "$selected" ] || return 1
   printf '%s' "$selected"
@@ -6505,13 +8967,15 @@ users_port_pool_bounds() {
     _pool_hi="$USER_PORT_POOL_END"
     return 0
   fi
-  local base
-  if base="$(derive_port_base 2>/dev/null)"; then
-    _pool_lo=$((base + 1))
-    _pool_hi=$((base + 99))
-    [ "${PROTOCOL:-TCP}" = "BOTH" ] && _pool_hi=$((base + 98))
+  local bounds profile_id="${INGRESS_PROFILE_ID:-$NOBRAND_LEGACY_INGRESS_PROFILE_ID}"
+  if bounds="$(nb_ingress_profile_auto_range "$profile_id" 2>/dev/null)"; then
+    _pool_lo="${bounds%%|*}"
+    _pool_hi="${bounds#*|}"
+    [ "${PROTOCOL:-TCP}" = "BOTH" ] && _pool_hi=$((_pool_hi - 1))
     return 0
   fi
+  [ "$profile_id" = "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ] \
+    || { die 'Selected ingress profile is manual-only; pass --port for the new Mieru user'; return 1; }
   # 无 IP 尾号时：主端口附近 或 默认 20000-29999
   if [ -n "${PORT:-}" ] && valid_port "$PORT"; then
     _pool_lo=$((PORT + 2))
@@ -6551,7 +9015,7 @@ allocate_user_port() {
     printf '%s' "$prefer"
     return 0
   fi
-  users_port_pool_bounds
+  users_port_pool_bounds || return 1
   p="$_pool_lo"
   while [ "$p" -le "$_pool_hi" ]; do
     if ! port_is_allocated "$p" && port_available_for_mode "$p"; then
@@ -6571,6 +9035,8 @@ users_initialize_primary() {
   users_require_python
   [ -n "${USERNAME:-}" ] || return 0
   [ -n "${PORT:-}" ] || return 0
+  local primary_profile_id="${INGRESS_PROFILE_ID:-$NOBRAND_LEGACY_INGRESS_PROFILE_ID}"
+  nb_prepare_ingress_deployment "$primary_profile_id" firewall || return 1
   admin_lock_acquire || return 1
   if users_state_exists; then
     local n
@@ -6583,7 +9049,7 @@ users_initialize_primary() {
   run mkdir -p "$(dirname "$MITA_USERS_STATE")"
   if ! python3 -c '
 import hashlib, json, sys, time
-path, name, pwd, port, proto, advertise_host, advertise_port, deployment_model = sys.argv[1:9]
+path, name, pwd, port, proto, advertise_host, advertise_port, deployment_model, ingress_profile_id, enforcement, method, local_address = sys.argv[1:13]
 port = int(port)
 advertise_port = int(advertise_port) if advertise_port else ""
 instance_id = "u" + hashlib.sha256(("%s\0%s" % (name, port)).encode()).hexdigest()[:16]
@@ -6604,10 +9070,15 @@ d = {"version": 2, "deployment_model": deployment_model, "protocol": proto, "use
     "bandwidth_mbps": 0,
     "created_at": int(time.time()),
     "updated_at": int(time.time()),
+    "ingress_profile_id": ingress_profile_id,
+    "ingress_enforcement": enforcement,
+    "ingress_enforcement_method": method,
+    "ingress_local_address": local_address,
 }]}
 json.dump(d, open(path, "w"), indent=2)
   ' "$MITA_USERS_STATE" "$USERNAME" "$PASSWORD" "$PORT" "${PROTOCOL:-TCP}" \
-    "${ADVERTISE_HOST:-}" "${ADVERTISE_PORT:-}" "$MITA_DEPLOYMENT_MODEL"
+    "${ADVERTISE_HOST:-}" "${ADVERTISE_PORT:-}" "$MITA_DEPLOYMENT_MODEL" \
+    "$primary_profile_id" "$INGRESS_ENFORCEMENT_RESOLVED" "$INGRESS_ENFORCEMENT_METHOD" "$INGRESS_LOCAL_ADDRESS"
   then
     admin_lock_release
     return 1
@@ -6637,6 +9108,8 @@ for u in d.get("users") or []:
   PORT="${rest#*$'\t'}"
   ADVERTISE_HOST="$(users_get_field "$USERNAME" advertise_host 2>/dev/null || true)"
   ADVERTISE_PORT="$(users_get_field "$USERNAME" advertise_port 2>/dev/null || true)"
+  INGRESS_PROFILE_ID="$(users_get_field "$USERNAME" ingress_profile_id 2>/dev/null || true)"
+  [ -n "$INGRESS_PROFILE_ID" ] || INGRESS_PROFILE_ID="$NOBRAND_LEGACY_INGRESS_PROFILE_ID"
   MULTI_USER_MODE=1
 }
 
@@ -6655,6 +9128,9 @@ users_add() {
   local advertise_host="${4:-}" advertise_port="${5:-}"
   local bw="${USER_BANDWIDTH_MBPS:-0}" qmode
   users_require_python || return 1
+  nb_prepare_ingress_request || return 1
+  nb_prepare_ingress_deployment "$INGRESS_PROFILE_ID" firewall \
+    || die '所选 Ingress strict local address cannot be firewall-enforced for Mieru'
   [ -n "$name" ] || { die "$(t '用户名不能为空' 'Username required')" || return 1; }
   [ -n "$password" ] || password="$(random_token)"
   validate_proxy_credentials "$name" "$password" || return 1
@@ -6700,6 +9176,10 @@ users_add() {
   _U_QUOTA_MODE="$qmode"
   _U_EXPIRE="${expire_at}" _U_PACKAGE="${USER_PACKAGE:-}" _U_BW="$bw"
   _U_ADVERTISE_HOST="$advertise_host" _U_ADVERTISE_PORT="$advertise_port"
+  _U_INGRESS_PROFILE_ID="$INGRESS_PROFILE_ID"
+  _U_INGRESS_ENFORCEMENT="$INGRESS_ENFORCEMENT_RESOLVED"
+  _U_INGRESS_ENFORCEMENT_METHOD="$INGRESS_ENFORCEMENT_METHOD"
+  _U_INGRESS_LOCAL_ADDRESS="$INGRESS_LOCAL_ADDRESS"
   set +e
   users_py_locked '
 import json, os, time, sys, datetime, secrets
@@ -6727,6 +9207,10 @@ expire = (os.environ.get("_U_EXPIRE") or "").strip()
 package = (os.environ.get("_U_PACKAGE") or "").strip() or ("custom" if qmb > 0 else "unlimited")
 advertise_host = (os.environ.get("_U_ADVERTISE_HOST") or "").strip()
 advertise_port = int(os.environ.get("_U_ADVERTISE_PORT")) if os.environ.get("_U_ADVERTISE_PORT") else ""
+ingress_profile_id = (os.environ.get("_U_INGRESS_PROFILE_ID") or "legacy-default-route").strip()
+ingress_enforcement = (os.environ.get("_U_INGRESS_ENFORCEMENT") or "permissive").strip()
+ingress_enforcement_method = (os.environ.get("_U_INGRESS_ENFORCEMENT_METHOD") or "wildcard").strip()
+ingress_local_address = (os.environ.get("_U_INGRESS_LOCAL_ADDRESS") or "").strip()
 try:
     d = json.load(open(path))
 except Exception:
@@ -6760,6 +9244,10 @@ users.append({
     "bandwidth_mbps": bw,
     "created_at": int(time.time()),
     "updated_at": int(time.time()),
+    "ingress_profile_id": ingress_profile_id,
+    "ingress_enforcement": ingress_enforcement,
+    "ingress_enforcement_method": ingress_enforcement_method,
+    "ingress_local_address": ingress_local_address,
 })
 d["protocol"] = proto
 json.dump(d, open(path, "w"), indent=2)
@@ -7733,6 +10221,22 @@ for u in users:
     if not isinstance(enabled, bool):
         sys.exit(11)
     u["enabled"]=enabled
+    ingress_profile_id=str(u.get("ingress_profile_id") or "legacy-default-route").strip()
+    ingress_enforcement=str(u.get("ingress_enforcement") or "permissive").strip().lower()
+    ingress_method=str(u.get("ingress_enforcement_method") or "wildcard").strip().lower()
+    ingress_address=str(u.get("ingress_local_address") or "").strip()
+    if not ingress_profile_id or ingress_enforcement not in ("permissive","strict"):
+        sys.exit(20)
+    if ingress_enforcement == "permissive" and ingress_method != "wildcard":
+        sys.exit(20)
+    if ingress_enforcement == "strict":
+        if ingress_method != "firewall":
+            sys.exit(20)
+        try:
+            if ipaddress.ip_address(ingress_address).version != 4:
+                sys.exit(20)
+        except Exception:
+            sys.exit(20)
     expire=str(u.get("expire_at") or "").strip()
     if expire:
         try:
@@ -7955,7 +10459,7 @@ do_user_import() {
 
 print_user_outputs() {
   local name="$1"
-  local ip password port saved_user saved_pass saved_port saved_advertise_host saved_advertise_port
+  local ip password port saved_user saved_pass saved_port saved_advertise_host saved_advertise_port saved_ingress_profile_id
   password="$(users_get_field "$name" password)" || return 1
   port="$(users_get_field "$name" port)" || return 1
   saved_user="$USERNAME"
@@ -7963,16 +10467,21 @@ print_user_outputs() {
   saved_port="$PORT"
   saved_advertise_host="$ADVERTISE_HOST"
   saved_advertise_port="$ADVERTISE_PORT"
+  saved_ingress_profile_id="${INGRESS_PROFILE_ID:-}"
   USERNAME="$name"
   PASSWORD="$password"
   PORT="$port"
   ADVERTISE_HOST="$(users_get_field "$name" advertise_host 2>/dev/null || true)"
   ADVERTISE_PORT="$(users_get_field "$name" advertise_port 2>/dev/null || true)"
+  INGRESS_PROFILE_ID="$(users_get_field "$name" ingress_profile_id 2>/dev/null || true)"
+  [ -n "$INGRESS_PROFILE_ID" ] || INGRESS_PROFILE_ID="$NOBRAND_LEGACY_INGRESS_PROFILE_ID"
   ip="$(advertised_host || echo 'YOUR_SERVER_IP')"
   msg ""
   t "========== 用户 ${name} ==========" "========== User ${name} =========="
   t "  专属实例端口: ${port}（其它用户凭据无法在此实例认证）" \
     "  Dedicated instance port: ${port} (other users cannot authenticate on this instance)"
+  t "  网络入口: $(nb_ingress_profile_name "$INGRESS_PROFILE_ID")" \
+    "  Ingress: $(nb_ingress_profile_name "$INGRESS_PROFILE_ID")"
   local qmb qdays exp en pkg bw
   qmb="$(users_get_field "$name" quota_mb 2>/dev/null || echo 0)"
   qdays="$(users_get_field "$name" quota_days 2>/dev/null || echo 0)"
@@ -8007,6 +10516,7 @@ print_user_outputs() {
   PORT="$saved_port"
   ADVERTISE_HOST="$saved_advertise_host"
   ADVERTISE_PORT="$saved_advertise_port"
+  INGRESS_PROFILE_ID="$saved_ingress_profile_id"
 }
 
 open_firewall_for_pairs() {
@@ -9431,7 +11941,7 @@ choose_protocol_interactive() {
 }
 
 collect_advertise_endpoint_interactive() {
-  local input="" candidate="" detected="" auto_selected=0
+  local input="" candidate="" detected="" auto_selected=0 profile_default=0
   local default_host="${ADVERTISE_HOST:-}" default_port="${ADVERTISE_PORT:-${PORT:-}}"
   if [ "${ADVERTISE_CLI:-0}" -eq 1 ]; then
     validate_advertise_endpoint || die "$(t '自定义客户端入口参数无效' \
@@ -9442,7 +11952,13 @@ collect_advertise_endpoint_interactive() {
 
   msg ""
   if [ -z "$default_host" ]; then
-    detected="$(public_ip 2>/dev/null || true)"
+    detected="$(nb_ingress_profile_display_host "${INGRESS_PROFILE_ID:-}" 2>/dev/null || true)"
+    if [ -n "$detected" ]; then
+      profile_default=1
+      default_port="$(nb_ingress_profile_display_port "$INGRESS_PROFILE_ID" "${PORT:-}")"
+    else
+      detected="$(public_ip 2>/dev/null || true)"
+    fi
     default_host="$detected"
   fi
   if [ -n "$detected" ]; then
@@ -9469,7 +11985,11 @@ collect_advertise_endpoint_interactive() {
       ADVERTISE_HOST=""
       break
     fi
-    if valid_advertise_host "$candidate"; then
+    if [ "$profile_default" -eq 1 ] && [ -z "$input" ]; then
+      auto_selected=1
+      ADVERTISE_HOST=""
+      break
+    elif valid_advertise_host "$candidate"; then
       ADVERTISE_HOST="$candidate"
       break
     fi
@@ -9497,8 +12017,8 @@ collect_advertise_endpoint_interactive() {
 
   msg ""
   if [ "$auto_selected" -eq 1 ]; then
-    t '客户端入口: 自动探测公网地址并使用实际监听端口' \
-      'Client entry: auto-detected public address with the backend listen port'
+    t "客户端入口: 使用入口配置 $(nb_ingress_profile_name "${INGRESS_PROFILE_ID:-}") 的默认展示（不修改监听）" \
+      "Client entry: ingress profile $(nb_ingress_profile_name "${INGRESS_PROFILE_ID:-}") display default (listener unchanged)"
   elif [ "$PROTOCOL" = "BOTH" ]; then
     t "客户端配置将展示: ${ADVERTISE_HOST}，TCP ${ADVERTISE_PORT} / UDP $((ADVERTISE_PORT + 1))" \
       "Client configs will show: ${ADVERTISE_HOST}, TCP ${ADVERTISE_PORT} / UDP $((ADVERTISE_PORT + 1))"
@@ -9716,6 +12236,7 @@ collect_config_interactive() {
   local requested_protocol="$PROTOCOL" requested_mtu="$MTU_REQUEST"
   local requested_mux="$MULTIPLEXING" requested_handshake="$HANDSHAKE_MODE"
   local requested_traffic="$TRAFFIC_PATTERN" requested_low="$LOW_ENTROPY_MODE"
+  nb_prepare_ingress_request || return 1
   [ -n "$USERNAME" ] || USERNAME="$(random_token)"
   [ -n "$PASSWORD" ] || PASSWORD="$(random_token)"
   msg ""
@@ -9742,27 +12263,24 @@ collect_config_interactive() {
 
   msg ""
   if [ -z "$PORT" ] && [ -z "$PORT_RANGE" ]; then
-    local default_port input="" candidate="" base="" localip="" segment_hi=99
-    localip="$(detect_local_ip)"
-    [ "$PROTOCOL" = "BOTH" ] && segment_hi=98
-    if base="$(derive_port_base)"; then
-      if ! default_port="$(derive_port_from_ip)"; then
-        warn "$(t "IP 尾号端口段 $((base + 1))-$((base + segment_hi)) 当前没有可用端口，回退全局随机端口" \
-          "No available port in IP-derived range $((base + 1))-$((base + segment_hi)); falling back to a global random port")"
-        default_port="$(random_available_port)" \
-          || die "$(t '未找到可用监听端口' 'No available listen port found')"
-      fi
-      t "检测到本机 IP ${localip}，按尾号规则端口段 $((base + 1))-$((base + segment_hi))（${base} 留给 SSH，默认选择已校验的空闲端口）" \
-        "Detected local IP ${localip}; range $((base + 1))-$((base + segment_hi)) (${base} reserved for SSH); default is a verified free port"
+    local default_port="" input="" candidate="" bounds="" profile_name
+    profile_name="$(nb_ingress_profile_name "$INGRESS_PROFILE_ID")"
+    bounds="$(nb_ingress_profile_auto_range "$INGRESS_PROFILE_ID" 2>/dev/null || true)"
+    default_port="$(select_available_port 2>/dev/null || true)"
+    if [ -n "$bounds" ]; then
+      t "入口配置 ${profile_name} 的自动端口段: ${bounds%%|*}-${bounds#*|}（Derived 表示由所选本地 IPv4 尾号推导）" \
+        "Ingress profile ${profile_name} auto range: ${bounds%%|*}-${bounds#*|} (Derived means inferred from the selected local IPv4 tail)"
     else
-      default_port="$(random_available_port)" \
-        || die "$(t '未找到可用监听端口' 'No available listen port found')"
-      warn "$(t "无法按 IP 尾号推导端口（IP=${localip:-未知}，尾号过小或无法识别），回退随机端口" \
-        "Cannot derive port from IP last octet (IP=${localip:-unknown}); falling back to random port")"
+      t "入口配置 ${profile_name} 为 manual-only，必须输入端口" \
+        "Ingress profile ${profile_name} is manual-only; a port is required"
     fi
     while true; do
       input=""
-      read_tty input "$(t "监听端口 [${default_port}]: " "Listen port [${default_port}]: ")" || input=""
+      if [ -n "$default_port" ]; then
+        read_tty input "$(t "监听端口 [${default_port}]: " "Listen port [${default_port}]: ")" || input=""
+      else
+        read_tty input "$(t '监听端口: ' 'Listen port: ')" || input=""
+      fi
       candidate="${input:-$default_port}"
       if ! valid_port "$candidate"; then
         warn "$(t '非法端口，请重新输入' 'Invalid port; try again')"
@@ -9784,10 +12302,7 @@ collect_config_interactive() {
       [ -z "$input" ] && PORT_AUTO_SELECTED=1 || PORT_AUTO_SELECTED=0
       break
     done
-    if [ -n "$base" ] && { [ "$PORT" -lt "$((base + 1))" ] || [ "$PORT" -gt "$((base + segment_hi))" ]; }; then
-      warn "$(t "注意：端口 ${PORT} 不在 IP 尾号段 $((base + 1))-$((base + segment_hi)) 内，可能与按 IP 分配端口的约定冲突" \
-        "Note: port ${PORT} is outside the IP last-octet range $((base + 1))-$((base + segment_hi)); may break the per-IP port convention")"
-    fi
+    nb_warn_if_outside_recommended_range "$PORT" "$INGRESS_PROFILE_ID"
   elif [ -n "$PORT" ] && [ -n "$PORT_RANGE" ]; then
     die "$(t '不能同时指定端口与端口段' 'Cannot set both port and port range')"
   fi
@@ -9908,6 +12423,7 @@ collect_reconfigure_interactive() {
 
 ensure_config_noninteractive() {
   STAGE="参数校验"
+  nb_prepare_ingress_request || return 1
   apply_requested_profile_preserving_cli
   [ -n "$PORT" ] && [ -n "$PORT_RANGE" ] && \
     die "$(t '--port 与 --port-range 不能同时使用' 'Cannot use --port and --port-range together')"
@@ -9925,12 +12441,7 @@ ensure_config_noninteractive() {
   if [ -n "$PORT" ]; then
     valid_port "$PORT" || die "$(t '非法端口' 'Invalid port')"
     PORT="$(normalize_uint "$PORT")"
-    local _base
-    if _base="$(derive_port_base 2>/dev/null)" \
-       && { [ "$PORT" -lt "$((_base + 1))" ] || [ "$PORT" -gt "$((_base + 99))" ]; }; then
-      warn "$(t "端口 ${PORT} 不在本机 IP 尾号段 $((_base + 1))-$((_base + 99)) 内（如非本机 IP 可忽略）" \
-        "Port ${PORT} is outside this host's IP last-octet range $((_base + 1))-$((_base + 99)) (ignore if intended)")"
-    fi
+    nb_warn_if_outside_recommended_range "$PORT" "$INGRESS_PROFILE_ID"
   fi
   if [ -n "$PORT_RANGE" ]; then
     die "$(t 'v2 用户专属实例不支持 --port-range，请使用单个 --port' \
@@ -10239,6 +12750,7 @@ snell_generate_state() {
   local output="$1" id="$2" name="$3" major="$4" psk="$5" listen_host="$6" listen_port="$7"
   local advertise_mode="$8" advertise_host="$9" advertise_port="${10}" created_at="${11:-}"
   local quic_proxy_enabled="${12:-false}"
+  local ingress_profile_id="${13:-}"
   local runtime_version runtime_status updated_at
   case "$major" in 4|5) ;; *) return 1 ;; esac
   runtime_version="$(snell_runtime_release_version "$major" 2>/dev/null || printf unknown)"
@@ -10250,7 +12762,7 @@ snell_generate_state() {
     --arg advertise_mode "$advertise_mode" --arg advertise_host "$advertise_host" \
     --arg advertise_port "$advertise_port" --arg runtime_version "$runtime_version" \
     --arg runtime_status "$runtime_status" --arg created_at "$created_at" --arg updated_at "$updated_at" \
-    --argjson quic_proxy_enabled "$quic_proxy_enabled" '
+    --argjson quic_proxy_enabled "$quic_proxy_enabled" --arg ingress_profile_id "$ingress_profile_id" '
       {
         protocol:"snell",
         instance_id:$id,
@@ -10271,6 +12783,7 @@ snell_generate_state() {
         created_at:$created_at,
         updated_at:$updated_at
       }
+      + if $ingress_profile_id=="" then {} else {ingress_profile_id:$ingress_profile_id} end
     ' >"$output"
 }
 
@@ -10340,21 +12853,22 @@ snell_firewall_pairs() {
 
 snell_install_port_available() {
   local port="$1"
-  nb_port_available_for_transport "$port" TCP || return 1
-  [ "${SNELL_QUIC_PROXY:-off}" != on ] || nb_port_available_for_transport "$port" UDP
+  nb_port_available_for_profile "$port" TCP "${INGRESS_PROFILE_ID:-$NOBRAND_LEGACY_INGRESS_PROFILE_ID}" || return 1
+  [ "${SNELL_QUIC_PROXY:-off}" != on ] \
+    || nb_port_available_for_profile "$port" UDP "${INGRESS_PROFILE_ID:-$NOBRAND_LEGACY_INGRESS_PROFILE_ID}"
 }
 
 snell_select_available_install_port() {
-  local ip bounds lo hi selected attempt=0 random_value
-  [ "${SNELL_QUIC_PROXY:-off}" = on ] || { nb_select_available_port TCP; return; }
-  ip="$(nb_detect_local_ipv4 2>/dev/null || true)"
-  if bounds="$(nb_tail_port_bounds "$ip" 2>/dev/null)"; then
+  local profile_id="${INGRESS_PROFILE_ID:-$NOBRAND_LEGACY_INGRESS_PROFILE_ID}" bounds lo hi selected attempt=0 random_value
+  [ "${SNELL_QUIC_PROXY:-off}" = on ] || { nb_select_available_port TCP "$profile_id"; return; }
+  if bounds="$(nb_ingress_profile_auto_range "$profile_id" 2>/dev/null)"; then
     lo="${bounds%%|*}"; hi="${bounds#*|}"
     if selected="$(nb_scan_port_span "$lo" "$hi" snell_install_port_available)"; then
       printf '%s' "$selected"
       return 0
     fi
   fi
+  [ "$profile_id" = "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ] || return 1
   while [ "$attempt" -lt 512 ]; do
     random_value="$(openssl rand -hex 2 2>/dev/null || true)"
     if [[ "$random_value" =~ ^[0-9a-fA-F]{4}$ ]]; then
@@ -10369,13 +12883,14 @@ snell_select_available_install_port() {
 }
 
 snell_effective_endpoint() {
-  local id="$1" mode host advertise_port listen_port effective_host effective_port
+  local id="$1" mode host advertise_port listen_port ingress_profile_id effective_host effective_port
   mode="$(snell_state_field "$id" advertise_mode)"
   host="$(snell_state_field "$id" advertise_host)"
   advertise_port="$(snell_state_field "$id" advertise_port)"
   listen_port="$(snell_state_field "$id" listen_port)"
-  effective_host="$(nb_effective_advertise_host "$mode" "$host")"
-  effective_port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port")"
+  ingress_profile_id="$(snell_state_field "$id" ingress_profile_id 2>/dev/null || true)"
+  effective_host="$(nb_effective_advertise_host "$mode" "$host" "$ingress_profile_id")"
+  effective_port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port" "$ingress_profile_id")"
   printf '%s|%s' "$effective_host" "$effective_port"
 }
 
@@ -10397,6 +12912,9 @@ snell_collect_install_requests() {
   case "${SNELL_VERSION:-5}" in 4|5) ;; *) die 'Snell 只支持 v4、v5' ;; esac
   snell_platform_supported "$SNELL_VERSION" \
     || die "当前 OS/arch 不支持官方 Snell v${SNELL_VERSION} runtime"
+  nb_prepare_ingress_request || return 1
+  nb_prepare_ingress_deployment "$INGRESS_PROFILE_ID" native-bind \
+    || die '所选 Ingress strict local address cannot be bound by Snell'
   if [ -z "${SNELL_NAME:-}" ]; then
     if [ "$interactive" -eq 1 ]; then
       read_tty SNELL_NAME "$(t "节点名 [snell-v${SNELL_VERSION}]: " "Node name [snell-v${SNELL_VERSION}]: ")" || SNELL_NAME=""
@@ -10406,13 +12924,14 @@ snell_collect_install_requests() {
   snell_valid_name "$SNELL_NAME" || die 'Snell 节点名无效（1-64 字符且不能含控制字符或 |）'
   [ -z "$(snell_find_id_by_name "$SNELL_NAME" 2>/dev/null || true)" ] || die "Snell 节点名已存在: $SNELL_NAME"
   if [ -z "${PORT:-}" ]; then
-    PORT="$(nb_select_available_port TCP)" || die '未找到可用 Snell TCP 端口'
+    PORT="$(nb_select_available_port TCP "$INGRESS_PROFILE_ID")" \
+      || die '所选入口配置没有可用 Snell TCP 自动端口；manual-only 必须显式使用 --port'
     PORT_AUTO_SELECTED=1
   else
     nb_valid_port "$PORT" || die 'Snell 端口必须是 1-65535'
     PORT="$(normalize_uint "$PORT")"
-    nb_warn_if_outside_recommended_range "$PORT"
-    if ! nb_port_available_for_transport "$PORT" TCP; then
+    nb_warn_if_outside_recommended_range "$PORT" "$INGRESS_PROFILE_ID"
+    if ! nb_port_available_for_profile "$PORT" TCP "$INGRESS_PROFILE_ID"; then
       warn "Snell TCP/${PORT} 已占用"
       nb_describe_port_conflict TCP "$PORT"
       return 1
@@ -10443,7 +12962,8 @@ snell_collect_install_requests() {
     SNELL_QUIC_PROXY=off
   fi
   case "$SNELL_QUIC_PROXY" in on|off) ;; *) die 'QUIC Proxy Mode 只支持 on 或 off' ;; esac
-  if [ "$SNELL_QUIC_PROXY" = on ] && ! nb_port_available_for_transport "$PORT" UDP; then
+  if [ "$SNELL_QUIC_PROXY" = on ] \
+     && ! nb_port_available_for_profile "$PORT" UDP "$INGRESS_PROFILE_ID"; then
     if [ "${PORT_AUTO_SELECTED:-0}" -eq 1 ]; then
       PORT="$(snell_select_available_install_port)" || die '未找到同时可用的 Snell v5 TCP/UDP 同号端口'
     else
@@ -10499,10 +13019,12 @@ install_snell() {
   mode="$(nb_endpoint_mode_from_values "$ADVERTISE_HOST")"
   firewall_pairs="TCP|${PORT}"
   [ "$SNELL_QUIC_PROXY" != on ] || firewall_pairs="${firewall_pairs}"$'\n'"UDP|${PORT}"
-  if ! snell_generate_server_config "$config_tmp" "$SNELL_VERSION" 0.0.0.0 "$PORT" "$SNELL_PSK" \
+  if ! snell_generate_server_config "$config_tmp" "$SNELL_VERSION" "$INGRESS_LISTEN_HOST" "$PORT" "$SNELL_PSK" \
      || ! snell_generate_state "$state_tmp" "$id" "$SNELL_NAME" "$SNELL_VERSION" "$SNELL_PSK" \
-          0.0.0.0 "$PORT" "$mode" "$ADVERTISE_HOST" "$ADVERTISE_PORT" "" \
+          "$INGRESS_LISTEN_HOST" "$PORT" "$mode" "$ADVERTISE_HOST" "$ADVERTISE_PORT" "" \
           "$([ "$SNELL_QUIC_PROXY" = on ] && printf true || printf false)" \
+          "$INGRESS_PROFILE_ID" \
+     || ! nb_ingress_stamp_state_file "$state_tmp" "$INGRESS_PROFILE_ID" native-bind \
      || ! snell_config_matches_state_files "$state_tmp" "$config_tmp"; then
     rm -f "$config_tmp" "$state_tmp"
     admin_lock_release
@@ -10531,8 +13053,7 @@ install_snell() {
     && new_pairs="${new_pairs}${new_pairs:+$'\n'}UDP|${PORT}"
   if ! snell_service_action "$id" start \
      || ! snell_service_active "$id" \
-     || ! nb_wait_for_listener TCP "$PORT" 25 \
-     || ! { [ "$SNELL_QUIC_PROXY" != on ] || snell_wait_for_quic_listener "$PORT" 25; }; then
+     || ! snell_wait_for_required_listeners "$id" 25; then
     snell_install_rollback "$id" "$new_pairs"
     admin_lock_release
     warn "Snell v${SNELL_VERSION} 启动或 TCP listener 验收失败，已回滚"
@@ -10717,11 +13238,67 @@ snell_wait_for_quic_listener() {
 }
 
 snell_wait_for_required_listeners() {
-  local id="$1" timeout="${2:-25}" port
+  local id="$1" timeout="${2:-25}" port policy method address owner
   port="$(snell_state_field "$id" listen_port)" || return 1
-  nb_wait_for_listener TCP "$port" "$timeout" || return 1
+  policy="$(snell_state_field "$id" ingress_enforcement 2>/dev/null || printf permissive)"
+  method="$(snell_state_field "$id" ingress_enforcement_method 2>/dev/null || printf wildcard)"
+  address="$(snell_state_field "$id" ingress_local_address 2>/dev/null || true)"
+  owner="snell:${id}"
+  nb_wait_for_enforced_listener "$policy" "$method" TCP "$port" "$address" "$owner" "$timeout" || return 1
   snell_quic_proxy_enabled "$id" || return 0
-  snell_wait_for_quic_listener "$port" "$timeout"
+  snell_wait_for_quic_listener "$port" "$timeout" || return 1
+  [ "$policy" != strict ] || nb_wait_for_listener_address UDP "$port" "$address" "$timeout"
+}
+
+snell_apply_ingress_enforcement() {
+  local id="$1" state config profile_id port major psk candidate_state candidate_config snapshot
+  local was_active=0 enabled policy method address rc=0
+  state="$(snell_state_path "$id")" || return 1
+  config="$(snell_config_path "$id")" || return 1
+  snell_state_exists "$id" || return 1
+  profile_id="$(snell_state_field "$id" ingress_profile_id 2>/dev/null || true)"
+  [ -n "$profile_id" ] || profile_id="$NOBRAND_LEGACY_INGRESS_PROFILE_ID"
+  nb_prepare_ingress_deployment "$profile_id" native-bind || return 1
+  port="$(snell_state_field "$id" listen_port)"
+  major="$(snell_state_field "$id" version)"
+  psk="$(snell_state_field "$id" psk)"
+  enabled="$(snell_state_field "$id" enabled 2>/dev/null || printf true)"
+  candidate_state="$(mktemp_file .snell-ingress-state)" || return 1
+  candidate_config="$(mktemp_file .snell-ingress-config)" || { rm -f "$candidate_state"; return 1; }
+  snapshot="$(mktemp_dir)" || { rm -f "$candidate_state" "$candidate_config"; return 1; }
+  cp -a "$state" "$snapshot/state" && cp -a "$config" "$snapshot/config" || rc=1
+  if [ "$rc" -eq 0 ]; then
+    jq --arg listen "$INGRESS_LISTEN_HOST" "$state" '.listen_host=$listen' >"$candidate_state" \
+      && nb_ingress_stamp_state_file "$candidate_state" "$profile_id" native-bind \
+      && snell_generate_server_config "$candidate_config" "$major" "$INGRESS_LISTEN_HOST" "$port" "$psk" \
+      && snell_config_matches_state_files "$candidate_state" "$candidate_config" || rc=1
+  fi
+  snell_service_active "$id" && was_active=1
+  if [ "$rc" -eq 0 ]; then
+    nb_atomic_install_file "$candidate_config" "$config" 0600 \
+      && nb_atomic_install_file "$candidate_state" "$state" 0600 || rc=1
+  fi
+  if [ "$rc" -eq 0 ] && [ "$was_active" -eq 1 ]; then
+    [ "${NOBRAND_TEST_INGRESS_SERVICE_FAIL:-0}" -eq 0 ] \
+      && snell_service_action "$id" restart \
+      && [ "${NOBRAND_TEST_INGRESS_LISTENER_FAIL:-0}" -eq 0 ] \
+      && snell_wait_for_required_listeners "$id" 25 || rc=1
+  fi
+  if [ "$rc" -ne 0 ]; then
+    nb_atomic_install_file "$snapshot/config" "$config" 0600 >/dev/null 2>&1 || true
+    nb_atomic_install_file "$snapshot/state" "$state" 0600 >/dev/null 2>&1 || true
+    if [ "$was_active" -eq 1 ]; then
+      snell_service_action "$id" restart >/dev/null 2>&1 \
+        && snell_wait_for_required_listeners "$id" 25 >/dev/null 2>&1 || true
+    else
+      snell_service_action "$id" stop >/dev/null 2>&1 || true
+    fi
+  elif [ "$enabled" != true ] && [ "$was_active" -eq 0 ]; then
+    snell_service_action "$id" stop >/dev/null 2>&1 || true
+  fi
+  rm -f "$candidate_state" "$candidate_config"
+  rm -rf -- "$snapshot"
+  return "$rc"
 }
 
 snell_node_rows() {
@@ -10762,6 +13339,8 @@ snell_print_result() {
   printf '真实监听\n  Address   %s\n  Port      %s\n  Transport TCP\n' "$listen_host" "$listen_port"
   printf '  QUIC Proxy %s\n' "$quic"
   [ "$quic" != Enabled ] || printf '  QUIC Transport UDP/%s (same port)\n' "$listen_port"
+  msg ''
+  printf '网络入口\n  Profile   %s\n' "$(nb_ingress_profile_name "$(snell_state_field "$id" ingress_profile_id 2>/dev/null || true)")"
   msg ''
   printf '客户端入口\n  Host      %s\n  Port      %s\n' "$host" "$port"
   msg ''
@@ -11102,7 +13681,7 @@ hysteria2_build_share_link() {
 }
 
 hysteria2_current_share_link() {
-  local auth sni obfs listen_port mode advertise_host advertise_port host port
+  local auth sni obfs listen_port mode advertise_host advertise_port ingress_profile_id host port
   hysteria2_state_exists || return 1
   auth="$(hysteria2_state_field auth)"
   sni="$(hysteria2_state_field sni)"
@@ -11111,13 +13690,14 @@ hysteria2_current_share_link() {
   mode="$(hysteria2_state_field advertise_mode)"
   advertise_host="$(hysteria2_state_field advertise_host)"
   advertise_port="$(hysteria2_state_field advertise_port)"
-  host="$(nb_effective_advertise_host "$mode" "$advertise_host")"
-  port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port")"
+  ingress_profile_id="$(hysteria2_state_field ingress_profile_id 2>/dev/null || true)"
+  host="$(nb_effective_advertise_host "$mode" "$advertise_host" "$ingress_profile_id")"
+  port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port" "$ingress_profile_id")"
   hysteria2_build_share_link "$auth" "$host" "$port" "$sni" "$obfs"
 }
 
 hysteria2_export_values() {
-  local auth sni obfs listen_port mode advertise_host advertise_port host port
+  local auth sni obfs listen_port mode advertise_host advertise_port ingress_profile_id host port
   hysteria2_state_exists || return 1
   auth="$(hysteria2_state_field auth)"
   sni="$(hysteria2_state_field sni)"
@@ -11126,8 +13706,9 @@ hysteria2_export_values() {
   mode="$(hysteria2_state_field advertise_mode)"
   advertise_host="$(hysteria2_state_field advertise_host)"
   advertise_port="$(hysteria2_state_field advertise_port)"
-  host="$(nb_effective_advertise_host "$mode" "$advertise_host")"
-  port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port")"
+  ingress_profile_id="$(hysteria2_state_field ingress_profile_id 2>/dev/null || true)"
+  host="$(nb_effective_advertise_host "$mode" "$advertise_host" "$ingress_profile_id")"
+  port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port" "$ingress_profile_id")"
   printf '%s\t%s\t%s\t%s\t%s\n' "$auth" "$sni" "$obfs" "$host" "$port"
 }
 
@@ -11171,17 +13752,18 @@ hysteria2_generate_state() {
   local output="$1" listen="$2" port="$3" auth="$4" sni="$5" obfs="$6"
   local advertise_mode="$7" advertise_host="$8" advertise_port="$9"
   local created_at="${10:-}" updated_at link effective_host effective_port runtime_version
+  local ingress_profile_id="${11:-}"
   [ -n "$created_at" ] || created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   updated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  effective_host="$(nb_effective_advertise_host "$advertise_mode" "$advertise_host")"
-  effective_port="$(nb_effective_advertise_port "$advertise_mode" "$advertise_port" "$port")"
+  effective_host="$(nb_effective_advertise_host "$advertise_mode" "$advertise_host" "$ingress_profile_id")"
+  effective_port="$(nb_effective_advertise_port "$advertise_mode" "$advertise_port" "$port" "$ingress_profile_id")"
   link="$(hysteria2_build_share_link "$auth" "$effective_host" "$effective_port" "$sni" "$obfs")" || return 1
   runtime_version="$(nobrand_xray_version 2>/dev/null || printf unknown)"
   jq -n --arg auth "$auth" --arg sni "$sni" --arg obfs "$obfs" \
     --arg listen "$listen" --arg port "$port" --arg mode "$advertise_mode" \
     --arg advertise_host "$advertise_host" --arg advertise_port "$advertise_port" \
     --arg tag "$NOBRAND_HY2_TAG" --arg link "$link" --arg runtime "$runtime_version" \
-    --arg created "$created_at" --arg updated "$updated_at" '
+    --arg created "$created_at" --arg updated "$updated_at" --arg ingress_profile_id "$ingress_profile_id" '
     {
       "protocol":"hysteria2",
       "auth":$auth,
@@ -11200,6 +13782,7 @@ hysteria2_generate_state() {
       "created_at":$created,
       "updated_at":$updated
     }
+    + if $ingress_profile_id=="" then {} else {ingress_profile_id:$ingress_profile_id} end
   ' >"$output"
 }
 
@@ -11220,16 +13803,26 @@ hysteria2_restore_snapshot_file() {
 
 hysteria2_configure_requests() {
   local interactive="${1:-0}" old_port="" conflict_owner=""
-  HY2_LISTEN="0.0.0.0"
+  if hysteria2_state_exists && [ "${INGRESS_PROFILE_CLI:-0}" -eq 0 ]; then
+    INGRESS_PROFILE_ID="$(hysteria2_state_field ingress_profile_id 2>/dev/null || true)"
+    [ -n "$INGRESS_PROFILE_ID" ] || INGRESS_PROFILE_ID="$NOBRAND_LEGACY_INGRESS_PROFILE_ID"
+  else
+    nb_prepare_ingress_request || return 1
+  fi
+  nb_prepare_ingress_deployment "$INGRESS_PROFILE_ID" native-bind \
+    || die '所选 Ingress strict local address cannot be bound by Hysteria2'
+  HY2_LISTEN="$INGRESS_LISTEN_HOST"
   hysteria2_state_exists && old_port="$(hysteria2_state_field listen_port 2>/dev/null || true)"
   if [ -z "${PORT:-}" ]; then
-    PORT="$(nb_select_available_port UDP)" || die '未找到可用 Hysteria2 UDP 端口'
+    PORT="$(nb_select_available_port UDP "$INGRESS_PROFILE_ID")" \
+      || die '所选入口配置没有可用 Hysteria2 UDP 自动端口；manual-only 必须显式使用 --port'
     PORT_AUTO_SELECTED=1
   else
     nb_valid_port "$PORT" || die 'Hysteria2 端口必须是 1-65535'
     PORT="$(normalize_uint "$PORT")"
-    nb_warn_if_outside_recommended_range "$PORT"
-    if [ "$PORT" != "$old_port" ] && ! nb_port_available_for_transport "$PORT" UDP 'hy2:default'; then
+    nb_warn_if_outside_recommended_range "$PORT" "$INGRESS_PROFILE_ID"
+    if [ "$PORT" != "$old_port" ] \
+       && ! nb_port_available_for_profile "$PORT" UDP "$INGRESS_PROFILE_ID" 'hy2:default'; then
       warn "Hysteria2 UDP/${PORT} 已占用"
       nb_describe_port_conflict UDP "$PORT"
       return 1
@@ -11309,7 +13902,7 @@ install_hysteria2() {
     }
   fi
   # TOCTOU 二次检测：旧实例同端口需先停止自身 listener。
-  if ! nb_port_available_for_transport "$PORT" UDP 'hy2:default'; then
+  if ! nb_port_available_for_profile "$PORT" UDP "$INGRESS_PROFILE_ID" 'hy2:default'; then
     warn "提交前发现 UDP/${PORT} 已被其它进程占用"
     nb_describe_port_conflict UDP "$PORT"
     hysteria2_install_rollback "$snapshot" "$was_active" 0
@@ -11331,7 +13924,8 @@ install_hysteria2() {
   if ! hysteria2_generate_config "$config_tmp" "$HY2_LISTEN" "$PORT" "$HY2_AUTH" "$HY2_SNI" "$HY2_OBFS" \
      || ! nobrand_xray_test_config "$config_tmp" \
      || ! hysteria2_generate_state "$state_tmp" "$HY2_LISTEN" "$PORT" "$HY2_AUTH" "$HY2_SNI" "$HY2_OBFS" \
-          "$advertise_mode" "$ADVERTISE_HOST" "$ADVERTISE_PORT" "$old_created" \
+          "$advertise_mode" "$ADVERTISE_HOST" "$ADVERTISE_PORT" "$old_created" "$INGRESS_PROFILE_ID" \
+     || ! nb_ingress_stamp_state_file "$state_tmp" "$INGRESS_PROFILE_ID" native-bind \
      || ! nb_atomic_install_file "$config_tmp" "$NOBRAND_HY2_CONFIG_FILE" 0600 \
      || ! nb_atomic_install_file "$state_tmp" "$NOBRAND_HY2_STATE_FILE" 0600 \
      || ! nobrand_write_hy2_service \
@@ -11345,7 +13939,8 @@ install_hysteria2() {
   nb_firewall_binding_owned UDP "$PORT" && [ "$binding_was_owned" -eq 0 ] && binding_now_owned=1
   if ! nobrand_hy2_service_action restart \
      || ! nobrand_hy2_service_active \
-     || ! nb_wait_for_listener UDP "$PORT" 25; then
+     || ! nb_wait_for_enforced_listener "$INGRESS_ENFORCEMENT_RESOLVED" "$INGRESS_ENFORCEMENT_METHOD" \
+          UDP "$PORT" "$INGRESS_LOCAL_ADDRESS" 'hy2:default' 25; then
     hysteria2_install_rollback "$snapshot" "$was_active" "$binding_now_owned"
     rm -rf -- "$snapshot"; admin_lock_release
     warn 'Hysteria2 服务启动或 UDP listener 验收失败，已回滚'
@@ -11361,7 +13956,7 @@ install_hysteria2() {
 }
 
 hysteria2_set_endpoint() {
-  local interactive=0 tmp mode owner auth sni obfs host port link
+  local interactive=0 tmp mode owner auth sni obfs host port link ingress_profile_id
   require_root
   hysteria2_state_exists || die 'Hysteria2 未安装'
   [ "${YES:-0}" -eq 1 ] || interactive=1
@@ -11382,8 +13977,10 @@ hysteria2_set_endpoint() {
   auth="$(hysteria2_state_field auth)"
   sni="$(hysteria2_state_field sni)"
   obfs="$(hysteria2_state_field obfs)"
-  host="$(nb_effective_advertise_host "$mode" "$ADVERTISE_HOST")"
-  port="$(nb_effective_advertise_port "$mode" "$ADVERTISE_PORT" "$PORT")"
+  ingress_profile_id="$(hysteria2_state_field ingress_profile_id 2>/dev/null || true)"
+  [ -n "$ingress_profile_id" ] || ingress_profile_id="$NOBRAND_LEGACY_INGRESS_PROFILE_ID"
+  host="$(nb_effective_advertise_host "$mode" "$ADVERTISE_HOST" "$ingress_profile_id")"
+  port="$(nb_effective_advertise_port "$mode" "$ADVERTISE_PORT" "$PORT" "$ingress_profile_id")"
   link="$(hysteria2_build_share_link "$auth" "$host" "$port" "$sni" "$obfs")" \
     || { rm -f "$tmp"; admin_lock_release; return 1; }
   if ! jq --arg mode "$mode" --arg host "$ADVERTISE_HOST" --arg port "$ADVERTISE_PORT" \
@@ -11406,10 +14003,60 @@ hysteria2_set_endpoint() {
 }
 
 hysteria2_running() {
-  local port
+  local port policy method address
   hysteria2_state_exists || return 1
   port="$(hysteria2_state_field listen_port)"
-  nobrand_hy2_service_active && nb_port_is_listening UDP "$port"
+  policy="$(hysteria2_state_field ingress_enforcement 2>/dev/null || printf permissive)"
+  method="$(hysteria2_state_field ingress_enforcement_method 2>/dev/null || printf wildcard)"
+  address="$(hysteria2_state_field ingress_local_address 2>/dev/null || true)"
+  nobrand_hy2_service_active \
+    && nb_wait_for_enforced_listener "$policy" "$method" UDP "$port" "$address" 'hy2:default' 1
+}
+
+hysteria2_apply_ingress_enforcement() {
+  local profile_id port auth sni obfs candidate_state candidate_config snapshot was_active=0 rc=0
+  hysteria2_state_exists || return 1
+  profile_id="$(hysteria2_state_field ingress_profile_id 2>/dev/null || true)"
+  [ -n "$profile_id" ] || profile_id="$NOBRAND_LEGACY_INGRESS_PROFILE_ID"
+  nb_prepare_ingress_deployment "$profile_id" native-bind || return 1
+  port="$(hysteria2_state_field listen_port)"
+  auth="$(hysteria2_state_field auth)"
+  sni="$(hysteria2_state_field sni)"
+  obfs="$(hysteria2_state_field obfs)"
+  candidate_state="$(mktemp_file .hy2-ingress-state)" || return 1
+  candidate_config="$(mktemp_file .hy2-ingress-config)" || { rm -f "$candidate_state"; return 1; }
+  snapshot="$(mktemp_dir)" || { rm -f "$candidate_state" "$candidate_config"; return 1; }
+  cp -a "$NOBRAND_HY2_STATE_FILE" "$snapshot/state" \
+    && cp -a "$NOBRAND_HY2_CONFIG_FILE" "$snapshot/config" || rc=1
+  if [ "$rc" -eq 0 ]; then
+    jq --arg listen "$INGRESS_LISTEN_HOST" '.listen_host=$listen' "$NOBRAND_HY2_STATE_FILE" >"$candidate_state" \
+      && nb_ingress_stamp_state_file "$candidate_state" "$profile_id" native-bind \
+      && hysteria2_generate_config "$candidate_config" "$INGRESS_LISTEN_HOST" "$port" "$auth" "$sni" "$obfs" \
+      && nobrand_xray_test_config "$candidate_config" || rc=1
+  fi
+  nobrand_hy2_service_active && was_active=1
+  if [ "$rc" -eq 0 ]; then
+    nb_atomic_install_file "$candidate_config" "$NOBRAND_HY2_CONFIG_FILE" 0600 \
+      && nb_atomic_install_file "$candidate_state" "$NOBRAND_HY2_STATE_FILE" 0600 || rc=1
+  fi
+  if [ "$rc" -eq 0 ] && [ "$was_active" -eq 1 ]; then
+    [ "${NOBRAND_TEST_INGRESS_SERVICE_FAIL:-0}" -eq 0 ] \
+      && nobrand_hy2_service_action restart \
+      && [ "${NOBRAND_TEST_INGRESS_LISTENER_FAIL:-0}" -eq 0 ] \
+      && hysteria2_running || rc=1
+  fi
+  if [ "$rc" -ne 0 ]; then
+    nb_atomic_install_file "$snapshot/config" "$NOBRAND_HY2_CONFIG_FILE" 0600 >/dev/null 2>&1 || true
+    nb_atomic_install_file "$snapshot/state" "$NOBRAND_HY2_STATE_FILE" 0600 >/dev/null 2>&1 || true
+    if [ "$was_active" -eq 1 ]; then
+      nobrand_hy2_service_action restart >/dev/null 2>&1 && hysteria2_running >/dev/null 2>&1 || true
+    else
+      nobrand_hy2_service_action stop >/dev/null 2>&1 || true
+    fi
+  fi
+  rm -f "$candidate_state" "$candidate_config"
+  rm -rf -- "$snapshot"
+  return "$rc"
 }
 
 hysteria2_state_set_enabled() {
@@ -11431,8 +14078,8 @@ hysteria2_node_rows() {
   advertise_host="$(hysteria2_state_field advertise_host)"
   advertise_port="$(hysteria2_state_field advertise_port)"
   listen_port="$(hysteria2_state_field listen_port)"
-  host="$(nb_effective_advertise_host "$mode" "$advertise_host")"
-  port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port")"
+  host="$(nb_effective_advertise_host "$mode" "$advertise_host" "$(hysteria2_state_field ingress_profile_id 2>/dev/null || true)")"
+  port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port" "$(hysteria2_state_field ingress_profile_id 2>/dev/null || true)")"
   status=Stopped; hysteria2_running && status=Running
   printf 'Hysteria2|default|%s:%s/UDP|%s|UDP\n' "$host" "$port" "$status"
 }
@@ -11444,8 +14091,8 @@ print_hysteria2_result() {
   listen_host="$(hysteria2_state_field listen_host)"; listen_port="$(hysteria2_state_field listen_port)"
   mode="$(hysteria2_state_field advertise_mode)"; advertise_host="$(hysteria2_state_field advertise_host)"
   advertise_port="$(hysteria2_state_field advertise_port)"
-  host="$(nb_effective_advertise_host "$mode" "$advertise_host")"
-  port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port")"
+  host="$(nb_effective_advertise_host "$mode" "$advertise_host" "$(hysteria2_state_field ingress_profile_id 2>/dev/null || true)")"
+  port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port" "$(hysteria2_state_field ingress_profile_id 2>/dev/null || true)")"
   status=Stopped; hysteria2_running && status=Running
   link="$(hysteria2_build_share_link "$auth" "$host" "$port" "$sni" "$obfs")"
   nobrand_print_banner
@@ -11454,6 +14101,8 @@ print_hysteria2_result() {
   printf '协议        Hysteria2\n节点        default\n状态        %s\n' "$status"
   msg ''
   printf '真实监听\n  Address   %s\n  Port      %s\n  Transport UDP\n' "$listen_host" "$listen_port"
+  msg ''
+  printf '网络入口\n  Profile   %s\n' "$(nb_ingress_profile_name "$(hysteria2_state_field ingress_profile_id 2>/dev/null || true)")"
   msg ''
   printf '客户端入口\n  Host      %s\n  Port      %s\n  Mode      %s\n' "$host" "$port" "$mode"
   msg ''
@@ -11484,7 +14133,7 @@ hysteria2_service_command() {
   case "$action" in
     start)
       nb_firewall_open_pairs "UDP|${port}" || return 1
-      if ! nobrand_hy2_service_action start || ! nb_wait_for_listener UDP "$port" 25 \
+      if ! nobrand_hy2_service_action start || ! hysteria2_running \
          || ! hysteria2_state_set_enabled true; then
         nobrand_hy2_service_action stop >/dev/null 2>&1 || true
         [ "$was_enabled" = true ] || hysteria2_state_set_enabled false >/dev/null 2>&1 || true
@@ -11498,7 +14147,7 @@ hysteria2_service_command() {
         return 1
       fi
       ;;
-    restart) nobrand_hy2_service_action restart && nb_wait_for_listener UDP "$port" 25 ;;
+    restart) nobrand_hy2_service_action restart && hysteria2_running ;;
     status)
       if hysteria2_running; then msg 'Hysteria2: Running'; else msg 'Hysteria2: Stopped'; return 1; fi
       ;;
@@ -11812,19 +14461,21 @@ vless_sudoku_server_config_matches() {
 
 vless_sudoku_client_config_matches() {
   local config="${1:-$NOBRAND_VLESS_CLIENT_FILE}" host="${2:-}" port="${3:-}"
-  local uuid="${4:-}" password="${5:-}"
+  local uuid="${4:-}" password="${5:-}" ingress_profile_id
+  ingress_profile_id="$(vless_sudoku_state_field ingress_profile_id 2>/dev/null || true)"
+  [ -n "$ingress_profile_id" ] || ingress_profile_id="$NOBRAND_LEGACY_INGRESS_PROFILE_ID"
   [ -n "$host" ] || {
     local mode advertise_host
     mode="$(vless_sudoku_state_field advertise_mode)" || return 1
     advertise_host="$(vless_sudoku_state_field advertise_host)"
-    host="$(nb_effective_advertise_host "$mode" "$advertise_host")"
+    host="$(nb_effective_advertise_host "$mode" "$advertise_host" "$ingress_profile_id")"
   }
   [ -n "$port" ] || {
     local mode advertise_port listen_port
     mode="$(vless_sudoku_state_field advertise_mode)" || return 1
     advertise_port="$(vless_sudoku_state_field advertise_port)"
     listen_port="$(vless_sudoku_state_field listen_port)"
-    port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port")"
+    port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port" "$ingress_profile_id")"
   }
   [ -n "$uuid" ] || uuid="$(vless_sudoku_state_field uuid)" || return 1
   [ -n "$password" ] \
@@ -11849,15 +14500,16 @@ vless_sudoku_client_config_matches() {
 }
 
 vless_sudoku_current_share_link() {
-  local uuid listen_port mode advertise_host advertise_port host port finalmask
+  local uuid listen_port mode advertise_host advertise_port ingress_profile_id host port finalmask
   vless_sudoku_state_exists || return 1
   uuid="$(vless_sudoku_state_field uuid)"
   listen_port="$(vless_sudoku_state_field listen_port)"
   mode="$(vless_sudoku_state_field advertise_mode)"
   advertise_host="$(vless_sudoku_state_field advertise_host)"
   advertise_port="$(vless_sudoku_state_field advertise_port)"
-  host="$(nb_effective_advertise_host "$mode" "$advertise_host")"
-  port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port")"
+  ingress_profile_id="$(vless_sudoku_state_field ingress_profile_id 2>/dev/null || true)"
+  host="$(nb_effective_advertise_host "$mode" "$advertise_host" "$ingress_profile_id")"
+  port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port" "$ingress_profile_id")"
   finalmask="$(jq -c '.finalmask_json' "$NOBRAND_VLESS_STATE_FILE")" || return 1
   vless_sudoku_build_share_link "$uuid" "$host" "$port" "$finalmask"
 }
@@ -11865,19 +14517,20 @@ vless_sudoku_current_share_link() {
 vless_sudoku_generate_state() {
   local output="$1" listen="$2" port="$3" uuid="$4" password="$5"
   local advertise_mode="$6" advertise_host="$7" advertise_port="$8" created_at="${9:-}"
+  local ingress_profile_id="${10:-}"
   local updated_at runtime_version finalmask effective_host effective_port link
   [ -n "$created_at" ] || created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   updated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   runtime_version="$(nobrand_xray_version 2>/dev/null || printf unknown)"
   finalmask="$(vless_sudoku_finalmask_json "$password")" || return 1
-  effective_host="$(nb_effective_advertise_host "$advertise_mode" "$advertise_host")"
-  effective_port="$(nb_effective_advertise_port "$advertise_mode" "$advertise_port" "$port")"
+  effective_host="$(nb_effective_advertise_host "$advertise_mode" "$advertise_host" "$ingress_profile_id")"
+  effective_port="$(nb_effective_advertise_port "$advertise_mode" "$advertise_port" "$port" "$ingress_profile_id")"
   link="$(vless_sudoku_build_share_link "$uuid" "$effective_host" "$effective_port" "$finalmask")" || return 1
   jq -n --arg uuid "$uuid" --arg listen "$listen" --arg port "$port" \
     --arg mode "$advertise_mode" --arg advertise_host "$advertise_host" \
     --arg advertise_port "$advertise_port" --arg tag "$NOBRAND_VLESS_TAG" \
     --arg runtime "$runtime_version" --arg link "$link" --arg created "$created_at" \
-    --arg updated "$updated_at" --argjson finalmask "$finalmask" '
+    --arg updated "$updated_at" --argjson finalmask "$finalmask" --arg ingress_profile_id "$ingress_profile_id" '
     {
       "protocol":"vless-sudoku",
       "uuid":$uuid,
@@ -11897,6 +14550,7 @@ vless_sudoku_generate_state() {
       "created_at":$created,
       "updated_at":$updated
     }
+    + if $ingress_profile_id=="" then {} else {ingress_profile_id:$ingress_profile_id} end
   ' >"$output"
 }
 
@@ -11917,21 +14571,30 @@ vless_sudoku_restore_snapshot_file() {
 
 vless_sudoku_configure_requests() {
   local interactive="${1:-0}" old_port="" old_password="" conflict_owner=""
-  VLESS_SUDOKU_LISTEN="0.0.0.0"
+  if vless_sudoku_state_exists && [ "${INGRESS_PROFILE_CLI:-0}" -eq 0 ]; then
+    INGRESS_PROFILE_ID="$(vless_sudoku_state_field ingress_profile_id 2>/dev/null || true)"
+    [ -n "$INGRESS_PROFILE_ID" ] || INGRESS_PROFILE_ID="$NOBRAND_LEGACY_INGRESS_PROFILE_ID"
+  else
+    nb_prepare_ingress_request || return 1
+  fi
+  nb_prepare_ingress_deployment "$INGRESS_PROFILE_ID" native-bind \
+    || die '所选 Ingress strict local address cannot be bound by VLESS Sudoku'
+  VLESS_SUDOKU_LISTEN="$INGRESS_LISTEN_HOST"
   if vless_sudoku_state_exists; then
     old_port="$(vless_sudoku_state_field listen_port 2>/dev/null || true)"
     VLESS_SUDOKU_UUID="$(vless_sudoku_state_field uuid 2>/dev/null || true)"
     old_password="$(jq -r '.finalmask_json.tcp[0].settings.password // empty' "$NOBRAND_VLESS_STATE_FILE" 2>/dev/null)"
   fi
   if [ -z "${PORT:-}" ]; then
-    PORT="$(nb_select_available_port TCP)" || die '未找到可用 VLESS Sudoku TCP 端口'
+    PORT="$(nb_select_available_port TCP "$INGRESS_PROFILE_ID")" \
+      || die '所选入口配置没有可用 VLESS Sudoku TCP 自动端口；manual-only 必须显式使用 --port'
     PORT_AUTO_SELECTED=1
   else
     nb_valid_port "$PORT" || die 'VLESS Sudoku 端口必须是 1-65535'
     PORT="$(normalize_uint "$PORT")"
-    nb_warn_if_outside_recommended_range "$PORT"
+    nb_warn_if_outside_recommended_range "$PORT" "$INGRESS_PROFILE_ID"
     if [ "$PORT" != "$old_port" ] \
-       && ! nb_port_available_for_transport "$PORT" TCP 'vless-sudoku:default'; then
+       && ! nb_port_available_for_profile "$PORT" TCP "$INGRESS_PROFILE_ID" 'vless-sudoku:default'; then
       warn "VLESS Sudoku TCP/${PORT} 已占用"
       nb_describe_port_conflict TCP "$PORT"
       return 1
@@ -12008,7 +14671,7 @@ install_vless_sudoku() {
       rm -rf -- "$snapshot"; admin_lock_release; return 1;
     }
   fi
-  if ! nb_port_available_for_transport "$PORT" TCP 'vless-sudoku:default'; then
+  if ! nb_port_available_for_profile "$PORT" TCP "$INGRESS_PROFILE_ID" 'vless-sudoku:default'; then
     warn "提交前发现 TCP/${PORT} 已被其它进程占用"
     nb_describe_port_conflict TCP "$PORT"
     vless_sudoku_install_rollback "$snapshot" "$was_active" 0
@@ -12028,8 +14691,8 @@ install_vless_sudoku() {
   }
   advertise_mode="$(nb_endpoint_mode_from_values "$ADVERTISE_HOST")"
   local effective_host effective_port
-  effective_host="$(nb_effective_advertise_host "$advertise_mode" "$ADVERTISE_HOST")"
-  effective_port="$(nb_effective_advertise_port "$advertise_mode" "$ADVERTISE_PORT" "$PORT")"
+  effective_host="$(nb_effective_advertise_host "$advertise_mode" "$ADVERTISE_HOST" "$INGRESS_PROFILE_ID")"
+  effective_port="$(nb_effective_advertise_port "$advertise_mode" "$ADVERTISE_PORT" "$PORT" "$INGRESS_PROFILE_ID")"
   if ! vless_sudoku_generate_server_config "$config_tmp" "$VLESS_SUDOKU_LISTEN" "$PORT" \
        "$VLESS_SUDOKU_UUID" "$VLESS_SUDOKU_PASSWORD" \
      || ! nobrand_xray_test_config "$config_tmp" \
@@ -12037,7 +14700,8 @@ install_vless_sudoku() {
        "$VLESS_SUDOKU_PASSWORD" "$VLESS_SUDOKU_LISTEN" \
      || ! vless_sudoku_generate_state "$state_tmp" "$VLESS_SUDOKU_LISTEN" "$PORT" \
        "$VLESS_SUDOKU_UUID" "$VLESS_SUDOKU_PASSWORD" "$advertise_mode" \
-       "$ADVERTISE_HOST" "$ADVERTISE_PORT" "$old_created" \
+       "$ADVERTISE_HOST" "$ADVERTISE_PORT" "$old_created" "$INGRESS_PROFILE_ID" \
+     || ! nb_ingress_stamp_state_file "$state_tmp" "$INGRESS_PROFILE_ID" native-bind \
      || ! vless_sudoku_generate_client_config "$client_tmp" "$effective_host" "$effective_port" \
        "$VLESS_SUDOKU_UUID" "$VLESS_SUDOKU_PASSWORD" \
      || ! vless_sudoku_client_config_matches "$client_tmp" "$effective_host" "$effective_port" \
@@ -12059,7 +14723,8 @@ install_vless_sudoku() {
   [ "$was_active" -eq 0 ] || service_action=restart
   if ! nobrand_vless_sudoku_service_action "$service_action" \
      || ! nobrand_vless_sudoku_service_active \
-     || ! nb_wait_for_listener TCP "$PORT" 25 \
+     || ! nb_wait_for_enforced_listener "$INGRESS_ENFORCEMENT_RESOLVED" "$INGRESS_ENFORCEMENT_METHOD" \
+          TCP "$PORT" "$INGRESS_LOCAL_ADDRESS" 'vless-sudoku:default' 25 \
      || ! nb_atomic_install_file "$client_tmp" "$NOBRAND_VLESS_CLIENT_FILE" 0600 \
      || ! nb_atomic_install_file "$state_tmp" "$NOBRAND_VLESS_STATE_FILE" 0600; then
     rm -f "$state_tmp" "$client_tmp"
@@ -12079,7 +14744,7 @@ install_vless_sudoku() {
 }
 
 vless_sudoku_set_endpoint() {
-  local interactive=0 state_tmp client_tmp snapshot mode owner uuid password host port link finalmask
+  local interactive=0 state_tmp client_tmp snapshot mode owner uuid password host port link finalmask ingress_profile_id
   require_root
   vless_sudoku_state_exists || die 'VLESS Sudoku 未安装'
   [ "${YES:-0}" -eq 1 ] || interactive=1
@@ -12107,11 +14772,13 @@ vless_sudoku_set_endpoint() {
   mode="$(nb_endpoint_mode_from_values "$ADVERTISE_HOST")"
   uuid="$(vless_sudoku_state_field uuid)"
   password="$(jq -r '.finalmask_json.tcp[0].settings.password' "$NOBRAND_VLESS_STATE_FILE")"
+  ingress_profile_id="$(vless_sudoku_state_field ingress_profile_id 2>/dev/null || true)"
+  [ -n "$ingress_profile_id" ] || ingress_profile_id="$NOBRAND_LEGACY_INGRESS_PROFILE_ID"
   finalmask="$(vless_sudoku_finalmask_json "$password")" || {
     rm -f "$state_tmp" "$client_tmp"; rm -rf -- "$snapshot"; admin_lock_release; return 1;
   }
-  host="$(nb_effective_advertise_host "$mode" "$ADVERTISE_HOST")"
-  port="$(nb_effective_advertise_port "$mode" "$ADVERTISE_PORT" "$PORT")"
+  host="$(nb_effective_advertise_host "$mode" "$ADVERTISE_HOST" "$ingress_profile_id")"
+  port="$(nb_effective_advertise_port "$mode" "$ADVERTISE_PORT" "$PORT" "$ingress_profile_id")"
   link="$(vless_sudoku_build_share_link "$uuid" "$host" "$port" "$finalmask")" || {
     rm -f "$state_tmp" "$client_tmp"; rm -rf -- "$snapshot"; admin_lock_release; return 1;
   }
@@ -12141,10 +14808,62 @@ vless_sudoku_set_endpoint() {
 }
 
 vless_sudoku_running() {
-  local port
+  local port policy method address
   vless_sudoku_state_exists || return 1
   port="$(vless_sudoku_state_field listen_port)"
-  nobrand_vless_sudoku_service_active && nb_port_is_listening TCP "$port"
+  policy="$(vless_sudoku_state_field ingress_enforcement 2>/dev/null || printf permissive)"
+  method="$(vless_sudoku_state_field ingress_enforcement_method 2>/dev/null || printf wildcard)"
+  address="$(vless_sudoku_state_field ingress_local_address 2>/dev/null || true)"
+  nobrand_vless_sudoku_service_active \
+    && nb_wait_for_enforced_listener "$policy" "$method" TCP "$port" "$address" 'vless-sudoku:default' 1
+}
+
+vless_sudoku_apply_ingress_enforcement() {
+  local profile_id port uuid password candidate_state candidate_config snapshot was_active=0 rc=0
+  vless_sudoku_state_exists || return 1
+  profile_id="$(vless_sudoku_state_field ingress_profile_id 2>/dev/null || true)"
+  [ -n "$profile_id" ] || profile_id="$NOBRAND_LEGACY_INGRESS_PROFILE_ID"
+  nb_prepare_ingress_deployment "$profile_id" native-bind || return 1
+  port="$(vless_sudoku_state_field listen_port)"
+  uuid="$(vless_sudoku_state_field uuid)"
+  password="$(jq -r '.finalmask_json.tcp[0].settings.password // empty' "$NOBRAND_VLESS_STATE_FILE")"
+  candidate_state="$(mktemp_file .vless-ingress-state)" || return 1
+  candidate_config="$(mktemp_file .vless-ingress-config.json)" || { rm -f "$candidate_state"; return 1; }
+  snapshot="$(mktemp_dir)" || { rm -f "$candidate_state" "$candidate_config"; return 1; }
+  cp -a "$NOBRAND_VLESS_STATE_FILE" "$snapshot/state" \
+    && cp -a "$NOBRAND_VLESS_CONFIG_FILE" "$snapshot/config" || rc=1
+  if [ "$rc" -eq 0 ]; then
+    jq --arg listen "$INGRESS_LISTEN_HOST" '.listen_host=$listen' "$NOBRAND_VLESS_STATE_FILE" >"$candidate_state" \
+      && nb_ingress_stamp_state_file "$candidate_state" "$profile_id" native-bind \
+      && vless_sudoku_state_matches "$candidate_state" \
+      && vless_sudoku_generate_server_config "$candidate_config" "$INGRESS_LISTEN_HOST" "$port" "$uuid" "$password" \
+      && vless_sudoku_server_config_matches "$candidate_config" "$uuid" "$port" "$password" "$INGRESS_LISTEN_HOST" \
+      && nobrand_xray_test_config "$candidate_config" || rc=1
+  fi
+  nobrand_vless_sudoku_service_active && was_active=1
+  if [ "$rc" -eq 0 ]; then
+    nb_atomic_install_file "$candidate_config" "$NOBRAND_VLESS_CONFIG_FILE" 0600 \
+      && nb_atomic_install_file "$candidate_state" "$NOBRAND_VLESS_STATE_FILE" 0600 || rc=1
+  fi
+  if [ "$rc" -eq 0 ] && [ "$was_active" -eq 1 ]; then
+    [ "${NOBRAND_TEST_INGRESS_SERVICE_FAIL:-0}" -eq 0 ] \
+      && nobrand_vless_sudoku_service_action restart \
+      && [ "${NOBRAND_TEST_INGRESS_LISTENER_FAIL:-0}" -eq 0 ] \
+      && vless_sudoku_running || rc=1
+  fi
+  if [ "$rc" -ne 0 ]; then
+    nb_atomic_install_file "$snapshot/config" "$NOBRAND_VLESS_CONFIG_FILE" 0600 >/dev/null 2>&1 || true
+    nb_atomic_install_file "$snapshot/state" "$NOBRAND_VLESS_STATE_FILE" 0600 >/dev/null 2>&1 || true
+    if [ "$was_active" -eq 1 ]; then
+      nobrand_vless_sudoku_service_action restart >/dev/null 2>&1 \
+        && vless_sudoku_running >/dev/null 2>&1 || true
+    else
+      nobrand_vless_sudoku_service_action stop >/dev/null 2>&1 || true
+    fi
+  fi
+  rm -f "$candidate_state" "$candidate_config"
+  rm -rf -- "$snapshot"
+  return "$rc"
 }
 
 vless_sudoku_state_set_enabled() {
@@ -12166,8 +14885,8 @@ vless_sudoku_node_rows() {
   advertise_host="$(vless_sudoku_state_field advertise_host)"
   advertise_port="$(vless_sudoku_state_field advertise_port)"
   listen_port="$(vless_sudoku_state_field listen_port)"
-  host="$(nb_effective_advertise_host "$mode" "$advertise_host")"
-  port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port")"
+  host="$(nb_effective_advertise_host "$mode" "$advertise_host" "$(vless_sudoku_state_field ingress_profile_id 2>/dev/null || true)")"
+  port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port" "$(vless_sudoku_state_field ingress_profile_id 2>/dev/null || true)")"
   status=Stopped; vless_sudoku_running && status=Running
   printf 'VLESS/Sudoku|sudoku|%s:%s/TCP|%s|TCP\n' "$host" "$port" "$status"
 }
@@ -12182,8 +14901,8 @@ print_vless_sudoku_result() {
   mode="$(vless_sudoku_state_field advertise_mode)"
   advertise_host="$(vless_sudoku_state_field advertise_host)"
   advertise_port="$(vless_sudoku_state_field advertise_port)"
-  host="$(nb_effective_advertise_host "$mode" "$advertise_host")"
-  port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port")"
+  host="$(nb_effective_advertise_host "$mode" "$advertise_host" "$(vless_sudoku_state_field ingress_profile_id 2>/dev/null || true)")"
+  port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port" "$(vless_sudoku_state_field ingress_profile_id 2>/dev/null || true)")"
   finalmask="$(jq -c '.finalmask_json' "$NOBRAND_VLESS_STATE_FILE")"
   password="$(jq -r '.finalmask_json.tcp[0].settings.password' "$NOBRAND_VLESS_STATE_FILE")"
   link="$(vless_sudoku_current_share_link)"
@@ -12199,6 +14918,9 @@ print_vless_sudoku_result() {
   msg '真实监听'
   msg "  Address   ${listen_host}"
   msg "  Port      ${listen_port}"
+  msg ''
+  msg '网络入口'
+  msg "  Profile   $(nb_ingress_profile_name "$(vless_sudoku_state_field ingress_profile_id 2>/dev/null || true)")"
   msg ''
   msg '客户端入口'
   msg "  Host      ${host}"
@@ -12226,7 +14948,7 @@ vless_sudoku_service_command() {
       nobrand_xray_test_config "$NOBRAND_VLESS_CONFIG_FILE" || return 1
       nb_firewall_open_pairs "TCP|${port}" || return 1
       if ! nobrand_vless_sudoku_service_action "$action" \
-         || ! nb_wait_for_listener TCP "$port" 25 \
+         || ! vless_sudoku_running \
          || ! vless_sudoku_state_set_enabled true; then
         nobrand_vless_sudoku_service_action stop >/dev/null 2>&1 || true
         [ "$was_enabled" = true ] || vless_sudoku_state_set_enabled false >/dev/null 2>&1 || true
@@ -12542,6 +15264,7 @@ tuic_generate_state() {
   local output="$1" instance_id="$2" name="$3" listen="$4" port="$5" mode="$6"
   local advertise_host="$7" advertise_port="$8" sni="$9" channel="${10}" runtime_version="${11}"
   local cert="${12}" key="${13}" users="${14}" created_at="${15:-}" updated_at fingerprint not_after
+  local ingress_profile_id="${16:-}"
   [ -n "$created_at" ] || created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   updated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   fingerprint="$(tuic_certificate_fingerprint "$cert" 2>/dev/null || true)"
@@ -12551,7 +15274,7 @@ tuic_generate_state() {
     --arg advertise_port "$advertise_port" --arg sni "$sni" --arg channel "$channel" \
     --arg runtime "$runtime_version" --arg cert "$cert" --arg key "$key" \
     --arg fingerprint "$fingerprint" --arg not_after "$not_after" --argjson users "$users" \
-    --arg created "$created_at" --arg updated "$updated_at" '
+    --arg created "$created_at" --arg updated "$updated_at" --arg ingress_profile_id "$ingress_profile_id" '
     {
       schema_version:3,ownership:"nobrand-v3",protocol:"tuic",tuic_version:5,
       instance_id:$instance_id,name:$name,listen_host:$listen,listen_port:($port|tonumber),transport:"udp",
@@ -12563,6 +15286,7 @@ tuic_generate_state() {
            fingerprint_sha256:$fingerprint,not_after:$not_after},
       users:$users,enabled:true,created_at:$created,updated_at:$updated
     }
+    + if $ingress_profile_id=="" then {} else {ingress_profile_id:$ingress_profile_id} end
   ' >"$output"
 }
 
@@ -12574,6 +15298,7 @@ tuic_config_matches_state() {
   jq -e --slurpfile state "$state" '
     .inbounds|length==1
     and .[0].type=="tuic"
+    and .[0].listen==$state[0].listen_host
     and .[0].listen_port==$state[0].listen_port
     and .[0].congestion_control=="cubic"
     and .[0].zero_rtt_handshake==false
@@ -12584,13 +15309,14 @@ tuic_config_matches_state() {
 }
 
 tuic_effective_endpoint() {
-  local id="$1" mode host port listen_port
+  local id="$1" mode host port listen_port ingress_profile_id
   mode="$(tuic_state_field "$id" advertise_mode)"
   host="$(tuic_state_field "$id" advertise_host)"
   port="$(tuic_state_field "$id" advertise_port)"
   listen_port="$(tuic_state_field "$id" listen_port)"
-  printf '%s|%s' "$(nb_effective_advertise_host "$mode" "$host")" \
-    "$(nb_effective_advertise_port "$mode" "$port" "$listen_port")"
+  ingress_profile_id="$(tuic_state_field "$id" ingress_profile_id 2>/dev/null || true)"
+  printf '%s|%s' "$(nb_effective_advertise_host "$mode" "$host" "$ingress_profile_id")" \
+    "$(nb_effective_advertise_port "$mode" "$port" "$listen_port" "$ingress_profile_id")"
 }
 
 tuic_export_mihomo() {
@@ -12605,7 +15331,7 @@ tuic_export_mihomo() {
   cat <<EOF
 mixed-port: 7890
 allow-lan: false
-mode: global
+mode: rule
 log-level: warning
 proxies:
   - name: "NoBrand-TUIC-${name}"
@@ -12681,18 +15407,23 @@ tuic_set_endpoint_state() {
 tuic_collect_install_requests() {
   local old_port="" owner
   tuic_protocol_scope_valid || die 'TUIC protocol scope constants invalid'
+  nb_prepare_ingress_request || return 1
+  nb_prepare_ingress_deployment "$INGRESS_PROFILE_ID" native-bind \
+    || die '所选 Ingress strict local address cannot be bound by TUIC'
   TUIC_NAME="${TUIC_NAME:-primary}"
   tuic_valid_name "$TUIC_NAME" || die 'TUIC instance name 无效'
   tuic_find_id_by_name "$TUIC_NAME" >/dev/null 2>&1 \
     && { t "TUIC instance 已存在: ${TUIC_NAME}" "TUIC instance already exists: ${TUIC_NAME}"; return 2; }
   if [ -z "${PORT:-}" ]; then
-    PORT="$(nb_select_available_port UDP)" || die '未找到可用 TUIC UDP port'
+    PORT="$(nb_select_available_port UDP "$INGRESS_PROFILE_ID")" \
+      || die '所选入口配置没有可用 TUIC UDP 自动端口；manual-only 必须显式使用 --port'
     PORT_AUTO_SELECTED=1
   else
     nb_valid_port "$PORT" || die 'TUIC port 必须是 1025-65535'
     PORT="$(normalize_uint "$PORT")"
-    nb_port_is_tail_base_reserved "$PORT" && die 'TUIC 禁止使用保留 xx00 port'
-    nb_port_available_for_transport "$PORT" UDP || {
+    nb_ingress_port_is_reserved "$INGRESS_PROFILE_ID" "$PORT" && die 'TUIC 禁止使用所选入口配置的保留 port'
+    nb_warn_if_outside_recommended_range "$PORT" "$INGRESS_PROFILE_ID"
+    nb_port_available_for_profile "$PORT" UDP "$INGRESS_PROFILE_ID" || {
       owner="$(nb_registry_port_owner UDP "$PORT" 2>/dev/null || true)"
       die "TUIC UDP/${PORT} 已占用${owner:+ by ${owner}}"
     }
@@ -12796,7 +15527,7 @@ install_tuic() {
       rm -rf -- "$runtime_snapshot"
       return 1
     }
-  tuic_generate_server_config "$config_tmp" "$id" 0.0.0.0 "$PORT" "$cert" "$key" "$TUIC_SNI" "$users" \
+  tuic_generate_server_config "$config_tmp" "$id" "$INGRESS_LISTEN_HOST" "$PORT" "$cert" "$key" "$TUIC_SNI" "$users" \
     && tuic_validate_config "$config_tmp" \
     || {
       tuic_install_transaction_rollback "$id" "$PORT" "$runtime_snapshot" "$template_preexisting"
@@ -12805,9 +15536,10 @@ install_tuic() {
       return 1
     }
   mode="$(nb_endpoint_mode_from_values "$ADVERTISE_HOST")"
-  tuic_generate_state "$state_tmp" "$id" "$TUIC_NAME" 0.0.0.0 "$PORT" "$mode" \
+  tuic_generate_state "$state_tmp" "$id" "$TUIC_NAME" "$INGRESS_LISTEN_HOST" "$PORT" "$mode" \
     "$ADVERTISE_HOST" "$ADVERTISE_PORT" "$TUIC_SNI" "$TUIC_CHANNEL" "$runtime_version" \
-    "$cert" "$key" "$users" || {
+    "$cert" "$key" "$users" "" "$INGRESS_PROFILE_ID" \
+    && nb_ingress_stamp_state_file "$state_tmp" "$INGRESS_PROFILE_ID" native-bind || {
       tuic_install_transaction_rollback "$id" "$PORT" "$runtime_snapshot" "$template_preexisting"
       rm -f "$config_tmp" "$state_tmp"
       rm -rf -- "$runtime_snapshot"
@@ -12819,14 +15551,15 @@ install_tuic() {
     rm -rf -- "$runtime_snapshot"
     return 1
   }
-  if ! nb_port_available_for_transport "$PORT" UDP \
+  if ! nb_port_available_for_profile "$PORT" UDP "$INGRESS_PROFILE_ID" \
      || ! nb_atomic_install_file "$config_tmp" "$config" 0600 \
      || ! nb_atomic_install_file "$state_tmp" "$state" 0600 \
      || ! tuic_install_service_runtime \
      || ! tuic_ensure_openrc_service "$id" \
      || ! nb_firewall_open_pairs "UDP|${PORT}" \
      || ! tuic_service_action "$id" start \
-     || ! nb_wait_for_listener UDP "$PORT" 25 \
+     || ! nb_wait_for_enforced_listener "$INGRESS_ENFORCEMENT_RESOLVED" "$INGRESS_ENFORCEMENT_METHOD" \
+          UDP "$PORT" "$INGRESS_LOCAL_ADDRESS" "tuic:${id}" 25 \
      || ! tuic_listener_owned_by_service "$id" "$PORT"; then
     tuic_install_transaction_rollback "$id" "$PORT" "$runtime_snapshot" "$template_preexisting"
     admin_lock_release
@@ -12842,7 +15575,7 @@ install_tuic() {
 }
 
 tuic_commit_candidate_state() {
-  local id="$1" candidate_state="$2" state config config_tmp snapshot running port users
+  local id="$1" candidate_state="$2" state config config_tmp snapshot running port users policy method address rc=0
   state="$(tuic_state_file "$id")" config="$(tuic_config_file "$id")"
   port="$(jq -r .listen_port "$candidate_state")"
   users="$(jq -c .users "$candidate_state")"
@@ -12850,25 +15583,52 @@ tuic_commit_candidate_state() {
   tuic_generate_server_config "$config_tmp" "$id" "$(jq -r .listen_host "$candidate_state")" "$port" \
     "$(jq -r .tls.certificate_path "$candidate_state")" "$(jq -r .tls.key_path "$candidate_state")" \
     "$(jq -r .sni "$candidate_state")" "$users" || return 1
-  tuic_validate_config "$config_tmp" || return 1
-  snapshot="$(mktemp_dir)" || return 1
-  cp -a "$state" "$config" "$snapshot/" || return 1
+  tuic_validate_config "$config_tmp" || { rm -f "$config_tmp"; return 1; }
+  snapshot="$(mktemp_dir)" || { rm -f "$config_tmp"; return 1; }
+  cp -a "$state" "$config" "$snapshot/" || { rm -f "$config_tmp"; rm -rf -- "$snapshot"; return 1; }
   running=0
   tuic_service_active "$id" && running=1
+  policy="$(jq -r '.ingress_enforcement // "permissive"' "$candidate_state")"
+  method="$(jq -r '.ingress_enforcement_method // "wildcard"' "$candidate_state")"
+  address="$(jq -r '.ingress_local_address // empty' "$candidate_state")"
   if ! nb_atomic_install_file "$config_tmp" "$config" 0600 \
      || ! nb_atomic_install_file "$candidate_state" "$state" 0600 \
      || ! { [ "$running" -eq 0 ] || {
-          tuic_service_action "$id" restart \
-            && nb_wait_for_listener UDP "$port" 25 \
-            && tuic_listener_owned_by_service "$id" "$port"
-        }; }; then
+           [ "${NOBRAND_TEST_INGRESS_SERVICE_FAIL:-0}" -eq 0 ] \
+             && tuic_service_action "$id" restart \
+             && [ "${NOBRAND_TEST_INGRESS_LISTENER_FAIL:-0}" -eq 0 ] \
+             && nb_wait_for_enforced_listener "$policy" "$method" UDP "$port" "$address" "tuic:${id}" 25 \
+             && tuic_listener_owned_by_service "$id" "$port"
+         }; }; then
     cp -a "$snapshot/state.json" "$state" 2>/dev/null || true
     cp -a "$snapshot/config.json" "$config" 2>/dev/null || true
-    [ "$running" -eq 0 ] || tuic_service_action "$id" restart >/dev/null 2>&1 || true
-    return 1
+    if [ "$running" -eq 1 ]; then
+      if ! tuic_service_action "$id" restart >/dev/null 2>&1 \
+         || ! tuic_running "$id" >/dev/null 2>&1; then
+        warn "TUIC rollback listener verification failed: ${id}"
+      fi
+    fi
+    rc=1
   fi
   rm -f "$config_tmp"
   rm -rf -- "$snapshot"
+  return "$rc"
+}
+
+tuic_apply_ingress_enforcement() {
+  local id="$1" state profile_id candidate rc
+  state="$(tuic_state_file "$id")"
+  tuic_state_exists "$id" || return 1
+  profile_id="$(tuic_state_field "$id" ingress_profile_id 2>/dev/null || true)"
+  [ -n "$profile_id" ] || profile_id="$NOBRAND_LEGACY_INGRESS_PROFILE_ID"
+  nb_prepare_ingress_deployment "$profile_id" native-bind || return 1
+  candidate="$(mktemp_file .tuic-ingress-state)" || return 1
+  jq --arg listen "$INGRESS_LISTEN_HOST" '.listen_host=$listen' "$state" >"$candidate" \
+    && nb_ingress_stamp_state_file "$candidate" "$profile_id" native-bind \
+    && tuic_commit_candidate_state "$id" "$candidate"
+  rc=$?
+  rm -f "$candidate"
+  return "$rc"
 }
 
 tuic_user_add() {
@@ -12919,8 +15679,10 @@ tuic_show_user() {
   local id="$1" selector="${2:-}" user_json endpoint
   user_json="$(tuic_resolve_user_json "$id" "$selector")" || return 1
   endpoint="$(tuic_effective_endpoint "$id")"
-  printf 'TUIC v5 instance: %s\nUser: %s\nDisplay Endpoint: %s:%s\nSNI: %s\nUUID: %s\nPassword: %s\n' \
+  printf 'TUIC v5 instance: %s\nUser: %s\nIngress Profile: %s\nActual: %s:%s/UDP\nDisplay Endpoint: %s:%s\nSNI: %s\nUUID: %s\nPassword: %s\n' \
     "$(tuic_state_field "$id" name)" "$(jq -r .name <<<"$user_json")" \
+    "$(nb_ingress_profile_name "$(tuic_state_field "$id" ingress_profile_id 2>/dev/null || true)")" \
+    "$(tuic_state_field "$id" listen_host)" "$(tuic_state_field "$id" listen_port)" \
     "${endpoint%%|*}" "${endpoint#*|}" "$(tuic_state_field "$id" sni)" \
     "$(jq -r .uuid <<<"$user_json")" "$(jq -r .password <<<"$user_json")"
 }
@@ -12943,12 +15705,24 @@ tuic_node_rows() {
   while IFS= read -r id; do
     endpoint="$(tuic_effective_endpoint "$id")"
     status=Stopped
-    tuic_service_active "$id" && nb_port_is_listening UDP "$(tuic_state_field "$id" listen_port)" && status=Running
+    tuic_running "$id" && status=Running
     while IFS= read -r user; do
       printf 'TUIC v5|%s/%s|%s:%s|%s|UDP\n' "$(tuic_state_field "$id" name)" \
         "$(jq -r .name <<<"$user")" "${endpoint%%|*}" "${endpoint#*|}" "$status"
     done < <(jq -c '.users[]' "$(tuic_state_file "$id")")
   done < <(tuic_instance_ids)
+}
+
+tuic_running() {
+  local id="$1" port policy method address
+  tuic_state_exists "$id" || return 1
+  port="$(tuic_state_field "$id" listen_port)"
+  policy="$(tuic_state_field "$id" ingress_enforcement 2>/dev/null || printf permissive)"
+  method="$(tuic_state_field "$id" ingress_enforcement_method 2>/dev/null || printf wildcard)"
+  address="$(tuic_state_field "$id" ingress_local_address 2>/dev/null || true)"
+  tuic_service_active "$id" \
+    && nb_wait_for_enforced_listener "$policy" "$method" UDP "$port" "$address" "tuic:${id}" 1 \
+    && tuic_listener_owned_by_service "$id" "$port"
 }
 
 tuic_doctor_one() {
@@ -12965,7 +15739,7 @@ tuic_doctor_one() {
     || { nb_doctor_line FAIL "TUIC config $(tuic_state_field "$id" name)"; failed=1; }
   tuic_service_active "$id" && nb_doctor_line PASS 'service active' \
     || { nb_doctor_line FAIL 'service inactive'; failed=1; }
-  nb_port_is_listening UDP "$port" && tuic_listener_owned_by_service "$id" "$port" \
+  tuic_running "$id" \
     && nb_doctor_line PASS "same-process UDP/${port}" \
     || { nb_doctor_line FAIL "same-process UDP/${port}"; failed=1; }
   nb_firewall_binding_owned UDP "$port" && nb_doctor_line PASS "firewall UDP/${port}" \
@@ -13011,7 +15785,7 @@ tuic_service_command() {
   port="$(tuic_state_field "$id" listen_port)"
   tuic_service_action "$id" "$action" || return 1
   case "$action" in
-    start|restart) nb_wait_for_listener UDP "$port" 25 && tuic_listener_owned_by_service "$id" "$port" ;;
+    start|restart) tuic_running "$id" ;;
   esac
 }
 
@@ -13048,8 +15822,7 @@ tuic_upgrade_runtime_rollback() {
     [ -n "$id" ] || continue
     port="$(tuic_state_field "$id" listen_port 2>/dev/null || true)"
     tuic_service_action "$id" restart >/dev/null 2>&1 \
-      && nb_wait_for_listener UDP "$port" 25 \
-      && tuic_listener_owned_by_service "$id" "$port" || failed=1
+      && tuic_running "$id" || failed=1
   done <"$active_file"
   [ "$failed" -eq 0 ]
 }
@@ -13102,8 +15875,7 @@ tuic_upgrade_runtime() {
     [ -n "$id" ] || continue
     port="$(tuic_state_field "$id" listen_port)"
     if ! tuic_service_action "$id" restart \
-       || ! nb_wait_for_listener UDP "$port" 25 \
-       || ! tuic_listener_owned_by_service "$id" "$port"; then
+       || ! tuic_running "$id"; then
       failed=1
       break
     fi
@@ -13204,6 +15976,1174 @@ TUIC v5 only; official sing-box; UDP/QUIC; independent UUID + password per user.
 EOF
       ;;
     *) die "未知 TUIC 操作: ${TUIC_ACTION}" ;;
+  esac
+}
+
+# ---------- VLESS + TCP + REALITY + XTLS Vision ----------
+
+reality_valid_name() {
+  local value="${1:-}"
+  [ -n "$value" ] && [ "$(printf '%s' "$value" | wc -c | tr -d '[:space:]')" -le 64 ] \
+    && ! has_control_chars "$value" && [[ "$value" != *'|'* ]]
+}
+
+reality_generate_instance_id() {
+  local value
+  value="$(openssl rand -hex 8 2>/dev/null || true)"
+  [ -n "$value" ] || value="$(printf '%08x%08x' "$RANDOM" "$RANDOM")"
+  printf 'r%s' "$value"
+}
+
+reality_instance_ids() {
+  local path id
+  for path in "$NOBRAND_REALITY_STATE_DIR"/*/state.json; do
+    [ -f "$path" ] || continue
+    id="$(basename "$(dirname "$path")")"
+    [[ "$id" =~ ^r[0-9a-f]{16}$ ]] || continue
+    jq -e --arg id "$id" '
+      .schema_version==3 and .ownership=="nobrand-v3"
+      and .protocol=="vless-reality" and .instance_id==$id
+    ' "$path" >/dev/null 2>&1 || continue
+    printf '%s\n' "$id"
+  done
+}
+
+reality_state_file() { printf '%s/%s/state.json' "$NOBRAND_REALITY_STATE_DIR" "$1"; }
+reality_instance_config_dir() { printf '%s/%s' "$NOBRAND_REALITY_CONFIG_DIR" "$1"; }
+reality_config_file() { printf '%s/config.json' "$(reality_instance_config_dir "$1")"; }
+reality_private_key_file() { printf '%s/private.key' "$(reality_instance_config_dir "$1")"; }
+
+reality_state_exists() {
+  local id="$1" state
+  state="$(reality_state_file "$id")"
+  [ -s "$state" ] && jq -e --arg id "$id" '
+    .schema_version==3 and .ownership=="nobrand-v3"
+    and .protocol=="vless-reality" and .instance_id==$id
+  ' "$state" >/dev/null 2>&1
+}
+
+reality_state_field() {
+  local id="$1" field="$2" state
+  state="$(reality_state_file "$id")"
+  reality_state_exists "$id" || return 1
+  jq -r --arg field "$field" --arg default_target_port "$NOBRAND_REALITY_DEFAULT_CAMOUFLAGE_PORT" '
+    if has($field) and .[$field]!=null then .[$field]
+    elif $field=="target_port" then $default_target_port
+    elif $field=="camouflage_mode" then "custom"
+    else empty
+    end
+  ' "$state"
+}
+
+reality_public_inbound_tag() { printf 'nobrand-vless-reality-%s-in' "$1"; }
+reality_defender_tag() { printf 'nobrand-vless-reality-%s-defender' "$1"; }
+
+reality_defender_owner_rows() {
+  local id state
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    state="$(reality_state_file "$id")"
+    jq -r --arg id "$id" '
+      select(.defender_enabled == true)
+      | select(.defender_port | type == "number")
+      | [$id, (.defender_port|tostring), (.defender_tag // "")] | @tsv
+    ' "$state" 2>/dev/null || true
+  done < <(reality_instance_ids)
+}
+
+reality_defender_port_owner() {
+  local port="$1" ignore_id="${2:-}" id row_port _tag
+  while IFS=$'\t' read -r id row_port _tag; do
+    [ "$id" = "$ignore_id" ] && continue
+    if [ "$row_port" = "$port" ]; then
+      printf 'vless-reality-defender:%s' "$id"
+      return 0
+    fi
+  done < <(reality_defender_owner_rows)
+  return 1
+}
+
+reality_defender_port_available() {
+  local port="$1" ignore_id="${2:-}" public_port="${3:-}"
+  nb_valid_port "$port" || return 1
+  [ "$port" -ge "$NOBRAND_REALITY_DEFENDER_PORT_MIN" ] \
+    && [ "$port" -le "$NOBRAND_REALITY_DEFENDER_PORT_MAX" ] || return 1
+  [ -z "$public_port" ] || [ "$port" != "$public_port" ] || return 1
+  reality_defender_port_owner "$port" "$ignore_id" >/dev/null 2>&1 && return 1
+  nb_registry_port_owner TCP "$port" >/dev/null 2>&1 && return 1
+  nb_port_is_listening TCP "$port" && return 1
+  return 0
+}
+
+reality_select_defender_port() {
+  local public_port="${1:-}"
+  nb_scan_port_span "$NOBRAND_REALITY_DEFENDER_PORT_MIN" "$NOBRAND_REALITY_DEFENDER_PORT_MAX" \
+    reality_defender_port_available '' "$public_port"
+}
+
+reality_defender_registry_valid() {
+  local id port tag owner
+  declare -A seen=()
+  while IFS=$'\t' read -r id port tag; do
+    [[ "$id" =~ ^r[0-9a-f]{16}$ ]] || return 1
+    nb_valid_port "$port" || return 1
+    [ "$port" -ge "$NOBRAND_REALITY_DEFENDER_PORT_MIN" ] \
+      && [ "$port" -le "$NOBRAND_REALITY_DEFENDER_PORT_MAX" ] || return 1
+    [ "$tag" = "$(reality_defender_tag "$id")" ] || return 1
+    [ -z "${seen[$port]:-}" ] || return 1
+    seen[$port]="$id"
+    owner="$(nb_registry_port_owner TCP "$port" 2>/dev/null || true)"
+    [ -z "$owner" ] || return 1
+  done < <(reality_defender_owner_rows)
+}
+
+reality_find_id_by_name() {
+  local name="$1" id matched=""
+  while IFS= read -r id; do
+    [ "$(reality_state_field "$id" name 2>/dev/null || true)" = "$name" ] || continue
+    [ -z "$matched" ] || return 1
+    matched="$id"
+  done < <(reality_instance_ids)
+  [ -n "$matched" ] || return 1
+  printf '%s' "$matched"
+}
+
+reality_resolve_instance_id() {
+  local selector="${1:-}" ids id
+  if [[ "$selector" =~ ^r[0-9a-f]{16}$ ]] && reality_state_exists "$selector"; then
+    printf '%s' "$selector"
+    return 0
+  fi
+  if [ -n "$selector" ]; then
+    reality_find_id_by_name "$selector"
+    return $?
+  fi
+  ids="$(reality_instance_ids)"
+  [ "$(printf '%s\n' "$ids" | sed '/^$/d' | wc -l | tr -d '[:space:]')" -eq 1 ] || return 1
+  id="$(printf '%s\n' "$ids" | sed '/^$/d')"
+  printf '%s' "$id"
+}
+
+reality_valid_uuid() {
+  [[ "${1:-}" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]]
+}
+
+reality_generate_uuid() {
+  local value=""
+  if [ -x "$NOBRAND_XRAY_BIN" ]; then
+    value="$("$NOBRAND_XRAY_BIN" uuid 2>/dev/null | tr -d '\r\n' || true)"
+  fi
+  if ! reality_valid_uuid "$value" && command -v uuidgen >/dev/null 2>&1; then
+    value="$(uuidgen 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr -d '\r\n' || true)"
+  fi
+  if ! reality_valid_uuid "$value" && [ -r /proc/sys/kernel/random/uuid ]; then
+    value="$(tr -d '\r\n' </proc/sys/kernel/random/uuid)"
+  fi
+  reality_valid_uuid "$value" || return 1
+  printf '%s' "$value"
+}
+
+reality_valid_x25519_key() {
+  [[ "${1:-}" =~ ^[A-Za-z0-9_-]{43}$ ]]
+}
+
+reality_generate_keypair() {
+  local output private_key public_key
+  [ -x "$NOBRAND_XRAY_BIN" ] || return 1
+  output="$("$NOBRAND_XRAY_BIN" x25519 2>/dev/null)" || return 1
+  private_key="$(sed -nE 's/^PrivateKey:[[:space:]]*//p' <<<"$output" | head -n1 | tr -d '\r\n')"
+  public_key="$(sed -nE 's/^Password \(PublicKey\):[[:space:]]*//p' <<<"$output" | head -n1 | tr -d '\r\n')"
+  reality_valid_x25519_key "$private_key" && reality_valid_x25519_key "$public_key" || return 1
+  printf '%s|%s' "$private_key" "$public_key"
+}
+
+reality_derive_public_key() {
+  local private_key="$1" output public_key
+  reality_valid_x25519_key "$private_key" || return 1
+  output="$("$NOBRAND_XRAY_BIN" x25519 -i "$private_key" 2>/dev/null)" || return 1
+  public_key="$(sed -nE 's/^Password \(PublicKey\):[[:space:]]*//p' <<<"$output" | head -n1 | tr -d '\r\n')"
+  reality_valid_x25519_key "$public_key" || return 1
+  printf '%s' "$public_key"
+}
+
+reality_valid_short_id() {
+  local value="${1:-}"
+  [[ "$value" =~ ^[0-9a-fA-F]{2,16}$ ]] && [ "$(( ${#value} % 2 ))" -eq 0 ]
+}
+
+reality_generate_short_id() {
+  local value
+  value="$(openssl rand -hex 8 2>/dev/null || true)"
+  reality_valid_short_id "$value" || return 1
+  printf '%s' "$value"
+}
+
+reality_normalize_hostname() {
+  printf '%s' "${1%.}" | tr '[:upper:]' '[:lower:]'
+}
+
+reality_valid_public_hostname_syntax() {
+  local host
+  host="$(reality_normalize_hostname "${1:-}")"
+  [ -n "$host" ] && [ "${#host}" -le 253 ] || return 1
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 - "$host" <<'PY'
+import re
+import sys
+
+host = sys.argv[1]
+if host in {"localhost", "localhost.localdomain"} or "." not in host:
+    raise SystemExit(1)
+labels = host.split(".")
+ok = all(1 <= len(label) <= 63 and
+         re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", label)
+         for label in labels)
+raise SystemExit(0 if ok and not host.replace(".", "").isdigit() else 1)
+PY
+}
+
+reality_target_resolves_public() {
+  local host="$1" port="$2"
+  python3 - "$host" "$port" <<'PY'
+import ipaddress
+import socket
+import sys
+
+host, port = sys.argv[1], int(sys.argv[2])
+try:
+    addresses = {item[4][0] for item in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)}
+except OSError:
+    raise SystemExit(1)
+if not addresses:
+    raise SystemExit(1)
+for raw in addresses:
+    ip = ipaddress.ip_address(raw.split("%", 1)[0])
+    if not ip.is_global:
+        raise SystemExit(1)
+raise SystemExit(0)
+PY
+}
+
+reality_validate_target_live() {
+  local host="$1" port="$2" log rc=0
+  reality_valid_public_hostname_syntax "$host" && nb_valid_port "$port" || return 1
+  reality_target_resolves_public "$host" "$port" || return 1
+  log="$(mktemp_file .reality-target)" || return 1
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 20 openssl s_client -connect "${host}:${port}" -servername "$host" \
+      -verify_hostname "$host" -verify_return_error -tls1_3 -brief </dev/null >"$log" 2>&1 || rc=$?
+  else
+    openssl s_client -connect "${host}:${port}" -servername "$host" \
+      -verify_hostname "$host" -verify_return_error -tls1_3 -brief </dev/null >"$log" 2>&1 || rc=$?
+  fi
+  rm -f "$log"
+  [ "$rc" -eq 0 ]
+}
+
+reality_auto_candidate_rows() {
+  printf '%s\n' "${REALITY_AUTO_QUALIFIED_CANDIDATES[@]}"
+}
+
+reality_randomized_auto_candidates() {
+  local candidates=() index swap_index swap
+  mapfile -t candidates < <(reality_auto_candidate_rows)
+  for ((index=${#candidates[@]}-1; index>0; index--)); do
+    swap_index=$((RANDOM % (index + 1)))
+    swap="${candidates[$index]}"
+    candidates[$index]="${candidates[$swap_index]}"
+    candidates[$swap_index]="$swap"
+  done
+  printf '%s\n' "${candidates[@]}"
+}
+
+reality_select_auto_camouflage_target() {
+  local target_port="$1" candidate seen_candidates='|'
+  VLESS_REALITY_TARGET=""
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    case "$seen_candidates" in
+      *"|${candidate}|"*) continue ;;
+    esac
+    seen_candidates="${seen_candidates}${candidate}|"
+    if reality_validate_target_live "$candidate" "$target_port"; then
+      VLESS_REALITY_TARGET="$candidate"
+      VLESS_REALITY_CAMOUFLAGE_MODE=auto
+      info "REALITY automatic camouflage selected: ${candidate}:${target_port}"
+      return 0
+    fi
+    warn "REALITY automatic camouflage candidate unavailable on target port ${target_port}: ${candidate}"
+  done < <(reality_randomized_auto_candidates)
+  return 1
+}
+
+reality_resolve_camouflage_request() {
+  VLESS_REALITY_TARGET_PORT="${VLESS_REALITY_TARGET_PORT:-$NOBRAND_REALITY_DEFAULT_CAMOUFLAGE_PORT}"
+  nb_valid_port "$VLESS_REALITY_TARGET_PORT" || return 1
+  VLESS_REALITY_TARGET_PORT="$(normalize_uint "$VLESS_REALITY_TARGET_PORT")"
+  if [ -z "${VLESS_REALITY_TARGET:-}" ]; then
+    VLESS_REALITY_CAMOUFLAGE_MODE=auto
+    reality_select_auto_camouflage_target "$VLESS_REALITY_TARGET_PORT"
+    return
+  fi
+  VLESS_REALITY_CAMOUFLAGE_MODE=custom
+  VLESS_REALITY_TARGET="$(reality_normalize_hostname "$VLESS_REALITY_TARGET")"
+  reality_valid_public_hostname_syntax "$VLESS_REALITY_TARGET" \
+    && reality_validate_target_live "$VLESS_REALITY_TARGET" "$VLESS_REALITY_TARGET_PORT"
+}
+
+reality_profile_recommendation() {
+  local profile_id="$1" type
+  type="$(nb_ingress_profile_json "$profile_id" 2>/dev/null | jq -r .type)" || return 1
+  case "$type" in
+    public) printf 'recommended' ;;
+    mapped|legacy) printf 'warning' ;;
+    *) return 1 ;;
+  esac
+}
+
+reality_generate_server_config() {
+  local output="$1" id="$2" listen="$3" port="$4" uuid="$5" private_key="$6"
+  local short_id="$7" server_name="$8" target_port="$9" defender_port="${10}"
+  reality_valid_uuid "$uuid" && reality_valid_x25519_key "$private_key" \
+    && reality_valid_short_id "$short_id" && reality_valid_public_hostname_syntax "$server_name" \
+    && nb_valid_port "$port" && nb_valid_port "$target_port" \
+    && nb_valid_port "$defender_port" || return 1
+  jq -n --arg tag "$(reality_public_inbound_tag "$id")" \
+    --arg defender_tag "$(reality_defender_tag "$id")" --arg listen "$listen" \
+    --arg port "$port" --arg uuid "$uuid" --arg private_key "$private_key" \
+    --arg short_id "$short_id" --arg server_name "$server_name" \
+    --arg target_port "$target_port" --arg defender_port "$defender_port" \
+    --arg target "127.0.0.1:${defender_port}" \
+    --arg min_client_ver "$NOBRAND_REALITY_MIN_CLIENT_VER" \
+    --arg dispatch "$NOBRAND_REALITY_DEFENDER_DISPATCH_HOST" \
+    --arg redirect "${server_name}:${target_port}" '
+    {
+      log:{loglevel:"warning"},
+      inbounds:[
+        {
+          tag:$tag,listen:$listen,port:($port|tonumber),protocol:"vless",
+          settings:{
+            clients:[{id:$uuid,email:"vless-reality@nobrand",flow:"xtls-rprx-vision"}],
+            decryption:"none"
+          },
+          streamSettings:{
+            network:"tcp",security:"reality",
+            realitySettings:{
+              show:false,target:$target,xver:0,minClientVer:$min_client_ver,serverNames:[$server_name],
+              privateKey:$private_key,shortIds:[$short_id]
+            }
+          },
+          sniffing:{enabled:true,destOverride:["http","tls","quic"]}
+        },
+        {
+          tag:$defender_tag,listen:"127.0.0.1",port:($defender_port|tonumber),
+          protocol:"dokodemo-door",
+          settings:{address:$dispatch,port:($target_port|tonumber),network:"tcp"},
+          sniffing:{enabled:true,routeOnly:true,destOverride:["tls"]}
+        }
+      ],
+      outbounds:[
+        {tag:"PUBLIC_DIRECT",protocol:"freedom"},
+        {tag:"DIRECT",protocol:"freedom",settings:{redirect:$redirect}},
+        {tag:"BLOCK",protocol:"blackhole"}
+      ],
+      routing:{rules:[
+        {type:"field",ip:["geoip:private"],outboundTag:"BLOCK"},
+        {type:"field",network:"tcp",port:"25,135,137,138,139,445,465,587",outboundTag:"BLOCK"},
+        {type:"field",protocol:["bittorrent"],outboundTag:"BLOCK"},
+        {type:"field",inboundTag:[$defender_tag],domain:["full:"+$server_name],outboundTag:"DIRECT"},
+        {type:"field",inboundTag:[$defender_tag],outboundTag:"BLOCK"},
+        {type:"field",inboundTag:[$tag],outboundTag:"PUBLIC_DIRECT"}
+      ]}
+    }
+  ' >"$output"
+}
+
+reality_generate_state() {
+  local output="$1" id="$2" name="$3" listen="$4" port="$5" mode="$6"
+  local advertise_host="$7" advertise_port="$8" uuid="$9" public_key="${10}"
+  local private_key_path="${11}" short_id="${12}" server_name="${13}" target_port="${14}"
+  local fingerprint="${15}" spider_x="${16}" runtime_version="${17}"
+  local ingress_profile_id="${18}" defender_port="${19}" created_at="${20:-}"
+  local camouflage_mode="${21:-custom}"
+  local updated_at recommendation defender_tag
+  [ -n "$created_at" ] || created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  updated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  recommendation="$(reality_profile_recommendation "$ingress_profile_id")" || return 1
+  defender_tag="$(reality_defender_tag "$id")"
+  jq -n --arg id "$id" --arg name "$name" --arg listen "$listen" --arg port "$port" \
+    --arg mode "$mode" --arg advertise_host "$advertise_host" --arg advertise_port "$advertise_port" \
+    --arg uuid "$uuid" --arg public_key "$public_key" --arg private_key_path "$private_key_path" \
+    --arg short_id "$short_id" --arg server_name "$server_name" --arg target_port "$target_port" \
+    --arg camouflage_mode "$camouflage_mode" \
+    --arg fingerprint "$fingerprint" --arg spider_x "$spider_x" --arg runtime "$runtime_version" \
+    --arg ingress "$ingress_profile_id" --arg recommendation "$recommendation" \
+    --arg defender_port "$defender_port" --arg defender_tag "$defender_tag" \
+    --arg defender_dispatch "$NOBRAND_REALITY_DEFENDER_DISPATCH_HOST" \
+    --arg created "$created_at" --arg updated "$updated_at" '
+    {
+      schema_version:3,ownership:"nobrand-v3",protocol:"vless-reality",
+      instance_id:$id,name:$name,listen_host:$listen,listen_port:($port|tonumber),
+      transport:"tcp",network:"tcp",security:"reality",flow:"xtls-rprx-vision",
+      uuid:$uuid,public_key:$public_key,private_key_path:$private_key_path,short_id:$short_id,
+      camouflage_mode:$camouflage_mode,server_name:$server_name,target_host:$server_name,
+      target_port:($target_port|tonumber),
+      defender_enabled:true,defender_protocol:"dokodemo-door",defender_listen:"127.0.0.1",
+      defender_port:($defender_port|tonumber),defender_tag:$defender_tag,
+      defender_dispatch_host:$defender_dispatch,defender_target_mode:"fixed-outbound-redirect",
+      fingerprint:$fingerprint,spider_x:$spider_x,show:false,xver:0,
+      advertise_mode:$mode,advertise_host:$advertise_host,
+      advertise_port:(if $advertise_port=="" then "" else ($advertise_port|tonumber) end),
+      ingress_profile_id:$ingress,profile_recommendation:$recommendation,
+      runtime_version:$runtime,enabled:true,created_at:$created,updated_at:$updated
+    }
+  ' >"$output"
+}
+
+reality_state_matches() {
+  local state="$1" id="${2:-}"
+  jq -e --arg id "$id" \
+    --argjson defender_min "$NOBRAND_REALITY_DEFENDER_PORT_MIN" \
+    --argjson defender_max "$NOBRAND_REALITY_DEFENDER_PORT_MAX" \
+    --argjson default_target_port "$NOBRAND_REALITY_DEFAULT_CAMOUFLAGE_PORT" \
+    --arg defender_dispatch "$NOBRAND_REALITY_DEFENDER_DISPATCH_HOST" '
+    .schema_version==3 and .ownership=="nobrand-v3" and .protocol=="vless-reality"
+    and (.instance_id|test("^r[0-9a-f]{16}$"))
+    and ($id=="" or .instance_id==$id)
+    and (.name | (type=="string" and length>0))
+    and (.listen_host | (type=="string" and length>0))
+    and (.listen_port | (type=="number" and .>=1 and .<=65535 and floor==.))
+    and .transport=="tcp" and .network=="tcp" and .security=="reality"
+    and .flow=="xtls-rprx-vision"
+    and (.uuid|test("^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"))
+    and (.public_key|test("^[A-Za-z0-9_-]{43}$"))
+    and (.private_key_path | (type=="string" and length>0))
+    and (.short_id|test("^(?:[0-9a-fA-F]{2}){1,8}$"))
+    and ((.camouflage_mode // "custom")=="auto" or (.camouflage_mode // "custom")=="custom")
+    and .server_name==.target_host
+    and ((.target_port // $default_target_port) | (type=="number" and .>=1 and .<=65535 and floor==.))
+    and .defender_enabled==true and .defender_protocol=="dokodemo-door"
+    and .defender_listen=="127.0.0.1"
+    and (.defender_port | (type=="number" and .>=$defender_min and .<=$defender_max and floor==.))
+    and .defender_tag==("nobrand-vless-reality-"+.instance_id+"-defender")
+    and .defender_dispatch_host==$defender_dispatch
+    and .defender_target_mode=="fixed-outbound-redirect"
+    and .fingerprint=="chrome" and .spider_x=="/" and .show==false and .xver==0
+    and ((.advertise_mode=="auto" and .advertise_host=="" and .advertise_port=="") or
+         (.advertise_mode=="custom" and (.advertise_host | (type=="string" and length>0))
+          and (.advertise_port | (type=="number" and .>=1 and .<=65535 and floor==.))))
+    and (.ingress_profile_id | (type=="string" and length>0))
+    and (.profile_recommendation=="recommended" or .profile_recommendation=="warning")
+    and (.runtime_version | (type=="string" and length>0))
+    and (.enabled | type=="boolean")
+    and ((.ingress_enforcement // "permissive")=="permissive" or .ingress_enforcement=="strict")
+    and ((.ingress_enforcement_method // "wildcard")=="wildcard" or .ingress_enforcement_method=="native-bind")
+  ' "$state" >/dev/null 2>&1
+}
+
+reality_config_matches_state() {
+  local id="$1" state config key_path private_key
+  state="$(reality_state_file "$id")" config="$(reality_config_file "$id")"
+  reality_state_matches "$state" "$id" || return 1
+  key_path="$(jq -r .private_key_path "$state")"
+  [ -s "$key_path" ] || return 1
+  private_key="$(tr -d '\r\n' <"$key_path")"
+  reality_valid_x25519_key "$private_key" || return 1
+  jq -e --slurpfile state "$state" --arg private_key "$private_key" \
+    --arg min_client_ver "$NOBRAND_REALITY_MIN_CLIENT_VER" \
+    --argjson default_target_port "$NOBRAND_REALITY_DEFAULT_CAMOUFLAGE_PORT" '
+    (.inbounds|length)==2
+    and .inbounds[0].tag==("nobrand-vless-reality-"+$state[0].instance_id+"-in")
+    and .inbounds[0].listen==$state[0].listen_host
+    and .inbounds[0].port==$state[0].listen_port
+    and .inbounds[0].protocol=="vless"
+    and .inbounds[0].settings.decryption=="none"
+    and .inbounds[0].settings.clients==[{
+      id:$state[0].uuid,email:"vless-reality@nobrand",flow:"xtls-rprx-vision"
+    }]
+    and .inbounds[0].streamSettings.network=="tcp"
+    and .inbounds[0].streamSettings.security=="reality"
+    and .inbounds[0].streamSettings.realitySettings=={
+      show:false,target:("127.0.0.1:"+($state[0].defender_port|tostring)),xver:0,
+      minClientVer:$min_client_ver,
+      serverNames:[$state[0].server_name],privateKey:$private_key,shortIds:[$state[0].short_id]
+    }
+    and .inbounds[0].sniffing=={enabled:true,destOverride:["http","tls","quic"]}
+    and .inbounds[1]=={
+      tag:$state[0].defender_tag,listen:"127.0.0.1",port:$state[0].defender_port,
+      protocol:"dokodemo-door",
+      settings:{address:$state[0].defender_dispatch_host,port:($state[0].target_port // $default_target_port),network:"tcp"},
+      sniffing:{enabled:true,routeOnly:true,destOverride:["tls"]}
+    }
+    and .outbounds==[
+      {tag:"PUBLIC_DIRECT",protocol:"freedom"},
+      {tag:"DIRECT",protocol:"freedom",settings:{redirect:($state[0].target_host+":"+(($state[0].target_port // $default_target_port)|tostring))}},
+      {tag:"BLOCK",protocol:"blackhole"}
+    ]
+    and .routing.rules==[
+      {type:"field",ip:["geoip:private"],outboundTag:"BLOCK"},
+      {type:"field",network:"tcp",port:"25,135,137,138,139,445,465,587",outboundTag:"BLOCK"},
+      {type:"field",protocol:["bittorrent"],outboundTag:"BLOCK"},
+      {type:"field",inboundTag:[$state[0].defender_tag],domain:["full:"+$state[0].target_host],outboundTag:"DIRECT"},
+      {type:"field",inboundTag:[$state[0].defender_tag],outboundTag:"BLOCK"},
+      {type:"field",inboundTag:[("nobrand-vless-reality-"+$state[0].instance_id+"-in")],outboundTag:"PUBLIC_DIRECT"}
+    ]
+  ' "$config" >/dev/null 2>&1
+}
+
+reality_effective_endpoint() {
+  local id="$1" mode host port listen_port ingress
+  mode="$(reality_state_field "$id" advertise_mode)"
+  host="$(reality_state_field "$id" advertise_host)"
+  port="$(reality_state_field "$id" advertise_port)"
+  listen_port="$(reality_state_field "$id" listen_port)"
+  ingress="$(reality_state_field "$id" ingress_profile_id)"
+  printf '%s|%s' "$(nb_effective_advertise_host "$mode" "$host" "$ingress")" \
+    "$(nb_effective_advertise_port "$mode" "$port" "$listen_port" "$ingress")"
+}
+
+reality_build_uri() {
+  local id="$1" endpoint host port uuid sni fingerprint public_key short_id name
+  endpoint="$(reality_effective_endpoint "$id")" || return 1
+  host="${endpoint%%|*}"; port="${endpoint#*|}"
+  uuid="$(reality_state_field "$id" uuid)"
+  sni="$(reality_state_field "$id" server_name)"
+  fingerprint="$(reality_state_field "$id" fingerprint)"
+  public_key="$(reality_state_field "$id" public_key)"
+  short_id="$(reality_state_field "$id" short_id)"
+  name="$(urlencode "NoBrand-REALITY-$(reality_state_field "$id" name)")" || return 1
+  printf 'vless://%s@%s:%s?security=reality&type=tcp&flow=xtls-rprx-vision&sni=%s&fp=%s&pbk=%s&sid=%s&spx=%%2F#%s' \
+    "$uuid" "$(url_host "$host")" "$port" "$(urlencode "$sni")" "$fingerprint" \
+    "$(urlencode "$public_key")" "$short_id" "$name"
+}
+
+reality_export_xray() {
+  local id="$1" socks_port="${2:-18080}" endpoint host port
+  endpoint="$(reality_effective_endpoint "$id")" || return 1
+  host="${endpoint%%|*}"; port="${endpoint#*|}"
+  jq -n --arg host "$host" --arg port "$port" --arg socks_port "$socks_port" \
+    --arg uuid "$(reality_state_field "$id" uuid)" \
+    --arg server_name "$(reality_state_field "$id" server_name)" \
+    --arg fingerprint "$(reality_state_field "$id" fingerprint)" \
+    --arg password "$(reality_state_field "$id" public_key)" \
+    --arg short_id "$(reality_state_field "$id" short_id)" \
+    --arg spider_x "$(reality_state_field "$id" spider_x)" '
+    {
+      log:{loglevel:"warning"},
+      inbounds:[{tag:"local-socks",listen:"127.0.0.1",port:($socks_port|tonumber),
+                 protocol:"socks",settings:{udp:true}}],
+      outbounds:[{
+        tag:"vless-reality-out",protocol:"vless",
+        settings:{vnext:[{address:$host,port:($port|tonumber),
+          users:[{id:$uuid,encryption:"none",flow:"xtls-rprx-vision"}]}]},
+        streamSettings:{network:"tcp",security:"reality",realitySettings:{
+          serverName:$server_name,fingerprint:$fingerprint,password:$password,
+          shortId:$short_id,spiderX:$spider_x
+        }}
+      }]
+    }
+  '
+}
+
+reality_export_mihomo() {
+  local id="$1" endpoint host port name
+  endpoint="$(reality_effective_endpoint "$id")" || return 1
+  host="${endpoint%%|*}"; port="${endpoint#*|}"; name="$(reality_state_field "$id" name)"
+  cat <<EOF
+mixed-port: 7890
+allow-lan: false
+mode: rule
+log-level: warning
+proxies:
+  - name: "NoBrand-REALITY-${name}"
+    type: vless
+    server: "${host}"
+    port: ${port}
+    uuid: "$(reality_state_field "$id" uuid)"
+    network: tcp
+    tls: true
+    udp: true
+    flow: xtls-rprx-vision
+    servername: "$(reality_state_field "$id" server_name)"
+    client-fingerprint: "$(reality_state_field "$id" fingerprint)"
+    reality-opts:
+      public-key: "$(reality_state_field "$id" public_key)"
+      short-id: "$(reality_state_field "$id" short_id)"
+proxy-groups:
+  - name: NOBRAND
+    type: select
+    proxies: ["NoBrand-REALITY-${name}"]
+rules:
+  - MATCH,NOBRAND
+EOF
+}
+
+reality_export_singbox() {
+  local id="$1" endpoint host port tag
+  endpoint="$(reality_effective_endpoint "$id")" || return 1
+  host="${endpoint%%|*}"; port="${endpoint#*|}"; tag="nobrand-reality-$(reality_state_field "$id" name)"
+  jq -n --arg tag "$tag" --arg host "$host" --arg port "$port" \
+    --arg uuid "$(reality_state_field "$id" uuid)" \
+    --arg server_name "$(reality_state_field "$id" server_name)" \
+    --arg fingerprint "$(reality_state_field "$id" fingerprint)" \
+    --arg public_key "$(reality_state_field "$id" public_key)" \
+    --arg short_id "$(reality_state_field "$id" short_id)" '
+    {
+      log:{level:"warn",timestamp:true},
+      inbounds:[{type:"mixed",tag:"mixed-in",listen:"127.0.0.1",listen_port:1080}],
+      outbounds:[{
+        type:"vless",tag:$tag,server:$host,server_port:($port|tonumber),uuid:$uuid,
+        flow:"xtls-rprx-vision",
+        tls:{enabled:true,server_name:$server_name,
+          utls:{enabled:true,fingerprint:$fingerprint},
+          reality:{enabled:true,public_key:$public_key,short_id:$short_id}}
+      }],
+      route:{final:$tag}
+    }
+  '
+}
+
+reality_set_endpoint_state() {
+  local id="$1" host="$2" port="$3" mode=custom state tmp
+  state="$(reality_state_file "$id")"
+  reality_state_exists "$id" || return 1
+  if [ -z "$host" ]; then
+    mode=auto; port=""
+  else
+    nb_validate_advertise_endpoint "$host" "$port" TCP || return 1
+    port="$(normalize_uint "$port")"
+  fi
+  tmp="$(mktemp_file .reality-state)" || return 1
+  jq --arg mode "$mode" --arg host "$host" --arg port "$port" \
+    --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+    .advertise_mode=$mode | .advertise_host=$host
+    | .advertise_port=(if $port=="" then "" else ($port|tonumber) end)
+    | .updated_at=$updated
+  ' "$state" >"$tmp" && nb_atomic_install_file "$tmp" "$state" 0600
+  rm -f "$tmp"
+}
+
+reality_apply_camouflage_defaults() {
+  VLESS_REALITY_TARGET_PORT="${VLESS_REALITY_TARGET_PORT:-$NOBRAND_REALITY_DEFAULT_CAMOUFLAGE_PORT}"
+  if [ -z "${VLESS_REALITY_TARGET:-}" ]; then
+    VLESS_REALITY_CAMOUFLAGE_MODE=auto
+  else
+    VLESS_REALITY_CAMOUFLAGE_MODE=custom
+  fi
+}
+
+reality_collect_install_requests() {
+  local owner profile_type input=""
+  nb_prepare_ingress_request || return 1
+  nb_prepare_ingress_deployment "$INGRESS_PROFILE_ID" native-bind \
+    || die '所选 Ingress strict local address cannot be bound by VLESS REALITY'
+  VLESS_REALITY_NAME="${VLESS_REALITY_NAME:-primary}"
+  reality_valid_name "$VLESS_REALITY_NAME" || die 'VLESS REALITY instance name 无效'
+  reality_find_id_by_name "$VLESS_REALITY_NAME" >/dev/null 2>&1 \
+    && { t "VLESS REALITY instance 已存在: ${VLESS_REALITY_NAME}" \
+      "VLESS REALITY instance already exists: ${VLESS_REALITY_NAME}"; return 2; }
+
+  profile_type="$(nb_ingress_profile_json "$INGRESS_PROFILE_ID" | jq -r .type)"
+  if [ "$profile_type" = public ]; then
+    info "VLESS REALITY: $(nb_ingress_profile_name "$INGRESS_PROFILE_ID") is Recommended (public Profile)"
+  else
+    warn "VLESS REALITY is not recommended for mapped/dedicated ingress; installation remains allowed"
+  fi
+
+  if [ "${YES:-0}" -ne 1 ] && [ "${VLESS_REALITY_TARGET_CLI:-0}" -eq 0 ]; then
+    read_tty input "$(t \
+      'REALITY 伪装 hostname [auto]: ' \
+      'REALITY camouflage host [auto]: ')" || input=""
+    VLESS_REALITY_TARGET="$input"
+  fi
+  if [ "${YES:-0}" -ne 1 ] && [ "${VLESS_REALITY_TARGET_PORT_CLI:-0}" -eq 0 ]; then
+    read_tty input "$(t \
+      "REALITY 伪装目标端口 [${NOBRAND_REALITY_DEFAULT_CAMOUFLAGE_PORT}]: " \
+      "REALITY camouflage target port [${NOBRAND_REALITY_DEFAULT_CAMOUFLAGE_PORT}]: ")" || input=""
+    VLESS_REALITY_TARGET_PORT="${input:-$NOBRAND_REALITY_DEFAULT_CAMOUFLAGE_PORT}"
+  fi
+  reality_apply_camouflage_defaults
+  nb_valid_port "$VLESS_REALITY_TARGET_PORT" || die 'REALITY target port 必须是 1-65535'
+  [ "$VLESS_REALITY_FINGERPRINT" = chrome ] || die 'Phase 2 REALITY fingerprint 固定为 chrome'
+  [ "$VLESS_REALITY_SPIDER_X" = / ] || die 'Phase 2 REALITY spiderX 固定为 /'
+
+  if [ -z "${PORT:-}" ] && [ "${YES:-0}" -ne 1 ]; then
+    read_tty input "$(t 'Actual TCP Port（manual-only 必填，留空时仅自动策略会分配）: ' \
+      'Actual TCP port (required for manual-only; blank only auto-allocates for auto policies): ')" || input=""
+    PORT="$input"
+  fi
+  if [ -z "${PORT:-}" ]; then
+    PORT="$(nb_select_available_port TCP "$INGRESS_PROFILE_ID")" \
+      || die '所选入口配置没有可用 REALITY TCP 自动端口；manual-only 必须显式使用 --port'
+    PORT_AUTO_SELECTED=1
+  else
+    nb_valid_port "$PORT" || die 'VLESS REALITY port 必须是 1-65535'
+    PORT="$(normalize_uint "$PORT")"
+    nb_ingress_port_is_reserved "$INGRESS_PROFILE_ID" "$PORT" \
+      && die 'VLESS REALITY 禁止使用所选入口配置的保留 port'
+    nb_warn_if_outside_recommended_range "$PORT" "$INGRESS_PROFILE_ID"
+    nb_port_available_for_profile "$PORT" TCP "$INGRESS_PROFILE_ID" || {
+      owner="$(nb_registry_port_owner TCP "$PORT" 2>/dev/null || true)"
+      die "VLESS REALITY TCP/${PORT} 已占用${owner:+ by ${owner}}"
+    }
+  fi
+
+  if [ "${YES:-0}" -ne 1 ] && [ "${ADVERTISE_CLI:-0}" -eq 0 ]; then
+    nb_collect_advertise_endpoint_interactive 'VLESS REALITY' "$PORT" || return 1
+  elif [ -z "${ADVERTISE_HOST:-}" ]; then
+    nb_require_explicit_endpoint_noninteractive
+  else
+    nb_validate_advertise_endpoint "$ADVERTISE_HOST" "$ADVERTISE_PORT" TCP \
+      || die 'VLESS REALITY Display Endpoint 无效'
+  fi
+
+  reality_resolve_camouflage_request \
+    || die 'REALITY camouflage pool exhausted or explicit target TLS 1.3 / certificate / public reachability validation failed'
+}
+
+reality_install_rollback() {
+  local id="$1" port="$2" runtime_preexisting="$3" template_preexisting="$4"
+  reality_remove_service "$id" >/dev/null 2>&1 || true
+  nb_firewall_close_pairs "TCP|${port}" >/dev/null 2>&1 || true
+  find "$NOBRAND_REALITY_STATE_DIR/$id" -mindepth 1 -maxdepth 1 -delete 2>/dev/null || true
+  find "$NOBRAND_REALITY_CONFIG_DIR/$id" -mindepth 1 -maxdepth 1 -delete 2>/dev/null || true
+  rmdir "$NOBRAND_REALITY_STATE_DIR/$id" "$NOBRAND_REALITY_CONFIG_DIR/$id" 2>/dev/null || true
+  if [ "$template_preexisting" -eq 0 ] && [ -z "$(reality_instance_ids)" ]; then
+    reality_remove_service_runtime_if_owned >/dev/null 2>&1 || true
+  fi
+  if [ "$runtime_preexisting" -eq 0 ] && [ -z "$(reality_instance_ids)" ] \
+     && ! hysteria2_state_exists && ! vless_sudoku_state_exists; then
+    nobrand_remove_xray_runtime_files >/dev/null 2>&1 || true
+  fi
+  [ "$(nb_service_manager)" != systemd ] || systemctl daemon-reload >/dev/null 2>&1 || true
+}
+
+install_vless_reality() {
+  local collect_rc=0 id="" uuid keypair private_key public_key short_id
+  local config state key_file config_tmp="" state_tmp="" key_tmp="" mode runtime defender_port
+  local runtime_preexisting=0 template_preexisting=0
+  require_root
+  require_linux
+  nobrand_prepare_common
+  reality_collect_install_requests || collect_rc=$?
+  [ "$collect_rc" -eq 0 ] || { [ "$collect_rc" -eq 2 ] && return 0; return "$collect_rc"; }
+  [ ! -x "$NOBRAND_XRAY_BIN" ] || runtime_preexisting=1
+  [ ! -e "$NOBRAND_REALITY_SYSTEMD_TEMPLATE" ] || template_preexisting=1
+  nobrand_install_xray_runtime 0 || return 1
+  runtime="$(nobrand_xray_version 2>/dev/null || true)"
+  [ "$runtime" = "$TESTED_XRAY_VERSION" ] \
+    || die "VLESS REALITY requires managed Xray ${TESTED_XRAY_VERSION}; run an official shared-runtime upgrade first"
+
+  id="$(reality_generate_instance_id)"
+  uuid="$(reality_generate_uuid)" || return 1
+  keypair="$(reality_generate_keypair)" || return 1
+  private_key="${keypair%%|*}"; public_key="${keypair#*|}"
+  [ "$(reality_derive_public_key "$private_key")" = "$public_key" ] || return 1
+  short_id="$(reality_generate_short_id)" || return 1
+  config="$(reality_config_file "$id")"; state="$(reality_state_file "$id")"
+  key_file="$(reality_private_key_file "$id")"
+  admin_lock_acquire || return 1
+  defender_port="$(reality_select_defender_port "$PORT")" || {
+    admin_lock_release
+    warn 'No collision-free loopback REALITY defender port is available'
+    return 1
+  }
+  # Xray 26.3.27 infers the config format from the candidate filename.
+  # Keep the transactional file JSON-suffixed just like the authoritative
+  # config, otherwise `xray run -test -c` rejects it before parsing.
+  mkdir -p "$(dirname "$config")" "$(dirname "$state")" \
+    && chmod 0700 "$(dirname "$config")" "$(dirname "$state")" \
+    && config_tmp="$(mktemp_file .reality-config.json)" \
+    && state_tmp="$(mktemp_file .reality-state)" \
+    && key_tmp="$(mktemp_file .reality-key)" || {
+      reality_install_rollback "$id" "$PORT" "$runtime_preexisting" "$template_preexisting"
+      admin_lock_release
+      return 1
+    }
+  printf '%s\n' "$private_key" >"$key_tmp"
+  chmod 0600 "$key_tmp"
+  reality_generate_server_config "$config_tmp" "$id" "$INGRESS_LISTEN_HOST" "$PORT" "$uuid" \
+    "$private_key" "$short_id" "$VLESS_REALITY_TARGET" "$VLESS_REALITY_TARGET_PORT" "$defender_port" \
+    && nobrand_xray_test_config "$config_tmp" || {
+      reality_install_rollback "$id" "$PORT" "$runtime_preexisting" "$template_preexisting"
+      admin_lock_release
+      rm -f "$config_tmp" "$state_tmp" "$key_tmp"
+      return 1
+    }
+  mode="$(nb_endpoint_mode_from_values "$ADVERTISE_HOST")"
+  reality_generate_state "$state_tmp" "$id" "$VLESS_REALITY_NAME" "$INGRESS_LISTEN_HOST" "$PORT" "$mode" \
+    "$ADVERTISE_HOST" "$ADVERTISE_PORT" "$uuid" "$public_key" "$key_file" "$short_id" \
+    "$VLESS_REALITY_TARGET" "$VLESS_REALITY_TARGET_PORT" "$VLESS_REALITY_FINGERPRINT" \
+    "$VLESS_REALITY_SPIDER_X" "$runtime" "$INGRESS_PROFILE_ID" "$defender_port" \
+    "" "$VLESS_REALITY_CAMOUFLAGE_MODE" \
+    && nb_ingress_stamp_state_file "$state_tmp" "$INGRESS_PROFILE_ID" native-bind || {
+      reality_install_rollback "$id" "$PORT" "$runtime_preexisting" "$template_preexisting"
+      admin_lock_release
+      rm -f "$config_tmp" "$state_tmp" "$key_tmp"
+      return 1
+    }
+
+  if ! nb_port_available_for_profile "$PORT" TCP "$INGRESS_PROFILE_ID" \
+     || ! reality_defender_port_available "$defender_port" "$id" "$PORT" \
+     || ! nb_atomic_install_file "$key_tmp" "$key_file" 0600 \
+     || ! nb_atomic_install_file "$config_tmp" "$config" 0600 \
+     || ! nb_atomic_install_file "$state_tmp" "$state" 0600 \
+     || ! reality_config_matches_state "$id" \
+     || ! reality_install_service_runtime \
+     || ! reality_ensure_openrc_service "$id" \
+     || ! nb_firewall_open_pairs "TCP|${PORT}" \
+     || ! reality_service_action "$id" start \
+     || ! nb_wait_for_enforced_listener "$INGRESS_ENFORCEMENT_RESOLVED" "$INGRESS_ENFORCEMENT_METHOD" \
+          TCP "$PORT" "$INGRESS_LOCAL_ADDRESS" "vless-reality:${id}" 25 \
+     || ! reality_listener_owned_by_service "$id" "$PORT" \
+     || ! nb_wait_for_listener_address TCP "$defender_port" 127.0.0.1 25 \
+     || ! reality_defender_listener_owned_by_service "$id" "$defender_port" \
+     || ! reality_defender_registry_valid; then
+    reality_install_rollback "$id" "$PORT" "$runtime_preexisting" "$template_preexisting"
+    admin_lock_release
+    rm -f "$config_tmp" "$state_tmp" "$key_tmp"
+    return 1
+  fi
+  admin_lock_release
+  rm -f "$config_tmp" "$state_tmp" "$key_tmp"
+  nobrand_install_manager_script || true
+  reality_show "$id"
+}
+
+reality_state_set_enabled() {
+  local id="$1" value="$2" state tmp
+  state="$(reality_state_file "$id")"; tmp="$(mktemp_file .reality-state)" || return 1
+  jq --argjson enabled "$value" --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '.enabled=$enabled | .updated_at=$updated' "$state" >"$tmp" \
+    && nb_atomic_install_file "$tmp" "$state" 0600
+  rm -f "$tmp"
+}
+
+reality_running() {
+  local id="$1" port defender_port policy method address
+  reality_state_exists "$id" || return 1
+  port="$(reality_state_field "$id" listen_port)"
+  defender_port="$(reality_state_field "$id" defender_port)"
+  policy="$(reality_state_field "$id" ingress_enforcement 2>/dev/null || printf permissive)"
+  method="$(reality_state_field "$id" ingress_enforcement_method 2>/dev/null || printf wildcard)"
+  address="$(reality_state_field "$id" ingress_local_address 2>/dev/null || true)"
+  reality_service_active "$id" \
+    && nb_wait_for_enforced_listener "$policy" "$method" TCP "$port" "$address" "vless-reality:${id}" 1 \
+    && reality_listener_owned_by_service "$id" "$port" \
+    && nb_wait_for_listener_address TCP "$defender_port" 127.0.0.1 1 \
+    && reality_defender_listener_owned_by_service "$id" "$defender_port"
+}
+
+reality_apply_ingress_enforcement() {
+  local id="$1" state config key_file private_key profile_id port uuid short_id target target_port defender_port
+  local candidate_state candidate_config snapshot was_active=0 rc=0
+  state="$(reality_state_file "$id")"; config="$(reality_config_file "$id")"
+  reality_state_exists "$id" || return 1
+  profile_id="$(reality_state_field "$id" ingress_profile_id)"
+  nb_prepare_ingress_deployment "$profile_id" native-bind || return 1
+  key_file="$(reality_state_field "$id" private_key_path)"
+  [ -s "$key_file" ] || return 1
+  private_key="$(tr -d '\r\n' <"$key_file")"
+  port="$(reality_state_field "$id" listen_port)"
+  uuid="$(reality_state_field "$id" uuid)"
+  short_id="$(reality_state_field "$id" short_id)"
+  target="$(reality_state_field "$id" target_host)"
+  target_port="$(reality_state_field "$id" target_port)"
+  defender_port="$(reality_state_field "$id" defender_port)"
+  candidate_state="$(mktemp_file .reality-ingress-state)" || return 1
+  candidate_config="$(mktemp_file .reality-ingress-config.json)" || { rm -f "$candidate_state"; return 1; }
+  snapshot="$(mktemp_dir)" || { rm -f "$candidate_state" "$candidate_config"; return 1; }
+  cp -a "$state" "$snapshot/state" && cp -a "$config" "$snapshot/config" || rc=1
+  if [ "$rc" -eq 0 ]; then
+    jq --arg listen "$INGRESS_LISTEN_HOST" '.listen_host=$listen' "$state" >"$candidate_state" \
+      && nb_ingress_stamp_state_file "$candidate_state" "$profile_id" native-bind \
+      && reality_state_matches "$candidate_state" "$id" \
+      && reality_generate_server_config "$candidate_config" "$id" "$INGRESS_LISTEN_HOST" "$port" "$uuid" \
+           "$private_key" "$short_id" "$target" "$target_port" "$defender_port" \
+      && nobrand_xray_test_config "$candidate_config" || rc=1
+  fi
+  reality_service_active "$id" && was_active=1
+  if [ "$rc" -eq 0 ]; then
+    nb_atomic_install_file "$candidate_config" "$config" 0600 \
+      && nb_atomic_install_file "$candidate_state" "$state" 0600 \
+      && reality_config_matches_state "$id" || rc=1
+  fi
+  if [ "$rc" -eq 0 ] && [ "$was_active" -eq 1 ]; then
+    [ "${NOBRAND_TEST_INGRESS_SERVICE_FAIL:-0}" -eq 0 ] \
+      && reality_service_action "$id" restart \
+      && [ "${NOBRAND_TEST_INGRESS_LISTENER_FAIL:-0}" -eq 0 ] \
+      && reality_running "$id" || rc=1
+  fi
+  if [ "$rc" -ne 0 ]; then
+    nb_atomic_install_file "$snapshot/config" "$config" 0600 >/dev/null 2>&1 || true
+    nb_atomic_install_file "$snapshot/state" "$state" 0600 >/dev/null 2>&1 || true
+    if [ "$was_active" -eq 1 ]; then
+      reality_service_action "$id" restart >/dev/null 2>&1 && reality_running "$id" >/dev/null 2>&1 || true
+    else
+      reality_service_action "$id" stop >/dev/null 2>&1 || true
+    fi
+  fi
+  rm -f "$candidate_state" "$candidate_config"
+  rm -rf -- "$snapshot"
+  return "$rc"
+}
+
+reality_service_command() {
+  local id action="$1" port
+  id="$(reality_resolve_instance_id "${VLESS_REALITY_NAME:-}")" \
+    || die '请用 --name 指定 VLESS REALITY instance'
+  port="$(reality_state_field "$id" listen_port)"
+  case "$action" in
+    stop)
+      reality_service_action "$id" stop && reality_state_set_enabled "$id" false
+      ;;
+    start)
+      reality_service_action "$id" start \
+        && reality_running "$id" \
+        && reality_state_set_enabled "$id" true
+      ;;
+    restart)
+      reality_service_action "$id" restart \
+        && reality_running "$id"
+      ;;
+  esac
+}
+
+reality_show() {
+  local id="$1" endpoint
+  endpoint="$(reality_effective_endpoint "$id")"
+  printf 'VLESS REALITY instance: %s\nIngress Profile: %s\nRecommendation: %s\nActual: %s:%s/TCP\nDisplay Endpoint: %s:%s\nCamouflage Mode: %s\nServerName: %s\nFlow: xtls-rprx-vision\nUUID: %s\nPublic Key: %s\nShort ID: %s\nURI: %s\n' \
+    "$(reality_state_field "$id" name)" \
+    "$(nb_ingress_profile_name "$(reality_state_field "$id" ingress_profile_id)")" \
+    "$(reality_state_field "$id" profile_recommendation)" \
+    "$(reality_state_field "$id" listen_host)" "$(reality_state_field "$id" listen_port)" "${endpoint%%|*}" "${endpoint#*|}" \
+    "$(reality_state_field "$id" camouflage_mode)" "$(reality_state_field "$id" server_name)" \
+    "$(reality_state_field "$id" uuid)" \
+    "$(reality_state_field "$id" public_key)" "$(reality_state_field "$id" short_id)" \
+    "$(reality_build_uri "$id")"
+}
+
+reality_export_all() {
+  local id="$1"
+  printf '%s\n' '===== VLESS URI ====='
+  reality_build_uri "$id"
+  printf '%s\n' '' '===== XRAY CLIENT JSON ====='
+  reality_export_xray "$id"
+  printf '%s\n' '' '===== MIHOMO YAML ====='
+  reality_export_mihomo "$id"
+  printf '%s\n' '' '===== SING-BOX JSON ====='
+  reality_export_singbox "$id"
+}
+
+reality_node_rows() {
+  local id endpoint status
+  while IFS= read -r id; do
+    endpoint="$(reality_effective_endpoint "$id")"
+    status=Stopped
+    reality_running "$id" && status=Running
+    printf 'VLESS REALITY|%s|%s:%s/TCP|%s|TCP\n' "$(reality_state_field "$id" name)" \
+      "${endpoint%%|*}" "${endpoint#*|}" "$status"
+  done < <(reality_instance_ids)
+}
+
+reality_doctor_one() {
+  local id="$1" failed=0 state config key_file private_key derived expected port owner
+  local defender_port defender_owner
+  state="$(reality_state_file "$id")"; config="$(reality_config_file "$id")"
+  key_file="$(reality_state_field "$id" private_key_path 2>/dev/null || true)"
+  port="$(reality_state_field "$id" listen_port 2>/dev/null || true)"
+  defender_port="$(reality_state_field "$id" defender_port 2>/dev/null || true)"
+  reality_state_matches "$state" "$id" && nb_doctor_line PASS "REALITY_STATE $(reality_state_field "$id" name)" \
+    || { nb_doctor_line FAIL "REALITY_STATE $(reality_state_field "$id" name 2>/dev/null || printf '%s' "$id")"; failed=1; }
+  [ "$(nobrand_xray_version 2>/dev/null || true)" = "$TESTED_XRAY_VERSION" ] \
+    && nb_doctor_line PASS "REALITY_XRAY ${TESTED_XRAY_VERSION}" \
+    || { nb_doctor_line FAIL "REALITY_XRAY expected ${TESTED_XRAY_VERSION}"; failed=1; }
+  reality_config_matches_state "$id" && nobrand_xray_test_config "$config" \
+    && nb_doctor_line PASS 'REALITY_CONFIG' \
+    || { nb_doctor_line FAIL 'REALITY_CONFIG'; failed=1; }
+  nobrand_xray_assets_ready \
+    && nb_doctor_line PASS 'REALITY_XRAY_ASSETS private geoip/geosite' \
+    || { nb_doctor_line FAIL 'REALITY_XRAY_ASSETS'; failed=1; }
+  jq -e --slurpfile state "$state" --arg min_client_ver "$NOBRAND_REALITY_MIN_CLIENT_VER" \
+    --argjson default_target_port "$NOBRAND_REALITY_DEFAULT_CAMOUFLAGE_PORT" '
+    .inbounds[0].streamSettings.realitySettings.target==("127.0.0.1:"+($state[0].defender_port|tostring))
+    and .inbounds[0].streamSettings.realitySettings.minClientVer==$min_client_ver
+    and .inbounds[1].tag==$state[0].defender_tag
+    and .inbounds[1].listen=="127.0.0.1"
+    and .inbounds[1].port==$state[0].defender_port
+    and .inbounds[1].protocol=="dokodemo-door"
+    and .inbounds[1].settings=={address:$state[0].defender_dispatch_host,port:($state[0].target_port // $default_target_port),network:"tcp"}
+    and .inbounds[1].sniffing=={enabled:true,routeOnly:true,destOverride:["tls"]}
+    and .routing.rules[3]=={type:"field",inboundTag:[$state[0].defender_tag],domain:["full:"+$state[0].target_host],outboundTag:"DIRECT"}
+    and .routing.rules[4]=={type:"field",inboundTag:[$state[0].defender_tag],outboundTag:"BLOCK"}
+    and .outbounds[1]=={tag:"DIRECT",protocol:"freedom",settings:{redirect:($state[0].target_host+":"+(($state[0].target_port // $default_target_port)|tostring))}}
+  ' "$config" >/dev/null 2>&1 \
+      && nb_doctor_line PASS 'REALITY_DEFENDER target/minClientVer/loopback/exact-SNI/catch-all' \
+    || { nb_doctor_line FAIL 'REALITY_DEFENDER contract'; failed=1; }
+  jq -e '
+    .routing.rules[0]=={type:"field",ip:["geoip:private"],outboundTag:"BLOCK"}
+    and .routing.rules[1]=={type:"field",network:"tcp",port:"25,135,137,138,139,445,465,587",outboundTag:"BLOCK"}
+    and .routing.rules[2]=={type:"field",protocol:["bittorrent"],outboundTag:"BLOCK"}
+    and .outbounds[0]=={tag:"PUBLIC_DIRECT",protocol:"freedom"}
+    and .outbounds[2]=={tag:"BLOCK",protocol:"blackhole"}
+  ' "$config" >/dev/null 2>&1 \
+    && nb_doctor_line PASS 'REALITY_DEFENDER private/dangerous-port/bittorrent blocks' \
+    || { nb_doctor_line FAIL 'REALITY_DEFENDER safety rules'; failed=1; }
+  if [ -s "$key_file" ] && [ "$(stat -c '%a' "$key_file" 2>/dev/null || true)" = 600 ] \
+     && [ "$(stat -c '%u:%g' "$key_file" 2>/dev/null || true)" = 0:0 ]; then
+    private_key="$(tr -d '\r\n' <"$key_file")"
+    derived="$(reality_derive_public_key "$private_key" 2>/dev/null || true)"
+    expected="$(reality_state_field "$id" public_key)"
+    [ -n "$derived" ] && [ "$derived" = "$expected" ] \
+      && nb_doctor_line PASS 'REALITY_KEYS private->public consistency; private mode=0600 owner=root' \
+      || { nb_doctor_line FAIL 'REALITY_KEYS public derivation mismatch'; failed=1; }
+  else
+    nb_doctor_line FAIL 'REALITY_KEYS private key permissions/owner'
+    failed=1
+  fi
+  reality_valid_short_id "$(reality_state_field "$id" short_id)" \
+    && [ "$(jq -r '.inbounds[0].streamSettings.realitySettings.shortIds[0]' "$config" 2>/dev/null)" = \
+      "$(reality_state_field "$id" short_id)" ] \
+    && nb_doctor_line PASS 'REALITY_SHORT_ID' \
+    || { nb_doctor_line FAIL 'REALITY_SHORT_ID'; failed=1; }
+  reality_valid_public_hostname_syntax "$(reality_state_field "$id" server_name)" \
+    && [ "$(reality_state_field "$id" server_name)" = "$(reality_state_field "$id" target_host)" ] \
+    && [ "$(reality_state_field "$id" flow)" = xtls-rprx-vision ] \
+    && nb_doctor_line PASS 'REALITY_SERVER_NAME_TARGET_FLOW' \
+    || { nb_doctor_line FAIL 'REALITY_SERVER_NAME_TARGET_FLOW'; failed=1; }
+  if [ "$(reality_state_field "$id" enabled)" = true ]; then
+    reality_service_active "$id" && nb_doctor_line PASS 'REALITY_SERVICE' \
+      || { nb_doctor_line FAIL 'REALITY_SERVICE'; failed=1; }
+    reality_running "$id" \
+      && nb_doctor_line PASS "REALITY_LISTENERS public TCP/${port}; defender loopback same-process" \
+      || { nb_doctor_line FAIL "REALITY_LISTENERS public TCP/${port}; defender loopback"; failed=1; }
+  else
+    nb_doctor_line INFO 'REALITY_SERVICE intentionally stopped'
+  fi
+  owner="$(nb_registry_port_owner TCP "$port" 2>/dev/null || true)"
+  [ "$owner" = "vless-reality:${id}" ] && nb_doctor_line PASS 'REALITY_PORT_OWNERSHIP' \
+    || { nb_doctor_line FAIL 'REALITY_PORT_OWNERSHIP'; failed=1; }
+  nb_firewall_binding_owned TCP "$port" && nb_doctor_line PASS 'REALITY_FIREWALL' \
+    || { nb_doctor_line FAIL 'REALITY_FIREWALL'; failed=1; }
+  defender_owner="$(reality_defender_port_owner "$defender_port" 2>/dev/null || true)"
+  [ "$defender_owner" = "vless-reality-defender:${id}" ] \
+    && reality_defender_registry_valid \
+    && ! nb_firewall_binding_owned TCP "$defender_port" \
+    && nb_doctor_line PASS 'REALITY_DEFENDER_INTERNAL_OWNERSHIP no-public-firewall' \
+    || { nb_doctor_line FAIL 'REALITY_DEFENDER_INTERNAL_OWNERSHIP'; failed=1; }
+  nb_ingress_profile_json "$(reality_state_field "$id" ingress_profile_id)" >/dev/null 2>&1 \
+    && [ "$(reality_profile_recommendation "$(reality_state_field "$id" ingress_profile_id)")" = \
+      "$(reality_state_field "$id" profile_recommendation)" ] \
+    && nb_doctor_line PASS "REALITY_INGRESS_PROFILE $(nb_ingress_profile_name "$(reality_state_field "$id" ingress_profile_id)")" \
+    || { nb_doctor_line FAIL 'REALITY_INGRESS_PROFILE'; failed=1; }
+  reality_effective_endpoint "$id" >/dev/null \
+    && nb_doctor_line PASS 'REALITY_DISPLAY metadata-only' \
+    || { nb_doctor_line FAIL 'REALITY_DISPLAY'; failed=1; }
+  return "$failed"
+}
+
+reality_doctor_all() {
+  local id failed=0 found=0
+  while IFS= read -r id; do
+    found=1
+    reality_doctor_one "$id" || failed=1
+  done < <(reality_instance_ids)
+  [ "$found" -eq 1 ] || nb_doctor_line INFO 'VLESS REALITY not installed'
+  return "$failed"
+}
+
+reality_status() {
+  local id endpoint found=0
+  while IFS= read -r id; do
+    found=1; endpoint="$(reality_effective_endpoint "$id")"
+    printf 'VLESS REALITY\n  Instance: %s\n  Runtime: Xray %s\n  Service: %s\n  Defender: %s\n  Actual: %s:%s/TCP\n  Display: %s:%s\n  Ingress: %s (%s)\n  Camouflage Mode: %s\n  ServerName: %s\n  Flow: xtls-rprx-vision\n' \
+      "$(reality_state_field "$id" name)" "$(reality_state_field "$id" runtime_version)" \
+      "$(reality_service_active "$id" && printf Running || printf Stopped)" \
+      "$(reality_running "$id" && printf Active || printf Inactive)" \
+      "$(reality_state_field "$id" listen_host)" "$(reality_state_field "$id" listen_port)" "${endpoint%%|*}" "${endpoint#*|}" \
+      "$(nb_ingress_profile_name "$(reality_state_field "$id" ingress_profile_id)")" \
+      "$(reality_state_field "$id" profile_recommendation)" \
+      "$(reality_state_field "$id" camouflage_mode)" "$(reality_state_field "$id" server_name)"
+  done < <(reality_instance_ids)
+  [ "$found" -eq 1 ] || t 'VLESS REALITY 未安装' 'VLESS REALITY not installed'
+}
+
+remove_vless_reality_instance() {
+  local id port config_dir state_dir
+  id="$(reality_resolve_instance_id "${VLESS_REALITY_NAME:-}")" \
+    || die '请用 --name 指定 VLESS REALITY instance'
+  port="$(reality_state_field "$id" listen_port)"
+  config_dir="$(reality_instance_config_dir "$id")"; state_dir="$(dirname "$(reality_state_file "$id")")"
+  reality_remove_service "$id" || return 1
+  nb_firewall_close_pairs "TCP|${port}" || return 1
+  find "$config_dir" -mindepth 1 -maxdepth 1 -delete
+  find "$state_dir" -mindepth 1 -maxdepth 1 -delete
+  rmdir "$config_dir" "$state_dir" 2>/dev/null || true
+  if [ -z "$(reality_instance_ids)" ]; then
+    reality_remove_service_runtime_if_owned || return 1
+    [ "$(nb_service_manager)" != systemd ] || systemctl daemon-reload
+    if ! hysteria2_state_exists && ! vless_sudoku_state_exists; then
+      nobrand_remove_xray_runtime_files || return 1
+    fi
+  fi
+}
+
+reality_restore_runtime() {
+  local id expected current
+  id="$(reality_instance_ids | head -n1)"
+  [ -n "$id" ] || return 0
+  expected="$(reality_state_field "$id" runtime_version)"
+  [ "$expected" = "$TESTED_XRAY_VERSION" ] || return 1
+  current="$(nobrand_xray_version 2>/dev/null || true)"
+  if [ "$current" != "$expected" ] || ! nobrand_xray_assets_ready; then
+    nobrand_install_xray_runtime 1 || return 1
+  fi
+  reality_defender_registry_valid || return 1
+  reality_install_service_runtime || return 1
+  while IFS= read -r id; do
+    [ "$(reality_state_field "$id" runtime_version)" = "$expected" ] \
+      && reality_config_matches_state "$id" \
+      && nobrand_xray_test_config "$(reality_config_file "$id")" \
+      && reality_ensure_openrc_service "$id" || return 1
+  done < <(reality_instance_ids)
+}
+
+nobrand_run_vless_reality_action() {
+  local id
+  case "${VLESS_REALITY_ACTION:-menu}" in
+    install) install_vless_reality ;;
+    start|stop|restart) reality_service_command "$VLESS_REALITY_ACTION" ;;
+    status) reality_status ;;
+    doctor) reality_doctor_all ;;
+    show)
+      id="$(reality_resolve_instance_id "${VLESS_REALITY_NAME:-}")" || die '请用 --name 指定 instance'
+      reality_show "$id"
+      ;;
+    export)
+      id="$(reality_resolve_instance_id "${VLESS_REALITY_NAME:-}")" || die '请用 --name 指定 instance'
+      reality_export_all "$id"
+      ;;
+    set-endpoint)
+      id="$(reality_resolve_instance_id "${VLESS_REALITY_NAME:-}")" || die '请用 --name 指定 instance'
+      reality_set_endpoint_state "$id" "${ADVERTISE_HOST:-}" "${ADVERTISE_PORT:-}"
+      ;;
+    remove|uninstall) remove_vless_reality_instance ;;
+    upgrade) nobrand_upgrade_xray_runtime ;;
+    menu) reality_status ;;
+    help)
+      cat <<'EOF'
+nobrand vless-reality install --name NAME [--target HOST] [--target-port PORT]
+  [--ingress-profile PROFILE] [--port PORT]
+  [--advertise-host HOST --advertise-port PORT | --advertise-auto] [-y]
+nobrand vless-reality show|export|status|doctor|start|stop|restart|set-endpoint|remove [--name NAME]
+Fixed stack: VLESS + TCP + REALITY + xtls-rprx-vision. Public Profiles are recommended;
+mapped Profiles are allowed with a warning. Xray 26.3.27; fingerprint=chrome; spiderX=/.
+Default camouflage host: automatic selection from the release-qualified pool. The selected host is persisted.
+Host and target port are independently configurable; explicit hosts are never replaced by auto selection.
+443 is the camouflage target port default, not the public REALITY listen port.
+EOF
+      ;;
+    *) die "未知 VLESS REALITY 操作: ${VLESS_REALITY_ACTION}" ;;
   esac
 }
 
@@ -13578,6 +17518,9 @@ client_endpoint_is_independent() {
 advertised_host() {
   if [ -n "${ADVERTISE_HOST:-}" ]; then
     printf '%s' "$ADVERTISE_HOST"
+  elif [ -n "${INGRESS_PROFILE_ID:-}" ] \
+       && [ "$INGRESS_PROFILE_ID" != "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ]; then
+    nb_ingress_profile_display_host "$INGRESS_PROFILE_ID" 2>/dev/null || public_ip
   else
     public_ip
   fi
@@ -13593,7 +17536,13 @@ advertised_port_for_protocol() {
       printf '%s' "$canonical_port"
     fi
   else
-    port_for_protocol "$proto"
+    canonical_port="$(port_for_protocol "$proto")" || return 1
+    if [ -n "${INGRESS_PROFILE_ID:-}" ] \
+       && [ "$INGRESS_PROFILE_ID" != "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ]; then
+      nb_ingress_profile_display_port "$INGRESS_PROFILE_ID" "$canonical_port"
+    else
+      printf '%s' "$canonical_port"
+    fi
   fi
 }
 
@@ -13733,8 +17682,14 @@ ssh_tunnel_detect_real_port() {
 }
 
 ssh_tunnel_default_display_port() {
-  local ip base real_port
-  ip="$(nb_detect_local_ipv4 2>/dev/null || true)"
+  local ip base real_port profile
+  if [ -n "${INGRESS_PROFILE_ID:-}" ] \
+     && [ "$INGRESS_PROFILE_ID" != "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ]; then
+    profile="$(nb_ingress_profile_json "$INGRESS_PROFILE_ID" 2>/dev/null || true)"
+    ip="$(jq -r '.local_address // empty' <<<"$profile" 2>/dev/null || true)"
+  else
+    ip="$(nb_detect_local_ipv4 2>/dev/null || true)"
+  fi
   if [ -n "$ip" ]; then
     base="$(nb_port_base_for_ip "$ip" 2>/dev/null || true)"
     if [ -n "$base" ]; then
@@ -13750,6 +17705,7 @@ ssh_tunnel_default_display_port() {
 ssh_tunnel_generate_state() {
   local output="$1" advertise_mode="$2" advertise_host="$3" advertise_port="$4"
   local real_port="$5" strategy="$6" managed_path="$7" users="$8" created_at="${9:-}"
+  local ingress_profile_id="${10:-}"
   local updated_at
   [ -n "$created_at" ] || created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   updated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -13757,7 +17713,7 @@ ssh_tunnel_generate_state() {
     --arg advertise_port "$advertise_port" --arg real_port "$real_port" \
     --arg group "$NOBRAND_SSH_GROUP" --arg strategy "$strategy" \
     --arg managed_path "$managed_path" --argjson users "$users" \
-    --arg created "$created_at" --arg updated "$updated_at" '
+    --arg created "$created_at" --arg updated "$updated_at" --arg ingress_profile_id "$ingress_profile_id" '
     {
       schema_version:3,
       ownership:"nobrand-v3",
@@ -13780,6 +17736,7 @@ ssh_tunnel_generate_state() {
       created_at:$created,
       updated_at:$updated
     }
+    + if $ingress_profile_id=="" then {} else {ingress_profile_id:$ingress_profile_id} end
   ' >"$output"
 }
 
@@ -14526,10 +18483,11 @@ ssh_tunnel_set_endpoint_state() {
 }
 
 ssh_tunnel_effective_host() {
-  local mode host
+  local mode host ingress_profile_id
   mode="$(ssh_tunnel_state_field advertise_mode)"
   host="$(ssh_tunnel_state_field advertise_host)"
-  nb_effective_advertise_host "$mode" "$host"
+  ingress_profile_id="$(ssh_tunnel_state_field ingress_profile_id 2>/dev/null || true)"
+  nb_effective_advertise_host "$mode" "$host" "$ingress_profile_id"
 }
 
 ssh_tunnel_host_public_key() {
@@ -14559,8 +18517,9 @@ ssh_tunnel_show_user() {
   host="$(ssh_tunnel_effective_host)"
   port="$(ssh_tunnel_state_field advertise_port)"
   key_path="$(ssh_tunnel_key_dir "$account_id")/id_ed25519"
-  printf 'SSH Tunnel user: %s\nLinux identity: %s\nDisplay Endpoint: %s:%s\n' \
-    "$label" "$linux_user" "$host" "$port"
+  printf 'SSH Tunnel user: %s\nLinux identity: %s\nIngress Profile: %s\nIngress Enforcement: Not applicable (system sshd)\nActual system listener: *:%s/TCP\nDisplay Endpoint: %s:%s\n' \
+    "$label" "$linux_user" "$(nb_ingress_profile_name "$(ssh_tunnel_state_field ingress_profile_id 2>/dev/null || true)")" \
+    "$(ssh_tunnel_state_field real_port)" "$host" "$port"
   printf 'Connection: ssh -N -i %s -p %s %s@%s\n' "$key_path" "$port" "$linux_user" "$host"
   printf 'TCP forwarding: -L / -D / -R\nGatewayPorts=no; shell/exec/TTY/SFTP/SCP are disabled.\n'
 }
@@ -14637,6 +18596,7 @@ ssh_tunnel_doctor() {
       || { nb_doctor_line FAIL "private-key mode $(jq -r .display_name <<<"$user_json")"; failed=1; }
   done < <(jq -c '.users[]?' "$NOBRAND_SSH_STATE_FILE")
   nb_doctor_line PASS 'external_listener=true managed_listener=false managed_firewall=false'
+  nb_doctor_line INFO 'NOT_APPLICABLE_TO_SYSTEM_SSH: system sshd / external mapped entry'
   return "$failed"
 }
 
@@ -14666,6 +18626,7 @@ ssh_tunnel_install() {
   require_root
   require_linux
   nobrand_prepare_common
+  nb_prepare_ingress_request || return 1
   command -v ssh-keygen >/dev/null 2>&1 || die 'SSH Tunnel 需要 OpenSSH ssh-keygen'
   ssh_tunnel_sshd_binary >/dev/null || die '未检测到现有 OpenSSH sshd'
   ssh_tunnel_sshd_test "$NOBRAND_SSH_CONFIG_MAIN" || die '现有 sshd_config 无法通过 sshd -t'
@@ -14679,9 +18640,16 @@ ssh_tunnel_install() {
     mode=custom host="$ADVERTISE_HOST" port="$(normalize_uint "$ADVERTISE_PORT")"
   else
     [ "${YES:-0}" -ne 1 ] || [ "${ADVERTISE_AUTO_REQUESTED:-0}" -eq 1 ] \
-      || die '非交互 SSH install 必须明确 Display Endpoint 或 --advertise-auto'
-    mode=auto host="" port="$(ssh_tunnel_default_display_port)" \
+      || [ -n "$(nb_ingress_profile_display_host "$INGRESS_PROFILE_ID" 2>/dev/null || true)" ] \
+      || die '非交互 SSH install 必须明确 Display Endpoint、--advertise-auto 或选择带展示主机的入口配置'
+    mode=auto host=""
+    if [ -n "${ADVERTISE_PORT:-}" ]; then
+      valid_advertise_port "$ADVERTISE_PORT" || die 'SSH Display port 无效'
+      port="$(normalize_uint "$ADVERTISE_PORT")"
+    else
+      port="$(ssh_tunnel_default_display_port)" \
       || die '无法安全推导 SSH Display port；请明确指定'
+    fi
   fi
   _has_group "$NOBRAND_SSH_GROUP" && group_preexisting=1
   ssh_tunnel_create_group || die '无法创建 SSH Tunnel group'
@@ -14692,7 +18660,7 @@ ssh_tunnel_install() {
     return 1
   }
   ssh_tunnel_generate_state "$state_tmp" "$mode" "$host" "$port" "$real_port" \
-    "$strategy" "$managed_path" "$users" || {
+    "$strategy" "$managed_path" "$users" "" "$INGRESS_PROFILE_ID" || {
       rm -f "$state_tmp"
       ssh_tunnel_rollback_empty_install "$group_preexisting" || true
       return 1
@@ -14728,6 +18696,7 @@ ssh_tunnel_status() {
     "$(ssh_tunnel_state_field policy_applied)" "$(ssh_tunnel_state_field real_port)" \
     "$(ssh_tunnel_effective_host)" "$(ssh_tunnel_state_field advertise_port)" \
     "$(jq '.users | length' "$NOBRAND_SSH_STATE_FILE")"
+  printf '  Ingress Profile: %s\n' "$(nb_ingress_profile_name "$(ssh_tunnel_state_field ingress_profile_id 2>/dev/null || true)")"
   printf '  Ownership: external_listener=true managed_listener=false managed_firewall=false\n'
 }
 
@@ -15211,13 +19180,21 @@ forward_realm_options_valid_json() {
 }
 
 forward_port_allowed() {
-  local port="${1:-}" protocol transport ignore_owner="${3:-}"
+  local port="${1:-}" protocol transport ignore_owner="${3:-}" profile_id="${4:-${INGRESS_PROFILE_ID:-$NOBRAND_LEGACY_INGRESS_PROFILE_ID}}"
   protocol="$(forward_normalize_protocol "${2:-}")" || return 1
   nb_valid_port "$port" || return 1
-  nb_port_is_tail_base_reserved "$port" && return 1
+  nb_ingress_port_is_reserved "$profile_id" "$port" && return 1
   while IFS= read -r transport; do
-    nb_port_available_for_transport "$port" "$transport" "$ignore_owner" || return 1
+    nb_port_available_for_profile "$port" "$transport" "$profile_id" "$ignore_owner" || return 1
   done < <(forward_protocol_transports "$protocol")
+}
+
+forward_select_available_port() {
+  local protocol="$1" profile_id="$2" bounds lo hi selected
+  bounds="$(nb_ingress_profile_auto_range "$profile_id" 2>/dev/null)" || return 1
+  lo="${bounds%%|*}"; hi="${bounds#*|}"
+  selected="$(nb_scan_port_span "$lo" "$hi" forward_port_allowed "$protocol" '' "$profile_id")" || return 1
+  printf '%s' "$selected"
 }
 
 forward_init_state() {
@@ -15243,9 +19220,21 @@ forward_state_valid() {
     .schema_version==3 and .ownership=="nobrand-v3" and .feature=="port-forward" and
     (.rules|type)=="array" and
     all(.rules[];
-      (keys|sort)==["backend","backend_options","created_at","display_host","display_mode",
+      ((keys-["ingress_profile_id","ingress_enforcement","ingress_enforcement_method","ingress_local_address"]|sort)==["backend","backend_options","created_at","display_host","display_mode",
                     "display_port","enabled","listen_host","listen_port","name","note",
-                    "ownership_metadata","protocol","rule_id","target_host","target_port","updated_at"] and
+                    "ownership_metadata","protocol","rule_id","target_host","target_port","updated_at"]) and
+      ((has("ingress_profile_id")|not) or (.ingress_profile_id|type=="string" and length>0)) and
+      ((has("ingress_enforcement")|not) or
+        (.ingress_enforcement=="permissive" or .ingress_enforcement=="strict")) and
+      ((has("ingress_enforcement_method")|not) or
+        (.ingress_enforcement_method=="wildcard" or .ingress_enforcement_method=="native-bind" or
+         .ingress_enforcement_method=="address-match")) and
+      ((has("ingress_local_address")|not) or (.ingress_local_address|type=="string")) and
+      (if (.ingress_enforcement // "permissive")=="strict" then
+         (.ingress_local_address|type=="string" and length>0) and .listen_host==.ingress_local_address and
+         (if .backend=="nftables" then .ingress_enforcement_method=="address-match"
+          else .ingress_enforcement_method=="native-bind" end)
+       else (.ingress_enforcement_method // "wildcard")=="wildcard" end) and
       (.rule_id|type)=="string" and (.rule_id|test("^f[0-9a-f]{16}$")) and
       (.name|type)=="string" and (.name|length)>0 and (.name|length)<=64 and
         (.name|test("[[:cntrl:]]")|not) and
@@ -15711,6 +19700,20 @@ forward_nft_rule_owned() {
   grep -F "nobrand:${id}:dnat:" <<<"$listing" >/dev/null
 }
 
+forward_nft_rule_ingress_owned() {
+  local id="$1" rule listing enforcement address
+  rule="$(forward_rule_json "$NOBRAND_FORWARD_STATE_FILE" "$id")" || return 1
+  [ -n "$rule" ] || return 1
+  forward_nft_rule_owned "$id" || return 1
+  enforcement="$(jq -r '.ingress_enforcement // "permissive"' <<<"$rule")"
+  [ "$enforcement" = strict ] || return 0
+  address="$(jq -r '.ingress_local_address // empty' <<<"$rule")"
+  [ -n "$address" ] || return 1
+  listing="$(nft list table "$NOBRAND_FORWARD_NFT_FAMILY" "$NOBRAND_FORWARD_NFT_TABLE" 2>/dev/null)" \
+    || return 1
+  grep -Fq "ip daddr ${address}" <<<"$listing"
+}
+
 forward_apply_nft_state() {
   local state="$1" candidate batch count
   count="$(jq '[.rules[]|select(.enabled and .backend=="nftables")]|length' "$state")" || return 1
@@ -15981,18 +19984,22 @@ forward_realm_service_action() {
 }
 
 forward_realm_listener_owned() {
-  local state="$1" pid protocol port transport found
+  local state="$1" pid protocol port transport found listen_host enforcement
   pid="$(forward_realm_service_pid 2>/dev/null || true)"
   [[ "$pid" =~ ^[0-9]+$ ]] && [ "$pid" -gt 1 ] || return 1
-  while IFS=$'\t' read -r protocol port; do
+  while IFS=$'\t' read -r protocol port listen_host enforcement; do
     while IFS= read -r transport; do
       found=0
       while IFS= read -r listener_pid; do
         [ "$listener_pid" != "$pid" ] || found=1
       done < <(nb_port_listener_pids "$transport" "$port")
       [ "$found" -eq 1 ] || return 1
+      if [ "$enforcement" = strict ]; then
+        nb_listener_has_local_address "$transport" "$port" "$listen_host" || return 1
+      fi
     done < <(forward_protocol_transports "$protocol")
-  done < <(jq -r '.rules[]|select(.enabled and .backend=="realm")|[.protocol,(.listen_port|tostring)]|@tsv' "$state")
+  done < <(jq -r '.rules[]|select(.enabled and .backend=="realm")|
+    [.protocol,(.listen_port|tostring),.listen_host,(.ingress_enforcement // "permissive")]|@tsv' "$state")
 }
 
 forward_realm_probe_config() {
@@ -16059,10 +20066,12 @@ forward_realm_apply_state() {
     && forward_generate_realm_probe_config "$state" "$probe" \
     && forward_realm_probe_config "$probe" \
     || { rm -f "$candidate" "$probe"; return 1; }
-  nb_atomic_install_file "$candidate" "$NOBRAND_FORWARD_REALM_CONFIG" 0600 \
+  [ "${NOBRAND_TEST_INGRESS_SERVICE_FAIL:-0}" -eq 0 ] \
+    && nb_atomic_install_file "$candidate" "$NOBRAND_FORWARD_REALM_CONFIG" 0600 \
     && forward_realm_install_service \
     && forward_realm_service_action restart \
     && forward_realm_service_active \
+    && [ "${NOBRAND_TEST_INGRESS_LISTENER_FAIL:-0}" -eq 0 ] \
     && forward_realm_listener_owned "$state"
   local rc=$?
   rm -f "$candidate" "$probe"
@@ -16190,12 +20199,28 @@ forward_default_options_json() {
   esac
 }
 
+forward_prepare_ingress_enforcement() {
+  local backend="$1" profile_id="$2" capability
+  case "$backend" in
+    nftables) capability='address-match' ;;
+    realm) capability=native-bind ;;
+    *) return 1 ;;
+  esac
+  nb_prepare_ingress_deployment "$profile_id" "$capability" || return 1
+  if [ "$INGRESS_ENFORCEMENT_RESOLVED" = strict ]; then
+    FORWARD_LISTEN_HOST="$INGRESS_LISTEN_HOST"
+  else
+    FORWARD_LISTEN_HOST="${FORWARD_LISTEN_HOST:-0.0.0.0}"
+  fi
+}
+
 forward_validate_requested_rule() {
   local ignore_owner="${1:-}" transport old_json="${2:-}" old_port="" old_protocol=""
   [ -n "$FORWARD_NAME" ] && [ "${#FORWARD_NAME}" -le 64 ] && ! has_control_chars "$FORWARD_NAME" || return 1
   [ "${#FORWARD_NOTE}" -le 256 ] && ! has_control_chars "$FORWARD_NOTE" || return 1
   case "$FORWARD_BACKEND" in nftables|realm) ;; *) return 1 ;; esac
   FORWARD_PROTOCOL="$(forward_normalize_protocol "$FORWARD_PROTOCOL")" || return 1
+  [ -n "${INGRESS_PROFILE_ID:-}" ] || nb_prepare_ingress_request || return 1
   FORWARD_LISTEN_HOST="${FORWARD_LISTEN_HOST:-0.0.0.0}"
   forward_listen_host_valid "$FORWARD_BACKEND" "$FORWARD_LISTEN_HOST" || return 1
   nb_valid_port "$FORWARD_LISTEN_PORT" && nb_valid_port "$FORWARD_TARGET_PORT" || return 1
@@ -16211,8 +20236,11 @@ forward_validate_requested_rule() {
     old_protocol="$(jq -r .protocol <<<"$old_json")"
   fi
   if [ "$old_port" != "$FORWARD_LISTEN_PORT" ] || [ "$old_protocol" != "$FORWARD_PROTOCOL" ]; then
-    forward_port_allowed "$FORWARD_LISTEN_PORT" "$FORWARD_PROTOCOL" "$ignore_owner" || return 1
+    forward_port_allowed "$FORWARD_LISTEN_PORT" "$FORWARD_PROTOCOL" "$ignore_owner" "$INGRESS_PROFILE_ID" || return 1
+  else
+    nb_ingress_port_is_reserved "$INGRESS_PROFILE_ID" "$FORWARD_LISTEN_PORT" && return 1
   fi
+  return 0
 }
 
 forward_requested_display_json() {
@@ -16229,9 +20257,17 @@ forward_requested_display_json() {
 forward_add_rule() {
   local id now options display rule candidate
   forward_init_state || return 1
+  nb_prepare_ingress_request || return 1
   [ -n "$FORWARD_NAME" ] && [ -n "$FORWARD_BACKEND" ] && [ -n "$FORWARD_PROTOCOL" ] \
-    && [ -n "$FORWARD_LISTEN_PORT" ] && [ -n "$FORWARD_TARGET_HOST" ] \
-    && [ -n "$FORWARD_TARGET_PORT" ] || die 'forward add 非交互模式需要 --name --backend --protocol --port --target --target-port'
+    && [ -n "$FORWARD_TARGET_HOST" ] && [ -n "$FORWARD_TARGET_PORT" ] \
+    || die 'forward add 非交互模式需要 --name --backend --protocol --target --target-port'
+  FORWARD_PROTOCOL="$(forward_normalize_protocol "$FORWARD_PROTOCOL")" || die 'Forward protocol 无效'
+  forward_prepare_ingress_enforcement "$FORWARD_BACKEND" "$INGRESS_PROFILE_ID" \
+    || die '所选 Ingress strict local address cannot be enforced by Forward'
+  if [ -z "$FORWARD_LISTEN_PORT" ]; then
+    FORWARD_LISTEN_PORT="$(forward_select_available_port "$FORWARD_PROTOCOL" "$INGRESS_PROFILE_ID")" \
+      || die '所选入口配置没有可用 Forward 自动端口；manual-only 必须显式使用 --port'
+  fi
   forward_validate_requested_rule || die 'Forward rule 参数无效、端口冲突或命中 xx00 保留端口'
   jq -e --arg name "$FORWARD_NAME" 'all(.rules[];.name!=$name)' "$NOBRAND_FORWARD_STATE_FILE" >/dev/null \
     || die 'Forward rule name 已存在'
@@ -16245,12 +20281,16 @@ forward_add_rule() {
     --arg target_host "$FORWARD_TARGET_HOST" --argjson target_port "$FORWARD_TARGET_PORT" \
     --arg display_mode "$(jq -r .mode <<<"$display")" --arg display_host "$(jq -r .host <<<"$display")" \
     --argjson display_port "$(jq -r .port <<<"$display")" --arg now "$now" \
-    --argjson options "$options" '
+    --argjson options "$options" --arg ingress_profile_id "$INGRESS_PROFILE_ID" \
+    --arg ingress_enforcement "$INGRESS_ENFORCEMENT_RESOLVED" \
+    --arg ingress_method "$INGRESS_ENFORCEMENT_METHOD" --arg ingress_address "$INGRESS_LOCAL_ADDRESS" '
       {rule_id:$id,name:$name,note:$note,backend:$backend,enabled:true,protocol:$protocol,
        listen_host:$listen_host,listen_port:$listen_port,target_host:$target_host,target_port:$target_port,
        display_host:$display_host,display_port:$display_port,display_mode:$display_mode,
        created_at:$now,updated_at:$now,
-       ownership_metadata:{managed_listener:true,managed_firewall:true},backend_options:$options}
+       ownership_metadata:{managed_listener:true,managed_firewall:true},backend_options:$options,
+        ingress_profile_id:$ingress_profile_id,ingress_enforcement:$ingress_enforcement,
+        ingress_enforcement_method:$ingress_method,ingress_local_address:$ingress_address}
     ')" || return 1
   candidate="$(mktemp_file .forward-add)" || return 1
   jq --argjson rule "$rule" '.rules += [$rule]' "$NOBRAND_FORWARD_STATE_FILE" >"$candidate" \
@@ -16290,10 +20330,16 @@ forward_set_enabled() {
 forward_modify_rule() {
   local id old old_backend options candidate new_name new_note new_protocol new_listen_host
   local new_listen_port new_target_host new_target_port display
-  local new_display_mode new_display_host new_display_port
+  local new_display_mode new_display_host new_display_port old_ingress_profile_id
   id="$(forward_resolve_rule_id "$FORWARD_RULE_ID")" || die 'Forward rule 不存在'
   old="$(forward_rule_json "$NOBRAND_FORWARD_STATE_FILE" "$id")"
   old_backend="$(jq -r .backend <<<"$old")"
+  old_ingress_profile_id="$(jq -r '.ingress_profile_id // "legacy-default-route"' <<<"$old")"
+  if [ "$INGRESS_PROFILE_CLI" -eq 1 ]; then
+    INGRESS_PROFILE_ID="$(nb_resolve_ingress_profile "$INGRESS_PROFILE")" || return 1
+  else
+    INGRESS_PROFILE_ID="$old_ingress_profile_id"
+  fi
   [ -z "$FORWARD_BACKEND" ] || [ "$FORWARD_BACKEND" = "$old_backend" ] \
     || die 'modify 不切换 backend；请使用 switch-backend'
   FORWARD_BACKEND="$old_backend"
@@ -16307,6 +20353,13 @@ forward_modify_rule() {
   FORWARD_NAME="$new_name" FORWARD_NOTE="$new_note" FORWARD_PROTOCOL="$new_protocol"
   FORWARD_LISTEN_HOST="$new_listen_host" FORWARD_LISTEN_PORT="$new_listen_port"
   FORWARD_TARGET_HOST="$new_target_host" FORWARD_TARGET_PORT="$new_target_port"
+  forward_prepare_ingress_enforcement "$FORWARD_BACKEND" "$INGRESS_PROFILE_ID" \
+    || die 'Modified Forward rule cannot enforce the selected Ingress profile'
+  if [ "$INGRESS_ENFORCEMENT_RESOLVED" = permissive ] \
+     && [ "$(jq -r '.ingress_enforcement // "permissive"' <<<"$old")" = strict ] \
+     && [ "${FORWARD_LISTEN_HOST_CLI:-0}" -eq 0 ]; then
+    FORWARD_LISTEN_HOST=0.0.0.0
+  fi
   forward_validate_requested_rule "forward:${id}" "$old" || die 'Forward 修改参数无效、冲突或命中 xx00'
   if [ "$ADVERTISE_CLI" -eq 1 ]; then
     display="$(forward_requested_display_json)" || die 'Forward Display Endpoint 无效'
@@ -16342,11 +20395,15 @@ forward_modify_rule() {
     --argjson listen_port "$FORWARD_LISTEN_PORT" --arg target_host "$FORWARD_TARGET_HOST" \
     --argjson target_port "$FORWARD_TARGET_PORT" --arg display_mode "$new_display_mode" \
     --arg display_host "$new_display_host" --argjson display_port "$new_display_port" \
-    --argjson options "$options" --arg now "$(forward_now)" '
+    --argjson options "$options" --arg ingress_profile_id "$INGRESS_PROFILE_ID" --arg now "$(forward_now)" \
+    --arg ingress_enforcement "$INGRESS_ENFORCEMENT_RESOLVED" \
+    --arg ingress_method "$INGRESS_ENFORCEMENT_METHOD" --arg ingress_address "$INGRESS_LOCAL_ADDRESS" '
       (.rules[]|select(.rule_id==$id)) |=
         (.name=$name|.note=$note|.protocol=$protocol|.listen_host=$listen_host|.listen_port=$listen_port|
          .target_host=$target_host|.target_port=$target_port|.display_mode=$display_mode|
-         .display_host=$display_host|.display_port=$display_port|.backend_options=$options|.updated_at=$now)
+         .display_host=$display_host|.display_port=$display_port|.backend_options=$options|
+         .ingress_profile_id=$ingress_profile_id|.ingress_enforcement=$ingress_enforcement|
+         .ingress_enforcement_method=$ingress_method|.ingress_local_address=$ingress_address|.updated_at=$now)
     ' "$NOBRAND_FORWARD_STATE_FILE" >"$candidate" \
     && forward_transaction_commit "$candidate" modify "$old_backend" "$old_backend"
   local rc=$?
@@ -16355,7 +20412,7 @@ forward_modify_rule() {
 }
 
 forward_switch_backend() {
-  local id old old_backend new_backend options target candidate
+  local id old old_backend new_backend options target candidate profile_id
   id="$(forward_resolve_rule_id "$FORWARD_RULE_ID")" || die 'Forward rule 不存在'
   old="$(forward_rule_json "$NOBRAND_FORWARD_STATE_FILE" "$id")"
   old_backend="$(jq -r .backend <<<"$old")"
@@ -16378,15 +20435,21 @@ forward_switch_backend() {
   FORWARD_TARGET_HOST="$target"
   FORWARD_TARGET_PORT="${FORWARD_TARGET_PORT:-$(jq -r .target_port <<<"$old")}"
   FORWARD_BACKEND="$new_backend"
+  profile_id="$(jq -r '.ingress_profile_id // "legacy-default-route"' <<<"$old")"
+  forward_prepare_ingress_enforcement "$new_backend" "$profile_id" \
+    || die 'Backend switch cannot enforce the retained Ingress profile'
   forward_validate_requested_rule "forward:${id}" "$old" || die 'Backend switch 参数无效'
   options="$(forward_default_options_json "$new_backend")" || die 'Backend options 无效'
   candidate="$(mktemp_file .forward-switch)" || return 1
   jq --arg id "$id" --arg backend "$new_backend" --arg listen_host "$FORWARD_LISTEN_HOST" \
     --arg target_host "$FORWARD_TARGET_HOST" --argjson target_port "$FORWARD_TARGET_PORT" \
-    --argjson options "$options" --arg now "$(forward_now)" '
+    --argjson options "$options" --arg now "$(forward_now)" \
+    --arg ingress_enforcement "$INGRESS_ENFORCEMENT_RESOLVED" \
+    --arg ingress_method "$INGRESS_ENFORCEMENT_METHOD" --arg ingress_address "$INGRESS_LOCAL_ADDRESS" '
       (.rules[]|select(.rule_id==$id)) |=
        (.backend=$backend|.listen_host=$listen_host|.target_host=$target_host|.target_port=$target_port|
-        .backend_options=$options|.updated_at=$now)
+         .backend_options=$options|.ingress_enforcement=$ingress_enforcement|
+         .ingress_enforcement_method=$ingress_method|.ingress_local_address=$ingress_address|.updated_at=$now)
     ' "$NOBRAND_FORWARD_STATE_FILE" >"$candidate" \
     && forward_transaction_commit "$candidate" switch-backend "$old_backend" "$new_backend"
   local rc=$?
@@ -16394,14 +20457,50 @@ forward_switch_backend() {
   return "$rc"
 }
 
+forward_apply_ingress_enforcement() {
+  local id="$1" rule backend profile_id candidate rc
+  rule="$(forward_rule_json "$NOBRAND_FORWARD_STATE_FILE" "$id")" || return 1
+  [ -n "$rule" ] || return 1
+  backend="$(jq -r .backend <<<"$rule")"
+  profile_id="$(jq -r '.ingress_profile_id // "legacy-default-route"' <<<"$rule")"
+  FORWARD_LISTEN_HOST="$(jq -r .listen_host <<<"$rule")"
+  forward_prepare_ingress_enforcement "$backend" "$profile_id" || return 1
+  [ "$INGRESS_ENFORCEMENT_RESOLVED" != permissive ] || FORWARD_LISTEN_HOST=0.0.0.0
+  candidate="$(mktemp_file .forward-ingress-apply)" || return 1
+  jq --arg id "$id" --arg listen "$FORWARD_LISTEN_HOST" \
+    --arg policy "$INGRESS_ENFORCEMENT_RESOLVED" --arg method "$INGRESS_ENFORCEMENT_METHOD" \
+    --arg address "$INGRESS_LOCAL_ADDRESS" --arg now "$(forward_now)" '
+      (.rules[]|select(.rule_id==$id)) |=
+        (.listen_host=$listen|.ingress_enforcement=$policy|
+         .ingress_enforcement_method=$method|.ingress_local_address=$address|.updated_at=$now)
+    ' "$NOBRAND_FORWARD_STATE_FILE" >"$candidate" \
+    && forward_transaction_commit "$candidate" ingress-enforcement "$backend" "$backend"
+  rc=$?
+  rm -f "$candidate"
+  return "$rc"
+}
+
+forward_listener_enforcement_owned() {
+  local id="$1" rule backend
+  rule="$(forward_rule_json "$NOBRAND_FORWARD_STATE_FILE" "$id")" || return 1
+  [ -n "$rule" ] || return 1
+  backend="$(jq -r .backend <<<"$rule")"
+  case "$backend" in
+    nftables) forward_nft_rule_ingress_owned "$id" ;;
+    realm) forward_realm_service_active && forward_realm_listener_owned "$NOBRAND_FORWARD_STATE_FILE" ;;
+    *) return 1 ;;
+  esac
+}
+
 forward_list_rules() {
   forward_init_state || return 1
-  printf '%-18s %-20s %-10s %-6s %-22s %-28s %s\n' ID NAME BACKEND PROTO LISTEN TARGET STATUS
+  printf '%-18s %-20s %-10s %-6s %-22s %-11s %-28s %s\n' ID NAME BACKEND PROTO LISTEN ENFORCEMENT TARGET STATUS
   jq -r '.rules|sort_by(.rule_id)[]|[.rule_id,.name,.backend,.protocol,
-    (.listen_host+":"+(.listen_port|tostring)),(.target_host+":"+(.target_port|tostring)),
+    (.listen_host+":"+(.listen_port|tostring)),(.ingress_enforcement // "permissive"),(.target_host+":"+(.target_port|tostring)),
     (if .enabled then "Enabled" else "Disabled" end)]|@tsv' "$NOBRAND_FORWARD_STATE_FILE" \
-    | while IFS=$'\t' read -r id name backend protocol listen target status; do
-        printf '%-18s %-20s %-10s %-6s %-22s %-28s %s\n' "$id" "$name" "$backend" "$protocol" "$listen" "$target" "$status"
+    | while IFS=$'\t' read -r id name backend protocol listen enforcement target status; do
+        printf '%-18s %-20s %-10s %-6s %-22s %-11s %-28s %s\n' \
+          "$id" "$name" "$backend" "$protocol" "$listen" "$enforcement" "$target" "$status"
       done
 }
 
@@ -16410,11 +20509,14 @@ forward_node_rows() {
   local effective_host effective_port status
   [ -s "$NOBRAND_FORWARD_STATE_FILE" ] || return 0
   auto_host="$(public_ip 2>/dev/null || printf 'YOUR_SERVER_IP')"
-  while IFS=$'\x1f' read -r id name backend enabled protocol display_mode display_host display_port listen_port; do
+  local ingress_profile_id
+  while IFS=$'\x1f' read -r id name backend enabled protocol display_mode display_host display_port listen_port ingress_profile_id; do
     effective_host="$display_host"
-    [ "$display_mode" = custom ] || effective_host="$auto_host"
+    [ "$display_mode" = custom ] \
+      || effective_host="$(nb_effective_advertise_host auto '' "$ingress_profile_id")"
     effective_port="$display_port"
-    [ "$display_mode" = custom ] || effective_port="$listen_port"
+    [ "$display_mode" = custom ] \
+      || effective_port="$(nb_effective_advertise_port auto '' "$listen_port" "$ingress_profile_id")"
     status=Disabled
     if [ "$enabled" = true ]; then
       if [ "$backend" = nftables ]; then
@@ -16428,7 +20530,7 @@ forward_node_rows() {
     printf 'Port Forward/%s|%s|%s:%s|%s|%s\n' \
       "$backend" "$name" "$effective_host" "$effective_port" "$status" "$(printf '%s' "$protocol" | tr '[:lower:]' '[:upper:]')"
   done < <(jq -r '.rules|sort_by(.rule_id)[]|[.rule_id,.name,.backend,(.enabled|tostring),.protocol,
-    .display_mode,.display_host,(.display_port|tostring),(.listen_port|tostring)]|join("\u001f")' \
+    .display_mode,.display_host,(.display_port|tostring),(.listen_port|tostring),(.ingress_profile_id // "legacy-default-route")]|join("\u001f")' \
     "$NOBRAND_FORWARD_STATE_FILE")
 }
 
@@ -16436,9 +20538,9 @@ forward_show_rule() {
   local id rule display_host display_port
   id="$(forward_resolve_rule_id "$FORWARD_RULE_ID")" || die 'Forward rule 不存在'
   rule="$(forward_rule_json "$NOBRAND_FORWARD_STATE_FILE" "$id")"
-  display_host="$(nb_effective_advertise_host "$(jq -r .display_mode <<<"$rule")" "$(jq -r .display_host <<<"$rule")")"
+  display_host="$(nb_effective_advertise_host "$(jq -r .display_mode <<<"$rule")" "$(jq -r .display_host <<<"$rule")" "$(jq -r '.ingress_profile_id // "legacy-default-route"' <<<"$rule")")"
   display_port="$(nb_effective_advertise_port "$(jq -r .display_mode <<<"$rule")" \
-    "$(jq -r .display_port <<<"$rule")" "$(jq -r .listen_port <<<"$rule")")"
+    "$(jq -r .display_port <<<"$rule")" "$(jq -r .listen_port <<<"$rule")" "$(jq -r '.ingress_profile_id // "legacy-default-route"' <<<"$rule")")"
   printf 'ID: %s\nName: %s\nNote: %s\nBackend: %s\nEnabled: %s\nProtocol: %s\n' \
     "$id" "$(jq -r .name <<<"$rule")" "$(jq -r .note <<<"$rule")" "$(jq -r .backend <<<"$rule")" \
     "$(jq -r .enabled <<<"$rule")" "$(jq -r .protocol <<<"$rule")"
@@ -16446,6 +20548,11 @@ forward_show_rule() {
     "$(jq -r .listen_host <<<"$rule")" "$(jq -r .listen_port <<<"$rule")" \
     "$(jq -r .target_host <<<"$rule")" "$(jq -r .target_port <<<"$rule")" \
     "$display_host" "$display_port" "$(jq -r .display_mode <<<"$rule")"
+  printf 'Ingress Profile: %s\n' "$(nb_ingress_profile_name "$(jq -r '.ingress_profile_id // "legacy-default-route"' <<<"$rule")")"
+  printf 'Ingress Enforcement: %s (%s)\nIngress Local Address: %s\n' \
+    "$(jq -r '.ingress_enforcement // "permissive"' <<<"$rule")" \
+    "$(jq -r '.ingress_enforcement_method // "wildcard"' <<<"$rule")" \
+    "$(jq -r '.ingress_local_address // empty' <<<"$rule")"
   printf 'Backend options: %s\n' "$(jq -c .backend_options <<<"$rule")"
 }
 
@@ -16462,7 +20569,7 @@ forward_doctor() {
     forward_target_valid "$backend" "$target" || { warn "${id} target: FAIL"; failed=1; }
     [ "$enabled" = true ] || continue
     if [ "$backend" = nftables ]; then
-      forward_nft_rule_owned "$id" \
+      forward_nft_rule_ingress_owned "$id" \
         || { warn "${id} nft ownership: FAIL"; failed=1; }
       [ "$(sysctl -n net.ipv4.ip_forward 2>/dev/null || true)" = 1 ] \
         || { warn "${id} ip_forward: FAIL"; failed=1; }
@@ -16645,7 +20752,8 @@ nobrand_run_forward_action() {
   case "$FORWARD_ACTION" in
     add|delete|modify|enable|disable|set-endpoint|switch-backend|import|upgrade-runtime|uninstall)
       lock_required=1
-      require_root
+      require_root || return 1
+      nb_init_state_layout || return 1
       ensure_management_dependencies "$(detect_pkg_manager)" || return 1
       admin_lock_acquire || return 1
       ;;
@@ -17325,6 +21433,8 @@ print_summary() {
   t "  用户名: ${USERNAME}" "  Username: ${USERNAME}"
   t "  密码:   ${PASSWORD}" "  Password: ${PASSWORD}"
   t "  协议:   $(client_protocol_label)" "  Protocol: $(client_protocol_label)"
+  t "  网络入口: $(nb_ingress_profile_name "${INGRESS_PROFILE_ID:-}")" \
+    "  Ingress:  $(nb_ingress_profile_name "${INGRESS_PROFILE_ID:-}")"
   t "  Profile: $(profile_label)" "  Profile:  $(profile_label)"
   t "  MTU:    ${MTU}（$(mtu_policy_label)）" \
     "  MTU:      ${MTU} ($(mtu_policy_label))"
@@ -17537,13 +21647,22 @@ snell_print_client_exports() {
   fi
 }
 
+mieru_prepare_noninteractive_ingress_endpoint() {
+  # Resolve the explicit/default Profile before enforcing the unattended
+  # Display Endpoint guard.  A first-class Profile with a stable display host
+  # is sufficient input; legacy-default-route still requires an explicit
+  # endpoint or --advertise-auto.
+  nb_prepare_ingress_request || return 1
+  nb_require_explicit_endpoint_noninteractive
+}
+
 do_install() {
   require_root
   require_linux
   require_cmd curl
   ensure_manager_state_layout 1
 
-  local pm arch ver url tmp tx reinstall_existing=0 managed_existing=0
+  local pm arch ver url tmp tx runtime_tx reinstall_existing=0 managed_existing=0
   pm="$(detect_pkg_manager)"
   arch="$(detect_arch)"
   ensure_management_dependencies "$pm"
@@ -17590,9 +21709,7 @@ do_install() {
   if [ "$reinstall_existing" -eq 1 ]; then
     ensure_config_noninteractive
   elif [ "$YES" -eq 1 ]; then
-    [ "${ADVERTISE_CLI:-0}" -eq 1 ] || die "$(t \
-      '非交互安装必须显式提供 --advertise-host/--advertise-port，或用 --advertise-auto 确认自动入口。' \
-      'Non-interactive install requires --advertise-host/--advertise-port, or --advertise-auto to explicitly confirm automatic endpoint selection.')"
+    mieru_prepare_noninteractive_ingress_endpoint || return 1
     ensure_config_noninteractive
   else
     collect_config_interactive
@@ -17604,12 +21721,25 @@ do_install() {
     ensure_install_port_available
   fi
 
-  ver="$(target_mieru_version)"
-  url="$(package_url "$ver" "$pm" "$arch")"
+  mieru_resolve_runtime "${MIERU_CHANNEL:-stable}" "${MIERU_VERSION:-}" "$pm" "$arch" \
+    || die "$(t '无法解析并验证官方 Mieru release' \
+      'Failed to resolve and validate the official Mieru release')"
+  ver="$MIERU_RUNTIME_RESOLVED_VERSION"
+  url="$MIERU_RUNTIME_RESOLVED_URL"
   tmp="$(mktemp_file)"
-  download_package "$url" "$tmp"
-  install_package "$tmp" "$pm"
+  download_package "$url" "$tmp" \
+    "$MIERU_RUNTIME_RESOLVED_SHA256" \
+    "$MIERU_RUNTIME_RESOLVED_CHECKSUM_URL"
+  runtime_tx="$(mieru_runtime_snapshot)" || { rm -f "$tmp"; return 1; }
+  if ! ( install_package "$tmp" "$pm" ) || ! mieru_assert_runtime_version "$ver"; then
+    rm -f "$tmp"
+    mieru_runtime_rollback "$runtime_tx" 2>/dev/null || true
+    die "$(t 'Mieru runtime 安装验证失败，已恢复原有 managed runtime' \
+      'Mieru runtime installation validation failed; the previous managed runtime was restored')"
+    return 1
+  fi
   rm -f "$tmp"
+  mieru_runtime_commit "$runtime_tx" || return 1
   MIERU_VERSION="$ver"
 
   add_op_user "$OP_USER"
@@ -17923,6 +22053,18 @@ json.dump(d, open(path, "w"), indent=2)
   print_summary current
 }
 
+mieru_upgrade_rollback() {
+  local runtime_tx="$1" users_tx="$2" old_channel="$3" old_version="$4" rc=0
+  MIERU_CHANNEL="$old_channel"
+  MIERU_VERSION="$old_version"
+  mieru_runtime_rollback "$runtime_tx" || rc=1
+  users_tx_rollback "$users_tx" 0
+  isolated_stop_all 2>/dev/null || true
+  reconcile_isolated_instances 2>/dev/null || rc=1
+  verify_mita_running 2>/dev/null || rc=1
+  return "$rc"
+}
+
 do_upgrade() {
   require_root
   require_linux
@@ -17931,7 +22073,7 @@ do_upgrade() {
     'mita is not installed; perform a fresh install first')"
   mita_v3_install_state_valid || die "$(t 'schema v3 Mieru 安装状态缺失或损坏，拒绝升级' \
     'Schema-v3 Mieru install state is missing or invalid; refusing upgrade')"
-  local pm arch ver url tmp tx
+  local pm arch ver url tmp tx runtime_tx cur state_channel state_version
   local requested_channel="$MIERU_CHANNEL" requested_version="$MIERU_VERSION"
   local requested_channel_cli="${MIERU_CHANNEL_CLI:-0}" requested_version_cli="${MIERU_VERSION_CLI:-0}"
   pm="$(detect_pkg_manager)"
@@ -17939,6 +22081,8 @@ do_upgrade() {
   ensure_management_dependencies "$pm"
   MIERU_CHANNEL_CLI=0 MIERU_VERSION_CLI=0
   load_install_state
+  state_channel="$MIERU_CHANNEL"
+  state_version="$MIERU_VERSION"
   users_isolated_mode || die "$(t 'schema v3 Mieru 状态必须使用 isolated-v2' \
     'Schema-v3 Mieru state must use isolated-v2')"
   [ "$(users_count 2>/dev/null || printf 0)" -gt 0 ] \
@@ -17951,8 +22095,10 @@ do_upgrade() {
   if [ "$MIERU_VERSION_CLI" -eq 1 ]; then
     MIERU_VERSION="$requested_version"
   fi
-  ver="$(target_mieru_version)"
-  local cur
+  mieru_resolve_runtime "${MIERU_CHANNEL:-stable}" "${MIERU_VERSION:-}" "$pm" "$arch" \
+    || die "$(t '无法解析并验证官方 Mieru release' \
+      'Failed to resolve and validate the official Mieru release')"
+  ver="$MIERU_RUNTIME_RESOLVED_VERSION"
   cur="$(installed_version || true)"
   if version_is_current "$cur" "$ver"; then
     MIERU_VERSION="$ver"
@@ -17974,24 +22120,59 @@ do_upgrade() {
     [ "${MENU_MODE:-0}" -eq 1 ] && return 0
     exit 0
   fi
-  url="$(package_url "$ver" "$pm" "$arch")"
+  if [ "${YES:-0}" -ne 1 ] && [ -t 0 ]; then
+    t "已安装: ${cur:-unknown}" "Installed: ${cur:-unknown}"
+    t "最新稳定版: ${ver}" "Latest stable: ${ver}"
+    if ! confirm '升级？[Y/n]: ' 'Upgrade? [Y/n]: ' y; then
+      [ "${MENU_MODE:-0}" -eq 1 ] && return 0
+      exit 0
+    fi
+  fi
+  url="$MIERU_RUNTIME_RESOLVED_URL"
   tmp="$(mktemp_file)"
-  download_package "$url" "$tmp"
-  install_package "$tmp" "$pm"
+  download_package "$url" "$tmp" \
+    "$MIERU_RUNTIME_RESOLVED_SHA256" \
+    "$MIERU_RUNTIME_RESOLVED_CHECKSUM_URL"
+  install_self_script
+  admin_lock_acquire || { rm -f "$tmp"; return 1; }
+  runtime_tx="$(mieru_runtime_snapshot)" \
+    || { rm -f "$tmp"; admin_lock_release; return 1; }
+  tx="$(users_tx_snapshot)" || {
+    rm -f "$tmp"
+    mieru_runtime_commit "$runtime_tx" 2>/dev/null || true
+    admin_lock_release
+    return 1
+  }
+  if ! ( install_package "$tmp" "$pm" ) || ! mieru_assert_runtime_version "$ver"; then
+    rm -f "$tmp"
+    mieru_upgrade_rollback "$runtime_tx" "$tx" "$state_channel" "$state_version" \
+      || warn "$(t 'Mieru runtime 回滚后服务恢复不完整，请立即运行 doctor' \
+        'Mieru services were not fully restored after runtime rollback; run doctor immediately')"
+    admin_lock_release
+    die "$(t 'Mieru runtime 升级验证失败，已恢复旧 runtime 与节点状态' \
+      'Mieru runtime upgrade validation failed; the old runtime and node state were restored')"
+    return 1
+  fi
   rm -f "$tmp"
   MIERU_VERSION="$ver"
-  install_self_script
-  admin_lock_acquire || return 1
-  tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
   isolated_stop_all
-  if ! apply_users_config "$tx"; then
+  if ! ( apply_users_config "$tx" ) \
+     || ! verify_mita_running \
+     || { [ ! -f "$MITA_STATE" ] || ! save_install_state; }; then
+    mieru_upgrade_rollback "$runtime_tx" "$tx" "$state_channel" "$state_version" \
+      || warn "$(t 'Mieru runtime 回滚后服务恢复不完整，请立即运行 doctor' \
+        'Mieru services were not fully restored after runtime rollback; run doctor immediately')"
     admin_lock_release
+    die "$(t 'Mieru 升级应用失败，已恢复旧 runtime、服务与状态' \
+      'Mieru upgrade application failed; the old runtime, services, and state were restored')"
     return 1
   fi
   users_tx_commit "$tx"
+  mieru_runtime_commit "$runtime_tx" || {
+    admin_lock_release
+    return 1
+  }
   admin_lock_release
-  verify_mita_running
-  [ -f "$MITA_STATE" ] && save_install_state
   t "已升级至 ${ver}（$(mieru_channel_label)）" \
     "Upgraded to ${ver} ($(mieru_channel_label))"
 }
@@ -18133,6 +22314,18 @@ verify_mita_uninstalled() {
       failed=1
     fi
   done
+  if [ -e "$NOBRAND_INGRESS_FIREWALL_STATE_FILE" ]; then
+    if ! nb_strict_firewall_state_valid "$NOBRAND_INGRESS_FIREWALL_STATE_FILE"; then
+      warn "$(t '卸载验收失败: Strict Ingress 防火墙状态无效' \
+        'Uninstall verification failed: Strict Ingress firewall state is invalid')"
+      failed=1
+    elif jq -e 'any(.rules[]; .owner | startswith("mieru:"))' \
+      "$NOBRAND_INGRESS_FIREWALL_STATE_FILE" >/dev/null; then
+      warn "$(t '卸载残留: Strict Ingress 中仍有 Mieru 所有者规则' \
+        'Uninstall residue: Strict Ingress still contains Mieru-owned rules')"
+      failed=1
+    fi
+  fi
   [ "$failed" -eq 0 ]
 }
 
@@ -18180,6 +22373,8 @@ do_uninstall() {
   stop_mita_for_uninstall
   STAGE="清理防火墙规则"
   firewall_clear_all_owned
+  STAGE="清理 Strict Ingress 防火墙规则"
+  mieru_clear_strict_firewall
   STAGE="卸载 mita 软件包"
   if [ "$UNINSTALL_PRESERVE_PACKAGE" -eq 0 ]; then
     case "$pm" in
@@ -18237,8 +22432,8 @@ do_status() {
   t "  Installed Mieru: $(installed_version 2>/dev/null || printf unknown)" \
     "  Installed Mieru: $(installed_version 2>/dev/null || printf unknown)"
   t "  Channel: $(mieru_channel_label)" "  Channel: $(mieru_channel_label)"
-  t "  Tested/Stable Mieru: ${TESTED_MIERU_VERSION}" \
-    "  Tested/Stable Mieru: ${TESTED_MIERU_VERSION}"
+  t "  Qualified last-known-good Mieru: ${LAST_KNOWN_GOOD_MIERU_VERSION}" \
+    "  Qualified last-known-good Mieru: ${LAST_KNOWN_GOOD_MIERU_VERSION}"
   t "  Profile: $(profile_label)" "  Profile: $(profile_label)"
   msg ""
   users_isolated_mode || {
@@ -18433,18 +22628,18 @@ do_version_channel_config() {
   local input="" version=""
   msg ""
   t "当前通道: $(mieru_channel_label)" "Current channel: $(mieru_channel_label)"
-  t "  1) stable — 项目测试版本 ${TESTED_MIERU_VERSION}" \
-    "  1) stable — project-tested ${TESTED_MIERU_VERSION}"
-  t '  2) latest — 每次升级查询上游最新 release' \
-    '  2) latest — query the newest upstream release on each upgrade'
+  t "  1) stable — 官方最新稳定版（当前合格回退 ${LAST_KNOWN_GOOD_MIERU_VERSION}）" \
+    "  1) stable — official latest stable (qualified fallback ${LAST_KNOWN_GOOD_MIERU_VERSION})"
+  t '  2) latest — stable 的兼容别名（同样排除 draft/prerelease）' \
+    '  2) latest — compatibility alias for stable (also excludes draft/prerelease)'
   t '  3) pinned — 指定精确版本（高级）' \
     '  3) pinned — use an exact version (advanced)'
   read_tty input "$(t '请选择 [1-3]: ' 'Choose [1-3]: ')" || input=""
   case "$input" in
-    1) MIERU_CHANNEL=stable; MIERU_VERSION="$TESTED_MIERU_VERSION" ;;
+    1) MIERU_CHANNEL=stable; MIERU_VERSION="" ;;
     2) MIERU_CHANNEL=latest; MIERU_VERSION="" ;;
     3)
-      read_tty version "$(t '精确版本（例如 3.35.0）: ' 'Exact version (for example 3.35.0): ')" || version=""
+      read_tty version "$(t '精确版本（例如 3.36.0）: ' 'Exact version (for example 3.36.0): ')" || version=""
       valid_mieru_version "$version" || die "$(t '版本号格式无效' 'Invalid version format')"
       MIERU_CHANNEL=pinned; MIERU_VERSION="$version"
       ;;
@@ -19007,6 +23202,92 @@ vless_sudoku_menu_loop() {
   done
 }
 
+reality_menu_select_instance() {
+  local id name choice="" found=0
+  while IFS= read -r id; do
+    name="$(reality_state_field "$id" name)"
+    printf '  - %s (%s)\n' "$name" "$id"
+    found=1
+  done < <(reality_instance_ids)
+  [ "$found" -eq 1 ] || { warn 'VLESS REALITY 尚无 instance'; return 1; }
+  read_tty choice '输入 VLESS REALITY instance name: ' || choice=""
+  reality_find_id_by_name "$choice" >/dev/null 2>&1 \
+    || { warn 'VLESS REALITY instance 不存在'; return 1; }
+  VLESS_REALITY_NAME="$choice"
+}
+
+vless_reality_menu_loop() {
+  local choice="" confirm="" selected="" profile_default=""
+  trap - ERR
+  while true; do
+    msg ''
+    msg '========== VLESS + TCP + REALITY + XTLS Vision =========='
+    msg 'Public Ingress: Recommended; mapped/dedicated: allowed with warning'
+    msg '  1) 安装新 instance'
+    msg '  2) 查看节点 / URI'
+    msg '  3) 导出 Xray / Mihomo / sing-box'
+    msg '  4) 修改 Display Endpoint'
+    msg '  5) 状态'
+    msg '  6) 启动'
+    msg '  7) 停止'
+    msg '  8) 重启'
+    msg '  9) Doctor'
+    msg ' 10) 升级共享 Xray runtime'
+    msg ' 11) 删除 instance'
+    msg '  0) 返回'
+    read_tty choice "$(t '请选择 [0-11]: ' 'Choose [0-11]: ')" || choice=""
+    case "$choice" in
+      1)
+        PORT="" PORT_CLI=0 VLESS_REALITY_NAME="" VLESS_REALITY_TARGET="" VLESS_REALITY_TARGET_CLI=0
+        VLESS_REALITY_TARGET_PORT="$NOBRAND_REALITY_DEFAULT_CAMOUFLAGE_PORT" \
+          VLESS_REALITY_TARGET_PORT_CLI=0 VLESS_REALITY_FINGERPRINT=chrome VLESS_REALITY_SPIDER_X=/
+        ADVERTISE_HOST="" ADVERTISE_PORT="" ADVERTISE_CLI=0 ADVERTISE_AUTO_REQUESTED=0
+        INGRESS_PROFILE="" INGRESS_PROFILE_CLI=0 YES=0
+        read_tty VLESS_REALITY_NAME 'Instance name [primary]: ' || VLESS_REALITY_NAME=""
+        VLESS_REALITY_NAME="${VLESS_REALITY_NAME:-primary}"
+        msg ''
+        nb_ingress_list
+        profile_default="$(nb_ingress_profile_name "$(nb_ingress_default_profile_id 2>/dev/null || true)")"
+        read_tty selected "Ingress Profile [${profile_default}]: " || selected=""
+        if [ -n "$selected" ]; then
+          INGRESS_PROFILE="$selected"; INGRESS_PROFILE_CLI=1
+        fi
+        VLESS_REALITY_ACTION=install
+        nobrand_menu_run nobrand_run_vless_reality_action
+        ;;
+      2) reality_menu_select_instance && { VLESS_REALITY_ACTION=show; nobrand_menu_run nobrand_run_vless_reality_action; } ;;
+      3) reality_menu_select_instance && { VLESS_REALITY_ACTION="export"; nobrand_menu_run nobrand_run_vless_reality_action; } ;;
+      4)
+        if reality_menu_select_instance; then
+          INGRESS_PROFILE_ID="$(reality_state_field "$(reality_find_id_by_name "$VLESS_REALITY_NAME")" ingress_profile_id)"
+          PORT="$(reality_state_field "$(reality_find_id_by_name "$VLESS_REALITY_NAME")" listen_port)"
+          ADVERTISE_HOST="" ADVERTISE_PORT="" ADVERTISE_CLI=0 ADVERTISE_AUTO_REQUESTED=0
+          nb_collect_advertise_endpoint_interactive 'VLESS REALITY' "$PORT"
+          VLESS_REALITY_ACTION=set-endpoint
+          nobrand_menu_run nobrand_run_vless_reality_action
+        fi
+        ;;
+      5) VLESS_REALITY_NAME=""; VLESS_REALITY_ACTION=status; nobrand_menu_run nobrand_run_vless_reality_action ;;
+      6) reality_menu_select_instance && { VLESS_REALITY_ACTION=start; nobrand_menu_run nobrand_run_vless_reality_action; } ;;
+      7) reality_menu_select_instance && { VLESS_REALITY_ACTION=stop; nobrand_menu_run nobrand_run_vless_reality_action; } ;;
+      8) reality_menu_select_instance && { VLESS_REALITY_ACTION=restart; nobrand_menu_run nobrand_run_vless_reality_action; } ;;
+      9) VLESS_REALITY_NAME=""; VLESS_REALITY_ACTION=doctor; nobrand_menu_run nobrand_run_vless_reality_action ;;
+      10) VLESS_REALITY_ACTION=upgrade; nobrand_menu_run nobrand_run_vless_reality_action ;;
+      11)
+        if reality_menu_select_instance; then
+          read_tty confirm '确认删除该 VLESS REALITY instance？输入 yes: ' || confirm=""
+          [ "$confirm" = yes ] || { warn '已取消'; continue; }
+          VLESS_REALITY_ACTION=remove
+          nobrand_menu_run nobrand_run_vless_reality_action
+        fi
+        ;;
+      0) return 0 ;;
+      *) warn '无效选择' ;;
+    esac
+    menu_pause
+  done
+}
+
 tuic_menu_select_instance() {
   local id name choice="" found=0
   while IFS= read -r id; do
@@ -19340,6 +23621,220 @@ nobrand_backup_menu_loop() {
   done
 }
 
+ingress_menu_reset_requests() {
+  INGRESS_PROFILE_SELECTOR="" INGRESS_NAME="" INGRESS_TYPE="" INGRESS_INTERFACE="" INGRESS_ADDRESS=""
+  INGRESS_PORT_POLICY="" INGRESS_RANGE_START="" INGRESS_RANGE_END="" INGRESS_RESERVED_PORTS=""
+  INGRESS_DISPLAY_HOST_DEFAULT="" INGRESS_DISPLAY_PORT_POLICY="" INGRESS_DISPLAY_PORT="" INGRESS_ENABLED=""
+  INGRESS_ENFORCEMENT="" INGRESS_APPLY_EXISTING=0
+  INGRESS_NAME_CLI=0 INGRESS_TYPE_CLI=0 INGRESS_INTERFACE_CLI=0 INGRESS_ADDRESS_CLI=0
+  INGRESS_PORT_POLICY_CLI=0 INGRESS_RANGE_START_CLI=0 INGRESS_RANGE_END_CLI=0 INGRESS_RESERVED_CLI=0
+  INGRESS_DISPLAY_HOST_CLI=0 INGRESS_DISPLAY_PORT_POLICY_CLI=0 INGRESS_DISPLAY_PORT_CLI=0 INGRESS_ENABLED_CLI=0
+  INGRESS_ENFORCEMENT_CLI=0
+}
+
+ingress_menu_select_profile() {
+  nb_ingress_list
+  read_tty INGRESS_PROFILE_SELECTOR "$(t '入口配置 ID 或名称: ' 'Ingress profile ID or name: ')" \
+    || INGRESS_PROFILE_SELECTOR=""
+  [ -n "$INGRESS_PROFILE_SELECTOR" ] || { warn '未选择入口配置'; return 1; }
+}
+
+ingress_menu_collect_add() {
+  local choice="" value=""
+  ingress_menu_reset_requests
+  msg ''
+  t '可用 non-loopback IPv4（[默认出口] 仅为只读提示，不决定 Ingress）:' \
+    'Available non-loopback IPv4 addresses ([default egress] is read-only and does not select Ingress):'
+  nb_ingress_interface_rows | while IFS='|' read -r iface address state is_default; do
+    printf '  %s  %s  [%s]%s\n' "$iface" "$address" "$state" "$([ "$is_default" = 1 ] && printf ' [默认出口/default egress]' || true)"
+  done
+  read_tty INGRESS_NAME "$(t '名称: ' 'Name: ')" || INGRESS_NAME=""
+  INGRESS_NAME_CLI=1
+  msg '  1) public   2) mapped'
+  read_tty choice "$(t '类型 [1-2]: ' 'Type [1-2]: ')" || choice=""
+  case "$choice" in 1|public) INGRESS_TYPE=public ;; 2|mapped) INGRESS_TYPE=mapped ;; *) warn '无效类型'; return 1 ;; esac
+  INGRESS_TYPE_CLI=1
+  read_tty INGRESS_INTERFACE "$(t 'Interface: ' 'Interface: ')" || INGRESS_INTERFACE=""
+  INGRESS_INTERFACE_CLI=1
+  read_tty INGRESS_ADDRESS "$(t '该 interface 的本地 IPv4: ' 'Local IPv4 on that interface: ')" || INGRESS_ADDRESS=""
+  INGRESS_ADDRESS_CLI=1
+  msg '  1) derived-tail（由所选本地 IPv4 尾号推导）'
+  msg '  2) custom-range'
+  msg '  3) manual-only'
+  read_tty choice "$(t '端口策略 [1-3]: ' 'Port policy [1-3]: ')" || choice=""
+  case "$choice" in
+    1|derived-tail) INGRESS_PORT_POLICY='derived-tail' ;;
+    2|custom-range)
+      INGRESS_PORT_POLICY='custom-range'
+      read_tty INGRESS_RANGE_START 'Range start: ' || INGRESS_RANGE_START=""
+      read_tty INGRESS_RANGE_END 'Range end: ' || INGRESS_RANGE_END=""
+      INGRESS_RANGE_START_CLI=1 INGRESS_RANGE_END_CLI=1
+      ;;
+    3|manual-only) INGRESS_PORT_POLICY='manual-only' ;;
+    *) warn '无效端口策略'; return 1 ;;
+  esac
+  INGRESS_PORT_POLICY_CLI=1
+  read_tty value "$(t '额外保留端口（逗号分隔，可留空）: ' 'Additional reserved ports (comma-separated, optional): ')" || value=""
+  if [ -n "$value" ]; then INGRESS_RESERVED_PORTS="$value"; INGRESS_RESERVED_CLI=1; fi
+  read_tty INGRESS_DISPLAY_HOST_DEFAULT "$(t '默认 Display Host（mapped 必填；public 留空=本地地址）: ' 'Default Display Host (required for mapped; public blank=local address): ')" \
+    || INGRESS_DISPLAY_HOST_DEFAULT=""
+  [ -z "$INGRESS_DISPLAY_HOST_DEFAULT" ] || INGRESS_DISPLAY_HOST_CLI=1
+  INGRESS_DISPLAY_PORT_POLICY='follow-actual' INGRESS_DISPLAY_PORT_POLICY_CLI=1
+  msg '  1) permissive（兼容 wildcard，默认）   2) strict（限制到 Profile 本地地址）'
+  read_tty choice "$(t '入口强制策略 [1-2，默认 1]: ' 'Ingress enforcement [1-2, default 1]: ')" || choice=""
+  case "$choice" in
+    ''|1|permissive) INGRESS_ENFORCEMENT=permissive ;;
+    2|strict) INGRESS_ENFORCEMENT=strict ;;
+    *) warn '无效入口强制策略'; return 1 ;;
+  esac
+  INGRESS_ENFORCEMENT_CLI=1
+}
+
+ingress_menu_modify() {
+  local current value choice current_type current_policy current_display_policy current_enabled current_enforcement
+  local effective_policy effective_display_policy effective_enforcement range_start range_end display_port refs
+  ingress_menu_reset_requests
+  ingress_menu_select_profile || return 1
+  current="$(nb_ingress_profile_json "$INGRESS_PROFILE_SELECTOR")" || return 1
+  read_tty value "$(t "新名称 [$(jq -r .name <<<"$current")]: " "New name [$(jq -r .name <<<"$current")]: ")" || value=""
+  if [ -n "$value" ]; then INGRESS_NAME="$value"; INGRESS_NAME_CLI=1; fi
+  current_type="$(jq -r .type <<<"$current")"
+  msg '  1) public   2) mapped'
+  read_tty choice "$(t "新类型 [${current_type}；留空保持]: " "New type [${current_type}; blank keeps current]: ")" || choice=""
+  case "$choice" in
+    '') ;;
+    1|public) INGRESS_TYPE=public; INGRESS_TYPE_CLI=1 ;;
+    2|mapped) INGRESS_TYPE=mapped; INGRESS_TYPE_CLI=1 ;;
+    *) warn '无效类型'; return 1 ;;
+  esac
+  read_tty value "$(t '新 Interface（留空保持）: ' 'New interface (blank keeps current): ')" || value=""
+  if [ -n "$value" ]; then INGRESS_INTERFACE="$value"; INGRESS_INTERFACE_CLI=1; fi
+  read_tty value "$(t '新本地 IPv4（留空保持）: ' 'New local IPv4 (blank keeps current): ')" || value=""
+  if [ -n "$value" ]; then INGRESS_ADDRESS="$value"; INGRESS_ADDRESS_CLI=1; fi
+
+  current_policy="$(jq -r .port_policy <<<"$current")"
+  msg '  1) derived-tail   2) custom-range   3) manual-only'
+  read_tty choice "$(t "新端口策略 [${current_policy}；留空保持]: " "New port policy [${current_policy}; blank keeps current]: ")" || choice=""
+  case "$choice" in
+    '') effective_policy="$current_policy" ;;
+    1|derived-tail) INGRESS_PORT_POLICY='derived-tail'; INGRESS_PORT_POLICY_CLI=1; effective_policy='derived-tail' ;;
+    2|custom-range) INGRESS_PORT_POLICY='custom-range'; INGRESS_PORT_POLICY_CLI=1; effective_policy='custom-range' ;;
+    3|manual-only) INGRESS_PORT_POLICY='manual-only'; INGRESS_PORT_POLICY_CLI=1; effective_policy='manual-only' ;;
+    *) warn '无效端口策略'; return 1 ;;
+  esac
+  if [ "$effective_policy" = custom-range ]; then
+    range_start="$(jq -r '.range_start // empty' <<<"$current")"
+    range_end="$(jq -r '.range_end // empty' <<<"$current")"
+    read_tty value "$(t "Range start [${range_start:-required}]: " "Range start [${range_start:-required}]: ")" || value=""
+    if [ -n "$value" ]; then range_start="$value"; INGRESS_RANGE_START="$value"; INGRESS_RANGE_START_CLI=1; fi
+    read_tty value "$(t "Range end [${range_end:-required}]: " "Range end [${range_end:-required}]: ")" || value=""
+    if [ -n "$value" ]; then range_end="$value"; INGRESS_RANGE_END="$value"; INGRESS_RANGE_END_CLI=1; fi
+    if [ "$INGRESS_PORT_POLICY_CLI" -eq 1 ]; then
+      [ -n "$range_start" ] && [ -n "$range_end" ] || { warn 'custom-range 需要起止端口'; return 1; }
+      INGRESS_RANGE_START="$range_start" INGRESS_RANGE_END="$range_end"
+      INGRESS_RANGE_START_CLI=1 INGRESS_RANGE_END_CLI=1
+    fi
+  fi
+  read_tty value "$(t '新保留端口列表（留空保持，- 清空）: ' 'New reserved-port list (blank keeps current, - clears): ')" || value=""
+  if [ "$value" = - ]; then
+    INGRESS_RESERVED_PORTS=""; INGRESS_RESERVED_CLI=1
+  elif [ -n "$value" ]; then
+    INGRESS_RESERVED_PORTS="$value"; INGRESS_RESERVED_CLI=1
+  fi
+  read_tty value "$(t '新默认 Display Host（留空保持，- 清空）: ' 'New default Display Host (blank keeps current, - clears): ')" || value=""
+  if [ "$value" = - ]; then
+    INGRESS_DISPLAY_HOST_DEFAULT=""; INGRESS_DISPLAY_HOST_CLI=1
+  elif [ -n "$value" ]; then
+    INGRESS_DISPLAY_HOST_DEFAULT="$value"; INGRESS_DISPLAY_HOST_CLI=1
+  fi
+
+  current_display_policy="$(jq -r .display_port_policy <<<"$current")"
+  msg '  1) follow-actual   2) custom'
+  read_tty choice "$(t "新 Display Port 策略 [${current_display_policy}；留空保持]: " "New Display Port policy [${current_display_policy}; blank keeps current]: ")" || choice=""
+  case "$choice" in
+    '') effective_display_policy="$current_display_policy" ;;
+    1|follow-actual) INGRESS_DISPLAY_PORT_POLICY='follow-actual'; INGRESS_DISPLAY_PORT_POLICY_CLI=1; effective_display_policy='follow-actual' ;;
+    2|custom) INGRESS_DISPLAY_PORT_POLICY=custom; INGRESS_DISPLAY_PORT_POLICY_CLI=1; effective_display_policy=custom ;;
+    *) warn '无效 Display Port 策略'; return 1 ;;
+  esac
+  if [ "$effective_display_policy" = custom ]; then
+    display_port="$(jq -r '.display_port // empty' <<<"$current")"
+    read_tty value "$(t "新 Display Port [${display_port:-required}]: " "New Display Port [${display_port:-required}]: ")" || value=""
+    if [ -n "$value" ]; then display_port="$value"; INGRESS_DISPLAY_PORT="$value"; INGRESS_DISPLAY_PORT_CLI=1; fi
+    if [ "$INGRESS_DISPLAY_PORT_POLICY_CLI" -eq 1 ]; then
+      [ -n "$display_port" ] || { warn 'custom Display Port 策略需要端口'; return 1; }
+      INGRESS_DISPLAY_PORT="$display_port" INGRESS_DISPLAY_PORT_CLI=1
+    fi
+  fi
+
+  current_enabled="$(jq -r .enabled <<<"$current")"
+  read_tty choice "$(t "启用状态 [${current_enabled}；1=启用，2=禁用，留空保持]: " "Enabled [${current_enabled}; 1=enable, 2=disable, blank keeps current]: ")" || choice=""
+  case "$choice" in
+    '') ;;
+    1|true|enable|enabled) INGRESS_ENABLED=true; INGRESS_ENABLED_CLI=1 ;;
+    2|false|disable|disabled) INGRESS_ENABLED=false; INGRESS_ENABLED_CLI=1 ;;
+    *) warn '无效启用状态'; return 1 ;;
+  esac
+
+  current_enforcement="$(jq -r '.ingress_enforcement // "permissive"' <<<"$current")"
+  msg '  1) permissive（wildcard）   2) strict（Profile 本地地址）'
+  read_tty choice "$(t "入口强制策略 [${current_enforcement}；留空保持]: " "Ingress enforcement [${current_enforcement}; blank keeps current]: ")" || choice=""
+  case "$choice" in
+    '') effective_enforcement="$current_enforcement" ;;
+    1|permissive) INGRESS_ENFORCEMENT=permissive; INGRESS_ENFORCEMENT_CLI=1; effective_enforcement=permissive ;;
+    2|strict) INGRESS_ENFORCEMENT=strict; INGRESS_ENFORCEMENT_CLI=1; effective_enforcement=strict ;;
+    *) warn '无效入口强制策略'; return 1 ;;
+  esac
+  if [ "$current_enforcement" != "$effective_enforcement" ] \
+     || { [ "$effective_enforcement" = strict ] \
+          && { [ "$INGRESS_INTERFACE_CLI" -eq 1 ] || [ "$INGRESS_ADDRESS_CLI" -eq 1 ]; }; }; then
+    refs="$(nb_ingress_profile_reference_rows "$(jq -r .profile_id <<<"$current")" | grep -Ev '^ssh-tunnel:' || true)"
+    if [ -n "$refs" ]; then
+      printf '%s\n' "$refs"
+      confirm '事务迁移以上现有节点？[y/N]: ' 'Transactionally migrate these existing nodes? [y/N]: ' n \
+        || return 1
+      INGRESS_APPLY_EXISTING=1
+    fi
+  fi
+  INGRESS_ACTION=modify
+  nobrand_run_ingress_action
+}
+
+ingress_menu_loop() {
+  local choice=""
+  while true; do
+    msg ''
+    t '【网络入口 / Ingress】' '[Network Ingress]'
+    msg '  1) 查看入口'
+    msg '  2) 新增入口'
+    msg '  3) 修改入口'
+    msg '  4) 删除入口'
+    msg '  5) 设置默认入口'
+    msg '  6) 取消默认入口'
+    msg '  7) 应用入口强制策略'
+    msg '  8) 入口 Doctor'
+    msg '  0) 返回'
+    read_tty choice "$(t '请选择 [0-8]: ' 'Choose [0-8]: ')" || choice=""
+    case "$choice" in
+      1) nb_ingress_list ;;
+      2) ingress_menu_collect_add && { INGRESS_ACTION=add; nobrand_run_ingress_action; } ;;
+      3) ingress_menu_modify ;;
+      4) ingress_menu_reset_requests; ingress_menu_select_profile \
+           && confirm '确认删除？[y/N]: ' 'Delete this profile? [y/N]: ' n \
+           && { INGRESS_ACTION=delete; nobrand_run_ingress_action; } ;;
+      5) ingress_menu_reset_requests; ingress_menu_select_profile \
+           && { INGRESS_ACTION=set-default; nobrand_run_ingress_action; } ;;
+      6) ingress_menu_reset_requests; INGRESS_ACTION=unset-default; nobrand_run_ingress_action ;;
+      7) ingress_menu_reset_requests; ingress_menu_select_profile \
+           && { INGRESS_ACTION=apply; nobrand_run_ingress_action; } ;;
+      8) nb_ingress_doctor ;;
+      0) return 0 ;;
+      *) warn '无效选择' ;;
+    esac
+    menu_pause
+  done
+}
+
 nobrand_menu_loop() {
   local choice=""
   MENU_MODE=1
@@ -19351,33 +23846,37 @@ nobrand_menu_loop() {
     msg '  2) Snell v4 / v5'
     msg '  3) Hysteria2 (Xray-core)'
     msg '  4) TUIC v5 (official sing-box)'
-    msg '  5) VLESS + FinalMask + Sudoku (TCP)'
-    msg '  6) SSH Tunnel (existing OpenSSH)'
-    msg '  7) Port Forward (nftables / Realm)'
-    msg '  8) 查看全部节点'
-    msg '  9) 综合状态'
-    msg ' 10) Doctor'
-    msg ' 11) 备份 / 恢复'
-    msg ' 12) 性能 / BBR / FQ（Mieru 公共网络工具）'
-    msg ' 13) 帮助 / CLI'
-    msg ' 14) 卸载 NoBrand-OneClick（全部协议）'
+    msg '  5) VLESS REALITY + Vision (TCP; Public Recommended)'
+    msg '  6) VLESS + FinalMask + Sudoku (TCP)'
+    msg '  7) SSH Tunnel (existing OpenSSH)'
+    msg '  8) Port Forward (nftables / Realm)'
+    msg '  9) 网络入口 / Ingress'
+    msg ' 10) 查看全部节点'
+    msg ' 11) 综合状态'
+    msg ' 12) Doctor'
+    msg ' 13) 备份 / 恢复'
+    msg ' 14) 性能 / BBR / FQ（Mieru 公共网络工具）'
+    msg ' 15) 帮助 / CLI'
+    msg ' 16) 卸载 NoBrand-OneClick（全部协议）'
     msg '  0) 退出'
-    read_tty choice "$(t '请选择 [0-14]: ' 'Choose [0-14]: ')" || choice=""
+    read_tty choice "$(t '请选择 [0-16]: ' 'Choose [0-16]: ')" || choice=""
     case "$choice" in
       1) menu_loop ;;
       2) snell_menu_loop ;;
       3) hysteria2_menu_loop ;;
       4) tuic_menu_loop ;;
-      5) vless_sudoku_menu_loop ;;
-      6) ssh_tunnel_menu_loop ;;
-      7) forward_menu_loop ;;
-      8) NOBRAND_PROTOCOL_FILTER=""; nobrand_menu_run nobrand_nodes; menu_pause ;;
-      9) nobrand_menu_run nobrand_status; menu_pause ;;
-      10) nobrand_menu_run nobrand_doctor; menu_pause ;;
-      11) nobrand_backup_menu_loop ;;
-      12) nobrand_menu_run do_perf; menu_pause ;;
-      13) nobrand_usage; menu_pause ;;
-      14) YES=0; nobrand_menu_run nobrand_uninstall; menu_pause ;;
+      5) vless_reality_menu_loop ;;
+      6) vless_sudoku_menu_loop ;;
+      7) ssh_tunnel_menu_loop ;;
+      8) forward_menu_loop ;;
+      9) ingress_menu_loop ;;
+      10) NOBRAND_PROTOCOL_FILTER=""; nobrand_menu_run nobrand_nodes; menu_pause ;;
+      11) nobrand_menu_run nobrand_status; menu_pause ;;
+      12) nobrand_menu_run nobrand_doctor; menu_pause ;;
+      13) nobrand_backup_menu_loop ;;
+      14) nobrand_menu_run do_perf; menu_pause ;;
+      15) nobrand_usage; menu_pause ;;
+      16) YES=0; nobrand_menu_run nobrand_uninstall; menu_pause ;;
       0) return 0 ;;
       *) warn '无效选择' ;;
     esac
@@ -19469,9 +23968,11 @@ main() {
     nobrand-snell) nobrand_run_snell_action ;;
     nobrand-hy2) nobrand_run_hy2_action ;;
     nobrand-vless-sudoku) nobrand_run_vless_sudoku_action ;;
+    nobrand-vless-reality) nobrand_run_vless_reality_action ;;
     nobrand-tuic) nobrand_run_tuic_action ;;
     nobrand-ssh-tunnel) nobrand_run_ssh_tunnel_action ;;
     nobrand-forward) nobrand_run_forward_action ;;
+    nobrand-ingress) nobrand_run_ingress_action ;;
     nobrand-mieru-menu) menu_loop ;;
     help) usage; exit 0 ;;
     menu)

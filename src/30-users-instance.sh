@@ -571,7 +571,129 @@ instance_start_proxy() {
     instance_log_tail "$id"
     return 1
   fi
+  mieru_instance_enforcement_valid "$id" 25 || return 1
   return 0
+}
+
+mieru_instance_enforcement_valid() {
+  local id="$1" timeout="${2:-25}" row policy method address profile_id port proto bind_transport bind_port
+  row="$(jq -r --arg id "$id" '.users[]|select((.instance_id // "")==$id)|[
+    (.ingress_enforcement // "permissive"),(.ingress_enforcement_method // "wildcard"),
+    (.ingress_local_address // ""),(.ingress_profile_id // "legacy-default-route"),(.port|tostring)]|@tsv' \
+    "$MITA_USERS_STATE" 2>/dev/null || true)"
+  [ -n "$row" ] || return 1
+  IFS=$'\t' read -r policy method address profile_id port <<<"$row"
+  proto="$(jq -r '.protocol // "TCP"' "$MITA_USERS_STATE")"
+  if [ "$proto" = BOTH ]; then
+    while IFS='|' read -r bind_transport bind_port; do
+      nb_wait_for_enforced_listener "$policy" "$method" "$bind_transport" "$bind_port" \
+        "$address" "mieru:${id}" "$timeout" || return 1
+    done <<<"TCP|${port}"$'\n'"UDP|$((port + 1))"
+  else
+    nb_wait_for_enforced_listener "$policy" "$method" "$proto" "$port" \
+      "$address" "mieru:${id}" "$timeout"
+  fi
+}
+
+mieru_build_strict_firewall_candidate() {
+  local output="$1" current
+  current="$(mktemp_file .mieru-firewall-current)" || return 1
+  nb_strict_firewall_current_or_empty "$current" || { rm -f "$current"; return 1; }
+  python3 - "$current" "$MITA_USERS_STATE" "$output" <<'PY'
+import json,sys
+current_path,users_path,output_path=sys.argv[1:]
+current=json.load(open(current_path,encoding="utf-8"))
+users=json.load(open(users_path,encoding="utf-8"))
+rules=[r for r in current.get("rules") or [] if not str(r.get("owner") or "").startswith("mieru:")]
+proto=str(users.get("protocol") or "TCP").upper()
+for user in users.get("users") or []:
+    if not user.get("enabled",True) or str(user.get("ingress_enforcement") or "permissive")!="strict":
+        continue
+    if str(user.get("ingress_enforcement_method") or "")!="firewall":
+        raise SystemExit(2)
+    owner="mieru:"+str(user.get("instance_id") or "")
+    address=str(user.get("ingress_local_address") or "")
+    profile=str(user.get("ingress_profile_id") or "")
+    port=int(user.get("port") or 0)
+    bindings=[("TCP",port),("UDP",port+1)] if proto=="BOTH" else [(proto,port)]
+    for transport,binding_port in bindings:
+        rules.append({"owner":owner,"ingress_profile_id":profile,"transport":transport,
+                      "port":binding_port,"local_address":address})
+current["rules"]=sorted(rules,key=lambda r:(r["owner"],r["transport"],r["port"]))
+json.dump(current,open(output_path,"w",encoding="utf-8"),indent=2)
+PY
+  local rc=$?
+  rm -f "$current"
+  [ "$rc" -eq 0 ] && nb_strict_firewall_state_valid "$output"
+}
+
+mieru_reconcile_strict_firewall() {
+  local candidate
+  users_state_exists || return 0
+  candidate="$(mktemp_file .mieru-firewall-candidate)" || return 1
+  mieru_build_strict_firewall_candidate "$candidate" \
+    && nb_strict_firewall_commit_candidate "$candidate"
+  local rc=$?
+  rm -f "$candidate"
+  return "$rc"
+}
+
+# Protocol uninstall removes every strict-ingress rule owned by Mieru before
+# deleting users.json.  Filtering the authoritative owner namespace is more
+# robust than enumerating the current users: it also clears a managed orphan
+# left by an interrupted user transaction without touching another protocol.
+mieru_clear_strict_firewall() {
+  local candidate rc
+  candidate="$(mktemp_file .mieru-firewall-clear)" || return 1
+  nb_strict_firewall_current_or_empty "$candidate" \
+    && jq '.rules |= map(select((.owner | startswith("mieru:")) | not))' \
+      "$candidate" >"${candidate}.next" \
+    && mv -f "${candidate}.next" "$candidate" \
+    && nb_strict_firewall_commit_candidate "$candidate"
+  rc=$?
+  rm -f "$candidate" "${candidate}.next"
+  return "$rc"
+}
+
+mieru_apply_ingress_enforcement() {
+  local id="$1" profile_id candidate snapshot firewall_old firewall_existed=0 old_protocol rc=0
+  users_state_exists || return 1
+  profile_id="$(jq -r --arg id "$id" '.users[]|select((.instance_id // "")==$id)|.ingress_profile_id // empty' \
+    "$MITA_USERS_STATE")"
+  [ -n "$profile_id" ] || profile_id="$NOBRAND_LEGACY_INGRESS_PROFILE_ID"
+  nb_prepare_ingress_deployment "$profile_id" firewall || return 1
+  candidate="$(mktemp_file .mieru-ingress-users)" || return 1
+  snapshot="$(mktemp_dir)" || { rm -f "$candidate"; return 1; }
+  firewall_old="$snapshot/firewall.json"
+  cp -a "$MITA_USERS_STATE" "$snapshot/users.json" || rc=1
+  [ ! -e "$NOBRAND_INGRESS_FIREWALL_STATE_FILE" ] || firewall_existed=1
+  [ "$rc" -ne 0 ] || nb_strict_firewall_current_or_empty "$firewall_old" || rc=1
+  if [ "$rc" -eq 0 ]; then
+    jq --arg id "$id" --arg policy "$INGRESS_ENFORCEMENT_RESOLVED" \
+      --arg method "$INGRESS_ENFORCEMENT_METHOD" --arg address "$INGRESS_LOCAL_ADDRESS" '
+        (.users[]|select((.instance_id // "")==$id)) |=
+          (.ingress_enforcement=$policy|.ingress_enforcement_method=$method|.ingress_local_address=$address)
+      ' "$MITA_USERS_STATE" >"$candidate" || rc=1
+  fi
+  old_protocol="${PROTOCOL:-TCP}"
+  [ "$rc" -ne 0 ] || PROTOCOL="$(jq -r '.protocol // "TCP"' "$candidate")"
+  if [ "$rc" -eq 0 ]; then
+    nb_atomic_install_file "$candidate" "$MITA_USERS_STATE" 0600 \
+      && [ "${NOBRAND_TEST_INGRESS_SERVICE_FAIL:-0}" -eq 0 ] \
+      && reconcile_isolated_instances \
+      && [ "${NOBRAND_TEST_INGRESS_LISTENER_FAIL:-0}" -eq 0 ] || rc=1
+  fi
+  if [ "$rc" -ne 0 ]; then
+    nb_atomic_install_file "$snapshot/users.json" "$MITA_USERS_STATE" 0600 >/dev/null 2>&1 || true
+    PROTOCOL="$(jq -r '.protocol // "TCP"' "$MITA_USERS_STATE" 2>/dev/null || printf '%s' "$old_protocol")"
+    reconcile_isolated_instances >/dev/null 2>&1 || true
+    nb_strict_firewall_commit_candidate "$firewall_old" >/dev/null 2>&1 || true
+    [ "$firewall_existed" -eq 1 ] || rm -f "$NOBRAND_INGRESS_FIREWALL_STATE_FILE"
+  fi
+  PROTOCOL="$old_protocol"
+  rm -f "$candidate"
+  rm -rf -- "$snapshot"
+  return "$rc"
 }
 
 isolated_stop_all() {
@@ -603,6 +725,7 @@ prune_orphan_instances() {
     [ -n "$id" ] || continue
     grep -qxF "$id" <<<"$all_ids" && continue
     instance_daemon_stop "$id" 1 || true
+    nb_strict_firewall_remove_owner "mieru:${id}" || true
     run rm -rf "${MITA_INSTANCES_DIR:?}/${id}" "${MITA_INSTANCE_METRICS_DIR:?}/${id}"
   done < <(printf '%s' "$candidates" | sed '/^[[:space:]]*$/d' | LC_ALL=C sort -u)
 }
@@ -612,6 +735,7 @@ reconcile_isolated_instances() {
   users_require_python || return 1
   users_ensure_instance_ids || return 1
   install_instance_runtime || return 1
+  mieru_reconcile_strict_firewall || return 1
 
   while IFS=$'\t' read -r id name port; do
     [ -n "$id" ] && [ -n "$name" ] && [ -n "$port" ] || continue

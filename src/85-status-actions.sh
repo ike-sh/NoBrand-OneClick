@@ -22,8 +22,8 @@ do_status() {
   t "  Installed Mieru: $(installed_version 2>/dev/null || printf unknown)" \
     "  Installed Mieru: $(installed_version 2>/dev/null || printf unknown)"
   t "  Channel: $(mieru_channel_label)" "  Channel: $(mieru_channel_label)"
-  t "  Tested/Stable Mieru: ${TESTED_MIERU_VERSION}" \
-    "  Tested/Stable Mieru: ${TESTED_MIERU_VERSION}"
+  t "  Qualified last-known-good Mieru: ${LAST_KNOWN_GOOD_MIERU_VERSION}" \
+    "  Qualified last-known-good Mieru: ${LAST_KNOWN_GOOD_MIERU_VERSION}"
   t "  Profile: $(profile_label)" "  Profile: $(profile_label)"
   msg ""
   users_isolated_mode || {
@@ -218,18 +218,18 @@ do_version_channel_config() {
   local input="" version=""
   msg ""
   t "当前通道: $(mieru_channel_label)" "Current channel: $(mieru_channel_label)"
-  t "  1) stable — 项目测试版本 ${TESTED_MIERU_VERSION}" \
-    "  1) stable — project-tested ${TESTED_MIERU_VERSION}"
-  t '  2) latest — 每次升级查询上游最新 release' \
-    '  2) latest — query the newest upstream release on each upgrade'
+  t "  1) stable — 官方最新稳定版（当前合格回退 ${LAST_KNOWN_GOOD_MIERU_VERSION}）" \
+    "  1) stable — official latest stable (qualified fallback ${LAST_KNOWN_GOOD_MIERU_VERSION})"
+  t '  2) latest — stable 的兼容别名（同样排除 draft/prerelease）' \
+    '  2) latest — compatibility alias for stable (also excludes draft/prerelease)'
   t '  3) pinned — 指定精确版本（高级）' \
     '  3) pinned — use an exact version (advanced)'
   read_tty input "$(t '请选择 [1-3]: ' 'Choose [1-3]: ')" || input=""
   case "$input" in
-    1) MIERU_CHANNEL=stable; MIERU_VERSION="$TESTED_MIERU_VERSION" ;;
+    1) MIERU_CHANNEL=stable; MIERU_VERSION="" ;;
     2) MIERU_CHANNEL=latest; MIERU_VERSION="" ;;
     3)
-      read_tty version "$(t '精确版本（例如 3.35.0）: ' 'Exact version (for example 3.35.0): ')" || version=""
+      read_tty version "$(t '精确版本（例如 3.36.0）: ' 'Exact version (for example 3.36.0): ')" || version=""
       valid_mieru_version "$version" || die "$(t '版本号格式无效' 'Invalid version format')"
       MIERU_CHANNEL=pinned; MIERU_VERSION="$version"
       ;;

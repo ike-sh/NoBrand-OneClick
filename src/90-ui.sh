@@ -510,6 +510,92 @@ vless_sudoku_menu_loop() {
   done
 }
 
+reality_menu_select_instance() {
+  local id name choice="" found=0
+  while IFS= read -r id; do
+    name="$(reality_state_field "$id" name)"
+    printf '  - %s (%s)\n' "$name" "$id"
+    found=1
+  done < <(reality_instance_ids)
+  [ "$found" -eq 1 ] || { warn 'VLESS REALITY 尚无 instance'; return 1; }
+  read_tty choice '输入 VLESS REALITY instance name: ' || choice=""
+  reality_find_id_by_name "$choice" >/dev/null 2>&1 \
+    || { warn 'VLESS REALITY instance 不存在'; return 1; }
+  VLESS_REALITY_NAME="$choice"
+}
+
+vless_reality_menu_loop() {
+  local choice="" confirm="" selected="" profile_default=""
+  trap - ERR
+  while true; do
+    msg ''
+    msg '========== VLESS + TCP + REALITY + XTLS Vision =========='
+    msg 'Public Ingress: Recommended; mapped/dedicated: allowed with warning'
+    msg '  1) 安装新 instance'
+    msg '  2) 查看节点 / URI'
+    msg '  3) 导出 Xray / Mihomo / sing-box'
+    msg '  4) 修改 Display Endpoint'
+    msg '  5) 状态'
+    msg '  6) 启动'
+    msg '  7) 停止'
+    msg '  8) 重启'
+    msg '  9) Doctor'
+    msg ' 10) 升级共享 Xray runtime'
+    msg ' 11) 删除 instance'
+    msg '  0) 返回'
+    read_tty choice "$(t '请选择 [0-11]: ' 'Choose [0-11]: ')" || choice=""
+    case "$choice" in
+      1)
+        PORT="" PORT_CLI=0 VLESS_REALITY_NAME="" VLESS_REALITY_TARGET="" VLESS_REALITY_TARGET_CLI=0
+        VLESS_REALITY_TARGET_PORT="$NOBRAND_REALITY_DEFAULT_CAMOUFLAGE_PORT" \
+          VLESS_REALITY_TARGET_PORT_CLI=0 VLESS_REALITY_FINGERPRINT=chrome VLESS_REALITY_SPIDER_X=/
+        ADVERTISE_HOST="" ADVERTISE_PORT="" ADVERTISE_CLI=0 ADVERTISE_AUTO_REQUESTED=0
+        INGRESS_PROFILE="" INGRESS_PROFILE_CLI=0 YES=0
+        read_tty VLESS_REALITY_NAME 'Instance name [primary]: ' || VLESS_REALITY_NAME=""
+        VLESS_REALITY_NAME="${VLESS_REALITY_NAME:-primary}"
+        msg ''
+        nb_ingress_list
+        profile_default="$(nb_ingress_profile_name "$(nb_ingress_default_profile_id 2>/dev/null || true)")"
+        read_tty selected "Ingress Profile [${profile_default}]: " || selected=""
+        if [ -n "$selected" ]; then
+          INGRESS_PROFILE="$selected"; INGRESS_PROFILE_CLI=1
+        fi
+        VLESS_REALITY_ACTION=install
+        nobrand_menu_run nobrand_run_vless_reality_action
+        ;;
+      2) reality_menu_select_instance && { VLESS_REALITY_ACTION=show; nobrand_menu_run nobrand_run_vless_reality_action; } ;;
+      3) reality_menu_select_instance && { VLESS_REALITY_ACTION="export"; nobrand_menu_run nobrand_run_vless_reality_action; } ;;
+      4)
+        if reality_menu_select_instance; then
+          INGRESS_PROFILE_ID="$(reality_state_field "$(reality_find_id_by_name "$VLESS_REALITY_NAME")" ingress_profile_id)"
+          PORT="$(reality_state_field "$(reality_find_id_by_name "$VLESS_REALITY_NAME")" listen_port)"
+          ADVERTISE_HOST="" ADVERTISE_PORT="" ADVERTISE_CLI=0 ADVERTISE_AUTO_REQUESTED=0
+          nb_collect_advertise_endpoint_interactive 'VLESS REALITY' "$PORT"
+          VLESS_REALITY_ACTION=set-endpoint
+          nobrand_menu_run nobrand_run_vless_reality_action
+        fi
+        ;;
+      5) VLESS_REALITY_NAME=""; VLESS_REALITY_ACTION=status; nobrand_menu_run nobrand_run_vless_reality_action ;;
+      6) reality_menu_select_instance && { VLESS_REALITY_ACTION=start; nobrand_menu_run nobrand_run_vless_reality_action; } ;;
+      7) reality_menu_select_instance && { VLESS_REALITY_ACTION=stop; nobrand_menu_run nobrand_run_vless_reality_action; } ;;
+      8) reality_menu_select_instance && { VLESS_REALITY_ACTION=restart; nobrand_menu_run nobrand_run_vless_reality_action; } ;;
+      9) VLESS_REALITY_NAME=""; VLESS_REALITY_ACTION=doctor; nobrand_menu_run nobrand_run_vless_reality_action ;;
+      10) VLESS_REALITY_ACTION=upgrade; nobrand_menu_run nobrand_run_vless_reality_action ;;
+      11)
+        if reality_menu_select_instance; then
+          read_tty confirm '确认删除该 VLESS REALITY instance？输入 yes: ' || confirm=""
+          [ "$confirm" = yes ] || { warn '已取消'; continue; }
+          VLESS_REALITY_ACTION=remove
+          nobrand_menu_run nobrand_run_vless_reality_action
+        fi
+        ;;
+      0) return 0 ;;
+      *) warn '无效选择' ;;
+    esac
+    menu_pause
+  done
+}
+
 tuic_menu_select_instance() {
   local id name choice="" found=0
   while IFS= read -r id; do
@@ -843,6 +929,220 @@ nobrand_backup_menu_loop() {
   done
 }
 
+ingress_menu_reset_requests() {
+  INGRESS_PROFILE_SELECTOR="" INGRESS_NAME="" INGRESS_TYPE="" INGRESS_INTERFACE="" INGRESS_ADDRESS=""
+  INGRESS_PORT_POLICY="" INGRESS_RANGE_START="" INGRESS_RANGE_END="" INGRESS_RESERVED_PORTS=""
+  INGRESS_DISPLAY_HOST_DEFAULT="" INGRESS_DISPLAY_PORT_POLICY="" INGRESS_DISPLAY_PORT="" INGRESS_ENABLED=""
+  INGRESS_ENFORCEMENT="" INGRESS_APPLY_EXISTING=0
+  INGRESS_NAME_CLI=0 INGRESS_TYPE_CLI=0 INGRESS_INTERFACE_CLI=0 INGRESS_ADDRESS_CLI=0
+  INGRESS_PORT_POLICY_CLI=0 INGRESS_RANGE_START_CLI=0 INGRESS_RANGE_END_CLI=0 INGRESS_RESERVED_CLI=0
+  INGRESS_DISPLAY_HOST_CLI=0 INGRESS_DISPLAY_PORT_POLICY_CLI=0 INGRESS_DISPLAY_PORT_CLI=0 INGRESS_ENABLED_CLI=0
+  INGRESS_ENFORCEMENT_CLI=0
+}
+
+ingress_menu_select_profile() {
+  nb_ingress_list
+  read_tty INGRESS_PROFILE_SELECTOR "$(t '入口配置 ID 或名称: ' 'Ingress profile ID or name: ')" \
+    || INGRESS_PROFILE_SELECTOR=""
+  [ -n "$INGRESS_PROFILE_SELECTOR" ] || { warn '未选择入口配置'; return 1; }
+}
+
+ingress_menu_collect_add() {
+  local choice="" value=""
+  ingress_menu_reset_requests
+  msg ''
+  t '可用 non-loopback IPv4（[默认出口] 仅为只读提示，不决定 Ingress）:' \
+    'Available non-loopback IPv4 addresses ([default egress] is read-only and does not select Ingress):'
+  nb_ingress_interface_rows | while IFS='|' read -r iface address state is_default; do
+    printf '  %s  %s  [%s]%s\n' "$iface" "$address" "$state" "$([ "$is_default" = 1 ] && printf ' [默认出口/default egress]' || true)"
+  done
+  read_tty INGRESS_NAME "$(t '名称: ' 'Name: ')" || INGRESS_NAME=""
+  INGRESS_NAME_CLI=1
+  msg '  1) public   2) mapped'
+  read_tty choice "$(t '类型 [1-2]: ' 'Type [1-2]: ')" || choice=""
+  case "$choice" in 1|public) INGRESS_TYPE=public ;; 2|mapped) INGRESS_TYPE=mapped ;; *) warn '无效类型'; return 1 ;; esac
+  INGRESS_TYPE_CLI=1
+  read_tty INGRESS_INTERFACE "$(t 'Interface: ' 'Interface: ')" || INGRESS_INTERFACE=""
+  INGRESS_INTERFACE_CLI=1
+  read_tty INGRESS_ADDRESS "$(t '该 interface 的本地 IPv4: ' 'Local IPv4 on that interface: ')" || INGRESS_ADDRESS=""
+  INGRESS_ADDRESS_CLI=1
+  msg '  1) derived-tail（由所选本地 IPv4 尾号推导）'
+  msg '  2) custom-range'
+  msg '  3) manual-only'
+  read_tty choice "$(t '端口策略 [1-3]: ' 'Port policy [1-3]: ')" || choice=""
+  case "$choice" in
+    1|derived-tail) INGRESS_PORT_POLICY='derived-tail' ;;
+    2|custom-range)
+      INGRESS_PORT_POLICY='custom-range'
+      read_tty INGRESS_RANGE_START 'Range start: ' || INGRESS_RANGE_START=""
+      read_tty INGRESS_RANGE_END 'Range end: ' || INGRESS_RANGE_END=""
+      INGRESS_RANGE_START_CLI=1 INGRESS_RANGE_END_CLI=1
+      ;;
+    3|manual-only) INGRESS_PORT_POLICY='manual-only' ;;
+    *) warn '无效端口策略'; return 1 ;;
+  esac
+  INGRESS_PORT_POLICY_CLI=1
+  read_tty value "$(t '额外保留端口（逗号分隔，可留空）: ' 'Additional reserved ports (comma-separated, optional): ')" || value=""
+  if [ -n "$value" ]; then INGRESS_RESERVED_PORTS="$value"; INGRESS_RESERVED_CLI=1; fi
+  read_tty INGRESS_DISPLAY_HOST_DEFAULT "$(t '默认 Display Host（mapped 必填；public 留空=本地地址）: ' 'Default Display Host (required for mapped; public blank=local address): ')" \
+    || INGRESS_DISPLAY_HOST_DEFAULT=""
+  [ -z "$INGRESS_DISPLAY_HOST_DEFAULT" ] || INGRESS_DISPLAY_HOST_CLI=1
+  INGRESS_DISPLAY_PORT_POLICY='follow-actual' INGRESS_DISPLAY_PORT_POLICY_CLI=1
+  msg '  1) permissive（兼容 wildcard，默认）   2) strict（限制到 Profile 本地地址）'
+  read_tty choice "$(t '入口强制策略 [1-2，默认 1]: ' 'Ingress enforcement [1-2, default 1]: ')" || choice=""
+  case "$choice" in
+    ''|1|permissive) INGRESS_ENFORCEMENT=permissive ;;
+    2|strict) INGRESS_ENFORCEMENT=strict ;;
+    *) warn '无效入口强制策略'; return 1 ;;
+  esac
+  INGRESS_ENFORCEMENT_CLI=1
+}
+
+ingress_menu_modify() {
+  local current value choice current_type current_policy current_display_policy current_enabled current_enforcement
+  local effective_policy effective_display_policy effective_enforcement range_start range_end display_port refs
+  ingress_menu_reset_requests
+  ingress_menu_select_profile || return 1
+  current="$(nb_ingress_profile_json "$INGRESS_PROFILE_SELECTOR")" || return 1
+  read_tty value "$(t "新名称 [$(jq -r .name <<<"$current")]: " "New name [$(jq -r .name <<<"$current")]: ")" || value=""
+  if [ -n "$value" ]; then INGRESS_NAME="$value"; INGRESS_NAME_CLI=1; fi
+  current_type="$(jq -r .type <<<"$current")"
+  msg '  1) public   2) mapped'
+  read_tty choice "$(t "新类型 [${current_type}；留空保持]: " "New type [${current_type}; blank keeps current]: ")" || choice=""
+  case "$choice" in
+    '') ;;
+    1|public) INGRESS_TYPE=public; INGRESS_TYPE_CLI=1 ;;
+    2|mapped) INGRESS_TYPE=mapped; INGRESS_TYPE_CLI=1 ;;
+    *) warn '无效类型'; return 1 ;;
+  esac
+  read_tty value "$(t '新 Interface（留空保持）: ' 'New interface (blank keeps current): ')" || value=""
+  if [ -n "$value" ]; then INGRESS_INTERFACE="$value"; INGRESS_INTERFACE_CLI=1; fi
+  read_tty value "$(t '新本地 IPv4（留空保持）: ' 'New local IPv4 (blank keeps current): ')" || value=""
+  if [ -n "$value" ]; then INGRESS_ADDRESS="$value"; INGRESS_ADDRESS_CLI=1; fi
+
+  current_policy="$(jq -r .port_policy <<<"$current")"
+  msg '  1) derived-tail   2) custom-range   3) manual-only'
+  read_tty choice "$(t "新端口策略 [${current_policy}；留空保持]: " "New port policy [${current_policy}; blank keeps current]: ")" || choice=""
+  case "$choice" in
+    '') effective_policy="$current_policy" ;;
+    1|derived-tail) INGRESS_PORT_POLICY='derived-tail'; INGRESS_PORT_POLICY_CLI=1; effective_policy='derived-tail' ;;
+    2|custom-range) INGRESS_PORT_POLICY='custom-range'; INGRESS_PORT_POLICY_CLI=1; effective_policy='custom-range' ;;
+    3|manual-only) INGRESS_PORT_POLICY='manual-only'; INGRESS_PORT_POLICY_CLI=1; effective_policy='manual-only' ;;
+    *) warn '无效端口策略'; return 1 ;;
+  esac
+  if [ "$effective_policy" = custom-range ]; then
+    range_start="$(jq -r '.range_start // empty' <<<"$current")"
+    range_end="$(jq -r '.range_end // empty' <<<"$current")"
+    read_tty value "$(t "Range start [${range_start:-required}]: " "Range start [${range_start:-required}]: ")" || value=""
+    if [ -n "$value" ]; then range_start="$value"; INGRESS_RANGE_START="$value"; INGRESS_RANGE_START_CLI=1; fi
+    read_tty value "$(t "Range end [${range_end:-required}]: " "Range end [${range_end:-required}]: ")" || value=""
+    if [ -n "$value" ]; then range_end="$value"; INGRESS_RANGE_END="$value"; INGRESS_RANGE_END_CLI=1; fi
+    if [ "$INGRESS_PORT_POLICY_CLI" -eq 1 ]; then
+      [ -n "$range_start" ] && [ -n "$range_end" ] || { warn 'custom-range 需要起止端口'; return 1; }
+      INGRESS_RANGE_START="$range_start" INGRESS_RANGE_END="$range_end"
+      INGRESS_RANGE_START_CLI=1 INGRESS_RANGE_END_CLI=1
+    fi
+  fi
+  read_tty value "$(t '新保留端口列表（留空保持，- 清空）: ' 'New reserved-port list (blank keeps current, - clears): ')" || value=""
+  if [ "$value" = - ]; then
+    INGRESS_RESERVED_PORTS=""; INGRESS_RESERVED_CLI=1
+  elif [ -n "$value" ]; then
+    INGRESS_RESERVED_PORTS="$value"; INGRESS_RESERVED_CLI=1
+  fi
+  read_tty value "$(t '新默认 Display Host（留空保持，- 清空）: ' 'New default Display Host (blank keeps current, - clears): ')" || value=""
+  if [ "$value" = - ]; then
+    INGRESS_DISPLAY_HOST_DEFAULT=""; INGRESS_DISPLAY_HOST_CLI=1
+  elif [ -n "$value" ]; then
+    INGRESS_DISPLAY_HOST_DEFAULT="$value"; INGRESS_DISPLAY_HOST_CLI=1
+  fi
+
+  current_display_policy="$(jq -r .display_port_policy <<<"$current")"
+  msg '  1) follow-actual   2) custom'
+  read_tty choice "$(t "新 Display Port 策略 [${current_display_policy}；留空保持]: " "New Display Port policy [${current_display_policy}; blank keeps current]: ")" || choice=""
+  case "$choice" in
+    '') effective_display_policy="$current_display_policy" ;;
+    1|follow-actual) INGRESS_DISPLAY_PORT_POLICY='follow-actual'; INGRESS_DISPLAY_PORT_POLICY_CLI=1; effective_display_policy='follow-actual' ;;
+    2|custom) INGRESS_DISPLAY_PORT_POLICY=custom; INGRESS_DISPLAY_PORT_POLICY_CLI=1; effective_display_policy=custom ;;
+    *) warn '无效 Display Port 策略'; return 1 ;;
+  esac
+  if [ "$effective_display_policy" = custom ]; then
+    display_port="$(jq -r '.display_port // empty' <<<"$current")"
+    read_tty value "$(t "新 Display Port [${display_port:-required}]: " "New Display Port [${display_port:-required}]: ")" || value=""
+    if [ -n "$value" ]; then display_port="$value"; INGRESS_DISPLAY_PORT="$value"; INGRESS_DISPLAY_PORT_CLI=1; fi
+    if [ "$INGRESS_DISPLAY_PORT_POLICY_CLI" -eq 1 ]; then
+      [ -n "$display_port" ] || { warn 'custom Display Port 策略需要端口'; return 1; }
+      INGRESS_DISPLAY_PORT="$display_port" INGRESS_DISPLAY_PORT_CLI=1
+    fi
+  fi
+
+  current_enabled="$(jq -r .enabled <<<"$current")"
+  read_tty choice "$(t "启用状态 [${current_enabled}；1=启用，2=禁用，留空保持]: " "Enabled [${current_enabled}; 1=enable, 2=disable, blank keeps current]: ")" || choice=""
+  case "$choice" in
+    '') ;;
+    1|true|enable|enabled) INGRESS_ENABLED=true; INGRESS_ENABLED_CLI=1 ;;
+    2|false|disable|disabled) INGRESS_ENABLED=false; INGRESS_ENABLED_CLI=1 ;;
+    *) warn '无效启用状态'; return 1 ;;
+  esac
+
+  current_enforcement="$(jq -r '.ingress_enforcement // "permissive"' <<<"$current")"
+  msg '  1) permissive（wildcard）   2) strict（Profile 本地地址）'
+  read_tty choice "$(t "入口强制策略 [${current_enforcement}；留空保持]: " "Ingress enforcement [${current_enforcement}; blank keeps current]: ")" || choice=""
+  case "$choice" in
+    '') effective_enforcement="$current_enforcement" ;;
+    1|permissive) INGRESS_ENFORCEMENT=permissive; INGRESS_ENFORCEMENT_CLI=1; effective_enforcement=permissive ;;
+    2|strict) INGRESS_ENFORCEMENT=strict; INGRESS_ENFORCEMENT_CLI=1; effective_enforcement=strict ;;
+    *) warn '无效入口强制策略'; return 1 ;;
+  esac
+  if [ "$current_enforcement" != "$effective_enforcement" ] \
+     || { [ "$effective_enforcement" = strict ] \
+          && { [ "$INGRESS_INTERFACE_CLI" -eq 1 ] || [ "$INGRESS_ADDRESS_CLI" -eq 1 ]; }; }; then
+    refs="$(nb_ingress_profile_reference_rows "$(jq -r .profile_id <<<"$current")" | grep -Ev '^ssh-tunnel:' || true)"
+    if [ -n "$refs" ]; then
+      printf '%s\n' "$refs"
+      confirm '事务迁移以上现有节点？[y/N]: ' 'Transactionally migrate these existing nodes? [y/N]: ' n \
+        || return 1
+      INGRESS_APPLY_EXISTING=1
+    fi
+  fi
+  INGRESS_ACTION=modify
+  nobrand_run_ingress_action
+}
+
+ingress_menu_loop() {
+  local choice=""
+  while true; do
+    msg ''
+    t '【网络入口 / Ingress】' '[Network Ingress]'
+    msg '  1) 查看入口'
+    msg '  2) 新增入口'
+    msg '  3) 修改入口'
+    msg '  4) 删除入口'
+    msg '  5) 设置默认入口'
+    msg '  6) 取消默认入口'
+    msg '  7) 应用入口强制策略'
+    msg '  8) 入口 Doctor'
+    msg '  0) 返回'
+    read_tty choice "$(t '请选择 [0-8]: ' 'Choose [0-8]: ')" || choice=""
+    case "$choice" in
+      1) nb_ingress_list ;;
+      2) ingress_menu_collect_add && { INGRESS_ACTION=add; nobrand_run_ingress_action; } ;;
+      3) ingress_menu_modify ;;
+      4) ingress_menu_reset_requests; ingress_menu_select_profile \
+           && confirm '确认删除？[y/N]: ' 'Delete this profile? [y/N]: ' n \
+           && { INGRESS_ACTION=delete; nobrand_run_ingress_action; } ;;
+      5) ingress_menu_reset_requests; ingress_menu_select_profile \
+           && { INGRESS_ACTION=set-default; nobrand_run_ingress_action; } ;;
+      6) ingress_menu_reset_requests; INGRESS_ACTION=unset-default; nobrand_run_ingress_action ;;
+      7) ingress_menu_reset_requests; ingress_menu_select_profile \
+           && { INGRESS_ACTION=apply; nobrand_run_ingress_action; } ;;
+      8) nb_ingress_doctor ;;
+      0) return 0 ;;
+      *) warn '无效选择' ;;
+    esac
+    menu_pause
+  done
+}
+
 nobrand_menu_loop() {
   local choice=""
   MENU_MODE=1
@@ -854,33 +1154,37 @@ nobrand_menu_loop() {
     msg '  2) Snell v4 / v5'
     msg '  3) Hysteria2 (Xray-core)'
     msg '  4) TUIC v5 (official sing-box)'
-    msg '  5) VLESS + FinalMask + Sudoku (TCP)'
-    msg '  6) SSH Tunnel (existing OpenSSH)'
-    msg '  7) Port Forward (nftables / Realm)'
-    msg '  8) 查看全部节点'
-    msg '  9) 综合状态'
-    msg ' 10) Doctor'
-    msg ' 11) 备份 / 恢复'
-    msg ' 12) 性能 / BBR / FQ（Mieru 公共网络工具）'
-    msg ' 13) 帮助 / CLI'
-    msg ' 14) 卸载 NoBrand-OneClick（全部协议）'
+    msg '  5) VLESS REALITY + Vision (TCP; Public Recommended)'
+    msg '  6) VLESS + FinalMask + Sudoku (TCP)'
+    msg '  7) SSH Tunnel (existing OpenSSH)'
+    msg '  8) Port Forward (nftables / Realm)'
+    msg '  9) 网络入口 / Ingress'
+    msg ' 10) 查看全部节点'
+    msg ' 11) 综合状态'
+    msg ' 12) Doctor'
+    msg ' 13) 备份 / 恢复'
+    msg ' 14) 性能 / BBR / FQ（Mieru 公共网络工具）'
+    msg ' 15) 帮助 / CLI'
+    msg ' 16) 卸载 NoBrand-OneClick（全部协议）'
     msg '  0) 退出'
-    read_tty choice "$(t '请选择 [0-14]: ' 'Choose [0-14]: ')" || choice=""
+    read_tty choice "$(t '请选择 [0-16]: ' 'Choose [0-16]: ')" || choice=""
     case "$choice" in
       1) menu_loop ;;
       2) snell_menu_loop ;;
       3) hysteria2_menu_loop ;;
       4) tuic_menu_loop ;;
-      5) vless_sudoku_menu_loop ;;
-      6) ssh_tunnel_menu_loop ;;
-      7) forward_menu_loop ;;
-      8) NOBRAND_PROTOCOL_FILTER=""; nobrand_menu_run nobrand_nodes; menu_pause ;;
-      9) nobrand_menu_run nobrand_status; menu_pause ;;
-      10) nobrand_menu_run nobrand_doctor; menu_pause ;;
-      11) nobrand_backup_menu_loop ;;
-      12) nobrand_menu_run do_perf; menu_pause ;;
-      13) nobrand_usage; menu_pause ;;
-      14) YES=0; nobrand_menu_run nobrand_uninstall; menu_pause ;;
+      5) vless_reality_menu_loop ;;
+      6) vless_sudoku_menu_loop ;;
+      7) ssh_tunnel_menu_loop ;;
+      8) forward_menu_loop ;;
+      9) ingress_menu_loop ;;
+      10) NOBRAND_PROTOCOL_FILTER=""; nobrand_menu_run nobrand_nodes; menu_pause ;;
+      11) nobrand_menu_run nobrand_status; menu_pause ;;
+      12) nobrand_menu_run nobrand_doctor; menu_pause ;;
+      13) nobrand_backup_menu_loop ;;
+      14) nobrand_menu_run do_perf; menu_pause ;;
+      15) nobrand_usage; menu_pause ;;
+      16) YES=0; nobrand_menu_run nobrand_uninstall; menu_pause ;;
       0) return 0 ;;
       *) warn '无效选择' ;;
     esac

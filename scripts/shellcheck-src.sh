@@ -16,6 +16,8 @@ source "${SOURCE_ROOT}/src/10-cli-prelude.sh"
 source "${SOURCE_ROOT}/src/15-core-state.sh"
 # shellcheck source=src/16-core-port.sh
 source "${SOURCE_ROOT}/src/16-core-port.sh"
+# shellcheck source=src/16-core-ingress.sh
+source "${SOURCE_ROOT}/src/16-core-ingress.sh"
 # shellcheck source=src/17-core-endpoint.sh
 source "${SOURCE_ROOT}/src/17-core-endpoint.sh"
 # shellcheck source=src/18-core-nodes.sh
@@ -30,6 +32,8 @@ source "${SOURCE_ROOT}/src/22-platform-snell.sh"
 source "${SOURCE_ROOT}/src/23-platform-vless-sudoku.sh"
 # shellcheck source=src/24-platform-tuic.sh
 source "${SOURCE_ROOT}/src/24-platform-tuic.sh"
+# shellcheck source=src/25-platform-vless-reality.sh
+source "${SOURCE_ROOT}/src/25-platform-vless-reality.sh"
 # shellcheck source=src/25-network-mtu.sh
 source "${SOURCE_ROOT}/src/25-network-mtu.sh"
 # shellcheck source=src/30-users-instance.sh
@@ -54,10 +58,14 @@ source "${SOURCE_ROOT}/src/57-hysteria2.sh"
 source "${SOURCE_ROOT}/src/58-vless-sudoku.sh"
 # shellcheck source=src/59-tuic.sh
 source "${SOURCE_ROOT}/src/59-tuic.sh"
+# shellcheck source=src/59-vless-reality.sh
+source "${SOURCE_ROOT}/src/59-vless-reality.sh"
 # shellcheck source=src/60-daemon-firewall-network.sh
 source "${SOURCE_ROOT}/src/60-daemon-firewall-network.sh"
 # shellcheck source=src/61-ssh-tunnel.sh
 source "${SOURCE_ROOT}/src/61-ssh-tunnel.sh"
+# shellcheck source=src/62-forward.sh
+source "${SOURCE_ROOT}/src/62-forward.sh"
 # shellcheck source=src/65-service-bbr.sh
 source "${SOURCE_ROOT}/src/65-service-bbr.sh"
 # shellcheck source=src/70-client-export-install.sh

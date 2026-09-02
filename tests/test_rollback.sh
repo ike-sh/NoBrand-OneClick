@@ -10,6 +10,30 @@ export NOBRAND_LIB_DIR="$fixture/nobrand-oneclick/lib"
 source_installer
 nb_init_state_layout
 
+# A fresh Xray transaction installs the executable and both official private
+# assets together under the NoBrand runtime root.
+(
+  rm -f "$NOBRAND_XRAY_BIN"
+  rm -rf -- "$NOBRAND_XRAY_ASSET_DIR"
+  nobrand_download_xray_candidate() {
+    printf '%s\n' '#!/usr/bin/env sh' \
+      "printf 'Xray ${TESTED_XRAY_VERSION} test (go test linux/amd64)\\n'" >"$1"
+    chmod 0755 "$1"
+    mkdir -p "$2"
+    printf 'fresh-geoip\n' >"$2/geoip.dat"
+    printf 'fresh-geosite\n' >"$2/geosite.dat"
+  }
+  nobrand_xray_validate_managed_configs() { :; }
+  nobrand_install_xray_runtime 0
+)
+assert_eq "$TESTED_XRAY_VERSION" "$(nobrand_xray_version)" 'fresh Xray runtime identity'
+assert_eq fresh-geoip "$(tr -d '\r\n' <"$NOBRAND_XRAY_ASSET_DIR/geoip.dat")" \
+  'fresh Xray geoip asset installation'
+assert_eq fresh-geosite "$(tr -d '\r\n' <"$NOBRAND_XRAY_ASSET_DIR/geosite.dat")" \
+  'fresh Xray geosite asset installation'
+rm -f "$NOBRAND_XRAY_BIN"
+rm -rf -- "$NOBRAND_XRAY_ASSET_DIR"
+
 # A candidate that passes its temporary check but fails after replacement must restore the old Snell runtime.
 snell_runtime="$(snell_runtime_path 5)"
 printf 'old-snell-runtime\n' >"$snell_runtime"
@@ -29,9 +53,19 @@ assert_eq "$old_snell_hash" "$(sha256sum "$snell_runtime")" 'Snell binary rollba
 # The same atomic replacement guarantee applies to the isolated Xray runtime.
 printf 'old-xray-runtime\n' >"$NOBRAND_XRAY_BIN"
 chmod +x "$NOBRAND_XRAY_BIN"
+mkdir -p "$NOBRAND_XRAY_ASSET_DIR"
+printf 'old-geoip\n' >"$NOBRAND_XRAY_ASSET_DIR/geoip.dat"
+printf 'old-geosite\n' >"$NOBRAND_XRAY_ASSET_DIR/geosite.dat"
 old_xray_hash="$(sha256sum "$NOBRAND_XRAY_BIN")"
+old_geoip_hash="$(sha256sum "$NOBRAND_XRAY_ASSET_DIR/geoip.dat")"
+old_geosite_hash="$(sha256sum "$NOBRAND_XRAY_ASSET_DIR/geosite.dat")"
 (
-  nobrand_download_xray_candidate() { printf 'invalid-new-xray\n' >"$1"; chmod +x "$1"; }
+  nobrand_download_xray_candidate() {
+    printf 'invalid-new-xray\n' >"$1"; chmod +x "$1"
+    mkdir -p "$2"
+    printf 'candidate-geoip\n' >"$2/geoip.dat"
+    printf 'candidate-geosite\n' >"$2/geosite.dat"
+  }
   nobrand_xray_version() {
     grep -q old-xray-runtime "$NOBRAND_XRAY_BIN" && { printf 1.0.0; return 0; }
     return 1
@@ -39,6 +73,10 @@ old_xray_hash="$(sha256sum "$NOBRAND_XRAY_BIN")"
   nobrand_install_xray_runtime 1
 ) >/dev/null 2>&1 && fail 'invalid replacement Xray runtime must fail'
 assert_eq "$old_xray_hash" "$(sha256sum "$NOBRAND_XRAY_BIN")" 'Xray binary rollback'
+assert_eq "$old_geoip_hash" "$(sha256sum "$NOBRAND_XRAY_ASSET_DIR/geoip.dat")" \
+  'Xray geoip asset rollback'
+assert_eq "$old_geosite_hash" "$(sha256sum "$NOBRAND_XRAY_ASSET_DIR/geosite.dat")" \
+  'Xray geosite asset rollback'
 
 # A valid Xray replacement whose running HY2 service fails acceptance must also restore the old runtime.
 jq -n '{protocol:"hysteria2",listen_port:3692,enabled:true,runtime_version:"old"}' >"$NOBRAND_HY2_STATE_FILE"
@@ -77,6 +115,7 @@ shared_calls="$fixture/shared-upgrade.calls"
   nobrand_hy2_service_active() { return 0; }
   nobrand_vless_sudoku_service_active() { return 0; }
   nobrand_install_xray_runtime() { printf 'shared-new-runtime\n' >"$NOBRAND_XRAY_BIN"; chmod +x "$NOBRAND_XRAY_BIN"; }
+  nobrand_xray_version() { printf '%s' "$TESTED_XRAY_VERSION"; }
   nobrand_hy2_service_action() { printf 'hy2:%s\n' "$1" >>"$shared_calls"; }
   nobrand_vless_sudoku_service_action() { printf 'vless:%s\n' "$1" >>"$shared_calls"; }
   nb_wait_for_listener() { [ "$1" != TCP ]; }
@@ -87,6 +126,58 @@ assert_eq "$old_hy2_state_hash" "$(sha256sum "$NOBRAND_HY2_STATE_FILE")" 'shared
 assert_eq "$old_vless_state_hash" "$(sha256sum "$NOBRAND_VLESS_STATE_FILE")" 'shared VLESS state rollback'
 assert_eq 2 "$(grep -c '^hy2:restart$' "$shared_calls")" 'HY2 restart on candidate and rollback runtime'
 assert_eq 2 "$(grep -c '^vless:restart$' "$shared_calls")" 'VLESS restart on candidate and rollback runtime'
+
+# Two active REALITY instances must be one shared-runtime transaction. A
+# failure committing the second instance's runtime metadata restores both
+# states, the old Xray binary, and both active services.
+reality_one=r1111111111111111
+reality_two=r2222222222222222
+mkdir -p "$(dirname "$(reality_state_file "$reality_one")")" \
+  "$(dirname "$(reality_state_file "$reality_two")")"
+jq -n --arg id "$reality_one" \
+  '{schema_version:3,ownership:"nobrand-v3",protocol:"vless-reality",instance_id:$id,
+    listen_port:3694,runtime_version:"old",enabled:true}' \
+  >"$(reality_state_file "$reality_one")"
+jq -n --arg id "$reality_two" \
+  '{schema_version:3,ownership:"nobrand-v3",protocol:"vless-reality",instance_id:$id,
+    listen_port:3695,runtime_version:"old",enabled:true}' \
+  >"$(reality_state_file "$reality_two")"
+old_reality_one_hash="$(sha256sum "$(reality_state_file "$reality_one")")"
+old_reality_two_hash="$(sha256sum "$(reality_state_file "$reality_two")")"
+reality_calls="$fixture/reality-shared-upgrade.calls"
+(
+  nobrand_prepare_common() { :; }
+  admin_lock_acquire() { :; }
+  admin_lock_release() { :; }
+  nobrand_hy2_service_active() { return 1; }
+  nobrand_vless_sudoku_service_active() { return 1; }
+  reality_service_active() { return 0; }
+  nobrand_install_xray_runtime() { printf 'shared-reality-new-runtime\n' >"$NOBRAND_XRAY_BIN"; chmod +x "$NOBRAND_XRAY_BIN"; }
+  nobrand_xray_version() { printf '%s' "$TESTED_XRAY_VERSION"; }
+  reality_service_action() { printf '%s:%s\n' "$1" "$2" >>"$reality_calls"; }
+  nb_wait_for_listener() { :; }
+  reality_listener_owned_by_service() { :; }
+  hysteria2_refresh_runtime_metadata() { :; }
+  vless_sudoku_refresh_runtime_metadata() { :; }
+  eval "$(declare -f nb_atomic_install_file \
+    | sed '1s/^nb_atomic_install_file /nb_atomic_install_file_before_reality_failure /')"
+  nb_atomic_install_file() {
+    [ "$2" != "$(reality_state_file "$reality_two")" ] || return 1
+    nb_atomic_install_file_before_reality_failure "$@"
+  }
+  nobrand_upgrade_xray_runtime
+) >/dev/null 2>&1 && fail 'shared REALITY upgrade must fail when one state metadata commit fails'
+assert_eq "$old_xray_hash" "$(sha256sum "$NOBRAND_XRAY_BIN")" 'multi-REALITY Xray runtime rollback'
+assert_eq "$old_reality_one_hash" "$(sha256sum "$(reality_state_file "$reality_one")")" \
+  'first REALITY state rollback after second state commit failure'
+assert_eq "$old_reality_two_hash" "$(sha256sum "$(reality_state_file "$reality_two")")" \
+  'second REALITY state rollback after its commit failure'
+assert_eq 2 "$(grep -c "^${reality_one}:restart$" "$reality_calls")" \
+  'first REALITY restart on candidate and rollback runtime'
+assert_eq 2 "$(grep -c "^${reality_two}:restart$" "$reality_calls")" \
+  'second REALITY restart on candidate and rollback runtime'
+rm -rf -- "$(dirname "$(reality_state_file "$reality_one")")" \
+  "$(dirname "$(reality_state_file "$reality_two")")"
 
 run_snell_failure_case() (
   set -Eeuo pipefail

@@ -22,6 +22,51 @@ printf 'secret-config\n' >"$NOBRAND_CONFIG_DIR/owned.conf"
 printf '{"protocol":"vless-sudoku","value":"original"}\n' >"$NOBRAND_VLESS_STATE_FILE"
 printf '{"inbounds":[]}\n' >"$NOBRAND_VLESS_CONFIG_FILE"
 printf '{"outbounds":[]}\n' >"$NOBRAND_VLESS_CLIENT_FILE"
+cat >"$NOBRAND_INGRESS_STATE_FILE" <<'JSON'
+{
+  "schema_version": 3,
+  "ownership": "nobrand-v3",
+  "feature": "ingress-profiles",
+  "default_profile_id": "i1111111111111111",
+  "profiles": [{
+    "profile_id": "i1111111111111111",
+    "name": "Backup-Mapped",
+    "type": "mapped",
+    "interface": "eth1",
+    "local_address": "198.51.100.110",
+    "port_policy": "derived-tail",
+    "range_start": null,
+    "range_end": null,
+    "reserved_ports": [11000],
+    "display_host_default": "backup-entry.example.test",
+    "display_port_policy": "follow-actual",
+    "display_port": null,
+    "enabled": true,
+    "created_at": "2026-09-01T00:00:00Z",
+    "updated_at": "2026-09-01T00:00:00Z"
+  }]
+}
+JSON
+nb_ingress_state_valid || fail 'backup fixture ingress state is invalid'
+reality_id="r$(openssl rand -hex 8)"
+reality_uuid="$(tr -d '\r\n' </proc/sys/kernel/random/uuid)"
+reality_private="$(openssl rand -base64 32 | tr '/+' '_-' | tr -d '=\r\n')"
+reality_public="$(openssl rand -base64 32 | tr '/+' '_-' | tr -d '=\r\n')"
+reality_short="$(openssl rand -hex 8)"
+reality_key="$(reality_private_key_file "$reality_id")"
+mkdir -p "$(dirname "$(reality_state_file "$reality_id")")" \
+  "$(reality_instance_config_dir "$reality_id")"
+printf '%s\n' "$reality_private" >"$reality_key"
+chmod 0600 "$reality_key"
+reality_generate_server_config "$(reality_config_file "$reality_id")" "$reality_id" \
+  0.0.0.0 32052 "$reality_uuid" "$reality_private" "$reality_short" \
+  backup-camouflage.example.com 8443 22052
+reality_generate_state "$(reality_state_file "$reality_id")" "$reality_id" backup-reality \
+  0.0.0.0 32052 custom reality-backup.example.test 443 "$reality_uuid" "$reality_public" \
+  "$reality_key" "$reality_short" backup-camouflage.example.com 8443 chrome / "$TESTED_XRAY_VERSION" \
+  i1111111111111111 22052 2026-09-01T00:00:00Z custom
+reality_state_hash="$(sha256sum "$(reality_state_file "$reality_id")")"
+reality_config_hash="$(sha256sum "$(reality_config_file "$reality_id")")"
 cat >"$NOBRAND_FORWARD_STATE_FILE" <<'JSON'
 {"schema_version":3,"ownership":"nobrand-v3","feature":"port-forward","rules":[
  {"rule_id":"f1111111111111111","name":"backup-forward","note":"","backend":"nftables","enabled":false,
@@ -29,7 +74,8 @@ cat >"$NOBRAND_FORWARD_STATE_FILE" <<'JSON'
   "target_host":"203.0.113.10","target_port":443,"display_host":"edge.example.test","display_port":24443,
   "display_mode":"custom","created_at":"2026-08-30T00:00:00Z","updated_at":"2026-08-30T00:00:00Z",
   "ownership_metadata":{"managed_listener":true,"managed_firewall":true},
-  "backend_options":{"source_mode":"masquerade"}}
+  "backend_options":{"source_mode":"masquerade"},
+  "ingress_profile_id":"i1111111111111111"}
 ]}
 JSON
 printf 'owned-forward-ruleset\n' >"$NOBRAND_FORWARD_NFT_RULESET"
@@ -47,6 +93,13 @@ assert_contains "$listing" 'config/vless-sudoku/config.json' 'backup VLESS confi
 assert_not_contains "$listing" 'external-xray' 'Xray-OneClick boundary'
 assert_contains "$listing" 'state/forward/state.json' 'backup Forward authoritative state'
 assert_contains "$listing" 'config/forward/nftables.nft' 'backup Forward generated ownership artifact'
+assert_contains "$listing" 'state/ingress.json' 'backup Ingress Profiles and default profile'
+assert_contains "$listing" "state/vless-reality/instances/${reality_id}/state.json" \
+  'backup REALITY authoritative state'
+assert_contains "$listing" "config/vless-reality/instances/${reality_id}/config.json" \
+  'backup REALITY server config'
+assert_contains "$listing" "config/vless-reality/instances/${reality_id}/private.key" \
+  'backup REALITY private key'
 
 printf '{"value":"changed"}\n' >"$NOBRAND_STATE_DIR/owned.json"
 printf 'changed-config\n' >"$NOBRAND_CONFIG_DIR/owned.conf"
@@ -55,6 +108,16 @@ mv "$fixture/vless.changed" "$NOBRAND_VLESS_STATE_FILE"
 jq '(.rules[0].enabled)=true | (.rules[0].display_host)="changed.example.test"' \
   "$NOBRAND_FORWARD_STATE_FILE" >"$fixture/forward.changed"
 mv "$fixture/forward.changed" "$NOBRAND_FORWARD_STATE_FILE"
+jq '(.profiles[0].display_host_default)="changed-entry.example.test" | .default_profile_id=null' \
+  "$NOBRAND_INGRESS_STATE_FILE" >"$fixture/ingress.changed"
+mv "$fixture/ingress.changed" "$NOBRAND_INGRESS_STATE_FILE"
+printf '%s\n' "$(openssl rand -base64 32 | tr '/+' '_-' | tr -d '=\r\n')" >"$reality_key"
+jq '.uuid="00000000-0000-4000-8000-000000000000" | .short_id="aabb"
+  | .target_host="changed.example" | .server_name="changed.example"
+  | .camouflage_mode="auto" | .listen_port=39999
+  | .ingress_profile_id="changed" | .advertise_host="changed.example"' \
+  "$(reality_state_file "$reality_id")" >"$fixture/reality.changed"
+mv "$fixture/reality.changed" "$(reality_state_file "$reality_id")"
 nobrand_backup_restore "$archive" >/dev/null
 assert_eq original "$(jq -r .value "$NOBRAND_STATE_DIR/owned.json")" 'restored state'
 assert_eq secret-config "$(tr -d '\r\n' <"$NOBRAND_CONFIG_DIR/owned.conf")" 'restored config'
@@ -63,6 +126,36 @@ assert_eq false "$(jq -r '.rules[0].enabled' "$NOBRAND_FORWARD_STATE_FILE")" \
   'restored Forward enabled state'
 assert_eq edge.example.test "$(jq -r '.rules[0].display_host' "$NOBRAND_FORWARD_STATE_FILE")" \
   'restored Forward Display Endpoint metadata'
+assert_eq i1111111111111111 "$(jq -r .default_profile_id "$NOBRAND_INGRESS_STATE_FILE")" \
+  'restored default Ingress Profile'
+assert_eq backup-entry.example.test "$(jq -r '.profiles[0].display_host_default' "$NOBRAND_INGRESS_STATE_FILE")" \
+  'restored Ingress Profile display metadata'
+assert_eq i1111111111111111 "$(jq -r '.rules[0].ingress_profile_id' "$NOBRAND_FORWARD_STATE_FILE")" \
+  'restored Forward-profile association'
+assert_eq "$reality_private" "$(tr -d '\r\n' <"$reality_key")" 'restored REALITY private key'
+assert_eq "$reality_public" "$(reality_state_field "$reality_id" public_key)" 'restored REALITY public key'
+assert_eq "$reality_uuid" "$(reality_state_field "$reality_id" uuid)" 'restored REALITY UUID'
+assert_eq "$reality_short" "$(reality_state_field "$reality_id" short_id)" 'restored REALITY short ID'
+assert_eq backup-camouflage.example.com "$(reality_state_field "$reality_id" server_name)" \
+  'restored custom REALITY camouflage host'
+assert_eq custom "$(reality_state_field "$reality_id" camouflage_mode)" \
+  'restored REALITY camouflage origin mode'
+assert_eq 8443 "$(reality_state_field "$reality_id" target_port)" \
+  'restored custom REALITY camouflage target port'
+assert_eq 32052 "$(reality_state_field "$reality_id" listen_port)" 'restored REALITY port'
+assert_eq i1111111111111111 "$(reality_state_field "$reality_id" ingress_profile_id)" \
+  'restored REALITY Profile association'
+assert_eq reality-backup.example.test "$(reality_state_field "$reality_id" advertise_host)" \
+  'restored REALITY Display metadata'
+assert_eq 22052 "$(reality_state_field "$reality_id" defender_port)" 'restored REALITY defender port'
+assert_eq "$(reality_defender_tag "$reality_id")" \
+  "$(reality_state_field "$reality_id" defender_tag)" 'restored REALITY defender tag'
+assert_eq "$reality_state_hash" "$(sha256sum "$(reality_state_file "$reality_id")")" \
+  'restored REALITY defender state bytes'
+assert_eq "$reality_config_hash" "$(sha256sum "$(reality_config_file "$reality_id")")" \
+  'restored REALITY defender config/routing bytes'
+printf 'CUSTOM_CAMOUFLAGE_BACKUP_RESTORE=PASS\n'
+assert_file_mode 600 "$reality_key"
 
 # A manager-only fresh install has no state/config roots.  The same backup
 # must restore successfully from that exact zero-state layout without needing
@@ -79,6 +172,8 @@ assert_eq original "$(jq -r .value "$NOBRAND_STATE_DIR/owned.json")" \
   'fresh-manager restore state'
 assert_eq secret-config "$(tr -d '\r\n' <"$NOBRAND_CONFIG_DIR/owned.conf")" \
   'fresh-manager restore config'
+assert_eq i1111111111111111 "$(jq -r .default_profile_id "$NOBRAND_INGRESS_STATE_FILE")" \
+  'fresh-manager restore ingress state'
 
 # Runtime/service reconstruction is a distinct restore phase.  It must cover
 # every protocol whose downloadable runtime or service unit is intentionally
@@ -106,6 +201,7 @@ runtime_calls="$fixture/runtime-restore.calls"
   nobrand_xray_validate_managed_configs() { printf '%s\n' validate-xray >>"$runtime_calls"; }
   nobrand_write_hy2_service() { printf '%s\n' service-hy2 >>"$runtime_calls"; }
   nobrand_write_vless_sudoku_service() { printf '%s\n' service-vless >>"$runtime_calls"; }
+  reality_restore_runtime() { printf '%s\n' runtime-reality >>"$runtime_calls"; }
   tuic_restore_runtime() { printf '%s\n' runtime-tuic >>"$runtime_calls"; }
   forward_realm_restore_runtime() { printf '%s\n' runtime-realm >>"$runtime_calls"; }
   nobrand_restore_protocol_runtimes_under_test
@@ -113,7 +209,7 @@ runtime_calls="$fixture/runtime-restore.calls"
 for expected_call in \
   load-mieru deps-mieru runtime-mieru account-mieru service-mieru \
   runtime-snell-v4 runtime-snell-v5 service-snell service-snell-instance \
-  runtime-xray validate-xray service-hy2 service-vless runtime-tuic runtime-realm; do
+  runtime-xray validate-xray service-hy2 service-vless runtime-reality runtime-tuic runtime-realm; do
   grep -qxF "$expected_call" "$runtime_calls" \
     || fail "manager-only restore omitted runtime/service step: $expected_call"
 done

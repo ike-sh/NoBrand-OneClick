@@ -214,19 +214,21 @@ vless_sudoku_server_config_matches() {
 
 vless_sudoku_client_config_matches() {
   local config="${1:-$NOBRAND_VLESS_CLIENT_FILE}" host="${2:-}" port="${3:-}"
-  local uuid="${4:-}" password="${5:-}"
+  local uuid="${4:-}" password="${5:-}" ingress_profile_id
+  ingress_profile_id="$(vless_sudoku_state_field ingress_profile_id 2>/dev/null || true)"
+  [ -n "$ingress_profile_id" ] || ingress_profile_id="$NOBRAND_LEGACY_INGRESS_PROFILE_ID"
   [ -n "$host" ] || {
     local mode advertise_host
     mode="$(vless_sudoku_state_field advertise_mode)" || return 1
     advertise_host="$(vless_sudoku_state_field advertise_host)"
-    host="$(nb_effective_advertise_host "$mode" "$advertise_host")"
+    host="$(nb_effective_advertise_host "$mode" "$advertise_host" "$ingress_profile_id")"
   }
   [ -n "$port" ] || {
     local mode advertise_port listen_port
     mode="$(vless_sudoku_state_field advertise_mode)" || return 1
     advertise_port="$(vless_sudoku_state_field advertise_port)"
     listen_port="$(vless_sudoku_state_field listen_port)"
-    port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port")"
+    port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port" "$ingress_profile_id")"
   }
   [ -n "$uuid" ] || uuid="$(vless_sudoku_state_field uuid)" || return 1
   [ -n "$password" ] \
@@ -251,15 +253,16 @@ vless_sudoku_client_config_matches() {
 }
 
 vless_sudoku_current_share_link() {
-  local uuid listen_port mode advertise_host advertise_port host port finalmask
+  local uuid listen_port mode advertise_host advertise_port ingress_profile_id host port finalmask
   vless_sudoku_state_exists || return 1
   uuid="$(vless_sudoku_state_field uuid)"
   listen_port="$(vless_sudoku_state_field listen_port)"
   mode="$(vless_sudoku_state_field advertise_mode)"
   advertise_host="$(vless_sudoku_state_field advertise_host)"
   advertise_port="$(vless_sudoku_state_field advertise_port)"
-  host="$(nb_effective_advertise_host "$mode" "$advertise_host")"
-  port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port")"
+  ingress_profile_id="$(vless_sudoku_state_field ingress_profile_id 2>/dev/null || true)"
+  host="$(nb_effective_advertise_host "$mode" "$advertise_host" "$ingress_profile_id")"
+  port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port" "$ingress_profile_id")"
   finalmask="$(jq -c '.finalmask_json' "$NOBRAND_VLESS_STATE_FILE")" || return 1
   vless_sudoku_build_share_link "$uuid" "$host" "$port" "$finalmask"
 }
@@ -267,19 +270,20 @@ vless_sudoku_current_share_link() {
 vless_sudoku_generate_state() {
   local output="$1" listen="$2" port="$3" uuid="$4" password="$5"
   local advertise_mode="$6" advertise_host="$7" advertise_port="$8" created_at="${9:-}"
+  local ingress_profile_id="${10:-}"
   local updated_at runtime_version finalmask effective_host effective_port link
   [ -n "$created_at" ] || created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   updated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   runtime_version="$(nobrand_xray_version 2>/dev/null || printf unknown)"
   finalmask="$(vless_sudoku_finalmask_json "$password")" || return 1
-  effective_host="$(nb_effective_advertise_host "$advertise_mode" "$advertise_host")"
-  effective_port="$(nb_effective_advertise_port "$advertise_mode" "$advertise_port" "$port")"
+  effective_host="$(nb_effective_advertise_host "$advertise_mode" "$advertise_host" "$ingress_profile_id")"
+  effective_port="$(nb_effective_advertise_port "$advertise_mode" "$advertise_port" "$port" "$ingress_profile_id")"
   link="$(vless_sudoku_build_share_link "$uuid" "$effective_host" "$effective_port" "$finalmask")" || return 1
   jq -n --arg uuid "$uuid" --arg listen "$listen" --arg port "$port" \
     --arg mode "$advertise_mode" --arg advertise_host "$advertise_host" \
     --arg advertise_port "$advertise_port" --arg tag "$NOBRAND_VLESS_TAG" \
     --arg runtime "$runtime_version" --arg link "$link" --arg created "$created_at" \
-    --arg updated "$updated_at" --argjson finalmask "$finalmask" '
+    --arg updated "$updated_at" --argjson finalmask "$finalmask" --arg ingress_profile_id "$ingress_profile_id" '
     {
       "protocol":"vless-sudoku",
       "uuid":$uuid,
@@ -299,6 +303,7 @@ vless_sudoku_generate_state() {
       "created_at":$created,
       "updated_at":$updated
     }
+    + if $ingress_profile_id=="" then {} else {ingress_profile_id:$ingress_profile_id} end
   ' >"$output"
 }
 
@@ -319,21 +324,30 @@ vless_sudoku_restore_snapshot_file() {
 
 vless_sudoku_configure_requests() {
   local interactive="${1:-0}" old_port="" old_password="" conflict_owner=""
-  VLESS_SUDOKU_LISTEN="0.0.0.0"
+  if vless_sudoku_state_exists && [ "${INGRESS_PROFILE_CLI:-0}" -eq 0 ]; then
+    INGRESS_PROFILE_ID="$(vless_sudoku_state_field ingress_profile_id 2>/dev/null || true)"
+    [ -n "$INGRESS_PROFILE_ID" ] || INGRESS_PROFILE_ID="$NOBRAND_LEGACY_INGRESS_PROFILE_ID"
+  else
+    nb_prepare_ingress_request || return 1
+  fi
+  nb_prepare_ingress_deployment "$INGRESS_PROFILE_ID" native-bind \
+    || die '所选 Ingress strict local address cannot be bound by VLESS Sudoku'
+  VLESS_SUDOKU_LISTEN="$INGRESS_LISTEN_HOST"
   if vless_sudoku_state_exists; then
     old_port="$(vless_sudoku_state_field listen_port 2>/dev/null || true)"
     VLESS_SUDOKU_UUID="$(vless_sudoku_state_field uuid 2>/dev/null || true)"
     old_password="$(jq -r '.finalmask_json.tcp[0].settings.password // empty' "$NOBRAND_VLESS_STATE_FILE" 2>/dev/null)"
   fi
   if [ -z "${PORT:-}" ]; then
-    PORT="$(nb_select_available_port TCP)" || die '未找到可用 VLESS Sudoku TCP 端口'
+    PORT="$(nb_select_available_port TCP "$INGRESS_PROFILE_ID")" \
+      || die '所选入口配置没有可用 VLESS Sudoku TCP 自动端口；manual-only 必须显式使用 --port'
     PORT_AUTO_SELECTED=1
   else
     nb_valid_port "$PORT" || die 'VLESS Sudoku 端口必须是 1-65535'
     PORT="$(normalize_uint "$PORT")"
-    nb_warn_if_outside_recommended_range "$PORT"
+    nb_warn_if_outside_recommended_range "$PORT" "$INGRESS_PROFILE_ID"
     if [ "$PORT" != "$old_port" ] \
-       && ! nb_port_available_for_transport "$PORT" TCP 'vless-sudoku:default'; then
+       && ! nb_port_available_for_profile "$PORT" TCP "$INGRESS_PROFILE_ID" 'vless-sudoku:default'; then
       warn "VLESS Sudoku TCP/${PORT} 已占用"
       nb_describe_port_conflict TCP "$PORT"
       return 1
@@ -410,7 +424,7 @@ install_vless_sudoku() {
       rm -rf -- "$snapshot"; admin_lock_release; return 1;
     }
   fi
-  if ! nb_port_available_for_transport "$PORT" TCP 'vless-sudoku:default'; then
+  if ! nb_port_available_for_profile "$PORT" TCP "$INGRESS_PROFILE_ID" 'vless-sudoku:default'; then
     warn "提交前发现 TCP/${PORT} 已被其它进程占用"
     nb_describe_port_conflict TCP "$PORT"
     vless_sudoku_install_rollback "$snapshot" "$was_active" 0
@@ -430,8 +444,8 @@ install_vless_sudoku() {
   }
   advertise_mode="$(nb_endpoint_mode_from_values "$ADVERTISE_HOST")"
   local effective_host effective_port
-  effective_host="$(nb_effective_advertise_host "$advertise_mode" "$ADVERTISE_HOST")"
-  effective_port="$(nb_effective_advertise_port "$advertise_mode" "$ADVERTISE_PORT" "$PORT")"
+  effective_host="$(nb_effective_advertise_host "$advertise_mode" "$ADVERTISE_HOST" "$INGRESS_PROFILE_ID")"
+  effective_port="$(nb_effective_advertise_port "$advertise_mode" "$ADVERTISE_PORT" "$PORT" "$INGRESS_PROFILE_ID")"
   if ! vless_sudoku_generate_server_config "$config_tmp" "$VLESS_SUDOKU_LISTEN" "$PORT" \
        "$VLESS_SUDOKU_UUID" "$VLESS_SUDOKU_PASSWORD" \
      || ! nobrand_xray_test_config "$config_tmp" \
@@ -439,7 +453,8 @@ install_vless_sudoku() {
        "$VLESS_SUDOKU_PASSWORD" "$VLESS_SUDOKU_LISTEN" \
      || ! vless_sudoku_generate_state "$state_tmp" "$VLESS_SUDOKU_LISTEN" "$PORT" \
        "$VLESS_SUDOKU_UUID" "$VLESS_SUDOKU_PASSWORD" "$advertise_mode" \
-       "$ADVERTISE_HOST" "$ADVERTISE_PORT" "$old_created" \
+       "$ADVERTISE_HOST" "$ADVERTISE_PORT" "$old_created" "$INGRESS_PROFILE_ID" \
+     || ! nb_ingress_stamp_state_file "$state_tmp" "$INGRESS_PROFILE_ID" native-bind \
      || ! vless_sudoku_generate_client_config "$client_tmp" "$effective_host" "$effective_port" \
        "$VLESS_SUDOKU_UUID" "$VLESS_SUDOKU_PASSWORD" \
      || ! vless_sudoku_client_config_matches "$client_tmp" "$effective_host" "$effective_port" \
@@ -461,7 +476,8 @@ install_vless_sudoku() {
   [ "$was_active" -eq 0 ] || service_action=restart
   if ! nobrand_vless_sudoku_service_action "$service_action" \
      || ! nobrand_vless_sudoku_service_active \
-     || ! nb_wait_for_listener TCP "$PORT" 25 \
+     || ! nb_wait_for_enforced_listener "$INGRESS_ENFORCEMENT_RESOLVED" "$INGRESS_ENFORCEMENT_METHOD" \
+          TCP "$PORT" "$INGRESS_LOCAL_ADDRESS" 'vless-sudoku:default' 25 \
      || ! nb_atomic_install_file "$client_tmp" "$NOBRAND_VLESS_CLIENT_FILE" 0600 \
      || ! nb_atomic_install_file "$state_tmp" "$NOBRAND_VLESS_STATE_FILE" 0600; then
     rm -f "$state_tmp" "$client_tmp"
@@ -481,7 +497,7 @@ install_vless_sudoku() {
 }
 
 vless_sudoku_set_endpoint() {
-  local interactive=0 state_tmp client_tmp snapshot mode owner uuid password host port link finalmask
+  local interactive=0 state_tmp client_tmp snapshot mode owner uuid password host port link finalmask ingress_profile_id
   require_root
   vless_sudoku_state_exists || die 'VLESS Sudoku 未安装'
   [ "${YES:-0}" -eq 1 ] || interactive=1
@@ -509,11 +525,13 @@ vless_sudoku_set_endpoint() {
   mode="$(nb_endpoint_mode_from_values "$ADVERTISE_HOST")"
   uuid="$(vless_sudoku_state_field uuid)"
   password="$(jq -r '.finalmask_json.tcp[0].settings.password' "$NOBRAND_VLESS_STATE_FILE")"
+  ingress_profile_id="$(vless_sudoku_state_field ingress_profile_id 2>/dev/null || true)"
+  [ -n "$ingress_profile_id" ] || ingress_profile_id="$NOBRAND_LEGACY_INGRESS_PROFILE_ID"
   finalmask="$(vless_sudoku_finalmask_json "$password")" || {
     rm -f "$state_tmp" "$client_tmp"; rm -rf -- "$snapshot"; admin_lock_release; return 1;
   }
-  host="$(nb_effective_advertise_host "$mode" "$ADVERTISE_HOST")"
-  port="$(nb_effective_advertise_port "$mode" "$ADVERTISE_PORT" "$PORT")"
+  host="$(nb_effective_advertise_host "$mode" "$ADVERTISE_HOST" "$ingress_profile_id")"
+  port="$(nb_effective_advertise_port "$mode" "$ADVERTISE_PORT" "$PORT" "$ingress_profile_id")"
   link="$(vless_sudoku_build_share_link "$uuid" "$host" "$port" "$finalmask")" || {
     rm -f "$state_tmp" "$client_tmp"; rm -rf -- "$snapshot"; admin_lock_release; return 1;
   }
@@ -543,10 +561,62 @@ vless_sudoku_set_endpoint() {
 }
 
 vless_sudoku_running() {
-  local port
+  local port policy method address
   vless_sudoku_state_exists || return 1
   port="$(vless_sudoku_state_field listen_port)"
-  nobrand_vless_sudoku_service_active && nb_port_is_listening TCP "$port"
+  policy="$(vless_sudoku_state_field ingress_enforcement 2>/dev/null || printf permissive)"
+  method="$(vless_sudoku_state_field ingress_enforcement_method 2>/dev/null || printf wildcard)"
+  address="$(vless_sudoku_state_field ingress_local_address 2>/dev/null || true)"
+  nobrand_vless_sudoku_service_active \
+    && nb_wait_for_enforced_listener "$policy" "$method" TCP "$port" "$address" 'vless-sudoku:default' 1
+}
+
+vless_sudoku_apply_ingress_enforcement() {
+  local profile_id port uuid password candidate_state candidate_config snapshot was_active=0 rc=0
+  vless_sudoku_state_exists || return 1
+  profile_id="$(vless_sudoku_state_field ingress_profile_id 2>/dev/null || true)"
+  [ -n "$profile_id" ] || profile_id="$NOBRAND_LEGACY_INGRESS_PROFILE_ID"
+  nb_prepare_ingress_deployment "$profile_id" native-bind || return 1
+  port="$(vless_sudoku_state_field listen_port)"
+  uuid="$(vless_sudoku_state_field uuid)"
+  password="$(jq -r '.finalmask_json.tcp[0].settings.password // empty' "$NOBRAND_VLESS_STATE_FILE")"
+  candidate_state="$(mktemp_file .vless-ingress-state)" || return 1
+  candidate_config="$(mktemp_file .vless-ingress-config.json)" || { rm -f "$candidate_state"; return 1; }
+  snapshot="$(mktemp_dir)" || { rm -f "$candidate_state" "$candidate_config"; return 1; }
+  cp -a "$NOBRAND_VLESS_STATE_FILE" "$snapshot/state" \
+    && cp -a "$NOBRAND_VLESS_CONFIG_FILE" "$snapshot/config" || rc=1
+  if [ "$rc" -eq 0 ]; then
+    jq --arg listen "$INGRESS_LISTEN_HOST" '.listen_host=$listen' "$NOBRAND_VLESS_STATE_FILE" >"$candidate_state" \
+      && nb_ingress_stamp_state_file "$candidate_state" "$profile_id" native-bind \
+      && vless_sudoku_state_matches "$candidate_state" \
+      && vless_sudoku_generate_server_config "$candidate_config" "$INGRESS_LISTEN_HOST" "$port" "$uuid" "$password" \
+      && vless_sudoku_server_config_matches "$candidate_config" "$uuid" "$port" "$password" "$INGRESS_LISTEN_HOST" \
+      && nobrand_xray_test_config "$candidate_config" || rc=1
+  fi
+  nobrand_vless_sudoku_service_active && was_active=1
+  if [ "$rc" -eq 0 ]; then
+    nb_atomic_install_file "$candidate_config" "$NOBRAND_VLESS_CONFIG_FILE" 0600 \
+      && nb_atomic_install_file "$candidate_state" "$NOBRAND_VLESS_STATE_FILE" 0600 || rc=1
+  fi
+  if [ "$rc" -eq 0 ] && [ "$was_active" -eq 1 ]; then
+    [ "${NOBRAND_TEST_INGRESS_SERVICE_FAIL:-0}" -eq 0 ] \
+      && nobrand_vless_sudoku_service_action restart \
+      && [ "${NOBRAND_TEST_INGRESS_LISTENER_FAIL:-0}" -eq 0 ] \
+      && vless_sudoku_running || rc=1
+  fi
+  if [ "$rc" -ne 0 ]; then
+    nb_atomic_install_file "$snapshot/config" "$NOBRAND_VLESS_CONFIG_FILE" 0600 >/dev/null 2>&1 || true
+    nb_atomic_install_file "$snapshot/state" "$NOBRAND_VLESS_STATE_FILE" 0600 >/dev/null 2>&1 || true
+    if [ "$was_active" -eq 1 ]; then
+      nobrand_vless_sudoku_service_action restart >/dev/null 2>&1 \
+        && vless_sudoku_running >/dev/null 2>&1 || true
+    else
+      nobrand_vless_sudoku_service_action stop >/dev/null 2>&1 || true
+    fi
+  fi
+  rm -f "$candidate_state" "$candidate_config"
+  rm -rf -- "$snapshot"
+  return "$rc"
 }
 
 vless_sudoku_state_set_enabled() {
@@ -568,8 +638,8 @@ vless_sudoku_node_rows() {
   advertise_host="$(vless_sudoku_state_field advertise_host)"
   advertise_port="$(vless_sudoku_state_field advertise_port)"
   listen_port="$(vless_sudoku_state_field listen_port)"
-  host="$(nb_effective_advertise_host "$mode" "$advertise_host")"
-  port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port")"
+  host="$(nb_effective_advertise_host "$mode" "$advertise_host" "$(vless_sudoku_state_field ingress_profile_id 2>/dev/null || true)")"
+  port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port" "$(vless_sudoku_state_field ingress_profile_id 2>/dev/null || true)")"
   status=Stopped; vless_sudoku_running && status=Running
   printf 'VLESS/Sudoku|sudoku|%s:%s/TCP|%s|TCP\n' "$host" "$port" "$status"
 }
@@ -584,8 +654,8 @@ print_vless_sudoku_result() {
   mode="$(vless_sudoku_state_field advertise_mode)"
   advertise_host="$(vless_sudoku_state_field advertise_host)"
   advertise_port="$(vless_sudoku_state_field advertise_port)"
-  host="$(nb_effective_advertise_host "$mode" "$advertise_host")"
-  port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port")"
+  host="$(nb_effective_advertise_host "$mode" "$advertise_host" "$(vless_sudoku_state_field ingress_profile_id 2>/dev/null || true)")"
+  port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port" "$(vless_sudoku_state_field ingress_profile_id 2>/dev/null || true)")"
   finalmask="$(jq -c '.finalmask_json' "$NOBRAND_VLESS_STATE_FILE")"
   password="$(jq -r '.finalmask_json.tcp[0].settings.password' "$NOBRAND_VLESS_STATE_FILE")"
   link="$(vless_sudoku_current_share_link)"
@@ -601,6 +671,9 @@ print_vless_sudoku_result() {
   msg '真实监听'
   msg "  Address   ${listen_host}"
   msg "  Port      ${listen_port}"
+  msg ''
+  msg '网络入口'
+  msg "  Profile   $(nb_ingress_profile_name "$(vless_sudoku_state_field ingress_profile_id 2>/dev/null || true)")"
   msg ''
   msg '客户端入口'
   msg "  Host      ${host}"
@@ -628,7 +701,7 @@ vless_sudoku_service_command() {
       nobrand_xray_test_config "$NOBRAND_VLESS_CONFIG_FILE" || return 1
       nb_firewall_open_pairs "TCP|${port}" || return 1
       if ! nobrand_vless_sudoku_service_action "$action" \
-         || ! nb_wait_for_listener TCP "$port" 25 \
+         || ! vless_sudoku_running \
          || ! vless_sudoku_state_set_enabled true; then
         nobrand_vless_sudoku_service_action stop >/dev/null 2>&1 || true
         [ "$was_enabled" = true ] || vless_sudoku_state_set_enabled false >/dev/null 2>&1 || true

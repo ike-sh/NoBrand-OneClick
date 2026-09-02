@@ -356,6 +356,8 @@ print_summary() {
   t "  用户名: ${USERNAME}" "  Username: ${USERNAME}"
   t "  密码:   ${PASSWORD}" "  Password: ${PASSWORD}"
   t "  协议:   $(client_protocol_label)" "  Protocol: $(client_protocol_label)"
+  t "  网络入口: $(nb_ingress_profile_name "${INGRESS_PROFILE_ID:-}")" \
+    "  Ingress:  $(nb_ingress_profile_name "${INGRESS_PROFILE_ID:-}")"
   t "  Profile: $(profile_label)" "  Profile:  $(profile_label)"
   t "  MTU:    ${MTU}（$(mtu_policy_label)）" \
     "  MTU:      ${MTU} ($(mtu_policy_label))"

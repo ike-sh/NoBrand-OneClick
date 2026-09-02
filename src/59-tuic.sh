@@ -178,6 +178,7 @@ tuic_generate_state() {
   local output="$1" instance_id="$2" name="$3" listen="$4" port="$5" mode="$6"
   local advertise_host="$7" advertise_port="$8" sni="$9" channel="${10}" runtime_version="${11}"
   local cert="${12}" key="${13}" users="${14}" created_at="${15:-}" updated_at fingerprint not_after
+  local ingress_profile_id="${16:-}"
   [ -n "$created_at" ] || created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   updated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   fingerprint="$(tuic_certificate_fingerprint "$cert" 2>/dev/null || true)"
@@ -187,7 +188,7 @@ tuic_generate_state() {
     --arg advertise_port "$advertise_port" --arg sni "$sni" --arg channel "$channel" \
     --arg runtime "$runtime_version" --arg cert "$cert" --arg key "$key" \
     --arg fingerprint "$fingerprint" --arg not_after "$not_after" --argjson users "$users" \
-    --arg created "$created_at" --arg updated "$updated_at" '
+    --arg created "$created_at" --arg updated "$updated_at" --arg ingress_profile_id "$ingress_profile_id" '
     {
       schema_version:3,ownership:"nobrand-v3",protocol:"tuic",tuic_version:5,
       instance_id:$instance_id,name:$name,listen_host:$listen,listen_port:($port|tonumber),transport:"udp",
@@ -199,6 +200,7 @@ tuic_generate_state() {
            fingerprint_sha256:$fingerprint,not_after:$not_after},
       users:$users,enabled:true,created_at:$created,updated_at:$updated
     }
+    + if $ingress_profile_id=="" then {} else {ingress_profile_id:$ingress_profile_id} end
   ' >"$output"
 }
 
@@ -210,6 +212,7 @@ tuic_config_matches_state() {
   jq -e --slurpfile state "$state" '
     .inbounds|length==1
     and .[0].type=="tuic"
+    and .[0].listen==$state[0].listen_host
     and .[0].listen_port==$state[0].listen_port
     and .[0].congestion_control=="cubic"
     and .[0].zero_rtt_handshake==false
@@ -220,13 +223,14 @@ tuic_config_matches_state() {
 }
 
 tuic_effective_endpoint() {
-  local id="$1" mode host port listen_port
+  local id="$1" mode host port listen_port ingress_profile_id
   mode="$(tuic_state_field "$id" advertise_mode)"
   host="$(tuic_state_field "$id" advertise_host)"
   port="$(tuic_state_field "$id" advertise_port)"
   listen_port="$(tuic_state_field "$id" listen_port)"
-  printf '%s|%s' "$(nb_effective_advertise_host "$mode" "$host")" \
-    "$(nb_effective_advertise_port "$mode" "$port" "$listen_port")"
+  ingress_profile_id="$(tuic_state_field "$id" ingress_profile_id 2>/dev/null || true)"
+  printf '%s|%s' "$(nb_effective_advertise_host "$mode" "$host" "$ingress_profile_id")" \
+    "$(nb_effective_advertise_port "$mode" "$port" "$listen_port" "$ingress_profile_id")"
 }
 
 tuic_export_mihomo() {
@@ -241,7 +245,7 @@ tuic_export_mihomo() {
   cat <<EOF
 mixed-port: 7890
 allow-lan: false
-mode: global
+mode: rule
 log-level: warning
 proxies:
   - name: "NoBrand-TUIC-${name}"
@@ -317,18 +321,23 @@ tuic_set_endpoint_state() {
 tuic_collect_install_requests() {
   local old_port="" owner
   tuic_protocol_scope_valid || die 'TUIC protocol scope constants invalid'
+  nb_prepare_ingress_request || return 1
+  nb_prepare_ingress_deployment "$INGRESS_PROFILE_ID" native-bind \
+    || die '所选 Ingress strict local address cannot be bound by TUIC'
   TUIC_NAME="${TUIC_NAME:-primary}"
   tuic_valid_name "$TUIC_NAME" || die 'TUIC instance name 无效'
   tuic_find_id_by_name "$TUIC_NAME" >/dev/null 2>&1 \
     && { t "TUIC instance 已存在: ${TUIC_NAME}" "TUIC instance already exists: ${TUIC_NAME}"; return 2; }
   if [ -z "${PORT:-}" ]; then
-    PORT="$(nb_select_available_port UDP)" || die '未找到可用 TUIC UDP port'
+    PORT="$(nb_select_available_port UDP "$INGRESS_PROFILE_ID")" \
+      || die '所选入口配置没有可用 TUIC UDP 自动端口；manual-only 必须显式使用 --port'
     PORT_AUTO_SELECTED=1
   else
     nb_valid_port "$PORT" || die 'TUIC port 必须是 1025-65535'
     PORT="$(normalize_uint "$PORT")"
-    nb_port_is_tail_base_reserved "$PORT" && die 'TUIC 禁止使用保留 xx00 port'
-    nb_port_available_for_transport "$PORT" UDP || {
+    nb_ingress_port_is_reserved "$INGRESS_PROFILE_ID" "$PORT" && die 'TUIC 禁止使用所选入口配置的保留 port'
+    nb_warn_if_outside_recommended_range "$PORT" "$INGRESS_PROFILE_ID"
+    nb_port_available_for_profile "$PORT" UDP "$INGRESS_PROFILE_ID" || {
       owner="$(nb_registry_port_owner UDP "$PORT" 2>/dev/null || true)"
       die "TUIC UDP/${PORT} 已占用${owner:+ by ${owner}}"
     }
@@ -432,7 +441,7 @@ install_tuic() {
       rm -rf -- "$runtime_snapshot"
       return 1
     }
-  tuic_generate_server_config "$config_tmp" "$id" 0.0.0.0 "$PORT" "$cert" "$key" "$TUIC_SNI" "$users" \
+  tuic_generate_server_config "$config_tmp" "$id" "$INGRESS_LISTEN_HOST" "$PORT" "$cert" "$key" "$TUIC_SNI" "$users" \
     && tuic_validate_config "$config_tmp" \
     || {
       tuic_install_transaction_rollback "$id" "$PORT" "$runtime_snapshot" "$template_preexisting"
@@ -441,9 +450,10 @@ install_tuic() {
       return 1
     }
   mode="$(nb_endpoint_mode_from_values "$ADVERTISE_HOST")"
-  tuic_generate_state "$state_tmp" "$id" "$TUIC_NAME" 0.0.0.0 "$PORT" "$mode" \
+  tuic_generate_state "$state_tmp" "$id" "$TUIC_NAME" "$INGRESS_LISTEN_HOST" "$PORT" "$mode" \
     "$ADVERTISE_HOST" "$ADVERTISE_PORT" "$TUIC_SNI" "$TUIC_CHANNEL" "$runtime_version" \
-    "$cert" "$key" "$users" || {
+    "$cert" "$key" "$users" "" "$INGRESS_PROFILE_ID" \
+    && nb_ingress_stamp_state_file "$state_tmp" "$INGRESS_PROFILE_ID" native-bind || {
       tuic_install_transaction_rollback "$id" "$PORT" "$runtime_snapshot" "$template_preexisting"
       rm -f "$config_tmp" "$state_tmp"
       rm -rf -- "$runtime_snapshot"
@@ -455,14 +465,15 @@ install_tuic() {
     rm -rf -- "$runtime_snapshot"
     return 1
   }
-  if ! nb_port_available_for_transport "$PORT" UDP \
+  if ! nb_port_available_for_profile "$PORT" UDP "$INGRESS_PROFILE_ID" \
      || ! nb_atomic_install_file "$config_tmp" "$config" 0600 \
      || ! nb_atomic_install_file "$state_tmp" "$state" 0600 \
      || ! tuic_install_service_runtime \
      || ! tuic_ensure_openrc_service "$id" \
      || ! nb_firewall_open_pairs "UDP|${PORT}" \
      || ! tuic_service_action "$id" start \
-     || ! nb_wait_for_listener UDP "$PORT" 25 \
+     || ! nb_wait_for_enforced_listener "$INGRESS_ENFORCEMENT_RESOLVED" "$INGRESS_ENFORCEMENT_METHOD" \
+          UDP "$PORT" "$INGRESS_LOCAL_ADDRESS" "tuic:${id}" 25 \
      || ! tuic_listener_owned_by_service "$id" "$PORT"; then
     tuic_install_transaction_rollback "$id" "$PORT" "$runtime_snapshot" "$template_preexisting"
     admin_lock_release
@@ -478,7 +489,7 @@ install_tuic() {
 }
 
 tuic_commit_candidate_state() {
-  local id="$1" candidate_state="$2" state config config_tmp snapshot running port users
+  local id="$1" candidate_state="$2" state config config_tmp snapshot running port users policy method address rc=0
   state="$(tuic_state_file "$id")" config="$(tuic_config_file "$id")"
   port="$(jq -r .listen_port "$candidate_state")"
   users="$(jq -c .users "$candidate_state")"
@@ -486,25 +497,52 @@ tuic_commit_candidate_state() {
   tuic_generate_server_config "$config_tmp" "$id" "$(jq -r .listen_host "$candidate_state")" "$port" \
     "$(jq -r .tls.certificate_path "$candidate_state")" "$(jq -r .tls.key_path "$candidate_state")" \
     "$(jq -r .sni "$candidate_state")" "$users" || return 1
-  tuic_validate_config "$config_tmp" || return 1
-  snapshot="$(mktemp_dir)" || return 1
-  cp -a "$state" "$config" "$snapshot/" || return 1
+  tuic_validate_config "$config_tmp" || { rm -f "$config_tmp"; return 1; }
+  snapshot="$(mktemp_dir)" || { rm -f "$config_tmp"; return 1; }
+  cp -a "$state" "$config" "$snapshot/" || { rm -f "$config_tmp"; rm -rf -- "$snapshot"; return 1; }
   running=0
   tuic_service_active "$id" && running=1
+  policy="$(jq -r '.ingress_enforcement // "permissive"' "$candidate_state")"
+  method="$(jq -r '.ingress_enforcement_method // "wildcard"' "$candidate_state")"
+  address="$(jq -r '.ingress_local_address // empty' "$candidate_state")"
   if ! nb_atomic_install_file "$config_tmp" "$config" 0600 \
      || ! nb_atomic_install_file "$candidate_state" "$state" 0600 \
      || ! { [ "$running" -eq 0 ] || {
-          tuic_service_action "$id" restart \
-            && nb_wait_for_listener UDP "$port" 25 \
-            && tuic_listener_owned_by_service "$id" "$port"
-        }; }; then
+           [ "${NOBRAND_TEST_INGRESS_SERVICE_FAIL:-0}" -eq 0 ] \
+             && tuic_service_action "$id" restart \
+             && [ "${NOBRAND_TEST_INGRESS_LISTENER_FAIL:-0}" -eq 0 ] \
+             && nb_wait_for_enforced_listener "$policy" "$method" UDP "$port" "$address" "tuic:${id}" 25 \
+             && tuic_listener_owned_by_service "$id" "$port"
+         }; }; then
     cp -a "$snapshot/state.json" "$state" 2>/dev/null || true
     cp -a "$snapshot/config.json" "$config" 2>/dev/null || true
-    [ "$running" -eq 0 ] || tuic_service_action "$id" restart >/dev/null 2>&1 || true
-    return 1
+    if [ "$running" -eq 1 ]; then
+      if ! tuic_service_action "$id" restart >/dev/null 2>&1 \
+         || ! tuic_running "$id" >/dev/null 2>&1; then
+        warn "TUIC rollback listener verification failed: ${id}"
+      fi
+    fi
+    rc=1
   fi
   rm -f "$config_tmp"
   rm -rf -- "$snapshot"
+  return "$rc"
+}
+
+tuic_apply_ingress_enforcement() {
+  local id="$1" state profile_id candidate rc
+  state="$(tuic_state_file "$id")"
+  tuic_state_exists "$id" || return 1
+  profile_id="$(tuic_state_field "$id" ingress_profile_id 2>/dev/null || true)"
+  [ -n "$profile_id" ] || profile_id="$NOBRAND_LEGACY_INGRESS_PROFILE_ID"
+  nb_prepare_ingress_deployment "$profile_id" native-bind || return 1
+  candidate="$(mktemp_file .tuic-ingress-state)" || return 1
+  jq --arg listen "$INGRESS_LISTEN_HOST" '.listen_host=$listen' "$state" >"$candidate" \
+    && nb_ingress_stamp_state_file "$candidate" "$profile_id" native-bind \
+    && tuic_commit_candidate_state "$id" "$candidate"
+  rc=$?
+  rm -f "$candidate"
+  return "$rc"
 }
 
 tuic_user_add() {
@@ -555,8 +593,10 @@ tuic_show_user() {
   local id="$1" selector="${2:-}" user_json endpoint
   user_json="$(tuic_resolve_user_json "$id" "$selector")" || return 1
   endpoint="$(tuic_effective_endpoint "$id")"
-  printf 'TUIC v5 instance: %s\nUser: %s\nDisplay Endpoint: %s:%s\nSNI: %s\nUUID: %s\nPassword: %s\n' \
+  printf 'TUIC v5 instance: %s\nUser: %s\nIngress Profile: %s\nActual: %s:%s/UDP\nDisplay Endpoint: %s:%s\nSNI: %s\nUUID: %s\nPassword: %s\n' \
     "$(tuic_state_field "$id" name)" "$(jq -r .name <<<"$user_json")" \
+    "$(nb_ingress_profile_name "$(tuic_state_field "$id" ingress_profile_id 2>/dev/null || true)")" \
+    "$(tuic_state_field "$id" listen_host)" "$(tuic_state_field "$id" listen_port)" \
     "${endpoint%%|*}" "${endpoint#*|}" "$(tuic_state_field "$id" sni)" \
     "$(jq -r .uuid <<<"$user_json")" "$(jq -r .password <<<"$user_json")"
 }
@@ -579,12 +619,24 @@ tuic_node_rows() {
   while IFS= read -r id; do
     endpoint="$(tuic_effective_endpoint "$id")"
     status=Stopped
-    tuic_service_active "$id" && nb_port_is_listening UDP "$(tuic_state_field "$id" listen_port)" && status=Running
+    tuic_running "$id" && status=Running
     while IFS= read -r user; do
       printf 'TUIC v5|%s/%s|%s:%s|%s|UDP\n' "$(tuic_state_field "$id" name)" \
         "$(jq -r .name <<<"$user")" "${endpoint%%|*}" "${endpoint#*|}" "$status"
     done < <(jq -c '.users[]' "$(tuic_state_file "$id")")
   done < <(tuic_instance_ids)
+}
+
+tuic_running() {
+  local id="$1" port policy method address
+  tuic_state_exists "$id" || return 1
+  port="$(tuic_state_field "$id" listen_port)"
+  policy="$(tuic_state_field "$id" ingress_enforcement 2>/dev/null || printf permissive)"
+  method="$(tuic_state_field "$id" ingress_enforcement_method 2>/dev/null || printf wildcard)"
+  address="$(tuic_state_field "$id" ingress_local_address 2>/dev/null || true)"
+  tuic_service_active "$id" \
+    && nb_wait_for_enforced_listener "$policy" "$method" UDP "$port" "$address" "tuic:${id}" 1 \
+    && tuic_listener_owned_by_service "$id" "$port"
 }
 
 tuic_doctor_one() {
@@ -601,7 +653,7 @@ tuic_doctor_one() {
     || { nb_doctor_line FAIL "TUIC config $(tuic_state_field "$id" name)"; failed=1; }
   tuic_service_active "$id" && nb_doctor_line PASS 'service active' \
     || { nb_doctor_line FAIL 'service inactive'; failed=1; }
-  nb_port_is_listening UDP "$port" && tuic_listener_owned_by_service "$id" "$port" \
+  tuic_running "$id" \
     && nb_doctor_line PASS "same-process UDP/${port}" \
     || { nb_doctor_line FAIL "same-process UDP/${port}"; failed=1; }
   nb_firewall_binding_owned UDP "$port" && nb_doctor_line PASS "firewall UDP/${port}" \
@@ -647,7 +699,7 @@ tuic_service_command() {
   port="$(tuic_state_field "$id" listen_port)"
   tuic_service_action "$id" "$action" || return 1
   case "$action" in
-    start|restart) nb_wait_for_listener UDP "$port" 25 && tuic_listener_owned_by_service "$id" "$port" ;;
+    start|restart) tuic_running "$id" ;;
   esac
 }
 
@@ -684,8 +736,7 @@ tuic_upgrade_runtime_rollback() {
     [ -n "$id" ] || continue
     port="$(tuic_state_field "$id" listen_port 2>/dev/null || true)"
     tuic_service_action "$id" restart >/dev/null 2>&1 \
-      && nb_wait_for_listener UDP "$port" 25 \
-      && tuic_listener_owned_by_service "$id" "$port" || failed=1
+      && tuic_running "$id" || failed=1
   done <"$active_file"
   [ "$failed" -eq 0 ]
 }
@@ -738,8 +789,7 @@ tuic_upgrade_runtime() {
     [ -n "$id" ] || continue
     port="$(tuic_state_field "$id" listen_port)"
     if ! tuic_service_action "$id" restart \
-       || ! nb_wait_for_listener UDP "$port" 25 \
-       || ! tuic_listener_owned_by_service "$id" "$port"; then
+       || ! tuic_running "$id"; then
       failed=1
       break
     fi

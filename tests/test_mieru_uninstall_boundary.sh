@@ -49,6 +49,9 @@ printf '%s\n' \
 printf '%s\n' \
   '{"version":2,"deployment_model":"isolated-v2","protocol":"TCP","users":[{"instance_id":"u0000000000000001","name":"alice","password":"alice-pass","port":26001,"enabled":true}]}' \
   >"$MITA_USERS_STATE"
+printf '%s\n' \
+  '{"schema_version":3,"ownership":"nobrand-v3","feature":"ingress-enforcement-firewall","rules":[{"owner":"mieru:u0000000000000001","ingress_profile_id":"i1111111111111111","transport":"TCP","port":26001,"local_address":"192.0.2.10"},{"owner":"reality:r1111111111111111","ingress_profile_id":"i2222222222222222","transport":"TCP","port":26002,"local_address":"192.0.2.20"}]}' \
+  >"$NOBRAND_INGRESS_FIREWALL_STATE_FILE"
 chmod 0600 "$MITA_STATE" "$MITA_USERS_STATE"
 touch "$MITA_MARKER" "$MITA_BIN" "$MITA_INSTANCE_SYSTEMD_TEMPLATE" \
   "$MITA_INSTANCE_TMPFILES" "$MITA_INSTANCE_RUNNER" \
@@ -80,6 +83,9 @@ firewall_clear_all_owned() {
   printf 'firewall-clear-owned\n' >>"$op_log"
   rm -f "$MITA_FIREWALL_OWNED_STATE"
 }
+nb_strict_firewall_apply_state() {
+  printf 'strict-firewall-apply\n' >>"$op_log"
+}
 _has_user() { return 0; }
 _has_group() { return 0; }
 # Confirmation is consumed indirectly by both uninstall entry points.
@@ -92,6 +98,13 @@ assert_contains "$protocol_output" 'Mieru 协议资源已卸载' 'protocol unins
 [ ! -e "$MITA_BIN" ] || fail 'NoBrand-managed Mita runtime must be removed'
 [ ! -e "$MITA_INSTANCES_DIR" ] || fail 'NoBrand-managed Mieru configs must be removed'
 [ ! -e "$MITA_INSTANCE_SYSTEMD_TEMPLATE" ] || fail 'NoBrand Mieru service template must be removed'
+[ "$(jq -r '.rules | length' "$NOBRAND_INGRESS_FIREWALL_STATE_FILE")" -eq 1 ] \
+  || fail 'Mieru uninstall must remove only its strict-ingress rules'
+assert_eq reality:r1111111111111111 \
+  "$(jq -r '.rules[0].owner' "$NOBRAND_INGRESS_FIREWALL_STATE_FILE")" \
+  'non-Mieru strict-ingress owner preserved'
+assert_contains "$(<"$op_log")" 'strict-firewall-apply' \
+  'Mieru uninstall must apply strict-ingress cleanup before deleting user state'
 [ -f "$NOBRAND_REGISTRY_FILE" ] || fail 'protocol uninstall must preserve schema-v3 manager state'
 [ -x "$NOBRAND_INSTALL_SCRIPT_PATH" ] || fail 'protocol uninstall must preserve installer'
 assert_eq "$NOBRAND_INSTALL_SCRIPT_PATH" "$(readlink "$NOBRAND_COMMAND_PATH")" 'nobrand symlink after protocol uninstall'

@@ -207,6 +207,7 @@ nb_registry_rows() {
   NOBRAND_SNELL_STATE_DIR="$NOBRAND_SNELL_STATE_DIR" \
   NOBRAND_HY2_STATE_FILE="$NOBRAND_HY2_STATE_FILE" \
   NOBRAND_VLESS_STATE_FILE="$NOBRAND_VLESS_STATE_FILE" \
+  NOBRAND_REALITY_STATE_DIR="$NOBRAND_REALITY_STATE_DIR" \
   NOBRAND_TUIC_STATE_DIR="$NOBRAND_TUIC_STATE_DIR" \
   NOBRAND_FORWARD_STATE_FILE="$NOBRAND_FORWARD_STATE_FILE" \
   MITA_USERS_STATE="$MITA_USERS_STATE" \
@@ -252,6 +253,20 @@ if vless_path and os.path.isfile(vless_path):
     try:
         state = json.load(open(vless_path, encoding="utf-8"))
         emit("vless-sudoku:default", "TCP", state.get("listen_port"),
+             state.get("advertise_host"), state.get("advertise_port"))
+    except Exception:
+        pass
+
+reality_dir = os.environ.get("NOBRAND_REALITY_STATE_DIR", "")
+for path in sorted(glob.glob(os.path.join(reality_dir, "*", "state.json"))):
+    try:
+        state = json.load(open(path, encoding="utf-8"))
+        instance_id = str(state.get("instance_id") or "")
+        if (state.get("schema_version") != 3 or state.get("ownership") != "nobrand-v3"
+                or state.get("protocol") != "vless-reality"
+                or os.path.basename(os.path.dirname(path)) != instance_id):
+            continue
+        emit("vless-reality:" + instance_id, "TCP", state.get("listen_port"),
              state.get("advertise_host"), state.get("advertise_port"))
     except Exception:
         pass
@@ -325,26 +340,35 @@ nb_registry_port_owner() {
 
 nb_port_available_for_transport() {
   local port="$1" transport="$2" ignore_owner="${3:-}"
+  nb_port_available_for_profile "$port" "$transport" "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" "$ignore_owner"
+}
+
+nb_port_available_for_profile() {
+  local port="$1" transport="$2" profile_id="${3:-$NOBRAND_LEGACY_INGRESS_PROFILE_ID}" ignore_owner="${4:-}"
   nb_valid_port "$port" || return 1
   transport="$(nb_normalize_transport "$transport")" || return 1
-  nb_port_is_tail_base_reserved "$port" && return 1
+  nb_ingress_profile_json "$profile_id" >/dev/null 2>&1 || return 1
+  nb_ingress_port_is_reserved "$profile_id" "$port" && return 1
   nb_registry_port_owner "$transport" "$port" "$ignore_owner" >/dev/null 2>&1 && return 1
   nb_port_is_listening "$transport" "$port" && return 1
   return 0
 }
 
 nb_select_available_port() {
-  local transport ip bounds lo hi selected attempt random_value
+  local transport profile_id="${2:-$NOBRAND_LEGACY_INGRESS_PROFILE_ID}" bounds lo hi selected attempt random_value rc=0
   transport="$(nb_normalize_transport "$1")" || return 1
-  ip="$(nb_detect_local_ipv4 2>/dev/null || true)"
-  if bounds="$(nb_tail_port_bounds "$ip" 2>/dev/null)"; then
+  bounds="$(nb_ingress_profile_auto_range "$profile_id" 2>/dev/null)" || rc=$?
+  if [ "$rc" -eq 0 ] && [ -n "$bounds" ]; then
     lo="${bounds%%|*}"
     hi="${bounds#*|}"
-    if selected="$(nb_scan_port_span "$lo" "$hi" nb_port_available_for_transport "$transport")"; then
+    if selected="$(nb_scan_port_span "$lo" "$hi" nb_port_available_for_profile "$transport" "$profile_id")"; then
       printf '%s' "$selected"
       return 0
     fi
   fi
+  # Explicit profiles fail closed. manual-only has no pool, while exhausted
+  # derived/custom ranges never silently escape into an unrelated random port.
+  [ "$profile_id" = "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ] || return 1
   attempt=0
   while [ "$attempt" -lt 512 ]; do
     if command -v openssl >/dev/null 2>&1; then
@@ -367,27 +391,28 @@ nb_select_available_port() {
 }
 
 nb_warn_if_outside_recommended_range() {
-  local port="$1" ip bounds lo hi
-  ip="$(nb_detect_local_ipv4 2>/dev/null || true)"
-  bounds="$(nb_tail_port_bounds "$ip" 2>/dev/null || true)"
+  local port="$1" profile_id="${2:-$NOBRAND_LEGACY_INGRESS_PROFILE_ID}" profile_name bounds lo hi
+  profile_name="$(nb_ingress_profile_name "$profile_id" 2>/dev/null || printf '%s' "$profile_id")"
+  bounds="$(nb_ingress_profile_auto_range "$profile_id" 2>/dev/null || true)"
   [ -n "$bounds" ] || return 0
   lo="${bounds%%|*}"
   hi="${bounds#*|}"
-  if nb_port_is_tail_base_reserved "$port"; then
-    warn "$(t "指定端口 ${port} 是本机尾号段的保留基准端口，不允许代理绑定" \
-      "Port ${port} is the reserved base of this host's tail-port range and cannot be used by a proxy")"
+  if nb_ingress_port_is_reserved "$profile_id" "$port"; then
+    warn "$(t "指定端口 ${port} 是入口配置 ${profile_name} 的保留端口，不允许代理绑定" \
+      "Port ${port} is reserved by ingress profile ${profile_name} and cannot be used by a proxy")"
     return 0
   fi
   if [ "$port" -lt "$lo" ] || [ "$port" -gt "$hi" ]; then
-    warn "$(t "指定端口 ${port} 不在本机 ${ip} 的推荐段 ${lo}-${hi}；确认空闲后仍允许使用" \
-      "Port ${port} is outside the recommended ${lo}-${hi} range for ${ip}; it is still allowed when free")"
+    warn "$(t "指定端口 ${port} 不在入口配置 ${profile_name} 的自动段 ${lo}-${hi}；确认空闲后仍允许使用" \
+      "Port ${port} is outside ingress profile ${profile_name}'s auto range ${lo}-${hi}; it is still allowed when free")"
   fi
 }
 
 nb_describe_port_conflict() {
-  local transport="$1" port="$2" owner reservation details
-  reservation="$(nb_tail_base_reservation_owner "$port" 2>/dev/null || true)"
-  [ -z "$reservation" ] || msg "  reserved owner: ${reservation} (tail-port base; external NAT/SSH ownership may be invisible inside the guest)"
+  local transport="$1" port="$2" profile_id="${3:-$NOBRAND_LEGACY_INGRESS_PROFILE_ID}" owner details
+  if nb_ingress_port_is_reserved "$profile_id" "$port"; then
+    msg "  reserved by ingress profile: $(nb_ingress_profile_name "$profile_id")"
+  fi
   owner="$(nb_registry_port_owner "$transport" "$port" 2>/dev/null || true)"
   [ -z "$owner" ] || msg "  state owner: ${owner}"
   details="$(nb_port_listener_details "$transport" "$port" 2>/dev/null || true)"

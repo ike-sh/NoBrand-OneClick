@@ -15,6 +15,10 @@ users_py_locked() {
       _U_EXPIRE="${_U_EXPIRE-}" _U_PACKAGE="${_U_PACKAGE-}" _U_ENABLED="${_U_ENABLED-}" \
       _U_BW="${_U_BW-}" _U_PRIMARY="${_U_PRIMARY-}" \
       _U_ADVERTISE_HOST="${_U_ADVERTISE_HOST-}" _U_ADVERTISE_PORT="${_U_ADVERTISE_PORT-}" \
+      _U_INGRESS_PROFILE_ID="${_U_INGRESS_PROFILE_ID-}" \
+      _U_INGRESS_ENFORCEMENT="${_U_INGRESS_ENFORCEMENT-}" \
+      _U_INGRESS_ENFORCEMENT_METHOD="${_U_INGRESS_ENFORCEMENT_METHOD-}" \
+      _U_INGRESS_LOCAL_ADDRESS="${_U_INGRESS_LOCAL_ADDRESS-}" \
       _U_DEPLOYMENT_MODEL="${_U_DEPLOYMENT_MODEL-}" \
       python3 -c "$code"
   else
@@ -25,6 +29,10 @@ users_py_locked() {
       _U_EXPIRE="${_U_EXPIRE-}" _U_PACKAGE="${_U_PACKAGE-}" _U_ENABLED="${_U_ENABLED-}" \
       _U_BW="${_U_BW-}" _U_PRIMARY="${_U_PRIMARY-}" \
       _U_ADVERTISE_HOST="${_U_ADVERTISE_HOST-}" _U_ADVERTISE_PORT="${_U_ADVERTISE_PORT-}" \
+      _U_INGRESS_PROFILE_ID="${_U_INGRESS_PROFILE_ID-}" \
+      _U_INGRESS_ENFORCEMENT="${_U_INGRESS_ENFORCEMENT-}" \
+      _U_INGRESS_ENFORCEMENT_METHOD="${_U_INGRESS_ENFORCEMENT_METHOD-}" \
+      _U_INGRESS_LOCAL_ADDRESS="${_U_INGRESS_LOCAL_ADDRESS-}" \
       _U_DEPLOYMENT_MODEL="${_U_DEPLOYMENT_MODEL-}" \
       python3 -c "$code"
   fi
@@ -110,15 +118,14 @@ port_required_bindings() {
 }
 
 port_available_for_mode() {
-  local p="$1" binding proto bind_port
+  local p="$1" binding proto bind_port profile_id="${INGRESS_PROFILE_ID:-$NOBRAND_LEGACY_INGRESS_PROFILE_ID}"
   valid_port "$p" || return 1
   if [ "${PROTOCOL:-TCP}" = "BOTH" ] && [ "$p" -ge 65535 ]; then
     return 1
   fi
   while IFS='|' read -r proto bind_port; do
     [ -n "$proto" ] && [ -n "$bind_port" ] || continue
-    nb_port_is_tail_base_reserved "$bind_port" && return 1
-    port_is_listening "$bind_port" "$proto" && return 1
+    nb_port_available_for_profile "$bind_port" "$proto" "$profile_id" || return 1
   done < <(port_required_bindings "$p")
   return 0
 }
@@ -158,11 +165,26 @@ port_listener_details() {
 }
 
 select_available_port() {
-  local selected=""
-  if selected="$(derive_port_from_ip 2>/dev/null)" && [ -n "$selected" ]; then
+  local selected="" profile_id="${INGRESS_PROFILE_ID:-$NOBRAND_LEGACY_INGRESS_PROFILE_ID}" bounds lo hi
+  if [ "${PROTOCOL:-TCP}" != BOTH ]; then
+    if [ "$profile_id" = "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ] \
+       && selected="$(derive_port_from_ip 2>/dev/null)" && [ -n "$selected" ]; then
+      printf '%s' "$selected"
+      return 0
+    fi
+    selected="$(nb_select_available_port "${PROTOCOL:-TCP}" "$profile_id")" || return 1
     printf '%s' "$selected"
     return 0
   fi
+  if bounds="$(nb_ingress_profile_auto_range "$profile_id" 2>/dev/null)"; then
+    lo="${bounds%%|*}"; hi="${bounds#*|}"
+    [ "$hi" -le 65534 ] || hi=65534
+    if selected="$(nb_scan_port_span "$lo" "$hi" port_available_for_mode)"; then
+      printf '%s' "$selected"
+      return 0
+    fi
+  fi
+  [ "$profile_id" = "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ] || return 1
   selected="$(random_available_port 2>/dev/null)" || return 1
   [ -n "$selected" ] || return 1
   printf '%s' "$selected"
@@ -203,13 +225,15 @@ users_port_pool_bounds() {
     _pool_hi="$USER_PORT_POOL_END"
     return 0
   fi
-  local base
-  if base="$(derive_port_base 2>/dev/null)"; then
-    _pool_lo=$((base + 1))
-    _pool_hi=$((base + 99))
-    [ "${PROTOCOL:-TCP}" = "BOTH" ] && _pool_hi=$((base + 98))
+  local bounds profile_id="${INGRESS_PROFILE_ID:-$NOBRAND_LEGACY_INGRESS_PROFILE_ID}"
+  if bounds="$(nb_ingress_profile_auto_range "$profile_id" 2>/dev/null)"; then
+    _pool_lo="${bounds%%|*}"
+    _pool_hi="${bounds#*|}"
+    [ "${PROTOCOL:-TCP}" = "BOTH" ] && _pool_hi=$((_pool_hi - 1))
     return 0
   fi
+  [ "$profile_id" = "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ] \
+    || { die 'Selected ingress profile is manual-only; pass --port for the new Mieru user'; return 1; }
   # 无 IP 尾号时：主端口附近 或 默认 20000-29999
   if [ -n "${PORT:-}" ] && valid_port "$PORT"; then
     _pool_lo=$((PORT + 2))
@@ -249,7 +273,7 @@ allocate_user_port() {
     printf '%s' "$prefer"
     return 0
   fi
-  users_port_pool_bounds
+  users_port_pool_bounds || return 1
   p="$_pool_lo"
   while [ "$p" -le "$_pool_hi" ]; do
     if ! port_is_allocated "$p" && port_available_for_mode "$p"; then
@@ -269,6 +293,8 @@ users_initialize_primary() {
   users_require_python
   [ -n "${USERNAME:-}" ] || return 0
   [ -n "${PORT:-}" ] || return 0
+  local primary_profile_id="${INGRESS_PROFILE_ID:-$NOBRAND_LEGACY_INGRESS_PROFILE_ID}"
+  nb_prepare_ingress_deployment "$primary_profile_id" firewall || return 1
   admin_lock_acquire || return 1
   if users_state_exists; then
     local n
@@ -281,7 +307,7 @@ users_initialize_primary() {
   run mkdir -p "$(dirname "$MITA_USERS_STATE")"
   if ! python3 -c '
 import hashlib, json, sys, time
-path, name, pwd, port, proto, advertise_host, advertise_port, deployment_model = sys.argv[1:9]
+path, name, pwd, port, proto, advertise_host, advertise_port, deployment_model, ingress_profile_id, enforcement, method, local_address = sys.argv[1:13]
 port = int(port)
 advertise_port = int(advertise_port) if advertise_port else ""
 instance_id = "u" + hashlib.sha256(("%s\0%s" % (name, port)).encode()).hexdigest()[:16]
@@ -302,10 +328,15 @@ d = {"version": 2, "deployment_model": deployment_model, "protocol": proto, "use
     "bandwidth_mbps": 0,
     "created_at": int(time.time()),
     "updated_at": int(time.time()),
+    "ingress_profile_id": ingress_profile_id,
+    "ingress_enforcement": enforcement,
+    "ingress_enforcement_method": method,
+    "ingress_local_address": local_address,
 }]}
 json.dump(d, open(path, "w"), indent=2)
   ' "$MITA_USERS_STATE" "$USERNAME" "$PASSWORD" "$PORT" "${PROTOCOL:-TCP}" \
-    "${ADVERTISE_HOST:-}" "${ADVERTISE_PORT:-}" "$MITA_DEPLOYMENT_MODEL"
+    "${ADVERTISE_HOST:-}" "${ADVERTISE_PORT:-}" "$MITA_DEPLOYMENT_MODEL" \
+    "$primary_profile_id" "$INGRESS_ENFORCEMENT_RESOLVED" "$INGRESS_ENFORCEMENT_METHOD" "$INGRESS_LOCAL_ADDRESS"
   then
     admin_lock_release
     return 1
@@ -335,6 +366,8 @@ for u in d.get("users") or []:
   PORT="${rest#*$'\t'}"
   ADVERTISE_HOST="$(users_get_field "$USERNAME" advertise_host 2>/dev/null || true)"
   ADVERTISE_PORT="$(users_get_field "$USERNAME" advertise_port 2>/dev/null || true)"
+  INGRESS_PROFILE_ID="$(users_get_field "$USERNAME" ingress_profile_id 2>/dev/null || true)"
+  [ -n "$INGRESS_PROFILE_ID" ] || INGRESS_PROFILE_ID="$NOBRAND_LEGACY_INGRESS_PROFILE_ID"
   MULTI_USER_MODE=1
 }
 
@@ -353,6 +386,9 @@ users_add() {
   local advertise_host="${4:-}" advertise_port="${5:-}"
   local bw="${USER_BANDWIDTH_MBPS:-0}" qmode
   users_require_python || return 1
+  nb_prepare_ingress_request || return 1
+  nb_prepare_ingress_deployment "$INGRESS_PROFILE_ID" firewall \
+    || die '所选 Ingress strict local address cannot be firewall-enforced for Mieru'
   [ -n "$name" ] || { die "$(t '用户名不能为空' 'Username required')" || return 1; }
   [ -n "$password" ] || password="$(random_token)"
   validate_proxy_credentials "$name" "$password" || return 1
@@ -398,6 +434,10 @@ users_add() {
   _U_QUOTA_MODE="$qmode"
   _U_EXPIRE="${expire_at}" _U_PACKAGE="${USER_PACKAGE:-}" _U_BW="$bw"
   _U_ADVERTISE_HOST="$advertise_host" _U_ADVERTISE_PORT="$advertise_port"
+  _U_INGRESS_PROFILE_ID="$INGRESS_PROFILE_ID"
+  _U_INGRESS_ENFORCEMENT="$INGRESS_ENFORCEMENT_RESOLVED"
+  _U_INGRESS_ENFORCEMENT_METHOD="$INGRESS_ENFORCEMENT_METHOD"
+  _U_INGRESS_LOCAL_ADDRESS="$INGRESS_LOCAL_ADDRESS"
   set +e
   users_py_locked '
 import json, os, time, sys, datetime, secrets
@@ -425,6 +465,10 @@ expire = (os.environ.get("_U_EXPIRE") or "").strip()
 package = (os.environ.get("_U_PACKAGE") or "").strip() or ("custom" if qmb > 0 else "unlimited")
 advertise_host = (os.environ.get("_U_ADVERTISE_HOST") or "").strip()
 advertise_port = int(os.environ.get("_U_ADVERTISE_PORT")) if os.environ.get("_U_ADVERTISE_PORT") else ""
+ingress_profile_id = (os.environ.get("_U_INGRESS_PROFILE_ID") or "legacy-default-route").strip()
+ingress_enforcement = (os.environ.get("_U_INGRESS_ENFORCEMENT") or "permissive").strip()
+ingress_enforcement_method = (os.environ.get("_U_INGRESS_ENFORCEMENT_METHOD") or "wildcard").strip()
+ingress_local_address = (os.environ.get("_U_INGRESS_LOCAL_ADDRESS") or "").strip()
 try:
     d = json.load(open(path))
 except Exception:
@@ -458,6 +502,10 @@ users.append({
     "bandwidth_mbps": bw,
     "created_at": int(time.time()),
     "updated_at": int(time.time()),
+    "ingress_profile_id": ingress_profile_id,
+    "ingress_enforcement": ingress_enforcement,
+    "ingress_enforcement_method": ingress_enforcement_method,
+    "ingress_local_address": ingress_local_address,
 })
 d["protocol"] = proto
 json.dump(d, open(path, "w"), indent=2)

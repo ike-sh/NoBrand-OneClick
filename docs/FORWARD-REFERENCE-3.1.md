@@ -1,11 +1,13 @@
-# Port Forward Reference Audit — NoBrand-OneClick 3.1
+# Port Forward Reference and 3.2 Ingress Contract — NoBrand-OneClick
 
-Status: development reference; not a release claim.
+Status: 3.2 release-candidate reference; not a release claim.
 
-NoBrand-OneClick 3.1 implements Port Forward as a NoBrand Common Network
+NoBrand-OneClick implements Port Forward as a NoBrand Common Network
 Feature. It does not install or embed realm-xwPF, does not create a `pf`
 command, and does not use `/etc/realm` as authority. No realm-xwPF source code
-is copied into NoBrand.
+is copied into NoBrand. The original runtime/reference audit remains the 3.1
+foundation; the strict multi-ingress contract below is part of the unreleased
+3.2 release candidate.
 
 ## Audited sources
 
@@ -104,7 +106,7 @@ no Proxy Protocol, no forced outgoing address/interface, and no load balance.
 | Concern | nftables | Realm |
 |---|---|---|
 | Data plane | Kernel DNAT plus optional MASQUERADE | Userspace L4 relay |
-| 3.1 target scope | IPv4 literal | IPv4, validated IPv6, or domain |
+| Target scope | IPv4 literal | IPv4, validated IPv6, or domain |
 | Protocol | TCP, UDP, BOTH | TCP, UDP, BOTH |
 | Source address | MASQUERADE default; preserve-source advanced | Realm connection/association semantics |
 | Runtime process | None | One NoBrand-owned Realm daemon |
@@ -113,6 +115,73 @@ no Proxy Protocol, no forced outgoing address/interface, and no load balance.
 | State authority | NoBrand state | NoBrand state |
 | Runtime artifact | NoBrand-owned nft table/chains/rules | Generated Realm config |
 | Removal boundary | Exact NoBrand table and owned sysctl fragment/state | Exact NoBrand service/config/runtime/state |
+
+## 3.2 Profile-aware ingress and strict enforcement
+
+A Forward rule keeps six concerns independent:
+
+```text
+Ingress Profile
+Port Policy
+Ingress Enforcement
+Actual Listener
+Display Endpoint
+Forward Target
+```
+
+For example, a mapped strict rule may receive locally at
+`192.0.2.110:11031`, advertise `203.0.113.50:11031`, and forward to
+`198.51.100.31:443`. Strict always uses the Profile local address; the Display
+Host is never used as a listener or nftables match, and the Target never
+becomes an ingress address.
+
+`permissive` is the default and preserves wildcard ingress. A missing
+`ingress_enforcement` field also resolves to permissive for schema-v3
+compatibility. `strict` uses the backend's actual capability:
+
+- nftables adds `ip daddr PROFILE_LOCAL_ADDRESS` to the owned DNAT path, so a
+  packet delivered through another local address does not match the rule;
+- Realm binds the endpoint to `PROFILE_LOCAL_ADDRESS` and must prove its exact
+  TCP/UDP listeners after restart.
+
+NoBrand does not use `iifname` as a substitute for the selected address and
+does not add routes, `ip rule`, policy-routing tables, `fwmark`, default-route,
+or `rp_filter` changes. MASQUERADE/Preserve Source and Realm `through` or
+interface options retain their existing explicit semantics and are not
+silently inferred from a Profile.
+
+Changing an active Profile's enforcement or strict local identity requires
+`--apply-existing`; `nobrand ingress apply PROFILE` reconciles the current
+policy. A Profile-wide failure restores exact Profile JSON and compensates
+earlier owners. Forward candidate, service, listener, nftables, sysctl, or
+firewall failure restores the previous data plane.
+
+Backend switching preserves the rule ID, Profile, numeric port, protocol,
+Display metadata, Target, and enforcement fields. `nftables → Realm` changes
+strict implementation from destination-address match to native bind;
+`Realm → nftables` changes it back. Domain or IPv6 Realm Targets still require
+an explicit IPv4 Target before switching to nftables.
+
+Common Port ownership remains host-global and transport-aware in strict mode.
+Two Profiles cannot reuse the same numeric port for the same transport even
+when their local addresses differ. TCP and UDP ownership remain independent.
+
+Export/import preserves `ingress_profile_id`, `ingress_enforcement`,
+`ingress_enforcement_method`, and `ingress_local_address`. Display-only edits
+do not regenerate the data plane. Doctor proves an owned strict nftables
+destination match or exact Realm listener and reports enforcement drift as a
+failure.
+
+## UDP datagram path capability
+
+NoBrand Forward is a transparent L4 data plane. It does not fragment, resize,
+clamp, or otherwise transform application UDP datagrams. The maximum usable
+datagram size can depend on a provider, NAT, tunnel, or Internet path. A
+controlled nftables or Realm backend path can therefore pass an exact payload
+size that a particular external path drops before the datagram reaches the
+managed server interface. This environmental path capability is independent
+of strict ingress and of the separately documented Hysteria2 proxied-UDP
+limitation.
 
 ## Safety findings carried into implementation
 
@@ -124,7 +193,8 @@ no Proxy Protocol, no forced outgoing address/interface, and no load balance.
   Original/effective state and NoBrand fragment ownership are recorded; the
   last rule may restore only a value NoBrand changed.
 - Realm config changes do not restart any proxy protocol or reload `sshd`.
-- The `xx00` tail-base reservation is rejected through the existing Common
-  Port Registry for both backends and both transports.
+- Profile reservations are rejected through the Common Port Registry for both
+  backends and both transports. The legacy adapter retains its `xx00`
+  tail-base reservation.
 - Display Endpoint changes are metadata-only and must not regenerate an nft
   rule, restart Realm, or alter the listener/target.
