@@ -8,6 +8,9 @@ export NOBRAND_STATE_DIR="$fixture/nobrand-oneclick/state"
 export NOBRAND_CONFIG_DIR="$fixture/nobrand-oneclick/config"
 export NOBRAND_LIB_DIR="$fixture/nobrand-oneclick/lib"
 source_installer
+# Exercise the live source fragment without rebuilding the generated installer.
+# shellcheck source=../src/24-platform-tuic.sh
+source "$TEST_ROOT/src/24-platform-tuic.sh"
 nb_init_state_layout
 
 # These globals deliberately override the sourced product functions during
@@ -237,5 +240,57 @@ run_tuic_install_failure_case() (
 for failure_mode in download-failure config-failure state-failure firewall-failure service-failure; do
   run_tuic_install_failure_case "$failure_mode"
 done
+
+# Snapshot helpers run below callers' `if`/`||` guards, where Bash suppresses
+# errexit for the whole call chain. Every snapshot write and removal therefore
+# has to return explicitly instead of relying on a later command not masking it.
+run_tuic_snapshot_failure_regressions() (
+  set -euo pipefail
+  local case_fixture snapshot
+  case_fixture="$(mktemp -d)"
+  trap 'rm -rf -- "$case_fixture"' EXIT
+  NOBRAND_SING_BOX_BIN="$case_fixture/live/sing-box"
+  NOBRAND_SING_BOX_RUNTIME_META="$case_fixture/live/runtime.json"
+  mkdir -p "$(dirname "$NOBRAND_SING_BOX_BIN")"
+  printf '%s\n' runtime >"$NOBRAND_SING_BOX_BIN"
+  printf '%s\n' metadata >"$NOBRAND_SING_BOX_RUNTIME_META"
+
+  snapshot="$case_fixture/copy-failure"
+  cp() {
+    local arg
+    for arg in "$@"; do
+      [ "$arg" != "$NOBRAND_SING_BOX_BIN" ] || return 71
+    done
+    command cp "$@"
+  }
+  if tuic_snapshot_runtime_files "$snapshot" 2>/dev/null; then
+    fail 'TUIC runtime snapshot masked a binary copy failure'
+  fi
+  unset -f cp
+
+  NOBRAND_SING_BOX_BIN="$case_fixture/live/missing-sing-box"
+  snapshot="$case_fixture/marker-failure"
+  mkdir -p "$snapshot/binary.absent"
+  if tuic_snapshot_runtime_files "$snapshot" 2>/dev/null; then
+    fail 'TUIC runtime snapshot masked an absent-marker write failure'
+  fi
+
+  NOBRAND_SING_BOX_BIN="$case_fixture/live/sing-box"
+  snapshot="$case_fixture/remove-failure"
+  mkdir -p "$snapshot"
+  : >"$snapshot/binary.absent"
+  command cp "$NOBRAND_SING_BOX_RUNTIME_META" "$snapshot/metadata"
+  rm() {
+    local arg
+    for arg in "$@"; do
+      [ "$arg" != "$NOBRAND_SING_BOX_BIN" ] || return 72
+    done
+    command rm "$@"
+  }
+  if tuic_restore_runtime_files "$snapshot" 2>/dev/null; then
+    fail 'TUIC runtime restore masked a binary removal failure'
+  fi
+)
+run_tuic_snapshot_failure_regressions
 
 pass 'TUIC install/upgrade runtime, state, config, firewall, and service rollback transactions'

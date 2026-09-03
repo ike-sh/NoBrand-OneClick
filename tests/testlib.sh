@@ -35,6 +35,8 @@ pass() {
 
 source_installer() {
   set --
+  # Read by the dynamically sourced installer below.
+  # shellcheck disable=SC2034
   MITA_SOURCE_ONLY=1
   # shellcheck disable=SC1090
   source "${TEST_ROOT}/install-nobrand.sh"

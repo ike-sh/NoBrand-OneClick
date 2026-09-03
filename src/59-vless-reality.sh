@@ -287,10 +287,10 @@ reality_select_auto_camouflage_target() {
     if reality_validate_target_live "$candidate" "$target_port"; then
       VLESS_REALITY_TARGET="$candidate"
       VLESS_REALITY_CAMOUFLAGE_MODE=auto
-      info "REALITY automatic camouflage selected: ${candidate}:${target_port}"
+      info "REALITY 已自动选择伪装目标: ${candidate}:${target_port}"
       return 0
     fi
-    warn "REALITY automatic camouflage candidate unavailable on target port ${target_port}: ${candidate}"
+    warn "REALITY 自动伪装候选在目标端口 ${target_port} 上不可用: ${candidate}"
   done < <(reality_randomized_auto_candidates)
   return 1
 }
@@ -655,23 +655,23 @@ reality_collect_install_requests() {
   local owner profile_type input=""
   nb_prepare_ingress_request || return 1
   nb_prepare_ingress_deployment "$INGRESS_PROFILE_ID" native-bind \
-    || die '所选 Ingress strict local address cannot be bound by VLESS REALITY'
+    || die 'VLESS REALITY 无法绑定所选 Ingress 的 Strict 本地地址'
   VLESS_REALITY_NAME="${VLESS_REALITY_NAME:-primary}"
-  reality_valid_name "$VLESS_REALITY_NAME" || die 'VLESS REALITY instance name 无效'
+  reality_valid_name "$VLESS_REALITY_NAME" || die 'VLESS REALITY 实例名称无效'
   reality_find_id_by_name "$VLESS_REALITY_NAME" >/dev/null 2>&1 \
-    && { t "VLESS REALITY instance 已存在: ${VLESS_REALITY_NAME}" \
+    && { t "VLESS REALITY 实例已存在: ${VLESS_REALITY_NAME}" \
       "VLESS REALITY instance already exists: ${VLESS_REALITY_NAME}"; return 2; }
 
   profile_type="$(nb_ingress_profile_json "$INGRESS_PROFILE_ID" | jq -r .type)"
   if [ "$profile_type" = public ]; then
-    info "VLESS REALITY: $(nb_ingress_profile_name "$INGRESS_PROFILE_ID") is Recommended (public Profile)"
+    info "VLESS REALITY：推荐使用 $(nb_ingress_profile_name "$INGRESS_PROFILE_ID")（Public Profile）"
   else
-    warn "VLESS REALITY is not recommended for mapped/dedicated ingress; installation remains allowed"
+    warn 'VLESS REALITY 不推荐使用 Mapped / Dedicated Ingress；仍允许继续安装'
   fi
 
   if [ "${YES:-0}" -ne 1 ] && [ "${VLESS_REALITY_TARGET_CLI:-0}" -eq 0 ]; then
     read_tty input "$(t \
-      'REALITY 伪装 hostname [auto]: ' \
+      'REALITY 伪装域名 [auto]: ' \
       'REALITY camouflage host [auto]: ')" || input=""
     VLESS_REALITY_TARGET="$input"
   fi
@@ -682,12 +682,12 @@ reality_collect_install_requests() {
     VLESS_REALITY_TARGET_PORT="${input:-$NOBRAND_REALITY_DEFAULT_CAMOUFLAGE_PORT}"
   fi
   reality_apply_camouflage_defaults
-  nb_valid_port "$VLESS_REALITY_TARGET_PORT" || die 'REALITY target port 必须是 1-65535'
-  [ "$VLESS_REALITY_FINGERPRINT" = chrome ] || die 'Phase 2 REALITY fingerprint 固定为 chrome'
-  [ "$VLESS_REALITY_SPIDER_X" = / ] || die 'Phase 2 REALITY spiderX 固定为 /'
+  nb_valid_port "$VLESS_REALITY_TARGET_PORT" || die 'REALITY 目标端口必须是 1-65535'
+  [ "$VLESS_REALITY_FINGERPRINT" = chrome ] || die '当前 REALITY fingerprint 固定为 chrome'
+  [ "$VLESS_REALITY_SPIDER_X" = / ] || die '当前 REALITY spiderX 固定为 /'
 
   if [ -z "${PORT:-}" ] && [ "${YES:-0}" -ne 1 ]; then
-    read_tty input "$(t 'Actual TCP Port（manual-only 必填，留空时仅自动策略会分配）: ' \
+    read_tty input "$(t '实际 TCP 监听端口（manual-only 必填，留空时仅自动策略会分配）: ' \
       'Actual TCP port (required for manual-only; blank only auto-allocates for auto policies): ')" || input=""
     PORT="$input"
   fi
@@ -696,14 +696,14 @@ reality_collect_install_requests() {
       || die '所选入口配置没有可用 REALITY TCP 自动端口；manual-only 必须显式使用 --port'
     PORT_AUTO_SELECTED=1
   else
-    nb_valid_port "$PORT" || die 'VLESS REALITY port 必须是 1-65535'
+    nb_valid_port "$PORT" || die 'VLESS REALITY 端口必须是 1-65535'
     PORT="$(normalize_uint "$PORT")"
     nb_ingress_port_is_reserved "$INGRESS_PROFILE_ID" "$PORT" \
-      && die 'VLESS REALITY 禁止使用所选入口配置的保留 port'
+      && die 'VLESS REALITY 禁止使用所选入口配置的保留端口'
     nb_warn_if_outside_recommended_range "$PORT" "$INGRESS_PROFILE_ID"
     nb_port_available_for_profile "$PORT" TCP "$INGRESS_PROFILE_ID" || {
       owner="$(nb_registry_port_owner TCP "$PORT" 2>/dev/null || true)"
-      die "VLESS REALITY TCP/${PORT} 已占用${owner:+ by ${owner}}"
+      die "VLESS REALITY TCP/${PORT} 已占用${owner:+，占用方: ${owner}}"
     }
   fi
 
@@ -717,7 +717,7 @@ reality_collect_install_requests() {
   fi
 
   reality_resolve_camouflage_request \
-    || die 'REALITY camouflage pool exhausted or explicit target TLS 1.3 / certificate / public reachability validation failed'
+    || die 'REALITY 伪装候选池已耗尽，或显式目标未通过 TLS 1.3、证书与公网可达性验证'
 }
 
 reality_install_rollback() {
@@ -751,7 +751,7 @@ install_vless_reality() {
   nobrand_install_xray_runtime 0 || return 1
   runtime="$(nobrand_xray_version 2>/dev/null || true)"
   [ "$runtime" = "$TESTED_XRAY_VERSION" ] \
-    || die "VLESS REALITY requires managed Xray ${TESTED_XRAY_VERSION}; run an official shared-runtime upgrade first"
+    || die "VLESS REALITY 需要 NoBrand 管理的 Xray ${TESTED_XRAY_VERSION}；请先执行官方共享 Runtime 升级"
 
   id="$(reality_generate_instance_id)"
   uuid="$(reality_generate_uuid)" || return 1
@@ -764,7 +764,7 @@ install_vless_reality() {
   admin_lock_acquire || return 1
   defender_port="$(reality_select_defender_port "$PORT")" || {
     admin_lock_release
-    warn 'No collision-free loopback REALITY defender port is available'
+    warn '没有可用且无冲突的 REALITY Defender 回环端口'
     return 1
   }
   # Xray 26.3.27 infers the config format from the candidate filename.
@@ -910,7 +910,7 @@ reality_apply_ingress_enforcement() {
 reality_service_command() {
   local id action="$1" port
   id="$(reality_resolve_instance_id "${VLESS_REALITY_NAME:-}")" \
-    || die '请用 --name 指定 VLESS REALITY instance'
+    || die '请用 --name 指定 VLESS REALITY 实例'
   port="$(reality_state_field "$id" listen_port)"
   case "$action" in
     stop)
@@ -929,14 +929,18 @@ reality_service_command() {
 }
 
 reality_show() {
-  local id="$1" endpoint
+  local id="$1" endpoint recommendation camouflage
   endpoint="$(reality_effective_endpoint "$id")"
-  printf 'VLESS REALITY instance: %s\nIngress Profile: %s\nRecommendation: %s\nActual: %s:%s/TCP\nDisplay Endpoint: %s:%s\nCamouflage Mode: %s\nServerName: %s\nFlow: xtls-rprx-vision\nUUID: %s\nPublic Key: %s\nShort ID: %s\nURI: %s\n' \
+  recommendation="$(reality_state_field "$id" profile_recommendation)"
+  case "$recommendation" in recommended) recommendation='推荐' ;; warning) recommendation='允许，但不推荐' ;; esac
+  camouflage="$(reality_state_field "$id" camouflage_mode)"
+  case "$camouflage" in auto) camouflage='自动' ;; custom) camouflage='自定义' ;; esac
+  printf 'VLESS REALITY 实例: %s\n入口配置 / Ingress Profile: %s\n建议: %s\n实际监听 / Actual Listener: %s:%s/TCP\n展示端点 / Display Endpoint: %s:%s\n伪装模式: %s\nServerName: %s\nFlow: xtls-rprx-vision\nUUID: %s\n公钥: %s\nShort ID: %s\nURI: %s\n' \
     "$(reality_state_field "$id" name)" \
     "$(nb_ingress_profile_name "$(reality_state_field "$id" ingress_profile_id)")" \
-    "$(reality_state_field "$id" profile_recommendation)" \
+    "$recommendation" \
     "$(reality_state_field "$id" listen_host)" "$(reality_state_field "$id" listen_port)" "${endpoint%%|*}" "${endpoint#*|}" \
-    "$(reality_state_field "$id" camouflage_mode)" "$(reality_state_field "$id" server_name)" \
+    "$camouflage" "$(reality_state_field "$id" server_name)" \
     "$(reality_state_field "$id" uuid)" \
     "$(reality_state_field "$id" public_key)" "$(reality_state_field "$id" short_id)" \
     "$(reality_build_uri "$id")"
@@ -1067,22 +1071,26 @@ reality_doctor_all() {
     found=1
     reality_doctor_one "$id" || failed=1
   done < <(reality_instance_ids)
-  [ "$found" -eq 1 ] || nb_doctor_line INFO 'VLESS REALITY not installed'
+  [ "$found" -eq 1 ] || nb_doctor_line INFO 'VLESS REALITY 未安装'
   return "$failed"
 }
 
 reality_status() {
-  local id endpoint found=0
+  local id endpoint found=0 service defender recommendation camouflage
   while IFS= read -r id; do
     found=1; endpoint="$(reality_effective_endpoint "$id")"
-    printf 'VLESS REALITY\n  Instance: %s\n  Runtime: Xray %s\n  Service: %s\n  Defender: %s\n  Actual: %s:%s/TCP\n  Display: %s:%s\n  Ingress: %s (%s)\n  Camouflage Mode: %s\n  ServerName: %s\n  Flow: xtls-rprx-vision\n' \
+    service="$(reality_service_active "$id" && printf '运行中' || printf '已停止')"
+    defender="$(reality_running "$id" && printf '正常' || printf '异常')"
+    recommendation="$(reality_state_field "$id" profile_recommendation)"
+    case "$recommendation" in recommended) recommendation='推荐' ;; warning) recommendation='允许，但不推荐' ;; esac
+    camouflage="$(reality_state_field "$id" camouflage_mode)"
+    case "$camouflage" in auto) camouflage='自动' ;; custom) camouflage='自定义' ;; esac
+    printf 'VLESS REALITY\n  实例: %s\n  运行时 / Runtime: Xray %s\n  服务: %s\n  防御进程 / Defender: %s\n  实际监听 / Actual Listener: %s:%s/TCP\n  展示端点 / Display Endpoint: %s:%s\n  入口配置 / Ingress Profile: %s（%s）\n  伪装模式: %s\n  服务器名称 / ServerName: %s\n  流控 / Flow: xtls-rprx-vision\n' \
       "$(reality_state_field "$id" name)" "$(reality_state_field "$id" runtime_version)" \
-      "$(reality_service_active "$id" && printf Running || printf Stopped)" \
-      "$(reality_running "$id" && printf Active || printf Inactive)" \
+      "$service" "$defender" \
       "$(reality_state_field "$id" listen_host)" "$(reality_state_field "$id" listen_port)" "${endpoint%%|*}" "${endpoint#*|}" \
       "$(nb_ingress_profile_name "$(reality_state_field "$id" ingress_profile_id)")" \
-      "$(reality_state_field "$id" profile_recommendation)" \
-      "$(reality_state_field "$id" camouflage_mode)" "$(reality_state_field "$id" server_name)"
+      "$recommendation" "$camouflage" "$(reality_state_field "$id" server_name)"
   done < <(reality_instance_ids)
   [ "$found" -eq 1 ] || t 'VLESS REALITY 未安装' 'VLESS REALITY not installed'
 }
@@ -1090,7 +1098,7 @@ reality_status() {
 remove_vless_reality_instance() {
   local id port config_dir state_dir
   id="$(reality_resolve_instance_id "${VLESS_REALITY_NAME:-}")" \
-    || die '请用 --name 指定 VLESS REALITY instance'
+    || die '请用 --name 指定 VLESS REALITY 实例'
   port="$(reality_state_field "$id" listen_port)"
   config_dir="$(reality_instance_config_dir "$id")"; state_dir="$(dirname "$(reality_state_file "$id")")"
   reality_remove_service "$id" || return 1
@@ -1135,15 +1143,15 @@ nobrand_run_vless_reality_action() {
     status) reality_status ;;
     doctor) reality_doctor_all ;;
     show)
-      id="$(reality_resolve_instance_id "${VLESS_REALITY_NAME:-}")" || die '请用 --name 指定 instance'
+      id="$(reality_resolve_instance_id "${VLESS_REALITY_NAME:-}")" || die '请用 --name 指定实例'
       reality_show "$id"
       ;;
     export)
-      id="$(reality_resolve_instance_id "${VLESS_REALITY_NAME:-}")" || die '请用 --name 指定 instance'
+      id="$(reality_resolve_instance_id "${VLESS_REALITY_NAME:-}")" || die '请用 --name 指定实例'
       reality_export_all "$id"
       ;;
     set-endpoint)
-      id="$(reality_resolve_instance_id "${VLESS_REALITY_NAME:-}")" || die '请用 --name 指定 instance'
+      id="$(reality_resolve_instance_id "${VLESS_REALITY_NAME:-}")" || die '请用 --name 指定实例'
       reality_set_endpoint_state "$id" "${ADVERTISE_HOST:-}" "${ADVERTISE_PORT:-}"
       ;;
     remove|uninstall) remove_vless_reality_instance ;;
@@ -1155,11 +1163,11 @@ nobrand vless-reality install --name NAME [--target HOST] [--target-port PORT]
   [--ingress-profile PROFILE] [--port PORT]
   [--advertise-host HOST --advertise-port PORT | --advertise-auto] [-y]
 nobrand vless-reality show|export|status|doctor|start|stop|restart|set-endpoint|remove [--name NAME]
-Fixed stack: VLESS + TCP + REALITY + xtls-rprx-vision. Public Profiles are recommended;
-mapped Profiles are allowed with a warning. Xray 26.3.27; fingerprint=chrome; spiderX=/.
-Default camouflage host: automatic selection from the release-qualified pool. The selected host is persisted.
-Host and target port are independently configurable; explicit hosts are never replaced by auto selection.
-443 is the camouflage target port default, not the public REALITY listen port.
+固定协议栈：VLESS + TCP + REALITY + xtls-rprx-vision。推荐使用 Public Profile；
+Mapped Profile 仍可使用，但会显示警告。Xray 26.3.27；fingerprint=chrome；spiderX=/。
+默认伪装域名：从发布验收过的候选池自动选择，并保存选定结果。
+伪装域名与目标端口可分别配置；显式指定的域名不会被自动选择替换。
+443 是默认伪装目标端口，不是公网 REALITY 监听端口。
 EOF
       ;;
     *) die "未知 VLESS REALITY 操作: ${VLESS_REALITY_ACTION}" ;;

@@ -54,11 +54,14 @@ unit_tests=(
   tests/test_nodes.sh
   tests/test_sensitive_output.sh
   tests/test_backup_boundary.sh
+  tests/test_backup_restore_transaction.sh
   tests/test_mieru_uninstall_boundary.sh
   tests/test_uninstall_boundary.sh
   tests/test_rollback.sh
   tests/test_cli.sh
   tests/test_menu.sh
+  tests/test_lifecycle_recovery.sh
+  tests/test_localization.sh
 )
 for test_file in "${unit_tests[@]}"; do
   bash "$test_file"

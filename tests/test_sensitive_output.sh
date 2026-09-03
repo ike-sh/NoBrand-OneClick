@@ -35,7 +35,7 @@ printf '%s\n' 'ssh-ed25519 AAAATEST output-user' \
   >"$NOBRAND_SSH_KEYS_DIR/$ssh_account_id/id_ed25519.pub"
 printf '%s\n' 'ssh-ed25519 AAAATEST output-user' >"$NOBRAND_SSH_AUTHORIZED_KEYS_DIR/$ssh_linux_user"
 ssh_user="$(ssh_tunnel_user_json "$ssh_account_id" output-user "$ssh_linux_user" 49001 \
-  SHA256:output-test 2026-08-30T00:00:00Z)"
+  SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA 2026-08-30T00:00:00Z)"
 ssh_tunnel_generate_state "$NOBRAND_SSH_STATE_FILE" custom entry.example.test 443 22 marker-block \
   "$fixture/sshd_config" "[$ssh_user]" 2026-08-30T00:00:00Z
 jq '.policy_applied=true' "$NOBRAND_SSH_STATE_FILE" >"$fixture/ssh-state.tmp"

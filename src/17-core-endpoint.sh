@@ -2,7 +2,8 @@
 
 nb_init_state_layout() {
   if [ "${DRY_RUN:-0}" -eq 1 ]; then
-    msg "[dry-run] initialize NoBrand state: $NOBRAND_STATE_DIR"
+    t "[演练] 初始化 NoBrand 状态: $NOBRAND_STATE_DIR" \
+      "[dry-run] initialize NoBrand state: $NOBRAND_STATE_DIR"
     return 0
   fi
   ensure_manager_state_layout 1 || return 1
@@ -45,7 +46,8 @@ nb_atomic_install_file() {
   local source="$1" destination="$2" mode="${3:-0600}" tmp
   [ -f "$source" ] || return 1
   if [ "${DRY_RUN:-0}" -eq 1 ]; then
-    msg "[dry-run] install -m ${mode} ${source} ${destination}"
+    t "[演练] install -m ${mode} ${source} ${destination}" \
+      "[dry-run] install -m ${mode} ${source} ${destination}"
     return 0
   fi
   mkdir -p "$(dirname "$destination")" || return 1

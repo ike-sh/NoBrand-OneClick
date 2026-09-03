@@ -83,7 +83,8 @@ tuic_download_runtime_candidate() {
     "$TUIC_RUNTIME_RESOLVED_URL" -o "$archive" || return 1
   actual_sha="$(nobrand_sha256_file "$archive")" || return 1
   [ "$actual_sha" = "$TUIC_RUNTIME_RESOLVED_SHA256" ] || {
-    warn 'official sing-box release digest mismatch'
+    warn "$(t '官方 sing-box 发布摘要不匹配' \
+      'official sing-box release digest mismatch')"
     return 1
   }
   tar --no-same-owner -C "$extract_dir" -xzf "$archive" || return 1
@@ -121,14 +122,14 @@ tuic_snapshot_runtime_files() {
   local snapshot="$1"
   mkdir -p "$snapshot" || return 1
   if [ -e "$NOBRAND_SING_BOX_BIN" ]; then
-    cp -a "$NOBRAND_SING_BOX_BIN" "$snapshot/binary"
+    cp -a "$NOBRAND_SING_BOX_BIN" "$snapshot/binary" || return 1
   else
-    : >"$snapshot/binary.absent"
+    : >"$snapshot/binary.absent" || return 1
   fi
   if [ -e "$NOBRAND_SING_BOX_RUNTIME_META" ]; then
-    cp -a "$NOBRAND_SING_BOX_RUNTIME_META" "$snapshot/metadata"
+    cp -a "$NOBRAND_SING_BOX_RUNTIME_META" "$snapshot/metadata" || return 1
   else
-    : >"$snapshot/metadata.absent"
+    : >"$snapshot/metadata.absent" || return 1
   fi
 }
 
@@ -137,14 +138,18 @@ tuic_restore_runtime_files() {
   if [ -e "$snapshot/binary" ]; then
     mkdir -p "$(dirname "$NOBRAND_SING_BOX_BIN")" || return 1
     nb_atomic_install_file "$snapshot/binary" "$NOBRAND_SING_BOX_BIN" 0755 || return 1
+  elif [ -f "$snapshot/binary.absent" ] && [ ! -L "$snapshot/binary.absent" ]; then
+    rm -f "$NOBRAND_SING_BOX_BIN" || return 1
   else
-    rm -f "$NOBRAND_SING_BOX_BIN"
+    return 1
   fi
   if [ -e "$snapshot/metadata" ]; then
     mkdir -p "$(dirname "$NOBRAND_SING_BOX_RUNTIME_META")" || return 1
     nb_atomic_install_file "$snapshot/metadata" "$NOBRAND_SING_BOX_RUNTIME_META" 0600 || return 1
+  elif [ -f "$snapshot/metadata.absent" ] && [ ! -L "$snapshot/metadata.absent" ]; then
+    rm -f "$NOBRAND_SING_BOX_RUNTIME_META" || return 1
   else
-    rm -f "$NOBRAND_SING_BOX_RUNTIME_META"
+    return 1
   fi
 }
 
@@ -176,8 +181,11 @@ tuic_restore_side_effect_snapshot() {
   if [ -e "$snapshot/systemd-template" ]; then
     mkdir -p "$(dirname "$NOBRAND_TUIC_SYSTEMD_TEMPLATE")" || failed=1
     cp -a "$snapshot/systemd-template" "$NOBRAND_TUIC_SYSTEMD_TEMPLATE" || failed=1
-  else
+  elif [ -f "$snapshot/systemd-template.absent" ] \
+       && [ ! -L "$snapshot/systemd-template.absent" ]; then
     rm -f "$NOBRAND_TUIC_SYSTEMD_TEMPLATE" || failed=1
+  else
+    failed=1
   fi
   [ "$(nb_service_manager)" != systemd ] || systemctl daemon-reload >/dev/null 2>&1 || failed=1
   [ "$failed" -eq 0 ]

@@ -1,11 +1,31 @@
 # ---------- 阶段4：备份 / 恢复 / 导出导入 / 管理锁 ----------
 
+user_package_display_label() {
+  case "${1:-}" in
+    unlimited) t '不限量' 'unlimited' ;;
+    trial) t '体验' 'trial' ;;
+    standard) t '标准' 'standard' ;;
+    custom) t '自定义' 'custom' ;;
+    "") printf '%s' '-' ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+user_enabled_display_label() {
+  if [ "${1:-0}" = 1 ]; then
+    t '启用' 'on'
+  else
+    t '停用' 'off'
+  fi
+}
+
 # 破坏性变更前备份 users.json；成功打印备份路径
 users_backup_now() {
   local tag="${1:-auto}" dest ts
   users_state_exists || return 1
   if [ "${DRY_RUN:-0}" -eq 1 ]; then
-    msg "[dry-run] backup users state: $MITA_USERS_STATE"
+    t "[演练] 备份用户状态: $MITA_USERS_STATE" \
+      "[dry-run] backup users state: $MITA_USERS_STATE"
     return 0
   fi
   run mkdir -p "$MITA_USERS_BACKUP_DIR"
@@ -395,15 +415,17 @@ print_user_outputs() {
     "  Dedicated instance port: ${port} (other users cannot authenticate on this instance)"
   t "  网络入口: $(nb_ingress_profile_name "$INGRESS_PROFILE_ID")" \
     "  Ingress: $(nb_ingress_profile_name "$INGRESS_PROFILE_ID")"
-  local qmb qdays exp en pkg bw
+  local qmb qdays exp en pkg bw status_label
   qmb="$(users_get_field "$name" quota_mb 2>/dev/null || echo 0)"
   qdays="$(users_get_field "$name" quota_days 2>/dev/null || echo 0)"
   exp="$(users_get_field "$name" expire_at 2>/dev/null || true)"
   en="$(users_get_field "$name" enabled 2>/dev/null || echo 1)"
   pkg="$(users_get_field "$name" package 2>/dev/null || true)"
   bw="$(users_get_field "$name" bandwidth_mbps 2>/dev/null || echo 0)"
-  t "  套餐: ${pkg:--}  配额: $(quota_label "$qmb" "$qdays")  双向限速: ${bw:-0}Mbps（0=不限） 到期: ${exp:-永不过期}  状态: $([ "$en" = 1 ] && echo on || echo off)" \
-    "  Package: ${pkg:--}  Quota: $(quota_label "$qmb" "$qdays")  Bidirectional rate: ${bw:-0}Mbps (0=unlim) Expire: ${exp:-never}  Status: $([ "$en" = 1 ] && echo on || echo off)"
+  pkg="$(user_package_display_label "$pkg")"
+  status_label="$(user_enabled_display_label "$en")"
+  t "  套餐: ${pkg}  配额: $(quota_label "$qmb" "$qdays")  双向限速: ${bw:-0}Mbps（0=不限） 到期: ${exp:-永不过期}  状态: ${status_label}" \
+    "  Package: ${pkg}  Quota: $(quota_label "$qmb" "$qdays")  Bidirectional rate: ${bw:-0}Mbps (0=unlim) Expire: ${exp:-never}  Status: ${status_label}"
   print_protocol_outputs "$ip"
   msg ""
   t '【连接信息】' '[Connection info]'
@@ -474,27 +496,35 @@ do_user_list() {
   python3 -c '
 import json, sys
 d = json.load(open(sys.argv[1]))
+on_l,off_l,unlimited_l,never_l,day_l,rolling_l,calendar_l=sys.argv[2:9]
+package_labels={"unlimited":unlimited_l,"trial":sys.argv[9],"standard":sys.argv[10],"custom":sys.argv[11]}
 for u in d.get("users") or []:
     name = (u.get("name") or "")[:11]
     port = str(u.get("port") or "")
-    st = "on" if u.get("enabled", True) else "off"
-    pkg = (u.get("package") or "-")[:9]
+    st = on_l if u.get("enabled", True) else off_l
+    raw_pkg = u.get("package") or "-"
+    pkg = package_labels.get(raw_pkg,raw_pkg)[:9]
     qmb = int(u.get("quota_mb") or 0)
     qdays = int(u.get("quota_days") or 0)
-    mode = (u.get("quota_mode") or "rolling")[:5]
+    raw_mode = u.get("quota_mode") or "rolling"
+    mode = (calendar_l if raw_mode == "calendar" else rolling_l)[:5]
     if qmb <= 0:
-        quota = "unlimited"
+        quota = unlimited_l
         mode = "-"
     elif qmb >= 1024:
-        quota = "%dG/%dd" % (qmb // 1024, qdays or 30)
+        quota = "%dG/%d%s" % (qmb // 1024, qdays or 30, day_l)
     else:
-        quota = "%dM/%dd" % (qmb, qdays or 30)
+        quota = "%dM/%d%s" % (qmb, qdays or 30, day_l)
     bw = int(u.get("bandwidth_mbps") or 0)
     bws = str(bw) if bw > 0 else "-"
-    exp = (u.get("expire_at") or "never")[:10]
+    exp = (u.get("expire_at") or never_l)[:10]
     print(f"{name:<11} {port:<4} {st:<4} {pkg:<9} {quota:<9} {mode:<5} {bws:<5} {exp}")
-' "$MITA_USERS_STATE"
-  t "共 $(users_count) 个用户（rolling=滚动窗；calendar=每月1日重置）" \
+' "$MITA_USERS_STATE" \
+    "$(t '启用' 'on')" "$(t '停用' 'off')" "$(t '不限量' 'unlimited')" \
+    "$(t '永不过期' 'never')" "$(t '天' 'd')" "$(t '滚动' 'rolling')" \
+    "$(t '日历月' 'calendar')" "$(t '体验' 'trial')" "$(t '标准' 'standard')" \
+    "$(t '自定义' 'custom')"
+  t "共 $(users_count) 个用户（滚动模式 rolling；日历月模式 calendar 每月 1 日重置）" \
     "Total $(users_count) (rolling window; calendar=reset on 1st)"
 }
 
@@ -534,7 +564,7 @@ do_user_add() {
   [ -z "$requested_advertise_port" ] \
     || requested_advertise_port="$(normalize_uint "$requested_advertise_port")"
   if ! users_state_exists || [ "$(users_count)" -eq 0 ]; then
-    die "$(t 'schema v3 Mieru 用户状态缺失；请重新执行 fresh install' \
+    die "$(t 'schema v3 Mieru 用户状态缺失；请重新执行全新安装' \
       'Schema-v3 Mieru user state is missing; perform a fresh install')"
   fi
   if [ -z "$name" ]; then
@@ -825,7 +855,7 @@ print(sum(1 for u in (d.get("users") or []) if u.get("enabled", True) and u.get(
   fi
   users_tx_commit "$tx"
   admin_lock_release
-  t "已停用用户 $name（端口仍保留，可再 enable）" "Disabled $name (port kept; can re-enable)"
+  t "已停用用户 $name（端口仍保留，可再次启用）" "Disabled $name (port kept; can re-enable)"
 }
 
 do_user_scan() {
@@ -845,10 +875,12 @@ do_user_scan() {
   fi
   admin_lock_release
   if [ -n "$out" ]; then
-    msg "disabled: $(printf '%s' "$out" | tr '\n' ' ')"
+    t "已停用: $(printf '%s' "$out" | tr '\n' ' ')" \
+      "disabled: $(printf '%s' "$out" | tr '\n' ' ')"
   fi
   if [ -n "$cal" ]; then
-    msg "quota-reset: $(printf '%s' "$cal" | tr '\n' ' ')"
+    t "已重置配额: $(printf '%s' "$cal" | tr '\n' ' ')" \
+      "quota-reset: $(printf '%s' "$cal" | tr '\n' ' ')"
   fi
   return "$rc"
 }
@@ -871,19 +903,22 @@ do_user_usage() {
   msg ""
   t '【本地套餐配置】' '[Local package config]'
   if users_state_exists; then
+    t '用户名         端口   配额模式 配额_MB    带宽_Mbps' \
+      'USER           PORT   MODE     QUOTA_MB   BW_Mbps'
     python3 -c '
 import json,sys
 d=json.load(open(sys.argv[1]))
-print("%-14s %-6s %-8s %-10s %-8s" % ("USER","PORT","MODE","QUOTA_MB","BW_Mbps"))
+rolling_l,calendar_l=sys.argv[2:4]
 for u in d.get("users") or []:
+    raw_mode=u.get("quota_mode") or "rolling"
     print("%-14s %-6s %-8s %-10s %-8s" % (
       (u.get("name") or "")[:14],
       u.get("port") or "",
-      (u.get("quota_mode") or "rolling")[:8],
+      (calendar_l if raw_mode == "calendar" else rolling_l)[:8],
       u.get("quota_mb") or 0,
       u.get("bandwidth_mbps") or 0,
     ))
-' "$MITA_USERS_STATE"
+' "$MITA_USERS_STATE" "$(t '滚动' 'rolling')" "$(t '日历月' 'calendar')"
   fi
 }
 

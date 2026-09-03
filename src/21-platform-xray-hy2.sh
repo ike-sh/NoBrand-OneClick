@@ -143,7 +143,8 @@ nobrand_download_xray_candidate() {
         || { rm -rf -- "$archive_dir"; return 1; }
     done
   fi
-  info "NoBrand isolated Xray-core asset resolved: ${version}"
+  info "$(t "NoBrand 独立 Xray-core 资产已解析: ${version}" \
+    "NoBrand isolated Xray-core asset resolved: ${version}")"
   rm -rf -- "$archive_dir"
 }
 
@@ -230,7 +231,8 @@ nobrand_install_xray_runtime() {
 nobrand_xray_redact_validation_log() {
   local config="$1" log="$2"
   if ! command -v python3 >/dev/null 2>&1; then
-    printf '%s\n' '[validation details suppressed: redactor unavailable]' >&2
+    printf '%s\n' "$(t '[校验详情已隐藏：脱敏器不可用]' \
+      '[validation details suppressed: redactor unavailable]')" >&2
     return 0
   fi
   python3 - "$config" "$log" >&2 <<'PY' || {
@@ -278,7 +280,8 @@ text = re.sub(
 )
 sys.stdout.write(text)
 PY
-    printf '%s\n' '[validation details suppressed: redaction failed]' >&2
+    printf '%s\n' "$(t '[校验详情已隐藏：脱敏失败]' \
+      '[validation details suppressed: redaction failed]')" >&2
   }
 }
 

@@ -252,6 +252,8 @@ resolve_mtu_request() {
 }
 
 print_mtu_selection() {
+  local family_label="${MTU_AUTO_FAMILY:-}"
+  [ "$family_label" != unknown ] || family_label="$(t '未知协议族' 'unknown family')"
   t "已选 MTU: ${MTU}（$(mtu_policy_label)）" \
     "Selected MTU: ${MTU} ($(mtu_policy_label))"
   if [ "$MTU_POLICY" = "optimized" ]; then
@@ -259,8 +261,8 @@ print_mtu_selection() {
       t '  TCP 模式提高 MTU 没有明显收益，自动策略保持 1400' \
         '  Raising MTU has little benefit in TCP mode; auto keeps 1400'
     elif [ -n "$MTU_AUTO_LINK" ]; then
-      t "  检测: 网卡 ${MTU_AUTO_IFACE}，链路 MTU ${MTU_AUTO_LINK}，${MTU_AUTO_FAMILY} 开销 ${MTU_AUTO_OVERHEAD}" \
-        "  Detected: ${MTU_AUTO_IFACE}, link MTU ${MTU_AUTO_LINK}, ${MTU_AUTO_FAMILY} overhead ${MTU_AUTO_OVERHEAD}"
+      t "  检测: 网卡 ${MTU_AUTO_IFACE}，链路 MTU ${MTU_AUTO_LINK}，${family_label} 开销 ${MTU_AUTO_OVERHEAD}" \
+        "  Detected: ${MTU_AUTO_IFACE}, link MTU ${MTU_AUTO_LINK}, ${family_label} overhead ${MTU_AUTO_OVERHEAD}"
     else
       warn "$(t '未能读取出口链路 MTU，自动策略已回退到 1400' \
         'Could not read egress link MTU; auto fell back to 1400')"

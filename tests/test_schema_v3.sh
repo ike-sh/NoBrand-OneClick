@@ -47,8 +47,8 @@ legacy="$NOBRAND_LEGACY_MIERU_STATE_DIR"
 mkdir -p "$legacy"
 printf 'do-not-read-or-change\n' >"$legacy/users.json"
 legacy_hash="$(sha256sum "$legacy/users.json")"
-NOBRAND_LEGACY_MIERU_STATE_DIR="$legacy" bash "$TEST_ROOT/install-nobrand.sh" --version   | grep -qx 'NoBrand-OneClick 3.2.0' || fail 'version must bypass legacy state'
-NOBRAND_LEGACY_MIERU_STATE_DIR="$legacy" bash "$TEST_ROOT/install-nobrand.sh" --help   | grep -q 'NoBrand-OneClick 3.2.0' || fail 'help must bypass legacy state'
+NOBRAND_LEGACY_MIERU_STATE_DIR="$legacy" bash "$TEST_ROOT/install-nobrand.sh" --version   | grep -qx 'NoBrand-OneClick 3.2.1' || fail 'version must bypass legacy state'
+NOBRAND_LEGACY_MIERU_STATE_DIR="$legacy" bash "$TEST_ROOT/install-nobrand.sh" --help   | grep -q 'NoBrand-OneClick 3.2.1' || fail 'help must bypass legacy state'
 if NOBRAND_LEGACY_MIERU_STATE_DIR="$legacy"    NOBRAND_STATE_DIR="$fixture/unused-state"    bash "$TEST_ROOT/install-nobrand.sh" status >/dev/null 2>&1; then
   fail 'stateful action must fail closed when a legacy Mieru root exists'
 fi

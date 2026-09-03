@@ -516,7 +516,7 @@ export VLESS_REALITY_NAME=mapped-allowed INGRESS_PROFILE=Mapped-Custom PORT=3210
 mapped_output_file="$fixture/mapped-output.txt"
 reality_collect_install_requests >"$mapped_output_file"
 mapped_output="$(<"$mapped_output_file")"
-assert_contains "$mapped_output" 'not recommended' 'mapped REALITY warning'
+assert_contains "$mapped_output" '不推荐使用 Mapped / Dedicated Ingress' 'mapped REALITY warning'
 assert_eq "$mapped_id" "$INGRESS_PROFILE_ID" 'mapped Profile remains installable'
 export VLESS_REALITY_NAME=reserved-rejected INGRESS_PROFILE=Mapped-Custom PORT=32101
 if ( reality_collect_install_requests >/dev/null 2>&1 ); then

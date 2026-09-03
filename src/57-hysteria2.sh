@@ -239,7 +239,7 @@ hysteria2_configure_requests() {
     nb_prepare_ingress_request || return 1
   fi
   nb_prepare_ingress_deployment "$INGRESS_PROFILE_ID" native-bind \
-    || die '所选 Ingress strict local address cannot be bound by Hysteria2'
+    || die 'Hysteria2 无法绑定所选 Ingress 的 Strict 本地地址'
   HY2_LISTEN="$INGRESS_LISTEN_HOST"
   hysteria2_state_exists && old_port="$(hysteria2_state_field listen_port 2>/dev/null || true)"
   if [ -z "${PORT:-}" ]; then
@@ -514,7 +514,7 @@ hysteria2_node_rows() {
 }
 
 print_hysteria2_result() {
-  local context="${1:-show}" auth sni obfs listen_host listen_port mode advertise_host advertise_port host port status link
+  local context="${1:-show}" auth sni obfs listen_host listen_port mode mode_label advertise_host advertise_port host port status link
   hysteria2_state_exists || { t 'Hysteria2 未安装' 'Hysteria2 is not installed'; return 0; }
   auth="$(hysteria2_state_field auth)"; sni="$(hysteria2_state_field sni)"; obfs="$(hysteria2_state_field obfs)"
   listen_host="$(hysteria2_state_field listen_host)"; listen_port="$(hysteria2_state_field listen_port)"
@@ -522,20 +522,21 @@ print_hysteria2_result() {
   advertise_port="$(hysteria2_state_field advertise_port)"
   host="$(nb_effective_advertise_host "$mode" "$advertise_host" "$(hysteria2_state_field ingress_profile_id 2>/dev/null || true)")"
   port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port" "$(hysteria2_state_field ingress_profile_id 2>/dev/null || true)")"
-  status=Stopped; hysteria2_running && status=Running
+  status=已停止; hysteria2_running && status=运行中
+  mode_label="$mode"; case "$mode" in auto) mode_label='自动' ;; custom) mode_label='自定义' ;; esac
   link="$(hysteria2_build_share_link "$auth" "$host" "$port" "$sni" "$obfs")"
   nobrand_print_banner
   msg "$( [ "$context" = install ] && printf '部署完成' || printf '节点配置' )"
   msg ''
   printf '协议        Hysteria2\n节点        default\n状态        %s\n' "$status"
   msg ''
-  printf '真实监听\n  Address   %s\n  Port      %s\n  Transport UDP\n' "$listen_host" "$listen_port"
+  printf '实际监听 / Actual Listener\n  地址      %s\n  端口      %s\n  传输      UDP\n' "$listen_host" "$listen_port"
   msg ''
-  printf '网络入口\n  Profile   %s\n' "$(nb_ingress_profile_name "$(hysteria2_state_field ingress_profile_id 2>/dev/null || true)")"
+  printf '网络入口 / Ingress\n  入口配置 / Ingress Profile  %s\n' "$(nb_ingress_profile_name "$(hysteria2_state_field ingress_profile_id 2>/dev/null || true)")"
   msg ''
-  printf '客户端入口\n  Host      %s\n  Port      %s\n  Mode      %s\n' "$host" "$port" "$mode"
+  printf '展示端点 / Display Endpoint\n  主机      %s\n  端口      %s\n  模式      %s\n' "$host" "$port" "$mode_label"
   msg ''
-  printf '认证\n  Auth      %s\n  SNI       %s\n  Salamander password  %s\n' "$auth" "$sni" "$obfs"
+  printf '认证\n  Auth      %s\n  SNI       %s\n  Salamander 密码  %s\n' "$auth" "$sni" "$obfs"
   msg ''
   msg '========================================'
   msg 'Mihomo'
@@ -546,7 +547,7 @@ print_hysteria2_result() {
   msg 'sing-box'
   msg '========================================'
   hysteria2_export_singbox
-  msg '  Certificate: self-signed P-256 / 3650 days; client must use insecure=1.'
+  msg '  证书：P-256 自签名证书，有效期 3650 天；客户端必须设置 insecure=1。'
   msg ''
   msg '========================================'
   msg '客户端配置'
@@ -578,7 +579,7 @@ hysteria2_service_command() {
       ;;
     restart) nobrand_hy2_service_action restart && hysteria2_running ;;
     status)
-      if hysteria2_running; then msg 'Hysteria2: Running'; else msg 'Hysteria2: Stopped'; return 1; fi
+      if hysteria2_running; then msg 'Hysteria2：运行中'; else msg 'Hysteria2：已停止'; return 1; fi
       ;;
   esac
 }
@@ -601,45 +602,45 @@ remove_hysteria2_config() {
 hysteria2_doctor() {
   local failed=0 port mode host advertise_port key_mode cert_cn expected_sni
   if ! hysteria2_state_exists; then
-    nb_doctor_line INFO 'not installed'
+    nb_doctor_line INFO 'Hysteria2 未安装'
     return 0
   fi
   port="$(hysteria2_state_field listen_port)"
-  [ -x "$NOBRAND_XRAY_BIN" ] && nb_doctor_line PASS "Xray $(nobrand_xray_version 2>/dev/null || printf unknown)" \
-    || { nb_doctor_line FAIL 'NoBrand Xray binary'; failed=1; }
+  [ -x "$NOBRAND_XRAY_BIN" ] && nb_doctor_line PASS "Xray $(nobrand_xray_version 2>/dev/null || printf '未知版本')" \
+    || { nb_doctor_line FAIL 'NoBrand Xray 可执行文件'; failed=1; }
   nobrand_xray_test_config "$NOBRAND_HY2_CONFIG_FILE" \
-    && nb_doctor_line PASS 'Xray config test' || { nb_doctor_line FAIL 'Xray config test'; failed=1; }
+    && nb_doctor_line PASS 'Xray 配置校验' || { nb_doctor_line FAIL 'Xray 配置校验'; failed=1; }
   if openssl ec -in "$NOBRAND_HY2_KEY_FILE" -noout -text 2>/dev/null | grep -q 'ASN1 OID: prime256v1'; then
     key_mode="$(stat -c '%a' "$NOBRAND_HY2_KEY_FILE" 2>/dev/null || true)"
-    [ "$key_mode" = 600 ] && nb_doctor_line PASS 'P-256 private key mode=0600' \
-      || { nb_doctor_line FAIL "private key mode=${key_mode}"; failed=1; }
+    [ "$key_mode" = 600 ] && nb_doctor_line PASS 'P-256 私钥权限=0600' \
+      || { nb_doctor_line FAIL "私钥权限=${key_mode}"; failed=1; }
   else
-    nb_doctor_line FAIL 'P-256 private key'; failed=1
+    nb_doctor_line FAIL 'P-256 私钥'; failed=1
   fi
   if openssl x509 -in "$NOBRAND_HY2_CERT_FILE" -noout >/dev/null 2>&1; then
     cert_cn="$(openssl x509 -in "$NOBRAND_HY2_CERT_FILE" -noout -subject -nameopt RFC2253 2>/dev/null \
       | sed -nE 's/^subject=.*CN=([^,]+).*$/\1/p')"
     expected_sni="$(hysteria2_state_field sni)"
     if [ "$cert_cn" = "$expected_sni" ]; then
-      nb_doctor_line PASS "certificate CN=${cert_cn}"
+      nb_doctor_line PASS "证书 CN=${cert_cn}"
     else
-      nb_doctor_line FAIL "certificate CN=${cert_cn:-missing}, state SNI=${expected_sni}"
+      nb_doctor_line FAIL "证书 CN=${cert_cn:-缺失}，状态 SNI=${expected_sni}"
       failed=1
     fi
   else
-    nb_doctor_line FAIL 'certificate'; failed=1
+    nb_doctor_line FAIL '证书'; failed=1
   fi
-  hysteria2_running && nb_doctor_line PASS "service + UDP/${port}" \
-    || { nb_doctor_line FAIL "service/listener UDP/${port}"; failed=1; }
-  nb_firewall_binding_owned UDP "$port" && nb_doctor_line PASS "firewall ownership UDP/${port}" \
-    || nb_doctor_line INFO "firewall rule not owned (pre-existing/no local firewall): UDP/${port}"
+  hysteria2_running && nb_doctor_line PASS "服务与 UDP/${port} 监听正常" \
+    || { nb_doctor_line FAIL "服务 / 监听异常: UDP/${port}"; failed=1; }
+  nb_firewall_binding_owned UDP "$port" && nb_doctor_line PASS "防火墙归属正常: UDP/${port}" \
+    || nb_doctor_line INFO "防火墙规则不归 NoBrand 管理（预先存在 / 无本地防火墙）: UDP/${port}"
   mode="$(hysteria2_state_field advertise_mode)"; host="$(hysteria2_state_field advertise_host)"
   advertise_port="$(hysteria2_state_field advertise_port)"
   nb_validate_advertise_endpoint "$host" "$advertise_port" UDP \
-    && nb_doctor_line PASS "display endpoint mode=${mode}" \
-    || { nb_doctor_line FAIL 'display endpoint state'; failed=1; }
+    && nb_doctor_line PASS "展示端点 / Display Endpoint 模式=${mode}" \
+    || { nb_doctor_line FAIL '展示端点 / Display Endpoint 状态无效'; failed=1; }
   hysteria2_current_share_link >/dev/null \
-    && nb_doctor_line PASS 'hysteria2 URI generation' || { nb_doctor_line FAIL 'URI generation'; failed=1; }
+    && nb_doctor_line PASS 'Hysteria2 URI 生成正常' || { nb_doctor_line FAIL 'URI 生成失败'; failed=1; }
   return "$failed"
 }
 

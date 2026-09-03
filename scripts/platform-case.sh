@@ -14,6 +14,13 @@ trap cleanup EXIT
 export NOBRAND_STATE_DIR="$platform_fixture/nobrand-oneclick/state"
 export NOBRAND_CONFIG_DIR="$platform_fixture/nobrand-oneclick/config"
 export NOBRAND_LIB_DIR="$platform_fixture/nobrand-oneclick/lib"
+export NOBRAND_LIFECYCLE_DIR="$platform_fixture/nobrand-oneclick-lifecycle"
+export NOBRAND_LIFECYCLE_TX_FILE="$platform_fixture/nobrand-oneclick-lifecycle/transaction.env"
+export NOBRAND_LIFECYCLE_LOCK_FILE="$platform_fixture/run/nobrand-oneclick/lifecycle.lock"
+export NOBRAND_INSTALL_SCRIPT_PATH="$platform_fixture/bin/install-nobrand"
+export NOBRAND_COMMAND_PATH="$platform_fixture/bin/nobrand"
+export NOBRAND_SHORT_COMMAND_PATH="$platform_fixture/bin/nb"
+export NOBRAND_LEGACY_MIERU_STATE_DIR="$platform_fixture/legacy-mieru"
 export NOBRAND_SSH_CONFIG_MAIN="$platform_fixture/sshd_config"
 export NOBRAND_SSH_CONFIG_DROPIN="$platform_fixture/sshd_config.d/90-nobrand-ssh-tunnel.conf"
 export MITA_SOURCE_ONLY=1
@@ -21,12 +28,148 @@ export MITA_SOURCE_ONLY=1
 source /work/install-nobrand.sh
 trap - ERR
 
-test "$SCRIPT_VERSION" = 3.2.0
+test "$SCRIPT_VERSION" = 3.2.1
 test "$SCRIPT_NAME|$SCRIPT_REPO" = 'NoBrand-OneClick|ike-sh/NoBrand-OneClick'
 case "$(detect_pkg_manager)" in
   deb|rpm|alpine) ;;
   *) echo "unsupported package-manager detection" >&2; exit 1 ;;
 esac
+
+# Exercise the lifecycle wrapper itself in a disposable, fully stubbed fixture.
+# The real manager/schema writers run, while package, service, and network work
+# is replaced so this remains safe in daemon-free platform containers.
+platform_lifecycle_case() (
+  local case_root="$platform_fixture"
+  local actual_state="" expected_operation="" preserve_hash=""
+
+  platform_lifecycle_reset() {
+    rm -rf -- "$NOBRAND_STATE_DIR" "$NOBRAND_CONFIG_DIR" "$NOBRAND_LIB_DIR" \
+      "$NOBRAND_LIFECYCLE_DIR" "$NOBRAND_LEGACY_MIERU_STATE_DIR" "${case_root:?}/bin" \
+      "${case_root:?}/run"
+    mkdir -p "$case_root/bin" "$case_root/run"
+    export NOBRAND_LIFECYCLE_ACTIVE=0
+    export NOBRAND_LIFECYCLE_OPERATION=""
+    export NOBRAND_LIFECYCLE_LOCK_HELD=0
+  }
+
+  platform_expect_install_state() {
+    local expected="$1" label="$2"
+    actual_state="$(nb_classify_installation_state)"
+    [ "$actual_state" = "$expected" ] || {
+      printf 'platform lifecycle %s: expected %s, got %s\n' \
+        "$label" "$expected" "$actual_state" >&2
+      return 1
+    }
+  }
+
+  # No actual lifecycle lock, package manager, network, or service may be used
+  # in this fixture. Transaction persistence and classification remain real.
+  require_root() { return 0; }
+  require_linux() { return 0; }
+  require_cmd() { return 0; }
+  nb_lifecycle_lock_acquire() {
+    NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD + 1))
+  }
+  nb_lifecycle_lock_release() {
+    [ "$NOBRAND_LIFECYCLE_LOCK_HELD" -eq 0 ] \
+      || NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD - 1))
+  }
+  mita_v3_install_state_valid() { return 0; }
+  users_state_exists() { return 0; }
+  users_count() { printf '1'; }
+  verify_mita_running() { return 0; }
+  curl() {
+    : >"$case_root/unexpected-network"
+    return 97
+  }
+  do_install_impl() {
+    [ "$NOBRAND_LIFECYCLE_OPERATION" = "$expected_operation" ] || return 96
+    ensure_manager_state_layout 1
+    install_self_script
+  }
+
+  platform_lifecycle_reset
+  platform_expect_install_state CLEAN clean-host
+  expected_operation=install
+  do_install
+  nb_schema_v3_file_valid
+  test "$(nb_installed_manager_version)" = "$SCRIPT_VERSION"
+  test "$(readlink "$NOBRAND_COMMAND_PATH")" = "$NOBRAND_INSTALL_SCRIPT_PATH"
+  test "$(readlink "$NOBRAND_SHORT_COMMAND_PATH")" = "$NOBRAND_COMMAND_PATH"
+  test "$(nb_lifecycle_field OPERATION)" = install
+  test "$(nb_lifecycle_field STATUS)" = complete
+  platform_expect_install_state CURRENT_COMPLETE fresh-manager-state
+
+  printf '%s\n' 'preserve-current-state-across-rerun' >"$NOBRAND_STATE_DIR/platform-preserve"
+  preserve_hash="$(sha256sum "$NOBRAND_STATE_DIR/platform-preserve")"
+  rm -f "$NOBRAND_SHORT_COMMAND_PATH"
+  expected_operation=repair
+  do_install
+  test "$preserve_hash" = "$(sha256sum "$NOBRAND_STATE_DIR/platform-preserve")"
+  test "$(readlink "$NOBRAND_SHORT_COMMAND_PATH")" = "$NOBRAND_COMMAND_PATH"
+  test "$(nb_lifecycle_field OPERATION)" = repair
+  test "$(nb_lifecycle_field STATUS)" = complete
+  platform_expect_install_state CURRENT_COMPLETE completed-rerun
+  [ ! -e "$case_root/unexpected-network" ]
+
+  platform_lifecycle_reset
+  nb_lifecycle_begin install prepare
+  platform_expect_install_state CURRENT_PARTIAL_INSTALL install-transaction
+  platform_lifecycle_reset
+  nb_lifecycle_begin repair prepare
+  platform_expect_install_state CURRENT_PARTIAL_REPAIR repair-transaction
+  platform_lifecycle_reset
+  nb_lifecycle_begin uninstall prepare
+  platform_expect_install_state CURRENT_PARTIAL_UNINSTALL uninstall-transaction
+
+  # Also cover the public v3.2 partial-uninstall evidence shape: compatible
+  # manager remains while its state root exists but is empty.
+  platform_lifecycle_reset
+  mkdir -p "$NOBRAND_STATE_DIR"
+  install_self_script
+  platform_expect_install_state CURRENT_PARTIAL_UNINSTALL empty-state-root
+
+  platform_lifecycle_reset
+  printf 'platform-lifecycle: PASS (clean/fresh, complete-rerun, partial classifiers, no network)\n'
+)
+platform_lifecycle_case
+
+# Capture one iteration of each requested menu so the four-platform gate owns
+# explicit Chinese-first assertions independently of the broader unit suite.
+platform_capture_menu() {
+  local menu_function="$1"
+  (
+    read_tty() {
+      local destination="$1"
+      printf -v "$destination" '%s' 0
+    }
+    menu_pause() { return 0; }
+    nobrand_print_banner() { msg 'NoBrand-OneClick 中文菜单'; }
+    "$menu_function"
+  )
+}
+
+platform_main_menu="$(platform_capture_menu nobrand_menu_loop)"
+grep -Fq '端口转发 / Port Forward' <<<"$platform_main_menu"
+grep -Fq '查看全部节点' <<<"$platform_main_menu"
+grep -Fq '卸载 NoBrand-OneClick（全部协议）' <<<"$platform_main_menu"
+
+platform_forward_menu="$(platform_capture_menu forward_menu_loop)"
+grep -Fq '端口转发 / Port Forward' <<<"$platform_forward_menu"
+grep -Fq '添加转发规则' <<<"$platform_forward_menu"
+grep -Fq '切换转发后端' <<<"$platform_forward_menu"
+grep -Fq '升级官方 Realm Runtime' <<<"$platform_forward_menu"
+for legacy_forward_label in \
+  'Add rule' 'List rules' 'Modify rule' 'Switch backend' 'Delete rule' \
+  'Upgrade official Realm runtime'; do
+  ! grep -Fq "$legacy_forward_label" <<<"$platform_forward_menu"
+done
+printf 'platform-localization: PASS (Chinese-first main and Forward menus)\n'
+
+# Reuse the focused maintenance suites on every distribution as well. Their
+# own PASS lines make it explicit in matrix logs that neither suite was skipped.
+bash /work/tests/test_lifecycle_recovery.sh
+bash /work/tests/test_localization.sh
 
 apply_profile_values iplc
 test "$PROFILE|$PROTOCOL|$MTU|$TRAFFIC_PATTERN|$LOW_ENTROPY_MODE" = \
@@ -246,7 +389,7 @@ account_id="$(ssh_tunnel_add_user_internal platform)"
 linux_user="$(jq -r --arg id "$account_id" '.users[] | select(.account_id==$id) | .linux_user' \
   "$NOBRAND_SSH_STATE_FILE")"
 ssh_tunnel_user_identity_valid "$(ssh_tunnel_resolve_user_json platform)"
-NOBRAND_SSH_WATCHDOG_DISABLED=1 ssh_tunnel_apply_policy "$linux_user" platform-test >/dev/null
+NOBRAND_SSH_WATCHDOG_DISABLED=1 ssh_tunnel_apply_policy "$linux_user" install >/dev/null
 ssh_tunnel_sshd_test "$NOBRAND_SSH_CONFIG_MAIN"
 ssh_tunnel_effective_policy_valid "$NOBRAND_SSH_CONFIG_MAIN" "$linux_user"
 detected_service="$(ssh_tunnel_detect_service)"

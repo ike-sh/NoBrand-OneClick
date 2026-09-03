@@ -1,4 +1,4 @@
-SCRIPT_VERSION="3.2.0"
+SCRIPT_VERSION="3.2.1"
 SCRIPT_AUTHOR="ike"
 SCRIPT_NAME="NoBrand-OneClick"
 SCRIPT_REPO="ike-sh/NoBrand-OneClick"
@@ -17,11 +17,20 @@ LAST_KNOWN_GOOD_MIERU_ARM64_RPM_SHA256="5cba9b07771998263447607212cf91bc2c7feb7e
 LAST_KNOWN_GOOD_MIERU_AMD64_TAR_SHA256="d61f35c463f101580a108dd6b969e1a3dca1b84836332b2533302a62e70f04bb"
 LAST_KNOWN_GOOD_MIERU_ARM64_TAR_SHA256="12b811bc00364bed2188d6e13e38cb7e727d149e488a3805f8c97f3f7f6e3bd6"
 
-# NoBrand 3.0 has one authoritative root. A directory without the exact v3
-# state marker is legacy/unknown input and is never imported or modified.
+# NoBrand 3 has one authoritative product-state root. Lifecycle recovery
+# metadata and its process lock deliberately live beside, not below, that
+# root so an interrupted full uninstall cannot erase the evidence needed by
+# the next invocation.
 NOBRAND_STATE_DIR="${NOBRAND_STATE_DIR:-/var/lib/nobrand-oneclick}"
 NOBRAND_CONFIG_DIR="${NOBRAND_CONFIG_DIR:-/etc/nobrand-oneclick}"
 NOBRAND_LIB_DIR="${NOBRAND_LIB_DIR:-/usr/local/lib/nobrand-oneclick}"
+NOBRAND_LIFECYCLE_DIR="${NOBRAND_LIFECYCLE_DIR:-/var/lib/nobrand-oneclick-lifecycle}"
+NOBRAND_LIFECYCLE_TX_FILE="${NOBRAND_LIFECYCLE_TX_FILE:-${NOBRAND_LIFECYCLE_DIR}/transaction.env}"
+NOBRAND_BACKUP_RESTORE_TX_DIR="${NOBRAND_LIFECYCLE_DIR}/backup-restore"
+NOBRAND_BACKUP_RESTORE_META_FILE="${NOBRAND_BACKUP_RESTORE_TX_DIR}/transaction.env"
+NOBRAND_BACKUP_RESTORE_SNAPSHOT_DIR="${NOBRAND_BACKUP_RESTORE_TX_DIR}/snapshot"
+NOBRAND_BACKUP_RESTORE_ROOTS_MANIFEST="${NOBRAND_BACKUP_RESTORE_TX_DIR}/snapshot-roots.manifest"
+NOBRAND_LIFECYCLE_LOCK_FILE="${NOBRAND_LIFECYCLE_LOCK_FILE:-/run/nobrand-oneclick/lifecycle.lock}"
 NOBRAND_BIN_DIR="${NOBRAND_BIN_DIR:-${NOBRAND_LIB_DIR}/bin}"
 NOBRAND_BACKUP_DIR="${NOBRAND_BACKUP_DIR:-${NOBRAND_STATE_DIR}/backups}"
 NOBRAND_LOCK_DIR="${NOBRAND_LOCK_DIR:-${NOBRAND_STATE_DIR}/locks}"
@@ -230,6 +239,10 @@ UNINSTALL_PRESERVE_USER=0
 UNINSTALL_PRESERVE_GROUP=0
 UNINSTALL_PRESERVE_SHARED=0
 MITA_REINSTALL_TRIED=0
+NOBRAND_INSTALL_STATE=""
+NOBRAND_LIFECYCLE_OPERATION=""
+NOBRAND_LIFECYCLE_ACTIVE=0
+NOBRAND_LIFECYCLE_LOCK_HELD=0
 YES=0
 DRY_RUN=0
 LANG_ZH=1

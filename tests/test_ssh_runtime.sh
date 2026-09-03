@@ -180,6 +180,11 @@ scp_base=(scp -q -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking
 export NOBRAND_STATE_DIR="$fixture/nobrand-oneclick/state"
 export NOBRAND_CONFIG_DIR="$fixture/nobrand-oneclick/config"
 export NOBRAND_LIB_DIR="$fixture/nobrand-oneclick/lib"
+export NOBRAND_LIFECYCLE_DIR="$fixture/nobrand-oneclick-lifecycle"
+export NOBRAND_LIFECYCLE_TX_FILE="$NOBRAND_LIFECYCLE_DIR/transaction.env"
+export NOBRAND_LIFECYCLE_LOCK_FILE="$fixture/run/nobrand-oneclick/lifecycle.lock"
+mkdir -p "$(dirname "$NOBRAND_LIFECYCLE_LOCK_FILE")"
+chmod 0700 "$(dirname "$NOBRAND_LIFECYCLE_LOCK_FILE")"
 export NOBRAND_SSH_CONFIG_MAIN="$sshd_config"
 export NOBRAND_SSH_CONFIG_DROPIN="$fixture/sshd_config.d/90-nobrand-ssh-tunnel.conf"
 export NOBRAND_SSHD_BIN="$NOBRAND_TEST_SSHD"
@@ -400,8 +405,10 @@ printf '[PASS] real SSH backup, key/endpoint perturbation, restore, and admin co
 
 # Arm the real rollback watchdog, then confirm it by invoking NoBrand from an
 # actual brand-new administrator SSH session rather than reusing local state.
-NOBRAND_SSH_WATCHDOG_DISABLED=0 NOBRAND_SSH_WATCHDOG_TIMEOUT=30 \
-  ssh_tunnel_apply_policy nbt-alice update >"$fixture/watchdog.out"
+if ! NOBRAND_SSH_WATCHDOG_DISABLED=0 NOBRAND_SSH_WATCHDOG_TIMEOUT=30 \
+  ssh_tunnel_apply_policy nbt-alice restore >"$fixture/watchdog.out"; then
+  fail 'real SSH watchdog policy re-apply'
+fi
 token="$(ssh_tunnel_state_field pending_watchdog_token)"
 [ -n "$token" ] && [ "$token" != disabled ] || fail 'real SSH watchdog token'
 confirm_watchdog_from_admin "$token" "$fixture/confirm.out" \

@@ -28,6 +28,11 @@ trap cleanup EXIT
 export NOBRAND_STATE_DIR="$fixture/nobrand-oneclick/state"
 export NOBRAND_CONFIG_DIR="$fixture/nobrand-oneclick/config"
 export NOBRAND_LIB_DIR="$fixture/nobrand-oneclick/lib"
+export NOBRAND_LIFECYCLE_DIR="$fixture/nobrand-oneclick-lifecycle"
+export NOBRAND_LIFECYCLE_TX_FILE="$NOBRAND_LIFECYCLE_DIR/transaction.env"
+export NOBRAND_LIFECYCLE_LOCK_FILE="$fixture/run/nobrand-oneclick/lifecycle.lock"
+mkdir -p "$(dirname "$NOBRAND_LIFECYCLE_LOCK_FILE")"
+chmod 0700 "$(dirname "$NOBRAND_LIFECYCLE_LOCK_FILE")"
 export NOBRAND_REALITY_SYSTEMD_TEMPLATE="$fixture/systemd/nobrand-vless-reality@.service"
 source_installer
 nb_init_state_layout

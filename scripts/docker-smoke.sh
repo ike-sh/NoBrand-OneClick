@@ -6,8 +6,292 @@ ROOT="$(cd "$(dirname "$0")/.." && { pwd -W 2>/dev/null || pwd; })"
 docker run --rm -i --cap-add=NET_ADMIN -v "$ROOT:/work:ro" debian:bookworm-slim bash -s <<'DOCKER_TEST'
 set -Eeuo pipefail
 apt-get update -qq >/dev/null
-apt-get install -y -qq python3 bash curl jq util-linux iproute2 passwd >/dev/null
+apt-get install -y -qq python3 bash curl git jq util-linux iproute2 passwd >/dev/null
 bash -n /work/install-nobrand.sh
+
+# Keep the exhaustive fault-injection harness, then run a separate container
+# lifecycle matrix below.  Docker PASS markers must be earned by their own
+# scenario, not inferred from the aggregate unit-harness exit status.
+bash /work/tests/test_lifecycle_recovery.sh
+
+# Exercise the production lifecycle wrappers against real files in this
+# disposable container. Package installation, daemon control, and firewall
+# mutation are the only replaced edges; manager/schema/user-state writes,
+# classification, durable checkpoints, reruns, root cleanup, and repair remain
+# the production implementations. Each PASS line is emitted immediately after
+# its corresponding independent scenario converges.
+docker_lifecycle_matrix() (
+  local matrix_root=/tmp/nobrand-docker-lifecycle
+  local runtime_marker="$matrix_root/mita-runtime.installed"
+  local expected actual rc sentinel_hash manager_hash registry_hash users_hash install_state_hash
+
+  export MITA_SOURCE_ONLY=1 NOBRAND_TEST_MODE=1 LANG_ZH=1 YES=1 DRY_RUN=0
+  export NOBRAND_STATE_DIR="$matrix_root/nobrand-oneclick/state"
+  export NOBRAND_CONFIG_DIR="$matrix_root/nobrand-oneclick/config"
+  export NOBRAND_LIB_DIR="$matrix_root/nobrand-oneclick/lib"
+  export NOBRAND_LIFECYCLE_DIR="$matrix_root/nobrand-oneclick-lifecycle"
+  export NOBRAND_LIFECYCLE_TX_FILE="$NOBRAND_LIFECYCLE_DIR/transaction.env"
+  export NOBRAND_LIFECYCLE_LOCK_FILE="$matrix_root/run/nobrand-oneclick/lifecycle.lock"
+  export NOBRAND_INSTALL_SCRIPT_PATH="$matrix_root/bin/install-nobrand"
+  export NOBRAND_COMMAND_PATH="$matrix_root/bin/nobrand"
+  export NOBRAND_SHORT_COMMAND_PATH="$matrix_root/bin/nb"
+  export NOBRAND_LEGACY_MIERU_STATE_DIR="$matrix_root/legacy/mita-oneclick"
+  export MITA_MANAGER_STATE_DIR="$NOBRAND_STATE_DIR/mieru"
+  export MITA_STATE="$MITA_MANAGER_STATE_DIR/install-state.env"
+  export MITA_USERS_STATE="$MITA_MANAGER_STATE_DIR/users.json"
+  export MITA_USERS_LOCK="$MITA_MANAGER_STATE_DIR/users.lock"
+  export MITA_USERS_BACKUP_DIR="$MITA_MANAGER_STATE_DIR/backups"
+  export MITA_ADMIN_LOCK="$MITA_MANAGER_STATE_DIR/admin.lock"
+  export MITA_MARKER="$MITA_MANAGER_STATE_DIR/.installed"
+  export MITA_USERS_CRON="$matrix_root/cron/nobrand-mieru-users"
+  export MITA_USERS_TIMER="$matrix_root/systemd/nobrand-mieru-users-scan.timer"
+  export MITA_USERS_SERVICE="$matrix_root/systemd/nobrand-mieru-users-scan.service"
+  export MITA_USERS_LOG="$matrix_root/log/nobrand-mieru-users.log"
+  export MITA_CLIENT_EXPORT_DIR="$matrix_root/client-exports"
+  export MITA_LOGROTATE_CONF="$matrix_root/logrotate/nobrand-mieru"
+  export MITA_METRICS_FILE="$matrix_root/mita/metrics.pb"
+  export MITA_INSTANCES_DIR="$NOBRAND_CONFIG_DIR/mita/instances"
+  export MITA_INSTANCE_RUN_DIR="$matrix_root/run/mita-instances"
+  export MITA_INSTANCE_METRICS_DIR="$NOBRAND_STATE_DIR/mita-metrics"
+  export MITA_INSTANCE_SYSTEMD_TEMPLATE="$matrix_root/systemd/nobrand-mieru@.service"
+  export MITA_INSTANCE_TMPFILES="$matrix_root/tmpfiles/nobrand-mieru.conf"
+  export MITA_INSTANCE_OPENRC_PREFIX="$matrix_root/openrc/nobrand-mieru-"
+  export NOBRAND_SNELL_SYSTEMD_TEMPLATE="$matrix_root/systemd/nobrand-snell@.service"
+  export NOBRAND_TUIC_SYSTEMD_TEMPLATE="$matrix_root/systemd/nobrand-tuic@.service"
+
+  # shellcheck source=install-nobrand.sh
+  source /work/install-nobrand.sh
+  trap - ERR
+  YES=1
+
+  matrix_fail() {
+    printf 'docker lifecycle matrix: %s\n' "$1" >&2
+    return 1
+  }
+
+  matrix_assert_eq() {
+    expected="$1"
+    actual="$2"
+    [ "$expected" = "$actual" ] \
+      || matrix_fail "$3 (expected=$expected actual=$actual)"
+  }
+
+  matrix_expect_state() {
+    actual="$(nb_classify_installation_state)"
+    matrix_assert_eq "$1" "$actual" "$2"
+  }
+
+  matrix_expect_interrupt() {
+    local interrupt_log="$matrix_root/expected-interrupt.log"
+    set +e
+    "$@" >"$interrupt_log" 2>&1
+    rc=$?
+    set -e
+    if [ "$rc" -eq 0 ]; then
+      cat "$interrupt_log" >&2
+      rm -f -- "$interrupt_log"
+      matrix_fail "expected injected interruption from: $*"
+      return 1
+    fi
+    rm -f -- "$interrupt_log"
+  }
+
+  matrix_reset() {
+    [ "${NOBRAND_LIFECYCLE_LOCK_HELD:-0}" -eq 0 ] \
+      || matrix_fail 'scenario leaked the lifecycle lock'
+    rm -rf -- "$matrix_root"
+    mkdir -p "$matrix_root/bin" "$matrix_root/run"
+    chmod 0700 "$matrix_root" "$matrix_root/bin" "$matrix_root/run"
+    NOBRAND_LIFECYCLE_ACTIVE=0
+    NOBRAND_LIFECYCLE_OPERATION=''
+    NOBRAND_LIFECYCLE_LOCK_HELD=0
+    NOBRAND_INSTALL_CANCELLED=0
+    unset NOBRAND_TEST_INTERRUPT_INSTALL_AT NOBRAND_TEST_INTERRUPT_REPAIR_AT \
+      NOBRAND_TEST_INTERRUPT_UNINSTALL_AT
+  }
+
+  # Container boundary replacements. These model only effects unavailable in a
+  # daemon-free image; the real install/reinstall branches still consume and
+  # preserve the state written by users_initialize_primary/save_install_state.
+  ensure_management_dependencies() { return 0; }
+  mita_installed() { [ -f "$runtime_marker" ]; }
+  installed_version() { mita_installed && printf '3.35.0'; }
+  ensure_install_port_available() { return 0; }
+  mieru_prepare_noninteractive_ingress_endpoint() {
+    INGRESS_PROFILE_ID="$NOBRAND_LEGACY_INGRESS_PROFILE_ID"
+    nb_prepare_ingress_deployment "$INGRESS_PROFILE_ID" firewall
+  }
+  ensure_config_noninteractive() {
+    PORT=26000
+    PORT_RANGE=''
+    PROTOCOL=TCP
+    PROFILE=balanced
+    ADVERTISE_HOST=198.51.100.20
+    ADVERTISE_PORT=26000
+    MTU=1400
+    MTU_POLICY=safe
+    USERNAME=docker-user
+    PASSWORD=docker-password
+    TRAFFIC_PATTERN=conservative
+    TRAFFIC_SEED=42
+    LOW_ENTROPY_MODE=LOW_ENTROPY_MODE_OFF
+    MULTIPLEXING=MULTIPLEXING_OFF
+    HANDSHAKE_MODE=HANDSHAKE_NO_WAIT
+    MIERU_CHANNEL=stable
+  }
+  mieru_resolve_runtime() {
+    MIERU_RUNTIME_RESOLVED_VERSION=3.35.0
+    MIERU_RUNTIME_RESOLVED_URL=https://fixture.invalid/mita.deb
+    MIERU_RUNTIME_RESOLVED_SHA256=''
+    MIERU_RUNTIME_RESOLVED_CHECKSUM_URL=''
+  }
+  download_package() { printf 'container-runtime-fixture\n' >"$2"; }
+  mieru_runtime_snapshot() { printf '%s' "$matrix_root/runtime.snapshot"; }
+  install_package() { : >"$runtime_marker"; }
+  mieru_assert_runtime_version() { return 0; }
+  mieru_runtime_commit() { return 0; }
+  add_op_user() { return 0; }
+  warn_traffic_unsupported() { return 0; }
+  warn_low_entropy_unsupported() { return 0; }
+  install_users_scheduler() { return 0; }
+  apply_users_config() { return 0; }
+  open_firewall_for_pairs() { return 0; }
+  close_firewall_for_bindings() { return 0; }
+  verify_mita_running() { return 0; }
+  isolated_stop_all() { return 0; }
+  prune_orphan_instances() { return 0; }
+  harden_mita_permissions() { return 0; }
+  client_exports_clear_current() { return 0; }
+  offer_bbr_fq() { return 0; }
+  print_summary() { return 0; }
+
+  # Full-uninstall runtime edges are represented by the explicit marker above;
+  # all managed-root and command removal below is performed by production code.
+  mita_uninstall_target_present() { mita_installed; }
+  do_uninstall() { rm -f -- "$runtime_marker"; }
+  ssh_tunnel_state_exists() { return 1; }
+  snell_instance_ids() { return 0; }
+  hysteria2_state_exists() { return 1; }
+  vless_sudoku_state_exists() { return 1; }
+  reality_instance_ids() { return 0; }
+  tuic_instance_ids() { return 0; }
+  reality_remove_service_runtime_if_owned() { return 0; }
+  nb_service_manager() { printf 'none'; }
+  nb_strict_firewall_clear_all() { return 0; }
+  nft() { return 1; }
+
+  matrix_reset
+  do_install >/dev/null
+  matrix_expect_state CURRENT_COMPLETE 'fresh install did not converge'
+  matrix_assert_eq install "$(nb_lifecycle_field OPERATION)" 'fresh install operation'
+  matrix_assert_eq complete "$(nb_lifecycle_field STATUS)" 'fresh install status'
+  nb_schema_v3_file_valid || matrix_fail 'fresh install did not write schema-v3 state'
+  mita_v3_install_state_valid || matrix_fail 'fresh install did not write Mieru install state'
+  [ "$(users_count)" -eq 1 ] || matrix_fail 'fresh install did not write its primary user'
+  printf 'DOCKER_LIFECYCLE_FRESH_INSTALL=PASS\n'
+
+  matrix_reset
+  export NOBRAND_TEST_INTERRUPT_INSTALL_AT=runtime-ready
+  matrix_expect_interrupt do_install
+  matrix_expect_state CURRENT_PARTIAL_INSTALL 'interrupted install classification'
+  matrix_assert_eq runtime-ready "$(nb_lifecycle_field LAST_COMPLETED_PHASE)" \
+    'interrupted install durable phase'
+  unset NOBRAND_TEST_INTERRUPT_INSTALL_AT
+  do_install >/dev/null
+  matrix_expect_state CURRENT_COMPLETE 'interrupted install rerun did not converge'
+  mita_v3_install_state_valid || matrix_fail 'install rerun did not restore install state'
+  printf 'DOCKER_LIFECYCLE_INTERRUPTED_INSTALL_RERUN=PASS\n'
+
+  matrix_reset
+  do_install >/dev/null
+  printf 'preserve-complete-rerun\n' >"$NOBRAND_STATE_DIR/rerun.sentinel"
+  sentinel_hash="$(sha256sum "$NOBRAND_STATE_DIR/rerun.sentinel")"
+  manager_hash="$(sha256sum "$NOBRAND_INSTALL_SCRIPT_PATH")"
+  registry_hash="$(sha256sum "$NOBRAND_REGISTRY_FILE")"
+  users_hash="$(sha256sum "$MITA_USERS_STATE")"
+  install_state_hash="$(sha256sum "$MITA_STATE")"
+  do_install >/dev/null
+  matrix_assert_eq repair "$(nb_lifecycle_field OPERATION)" 'complete rerun operation'
+  matrix_assert_eq complete "$(nb_lifecycle_field STATUS)" 'complete rerun status'
+  matrix_assert_eq "$sentinel_hash" "$(sha256sum "$NOBRAND_STATE_DIR/rerun.sentinel")" \
+    'complete rerun changed existing state'
+  matrix_assert_eq "$manager_hash" "$(sha256sum "$NOBRAND_INSTALL_SCRIPT_PATH")" \
+    'complete rerun changed manager identity'
+  matrix_assert_eq "$registry_hash" "$(sha256sum "$NOBRAND_REGISTRY_FILE")" \
+    'complete rerun changed registry bytes'
+  matrix_assert_eq "$users_hash" "$(sha256sum "$MITA_USERS_STATE")" \
+    'complete rerun changed user-state bytes'
+  matrix_assert_eq "$install_state_hash" "$(sha256sum "$MITA_STATE")" \
+    'complete rerun changed install-state bytes'
+  matrix_expect_state CURRENT_COMPLETE 'complete rerun did not remain complete'
+  printf 'DOCKER_LIFECYCLE_COMPLETE_RERUN=PASS\n'
+
+  matrix_reset
+  do_install >/dev/null
+  printf 'preserve-repair-rerun\n' >"$NOBRAND_STATE_DIR/repair.sentinel"
+  sentinel_hash="$(sha256sum "$NOBRAND_STATE_DIR/repair.sentinel")"
+  registry_hash="$(sha256sum "$NOBRAND_REGISTRY_FILE")"
+  users_hash="$(sha256sum "$MITA_USERS_STATE")"
+  export NOBRAND_TEST_INTERRUPT_REPAIR_AT=state-committed
+  matrix_expect_interrupt do_install
+  matrix_expect_state CURRENT_PARTIAL_REPAIR 'interrupted repair classification'
+  matrix_assert_eq state-committed "$(nb_lifecycle_field LAST_COMPLETED_PHASE)" \
+    'interrupted repair durable phase'
+  unset NOBRAND_TEST_INTERRUPT_REPAIR_AT
+  do_install >/dev/null
+  matrix_assert_eq "$sentinel_hash" "$(sha256sum "$NOBRAND_STATE_DIR/repair.sentinel")" \
+    'repair rerun changed existing state'
+  matrix_assert_eq "$registry_hash" "$(sha256sum "$NOBRAND_REGISTRY_FILE")" \
+    'repair rerun changed registry bytes'
+  matrix_assert_eq "$users_hash" "$(sha256sum "$MITA_USERS_STATE")" \
+    'repair rerun changed user-state bytes'
+  matrix_expect_state CURRENT_COMPLETE 'interrupted repair rerun did not converge'
+  printf 'DOCKER_LIFECYCLE_INTERRUPTED_REPAIR_RERUN=PASS\n'
+
+  matrix_reset
+  do_install >/dev/null
+  mkdir -p "$NOBRAND_CONFIG_DIR" "$NOBRAND_LIB_DIR"
+  printf 'preserve-until-cleanup\n' >"$NOBRAND_CONFIG_DIR/uninstall.sentinel"
+  printf 'preserve-until-cleanup\n' >"$NOBRAND_LIB_DIR/uninstall.sentinel"
+  export NOBRAND_TEST_INTERRUPT_UNINSTALL_AT=before-config-removal
+  matrix_expect_interrupt nobrand_uninstall
+  matrix_expect_state CURRENT_PARTIAL_UNINSTALL 'interrupted uninstall classification'
+  [ ! -e "$NOBRAND_STATE_DIR" ] || matrix_fail 'uninstall interruption did not cross state removal'
+  [ -e "$NOBRAND_CONFIG_DIR/uninstall.sentinel" ] \
+    || matrix_fail 'uninstall interruption removed config before its checkpoint'
+  [ -e "$NOBRAND_INSTALL_SCRIPT_PATH" ] \
+    || matrix_fail 'uninstall interruption removed manager too early'
+  unset NOBRAND_TEST_INTERRUPT_UNINSTALL_AT
+  nobrand_uninstall >/dev/null
+  matrix_expect_state CLEAN 'continued uninstall did not converge to clean'
+  [ ! -e "$runtime_marker" ] || matrix_fail 'continued uninstall retained runtime ownership'
+  printf 'DOCKER_LIFECYCLE_INTERRUPTED_UNINSTALL_CONTINUE=PASS\n'
+
+  matrix_reset
+  do_install >/dev/null
+  mkdir -p "$NOBRAND_CONFIG_DIR" "$NOBRAND_LIB_DIR"
+  printf 'preserve-through-repair\n' >"$NOBRAND_CONFIG_DIR/repair.sentinel"
+  printf 'preserve-through-repair\n' >"$NOBRAND_LIB_DIR/repair.sentinel"
+  export NOBRAND_TEST_INTERRUPT_UNINSTALL_AT=before-config-removal
+  matrix_expect_interrupt nobrand_uninstall
+  matrix_expect_state CURRENT_PARTIAL_UNINSTALL 'repair-direction uninstall classification'
+  unset NOBRAND_TEST_INTERRUPT_UNINSTALL_AT
+  do_install >/dev/null
+  matrix_expect_state CURRENT_COMPLETE 'partial-uninstall repair did not converge'
+  [ -e "$NOBRAND_CONFIG_DIR/repair.sentinel" ] \
+    || matrix_fail 'partial-uninstall repair discarded config'
+  [ -e "$NOBRAND_LIB_DIR/repair.sentinel" ] \
+    || matrix_fail 'partial-uninstall repair discarded manager library data'
+  [ ! -e "$MITA_STATE" ] && [ ! -e "$MITA_USERS_STATE" ] \
+    || matrix_fail 'manager-only partial-uninstall repair fabricated Mieru state'
+  [ ! -e "$runtime_marker" ] \
+    || matrix_fail 'manager-only partial-uninstall repair fabricated a runtime'
+  printf 'DOCKER_LIFECYCLE_INTERRUPTED_UNINSTALL_REPAIR=PASS\n'
+
+  printf 'DOCKER_LIFECYCLE_RECOVERY_GATE=PASS\n'
+)
+docker_lifecycle_matrix
+
 bash /work/tests/test_ingress_enforcement.sh
 bash /work/tests/test_ingress_enforcement_transaction.sh
 
@@ -35,7 +319,7 @@ getent group mita >/dev/null || groupadd --system mita
 id mita >/dev/null 2>&1 || useradd --system -g mita -s /usr/sbin/nologin -d /tmp/metrics mita
 
 source /work/install-nobrand.sh
-test "$SCRIPT_VERSION" = 3.2.0
+test "$SCRIPT_VERSION" = 3.2.1
 test "$SCRIPT_NAME|$SCRIPT_REPO" = 'NoBrand-OneClick|ike-sh/NoBrand-OneClick'
 trap - ERR
 MITA_STATE=/tmp/manager-state/install-state.env
@@ -92,9 +376,9 @@ grep -q '作者: ${SCRIPT_AUTHOR} / https://github.com/${SCRIPT_REPO}' /work/ins
   grep -q '^作者: ike / https://github.com/ike-sh/NoBrand-OneClick$' <<<"$menu_output"
   grep -q '^状态: 未安装$' <<<"$menu_output"
   grep -q '^用户: -$' <<<"$menu_output"
-  grep -q '^Profile: -$' <<<"$menu_output"
-  grep -q '^Mieru Version: 未安装$' <<<"$menu_output"
-  ! grep -q 'Profile: 高级自定义' <<<"$menu_output"
+  grep -q '^配置预设 / Profile: -$' <<<"$menu_output"
+  grep -q '^Mieru 版本: 未安装$' <<<"$menu_output"
+  ! grep -q '^配置预设 / Profile: 高级自定义$' <<<"$menu_output"
   menu_entries="$(grep -E '^[[:space:]]+[0-9]+\)' <<<"$menu_output")"
   expected_entries="$(cat <<'EOF'
   1) 新装 / 安装
@@ -105,7 +389,7 @@ grep -q '作者: ${SCRIPT_AUTHOR} / https://github.com/${SCRIPT_REPO}' /work/ins
   6) 服务管理
   7) 备份 / 恢复
   8) 升级
-  9) Doctor
+  9) Doctor / 诊断
  10) 卸载
   0) 退出
 EOF
@@ -314,7 +598,7 @@ test "$(profile_label balanced)" = '普通公网'
 test "$(profile_label stealth)" = '强化伪装'
 test "$(profile_label custom)" = '高级自定义'
 grep -q 'profile=default 是上游客户端的 profileName' /work/install-nobrand.sh
-grep -q '不会把 Mieru 简化成单用户协议' /work/README.md
+grep -q 'Mieru 使用官方 Mita runtime，并保留多用户、独立实例' /work/README.md
 grep -q '官方 Mieru client JSON' /work/README.md
 apply_profile_values iplc
 test "$PROFILE|$PROTOCOL|$MTU|$MULTIPLEXING|$HANDSHAKE_MODE|$TRAFFIC_PATTERN|$LOW_ENTROPY_MODE" = \
@@ -537,13 +821,31 @@ ADVERTISE_HOST="" ADVERTISE_PORT="" PROTOCOL=TCP
   test "$ADVERTISE_HOST|$ADVERTISE_PORT" = 'cm-entry.example.com|8443'
 )
 # -y 也不能静默跳过入口确认；必须显式给 endpoint 或 --advertise-auto。
+noninteractive_endpoint_root="$(mktemp -d /tmp/nobrand-endpoint.XXXXXX)"
+mkdir -p "$noninteractive_endpoint_root/run/nobrand-oneclick"
+chmod 0700 "$noninteractive_endpoint_root" \
+  "$noninteractive_endpoint_root/run" \
+  "$noninteractive_endpoint_root/run/nobrand-oneclick"
 set +e
-noninteractive_endpoint_output="$(MITA_SOURCE_ONLY=0 bash /work/install-nobrand.sh \
-  mieru install -y --port 26000 --user explicit-user --password explicit-pass 2>&1)"
+noninteractive_endpoint_output="$(
+  NOBRAND_STATE_DIR="$noninteractive_endpoint_root/state" \
+  NOBRAND_CONFIG_DIR="$noninteractive_endpoint_root/config" \
+  NOBRAND_LIB_DIR="$noninteractive_endpoint_root/lib" \
+  NOBRAND_LIFECYCLE_DIR="$noninteractive_endpoint_root/nobrand-oneclick-lifecycle" \
+  NOBRAND_LIFECYCLE_TX_FILE="$noninteractive_endpoint_root/nobrand-oneclick-lifecycle/transaction.env" \
+  NOBRAND_LIFECYCLE_LOCK_FILE="$noninteractive_endpoint_root/run/nobrand-oneclick/lifecycle.lock" \
+  NOBRAND_INSTALL_SCRIPT_PATH="$noninteractive_endpoint_root/bin/install-nobrand" \
+  NOBRAND_COMMAND_PATH="$noninteractive_endpoint_root/bin/nobrand" \
+  NOBRAND_SHORT_COMMAND_PATH="$noninteractive_endpoint_root/bin/nb" \
+  NOBRAND_LEGACY_MIERU_STATE_DIR="$noninteractive_endpoint_root/legacy/mita-oneclick" \
+  MITA_SOURCE_ONLY=0 bash /work/install-nobrand.sh \
+    mieru install -y --port 26000 --user explicit-user --password explicit-pass 2>&1
+)"
 noninteractive_endpoint_rc=$?
 set -e
 test "$noninteractive_endpoint_rc" -ne 0
 grep -q -- '--advertise-host/--advertise-port' <<<"$noninteractive_endpoint_output"
+rm -rf -- "$noninteractive_endpoint_root"
 
 # 端口探测必须区分 TCP/UDP；尾号段选择不得返回已监听端口。
 python3 -c 'import socket,time; s=socket.socket(); s.bind(("127.0.0.1",26801)); s.listen(); time.sleep(20)' &
@@ -605,7 +907,7 @@ users_add bob bob-pass 26005 >/dev/null
 test "$(users_count)" -eq 2
 python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert all(u.get("instance_id","").startswith("u") for u in d["users"]); assert next(u for u in d["users"] if u["name"]=="bob")["bandwidth_mbps"]==10; assert not next(u for u in d["users"] if u["name"]=="bob")["advertise_host"]' "$MITA_USERS_STATE"
 user_list_output="$(do_user_list)"
-grep -Eq '^alice[[:space:]]+26000[[:space:]]+on[[:space:]]+unlimited[[:space:]]+unlimited[[:space:]]+-' \
+grep -Eq '^alice[[:space:]]+26000[[:space:]]+启用[[:space:]]+不限量[[:space:]]+不限量[[:space:]]+-' \
   <<<"$user_list_output"
 
 # flock 分支必须传递展示入口字段；重复入口及自定义/自动入口碰撞都应拒绝。
@@ -656,12 +958,12 @@ rm -f "$conflict_state" "$conflict_state.norm"
 
   PORT=30000 PROTOCOL=TCP ADVERTISE_HOST=cm-entry.example.com ADVERTISE_PORT=10086
   perf_output="$(do_perf)"
-  grep -q 'Mieru Performance' <<<"$perf_output"
-  grep -q 'Backend listen port: 30000' <<<"$perf_output"
-  grep -q 'Advertised client address: cm-entry.example.com' <<<"$perf_output"
+  grep -q 'Mieru 性能诊断' <<<"$perf_output"
+  grep -q '后端监听端口: 30000' <<<"$perf_output"
+  grep -q '客户端展示地址 / Display Endpoint: cm-entry.example.com' <<<"$perf_output"
   grep -q '\[INFO\] 当前使用独立客户端入口' <<<"$perf_output"
-  grep -q 'Client: cm-entry.example.com:10086' <<<"$perf_output"
-  grep -q 'Backend: 203.0.113.173:30000' <<<"$perf_output"
+  grep -q '客户端: cm-entry.example.com:10086' <<<"$perf_output"
+  grep -q '后端: 203.0.113.173:30000' <<<"$perf_output"
   ! grep -Eq '\[WARN\].*客户端入口|\[FAIL\].*客户端入口' <<<"$perf_output"
   grep -q '本报告为只读' <<<"$perf_output"
   test ! -e /tmp/perf-unexpected-write
@@ -672,7 +974,7 @@ rm -f "$conflict_state" "$conflict_state.norm"
   check(){ printf '%s|%s|%s\n' "$2" "$1" "${3:-}"; }
   users_rate_limited_count(){ echo 0; }
   doctor_tc_output="$(doctor_check_tc_limits)"
-  grep -q '^1|rate-limit rules|' <<<"$doctor_tc_output"
+  grep -q '^1|用户限速规则|' <<<"$doctor_tc_output"
   ! grep -q '^0|' <<<"$doctor_tc_output"
 )
 (
@@ -684,7 +986,7 @@ rm -f "$conflict_state" "$conflict_state.norm"
   rm -f "$TC_OWNED_STATE"
   doctor_tc_output="$(doctor_check_tc_limits)"
   grep -q '^0|clsact|' <<<"$doctor_tc_output"
-  grep -q '^0|owned filter manifest|' <<<"$doctor_tc_output"
+  grep -q '^0|自有 filter 清单|' <<<"$doctor_tc_output"
 )
 
 # 状态页只显示运行与监听摘要，不调用 describe config 或暴露密码。

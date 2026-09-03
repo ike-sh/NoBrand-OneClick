@@ -33,7 +33,7 @@ json.dump(d, open(path,"w"), indent=2)
     t "已重置日历月配额: $(printf '%s' "$cal" | tr '\n' ' ')" \
       "Calendar quota reset: $(printf '%s' "$cal" | tr '\n' ' ')"
   else
-    t '无需重置（无 calendar 用户或本月已重置）' \
+    t '无需重置（没有日历月配额用户，或本月已重置）' \
       'Nothing to reset (no calendar users or already done this month)'
   fi
 }

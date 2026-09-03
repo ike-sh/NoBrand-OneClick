@@ -170,7 +170,7 @@ snell_validate_runtime_config() {
   log="$(mktemp_file .log)" || { rm -f "$config"; return 1; }
   snell_generate_server_config "$config" "$major" 127.0.0.1 "$port" "$psk" \
     || { rm -f "$config" "$log"; return 1; }
-  "$binary" -c "$config" >"$log" 2>&1 &
+  "$binary" -c "$config" 7>&- >"$log" 2>&1 &
   pid=$!
   local i=0
   while [ "$i" -lt 10 ]; do
@@ -190,16 +190,26 @@ snell_validate_runtime_config() {
 }
 
 snell_download_candidate() {
-  local major="$1" output="$2" release version url status upstream_sha256 temp candidate reported actual_archive_sha256
+  local major="$1" output="$2" release version url status status_display upstream_sha256
+  local temp candidate reported actual_archive_sha256
   case "$major" in 4|5) ;; *) return 1 ;; esac
   snell_platform_supported "$major" || {
-    warn "Snell v${major} on this platform unsupported"
+    warn "$(t "当前平台不支持 Snell v${major}" \
+      "Snell v${major} on this platform is unsupported")"
     return 1
   }
   release="$(snell_resolve_release "$major")" || return 1
   IFS=$'\t' read -r version url status upstream_sha256 <<<"$release"
+  case "$status" in
+    Stable) status_display='稳定版' ;;
+    RC) status_display='RC 候选版' ;;
+    Beta) status_display='Beta 测试版' ;;
+    Experimental) status_display='实验版' ;;
+    *) status_display="$status" ;;
+  esac
   [[ "$url" = https://dl.nssurge.com/snell/snell-server-v*-linux-*.zip ]] || {
-    warn "拒绝非 Surge 官方 HTTPS Snell asset: $url"
+    warn "$(t "拒绝非 Surge 官方 HTTPS Snell 资产: $url" \
+      "Refusing non-official Surge HTTPS Snell asset: $url")"
     return 1
   }
   temp="$(mktemp_dir)" || return 1
@@ -213,7 +223,8 @@ snell_download_candidate() {
     [[ "$upstream_sha256" =~ ^[0-9a-fA-F]{64}$ ]] || { rm -rf -- "$temp"; return 1; }
     actual_archive_sha256="$(nobrand_sha256_file "$temp/snell.zip")" || { rm -rf -- "$temp"; return 1; }
     [ "$actual_archive_sha256" = "$(printf '%s' "$upstream_sha256" | tr '[:upper:]' '[:lower:]')" ] \
-      || { warn "Surge Snell upstream SHA-256 mismatch"; rm -rf -- "$temp"; return 1; }
+      || { warn "$(t 'Surge Snell 上游 SHA-256 不匹配' \
+        'Surge Snell upstream SHA-256 mismatch')"; rm -rf -- "$temp"; return 1; }
   fi
   if ! unzip -t "$temp/snell.zip" >/dev/null \
      || ! unzip -qo "$temp/snell.zip" -d "$temp/unpacked"; then
@@ -231,7 +242,9 @@ snell_download_candidate() {
   SNELL_RESOLVED_URL="$url"
   SNELL_RESOLVED_STATUS="$status"
   SNELL_RESOLVED_SHA256="$(nobrand_sha256_file "$candidate" 2>/dev/null || true)"
-  info "Surge official Snell v${version} (${status}) verified; sha256=${SNELL_RESOLVED_SHA256:-unavailable}"
+  info "$(t \
+    "Surge 官方 Snell v${version}（${status_display}）已验证；sha256=${SNELL_RESOLVED_SHA256:-不可用}" \
+    "Surge official Snell v${version} (${status}) verified; sha256=${SNELL_RESOLVED_SHA256:-unavailable}")"
   rm -rf -- "$temp"
 }
 
@@ -252,7 +265,8 @@ snell_install_runtime() {
   test_psk="$(openssl rand -hex 16 2>/dev/null || printf '0123456789abcdef0123456789abcdef')"
   if ! snell_validate_runtime_config "$candidate" "$major" "$test_psk"; then
     rm -f "$candidate"
-    warn "Snell v${major} official runtime validation failed"
+    warn "$(t "Snell v${major} 官方 Runtime 验证失败" \
+      "Snell v${major} official runtime validation failed")"
     return 1
   fi
   mkdir -p "$NOBRAND_SNELL_RUNTIME_DIR" || { rm -f "$candidate"; return 1; }

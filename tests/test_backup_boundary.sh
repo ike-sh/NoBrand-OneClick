@@ -7,6 +7,11 @@ trap 'rm -rf -- "$fixture"' EXIT
 export NOBRAND_STATE_DIR="$fixture/nobrand-oneclick/state"
 export NOBRAND_CONFIG_DIR="$fixture/nobrand-oneclick/config"
 export NOBRAND_LIB_DIR="$fixture/nobrand-oneclick/lib"
+export NOBRAND_LIFECYCLE_DIR="$fixture/nobrand-oneclick-lifecycle"
+export NOBRAND_LIFECYCLE_TX_FILE="$NOBRAND_LIFECYCLE_DIR/transaction.env"
+export NOBRAND_LIFECYCLE_LOCK_FILE="$fixture/run/nobrand-oneclick/lifecycle.lock"
+mkdir -p "$(dirname "$NOBRAND_LIFECYCLE_LOCK_FILE")"
+chmod 0700 "$(dirname "$NOBRAND_LIFECYCLE_LOCK_FILE")"
 source_installer
 eval "$(declare -f nobrand_restore_protocol_runtimes \
   | sed '1s/^nobrand_restore_protocol_runtimes /nobrand_restore_protocol_runtimes_under_test /')"
@@ -226,10 +231,96 @@ fi
 safe="$(nb_assert_safe_nobrand_root "$NOBRAND_STATE_DIR" NOBRAND_STATE_DIR)"
 assert_eq "$NOBRAND_STATE_DIR" "$safe" 'safe NoBrand namespace'
 
-# Failure after TUIC runtime replacement and SSH Linux-account creation must
-# restore external side effects as well as the state/config trees.
+# Archive path names alone are insufficient: expected SSH directories must
+# remain real directories after extraction. Build otherwise valid archives
+# whose SSH state root is a symlink or whose SSH config root is a regular file,
+# then prove topology validation stops before layout initialization, tree
+# replacement, or any external identity/config operation.
 export NOBRAND_SSH_CONFIG_MAIN="$fixture/sshd_config"
 export NOBRAND_SSH_CONFIG_DROPIN="$fixture/sshd_config.d/90-nobrand-ssh-tunnel.conf"
+printf '%s\n' 'topology-baseline-sshd' >"$NOBRAND_SSH_CONFIG_MAIN"
+
+make_unsafe_ssh_topology_archive() {
+  local kind="$1" stage archive
+  stage="$fixture/unsafe-ssh-topology/${kind}/stage"
+  archive="$fixture/unsafe-ssh-topology/${kind}.tar.gz"
+  rm -rf -- "$(dirname "$stage")" "$archive"
+  mkdir -p "$stage/state/ssh-tunnel/keys" "$stage/state/ssh-tunnel/watchdog" \
+    "$stage/config/ssh-tunnel/authorized_keys" "$stage/config/ssh-tunnel/accounts"
+  printf '%s\n' \
+    'project=NoBrand-OneClick' \
+    'schema_version=3' \
+    'ownership=nobrand-v3' \
+    >"$stage/manifest.txt"
+  printf '%s\n' \
+    '{"schema_version":3,"project":"NoBrand-OneClick","ownership":"nobrand-v3"}' \
+    >"$stage/state/state.json"
+  ssh_tunnel_generate_state "$stage/state/ssh-tunnel/state.json" custom \
+    entry.example.test 443 2222 marker-block "$NOBRAND_SSH_CONFIG_MAIN" '[]' \
+    2026-08-30T00:00:00Z
+  chmod 0700 "$stage/state" "$stage/state/ssh-tunnel" \
+    "$stage/state/ssh-tunnel/keys" "$stage/state/ssh-tunnel/watchdog"
+  chmod 0711 "$stage/config" "$stage/config/ssh-tunnel"
+  chmod 0755 "$stage/config/ssh-tunnel/authorized_keys"
+  chmod 0700 "$stage/config/ssh-tunnel/accounts"
+  chmod 0600 "$stage/state/state.json" "$stage/state/ssh-tunnel/state.json"
+  case "$kind" in
+    state-symlink)
+      mv "$stage/state/ssh-tunnel" "$stage/state/ssh-tunnel-target"
+      ln -s ssh-tunnel-target "$stage/state/ssh-tunnel"
+      [ -L "$stage/state/ssh-tunnel" ] \
+        || fail 'unsafe backup fixture did not create the SSH state symlink'
+      ;;
+    config-file)
+      rm -rf -- "$stage/config/ssh-tunnel"
+      printf '%s\n' 'not-a-directory' >"$stage/config/ssh-tunnel"
+      [ -f "$stage/config/ssh-tunnel" ] && [ ! -d "$stage/config/ssh-tunnel" ] \
+        || fail 'unsafe backup fixture did not create the SSH config file'
+      ;;
+    *) fail "unknown unsafe SSH topology fixture: $kind" ;;
+  esac
+  tar -C "$stage" -czf "$archive" manifest.txt state config
+  printf '%s' "$archive"
+}
+
+topology_state_hash="$(sha256sum "$NOBRAND_STATE_DIR/owned.json")"
+topology_config_hash="$(sha256sum "$NOBRAND_CONFIG_DIR/owned.conf")"
+topology_sshd_hash="$(sha256sum "$NOBRAND_SSH_CONFIG_MAIN")"
+for unsafe_ssh_topology in state-symlink config-file; do
+  unsafe_ssh_archive="$(make_unsafe_ssh_topology_archive "$unsafe_ssh_topology")"
+  unsafe_ssh_markers="$fixture/unsafe-ssh-topology/${unsafe_ssh_topology}/markers"
+  mkdir -p "$unsafe_ssh_markers"
+  if (
+    nb_init_state_layout() { : >"$unsafe_ssh_markers/layout"; }
+    nobrand_stop_all_services() { : >"$unsafe_ssh_markers/services-stopped"; }
+    ssh_tunnel_snapshot_external_state() { : >"$unsafe_ssh_markers/external-snapshot"; }
+    tuic_snapshot_restore_side_effects() { : >"$unsafe_ssh_markers/tuic-snapshot"; }
+    forward_snapshot_restore_side_effects() { : >"$unsafe_ssh_markers/forward-snapshot"; }
+    nobrand_restore_protocol_runtimes() { : >"$unsafe_ssh_markers/runtime"; }
+    ssh_tunnel_restore_system_state() { : >"$unsafe_ssh_markers/ssh-restore"; }
+    nobrand_start_enabled_services() { : >"$unsafe_ssh_markers/services-started"; }
+    ssh_tunnel_create_group() { : >"$unsafe_ssh_markers/group-created"; }
+    ssh_tunnel_create_linux_user_with_uid() { : >"$unsafe_ssh_markers/user-created"; }
+    ssh_tunnel_apply_policy() { : >"$unsafe_ssh_markers/policy-applied"; }
+    ssh_tunnel_restore_external_snapshot() { : >"$unsafe_ssh_markers/external-restored"; }
+    _has_group() { return 1; }
+    _has_user() { return 1; }
+    nobrand_backup_restore "$unsafe_ssh_archive" >/dev/null 2>&1
+  ); then
+    fail "backup restore accepted unsafe staged SSH topology: $unsafe_ssh_topology"
+  fi
+  [ -z "$(find "$unsafe_ssh_markers" -mindepth 1 -maxdepth 1 -print -quit)" ] \
+    || fail "unsafe staged SSH topology crossed the pre-mutation boundary: $unsafe_ssh_topology"
+  assert_eq "$topology_state_hash" "$(sha256sum "$NOBRAND_STATE_DIR/owned.json")" \
+    "unsafe SSH topology preserves live state: $unsafe_ssh_topology"
+  assert_eq "$topology_config_hash" "$(sha256sum "$NOBRAND_CONFIG_DIR/owned.conf")" \
+    "unsafe SSH topology preserves live config: $unsafe_ssh_topology"
+  assert_eq "$topology_sshd_hash" "$(sha256sum "$NOBRAND_SSH_CONFIG_MAIN")" \
+    "unsafe SSH topology preserves external sshd config: $unsafe_ssh_topology"
+done
+
+# Failure after TUIC runtime replacement and SSH Linux-account creation must
+# restore external side effects as well as the state/config trees.
 export NOBRAND_TUIC_SYSTEMD_TEMPLATE="$fixture/systemd/nobrand-tuic@.service"
 account_id=a3333333333333333
 linux_user=nbt-restore
@@ -244,6 +335,9 @@ restore_user="$(ssh_tunnel_user_json "$account_id" restore "$linux_user" "$resto
   "$fingerprint" 2026-08-30T00:00:00Z)"
 ssh_tunnel_generate_state "$NOBRAND_SSH_STATE_FILE" custom restore.example.test 443 22 \
   marker-block "$NOBRAND_SSH_CONFIG_MAIN" "[$restore_user]" 2026-08-30T00:00:00Z
+jq '.policy_applied=true' "$NOBRAND_SSH_STATE_FILE" >"$fixture/ssh-backup-ready.json"
+mv -f "$fixture/ssh-backup-ready.json" "$NOBRAND_SSH_STATE_FILE"
+chmod 0600 "$NOBRAND_SSH_STATE_FILE"
 jq -n --arg account_id "$account_id" --arg linux_user "$linux_user" --argjson uid "$restore_uid" \
   '{schema_version:3,ownership:"nobrand-v3",account_id:$account_id,linux_user:$linux_user,uid:$uid}' \
   >"$NOBRAND_SSH_ACCOUNT_MARKER_DIR/$linux_user.json"
@@ -312,6 +406,7 @@ tuic_restore_runtime() {
 }
 nobrand_restore_protocol_runtimes() { tuic_restore_runtime; }
 tuic_remove_restore_attempt_resources() { :; }
+forward_remove_restore_attempt_resources() { :; }
 fresh_cleanup_marker="$fixture/fresh-runtime-cleanup"
 nobrand_remove_fresh_restore_protocol_resources() { : >"$fresh_cleanup_marker"; }
 nobrand_start_enabled_services() { return 1; }

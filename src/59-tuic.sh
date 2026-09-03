@@ -320,26 +320,26 @@ tuic_set_endpoint_state() {
 
 tuic_collect_install_requests() {
   local old_port="" owner
-  tuic_protocol_scope_valid || die 'TUIC protocol scope constants invalid'
+  tuic_protocol_scope_valid || die 'TUIC 协议范围常量无效'
   nb_prepare_ingress_request || return 1
   nb_prepare_ingress_deployment "$INGRESS_PROFILE_ID" native-bind \
-    || die '所选 Ingress strict local address cannot be bound by TUIC'
+    || die 'TUIC 无法绑定所选 Ingress 的 Strict 本地地址'
   TUIC_NAME="${TUIC_NAME:-primary}"
-  tuic_valid_name "$TUIC_NAME" || die 'TUIC instance name 无效'
+  tuic_valid_name "$TUIC_NAME" || die 'TUIC 实例名称无效'
   tuic_find_id_by_name "$TUIC_NAME" >/dev/null 2>&1 \
-    && { t "TUIC instance 已存在: ${TUIC_NAME}" "TUIC instance already exists: ${TUIC_NAME}"; return 2; }
+    && { t "TUIC 实例已存在: ${TUIC_NAME}" "TUIC instance already exists: ${TUIC_NAME}"; return 2; }
   if [ -z "${PORT:-}" ]; then
     PORT="$(nb_select_available_port UDP "$INGRESS_PROFILE_ID")" \
       || die '所选入口配置没有可用 TUIC UDP 自动端口；manual-only 必须显式使用 --port'
     PORT_AUTO_SELECTED=1
   else
-    nb_valid_port "$PORT" || die 'TUIC port 必须是 1025-65535'
+    nb_valid_port "$PORT" || die 'TUIC 端口必须是 1025-65535'
     PORT="$(normalize_uint "$PORT")"
-    nb_ingress_port_is_reserved "$INGRESS_PROFILE_ID" "$PORT" && die 'TUIC 禁止使用所选入口配置的保留 port'
+    nb_ingress_port_is_reserved "$INGRESS_PROFILE_ID" "$PORT" && die 'TUIC 禁止使用所选入口配置的保留端口'
     nb_warn_if_outside_recommended_range "$PORT" "$INGRESS_PROFILE_ID"
     nb_port_available_for_profile "$PORT" UDP "$INGRESS_PROFILE_ID" || {
       owner="$(nb_registry_port_owner UDP "$PORT" 2>/dev/null || true)"
-      die "TUIC UDP/${PORT} 已占用${owner:+ by ${owner}}"
+      die "TUIC UDP/${PORT} 已占用${owner:+，占用方: ${owner}}"
     }
   fi
   if [ -z "${ADVERTISE_HOST:-}" ]; then
@@ -348,13 +348,13 @@ tuic_collect_install_requests() {
     nb_validate_advertise_endpoint "$ADVERTISE_HOST" "$ADVERTISE_PORT" UDP || die 'TUIC Display Endpoint 无效'
   fi
   if [ -z "${TUIC_SNI:-}" ]; then TUIC_SNI=www.microsoft.com; fi
-  hysteria2_valid_sni "$TUIC_SNI" || die 'TUIC SNI 必须是有效 domain 或 IPv4'
-  TUIC_CHANNEL="$(tuic_normalize_channel "${TUIC_CHANNEL:-stable}")" || die 'TUIC runtime channel 无效'
+  hysteria2_valid_sni "$TUIC_SNI" || die 'TUIC SNI 必须是有效域名或 IPv4 地址'
+  TUIC_CHANNEL="$(tuic_normalize_channel "${TUIC_CHANNEL:-stable}")" || die 'TUIC Runtime 通道无效'
   if [ "$TUIC_CHANNEL" = pinned ]; then
-    tuic_valid_runtime_version "$TUIC_VERSION" || die 'pinned TUIC runtime 需要精确稳定版本'
+    tuic_valid_runtime_version "$TUIC_VERSION" || die 'pinned TUIC Runtime 需要精确稳定版本'
   fi
   TUIC_USER="${TUIC_USER:-default}"
-  tuic_valid_name "$TUIC_USER" || die 'TUIC user name 无效'
+  tuic_valid_name "$TUIC_USER" || die 'TUIC 用户名称无效'
   [ -z "$old_port" ] || true
 }
 
@@ -374,22 +374,22 @@ tuic_prepare_runtime_for_install() {
     tuic_install_runtime "$channel" "$requested_version"
     return
   fi
-  current="$(tuic_runtime_version)" || die '现有 NoBrand TUIC runtime 缺失或不可执行'
-  tuic_runtime_metadata_valid "$current" "" || die '现有 NoBrand TUIC runtime ownership metadata 无效'
+  current="$(tuic_runtime_version)" || die '现有 NoBrand TUIC Runtime 缺失或不可执行'
+  tuic_runtime_metadata_valid "$current" "" || die '现有 NoBrand TUIC Runtime 归属元数据无效'
   while IFS= read -r id; do
     state_version="$(tuic_state_field "$id" runtime_version)"
     [ "$state_version" = "$current" ] \
-      || die "TUIC instance ${id} runtime state 不一致，拒绝隐式替换共享 runtime"
+      || die "TUIC 实例 ${id} 的 Runtime 状态不一致，拒绝隐式替换共享 Runtime"
   done < <(tuic_instance_ids)
-  tuic_resolve_runtime "$channel" "$requested_version" || die '无法解析 official sing-box runtime'
+  tuic_resolve_runtime "$channel" "$requested_version" || die '无法解析官方 sing-box Runtime'
   [ "$TUIC_RUNTIME_RESOLVED_VERSION" = "$current" ] \
-    || die '新增 TUIC instance 不会隐式升级共享 runtime；请先执行 nobrand tuic upgrade-runtime'
+    || die '新增 TUIC 实例不会隐式升级共享 Runtime；请先执行 nobrand tuic upgrade-runtime'
 }
 
 tuic_install_transaction_rollback() {
   local id="$1" port="$2" runtime_snapshot="$3" template_preexisting="$4"
   tuic_install_rollback "$id" "$port"
-  tuic_restore_runtime_files "$runtime_snapshot" || warn 'TUIC install runtime rollback failed'
+  tuic_restore_runtime_files "$runtime_snapshot" || warn 'TUIC 安装期间的 Runtime 回滚失败'
   if [ "$template_preexisting" -eq 0 ] && [ -z "$(tuic_instance_ids)" ]; then
     case "$NOBRAND_TUIC_SYSTEMD_TEMPLATE" in
       /etc/systemd/system/nobrand-tuic@.service) rm -f "$NOBRAND_TUIC_SYSTEMD_TEMPLATE" ;;
@@ -410,7 +410,7 @@ install_tuic() {
   tuic_snapshot_runtime_files "$runtime_snapshot" || return 1
   [ ! -e "$NOBRAND_TUIC_SYSTEMD_TEMPLATE" ] || template_preexisting=1
   tuic_prepare_runtime_for_install "$TUIC_CHANNEL" "$TUIC_VERSION" \
-    || { rm -rf -- "$runtime_snapshot"; die 'official sing-box runtime 准备失败'; }
+    || { rm -rf -- "$runtime_snapshot"; die '官方 sing-box Runtime 准备失败'; }
   runtime_version="$(tuic_runtime_version)" || {
     tuic_restore_runtime_files "$runtime_snapshot" || true
     rm -rf -- "$runtime_snapshot"
@@ -519,7 +519,7 @@ tuic_commit_candidate_state() {
     if [ "$running" -eq 1 ]; then
       if ! tuic_service_action "$id" restart >/dev/null 2>&1 \
          || ! tuic_running "$id" >/dev/null 2>&1; then
-        warn "TUIC rollback listener verification failed: ${id}"
+        warn "TUIC 回滚后的监听校验失败: ${id}"
       fi
     fi
     rc=1
@@ -547,8 +547,8 @@ tuic_apply_ingress_enforcement() {
 
 tuic_user_add() {
   local id="$1" name="$2" state candidate user_id uuid password user_json
-  tuic_valid_name "$name" || die 'TUIC user name 无效'
-  tuic_resolve_user_json "$id" "$name" >/dev/null 2>&1 && die "TUIC user 已存在: $name"
+  tuic_valid_name "$name" || die 'TUIC 用户名称无效'
+  tuic_resolve_user_json "$id" "$name" >/dev/null 2>&1 && die "TUIC 用户已存在: $name"
   state="$(tuic_state_file "$id")" candidate="$(mktemp_file .tuic-state)" || return 1
   user_id="$(tuic_generate_user_id)" uuid="$(tuic_generate_uuid)" password="$(tuic_generate_password)"
   user_json="$(tuic_user_json "$user_id" "$name" "$uuid" "$password")"
@@ -560,10 +560,10 @@ tuic_user_add() {
 
 tuic_user_delete() {
   local id="$1" selector="$2" user_json user_id state candidate
-  user_json="$(tuic_resolve_user_json "$id" "$selector")" || die '找不到唯一 TUIC user'
+  user_json="$(tuic_resolve_user_json "$id" "$selector")" || die '找不到唯一 TUIC 用户'
   user_id="$(jq -r .user_id <<<"$user_json")"
   state="$(tuic_state_file "$id")" candidate="$(mktemp_file .tuic-state)" || return 1
-  [ "$(jq '.users|length' "$state")" -gt 1 ] || die 'TUIC instance 至少保留一个 user；请卸载 instance'
+  [ "$(jq '.users|length' "$state")" -gt 1 ] || die 'TUIC 实例至少要保留一个用户；如需清空，请卸载实例'
   jq --arg user_id "$user_id" --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     '.users |= map(select(.user_id!=$user_id)) | .updated_at=$updated' "$state" >"$candidate" \
     && tuic_commit_candidate_state "$id" "$candidate"
@@ -572,7 +572,7 @@ tuic_user_delete() {
 
 tuic_user_rotate() {
   local id="$1" selector="$2" user_json user_id state candidate uuid password
-  user_json="$(tuic_resolve_user_json "$id" "$selector")" || die '找不到唯一 TUIC user'
+  user_json="$(tuic_resolve_user_json "$id" "$selector")" || die '找不到唯一 TUIC 用户'
   user_id="$(jq -r .user_id <<<"$user_json")"
   uuid="$(tuic_generate_uuid)" password="$(tuic_generate_password)"
   state="$(tuic_state_file "$id")" candidate="$(mktemp_file .tuic-state)" || return 1
@@ -593,7 +593,7 @@ tuic_show_user() {
   local id="$1" selector="${2:-}" user_json endpoint
   user_json="$(tuic_resolve_user_json "$id" "$selector")" || return 1
   endpoint="$(tuic_effective_endpoint "$id")"
-  printf 'TUIC v5 instance: %s\nUser: %s\nIngress Profile: %s\nActual: %s:%s/UDP\nDisplay Endpoint: %s:%s\nSNI: %s\nUUID: %s\nPassword: %s\n' \
+  printf 'TUIC v5 实例: %s\n用户: %s\n入口配置 / Ingress Profile: %s\n实际监听 / Actual Listener: %s:%s/UDP\n展示端点 / Display Endpoint: %s:%s\nSNI: %s\nUUID: %s\n密码: %s\n' \
     "$(tuic_state_field "$id" name)" "$(jq -r .name <<<"$user_json")" \
     "$(nb_ingress_profile_name "$(tuic_state_field "$id" ingress_profile_id 2>/dev/null || true)")" \
     "$(tuic_state_field "$id" listen_host)" "$(tuic_state_field "$id" listen_port)" \
@@ -610,7 +610,7 @@ tuic_export_user() {
   if uri="$(tuic_build_uri "$id" "$selector" 2>/dev/null)"; then
     printf '\nTUIC URI: %s\n' "$uri"
   else
-    printf '%s\n' '' 'TUIC URI: unavailable (no upstream-standardized v5 URI confirmed).'
+    printf '%s\n' '' 'TUIC URI：不可用（尚未确认上游标准化的 v5 URI）。'
   fi
 }
 
@@ -647,27 +647,27 @@ tuic_doctor_one() {
   runtime="$(tuic_runtime_version 2>/dev/null || true)"
   expected="$(tuic_state_field "$id" runtime_version)"
   [ "$runtime" = "$expected" ] && nb_doctor_line PASS "sing-box ${runtime}" \
-    || { nb_doctor_line FAIL "sing-box version ${runtime:-missing}, expected ${expected}"; failed=1; }
+    || { nb_doctor_line FAIL "sing-box 版本 ${runtime:-缺失}，预期 ${expected}"; failed=1; }
   tuic_config_matches_state "$id" && tuic_validate_config "$(tuic_config_file "$id")" \
-    && nb_doctor_line PASS "TUIC v5 config $(tuic_state_field "$id" name)" \
-    || { nb_doctor_line FAIL "TUIC config $(tuic_state_field "$id" name)"; failed=1; }
-  tuic_service_active "$id" && nb_doctor_line PASS 'service active' \
-    || { nb_doctor_line FAIL 'service inactive'; failed=1; }
+    && nb_doctor_line PASS "TUIC v5 配置有效: $(tuic_state_field "$id" name)" \
+    || { nb_doctor_line FAIL "TUIC 配置无效: $(tuic_state_field "$id" name)"; failed=1; }
+  tuic_service_active "$id" && nb_doctor_line PASS '服务运行中' \
+    || { nb_doctor_line FAIL '服务未运行'; failed=1; }
   tuic_running "$id" \
-    && nb_doctor_line PASS "same-process UDP/${port}" \
-    || { nb_doctor_line FAIL "same-process UDP/${port}"; failed=1; }
-  nb_firewall_binding_owned UDP "$port" && nb_doctor_line PASS "firewall UDP/${port}" \
-    || { nb_doctor_line FAIL "firewall UDP/${port}"; failed=1; }
+    && nb_doctor_line PASS "同进程 UDP/${port} 监听正常" \
+    || { nb_doctor_line FAIL "同进程 UDP/${port} 监听异常"; failed=1; }
+  nb_firewall_binding_owned UDP "$port" && nb_doctor_line PASS "防火墙规则正常: UDP/${port}" \
+    || { nb_doctor_line FAIL "防火墙规则异常: UDP/${port}"; failed=1; }
   [ -s "$cert" ] && openssl x509 -in "$cert" -checkend 2592000 -noout >/dev/null 2>&1 \
-    && nb_doctor_line PASS 'TLS certificate valid beyond 30 days' \
-    || { nb_doctor_line FAIL 'TLS certificate missing/expiring'; failed=1; }
+    && nb_doctor_line PASS 'TLS 证书有效期超过 30 天' \
+    || { nb_doctor_line FAIL 'TLS 证书缺失或即将过期'; failed=1; }
   [ "$(stat -c '%a' "$key" 2>/dev/null || true)" = 600 ] \
-    && nb_doctor_line PASS 'TLS P-256 key mode=0600' \
-    || { nb_doctor_line FAIL 'TLS key permission'; failed=1; }
+    && nb_doctor_line PASS 'TLS P-256 密钥权限=0600' \
+    || { nb_doctor_line FAIL 'TLS 密钥权限异常'; failed=1; }
   jq -e '.users|length>0 and all(.[]; .uuid|test("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"))' \
     "$(tuic_state_file "$id")" >/dev/null \
-    && nb_doctor_line PASS 'TUIC v5 UUID+password users' \
-    || { nb_doctor_line FAIL 'TUIC users'; failed=1; }
+    && nb_doctor_line PASS 'TUIC v5 用户 UUID 与密码有效' \
+    || { nb_doctor_line FAIL 'TUIC 用户数据无效'; failed=1; }
   return "$failed"
 }
 
@@ -677,25 +677,26 @@ tuic_doctor_all() {
     found=1
     tuic_doctor_one "$id" || failed=1
   done < <(tuic_instance_ids)
-  [ "$found" -eq 1 ] || nb_doctor_line INFO 'TUIC v5 not installed'
+  [ "$found" -eq 1 ] || nb_doctor_line INFO 'TUIC v5 未安装'
   return "$failed"
 }
 
 tuic_status() {
-  local id endpoint
-  id="$(tuic_resolve_instance_id "${TUIC_NAME:-}")" || { t 'TUIC instance 未安装或不唯一' 'TUIC instance missing or ambiguous'; return 0; }
+  local id endpoint service
+  id="$(tuic_resolve_instance_id "${TUIC_NAME:-}")" || { t 'TUIC 实例未安装或选择结果不唯一' 'TUIC instance missing or ambiguous'; return 0; }
   endpoint="$(tuic_effective_endpoint "$id")"
-  printf 'TUIC v5\n  Instance: %s\n  Runtime: %s (%s)\n  Service: %s\n  UDP listener: %s\n  Display Endpoint: %s:%s\n  TLS: self-signed ECDSA P-256 / h3\n  Users: %s\n' \
+  service="$(tuic_service_active "$id" && printf '运行中' || printf '已停止')"
+  printf 'TUIC v5\n  实例: %s\n  Runtime: %s（%s）\n  服务: %s\n  UDP 监听端口: %s\n  展示端点 / Display Endpoint: %s:%s\n  TLS: ECDSA P-256 自签名证书 / h3\n  用户数: %s\n' \
     "$(tuic_state_field "$id" name)" "$(tuic_state_field "$id" runtime_version)" \
     "$(tuic_state_field "$id" runtime_channel)" \
-    "$(tuic_service_active "$id" && printf Running || printf Stopped)" \
+    "$service" \
     "$(tuic_state_field "$id" listen_port)" "${endpoint%%|*}" "${endpoint#*|}" \
     "$(jq '.users|length' "$(tuic_state_file "$id")")"
 }
 
 tuic_service_command() {
   local id action="$1" port
-  id="$(tuic_resolve_instance_id "${TUIC_NAME:-}")" || die '请用 --name 指定 TUIC instance'
+  id="$(tuic_resolve_instance_id "${TUIC_NAME:-}")" || die '请用 --name 指定 TUIC 实例'
   port="$(tuic_state_field "$id" listen_port)"
   tuic_service_action "$id" "$action" || return 1
   case "$action" in
@@ -705,7 +706,7 @@ tuic_service_command() {
 
 remove_tuic_instance() {
   local id port config_dir state_dir
-  id="$(tuic_resolve_instance_id "${TUIC_NAME:-}")" || die '请用 --name 指定 TUIC instance'
+  id="$(tuic_resolve_instance_id "${TUIC_NAME:-}")" || die '请用 --name 指定 TUIC 实例'
   port="$(tuic_state_field "$id" listen_port)"
   config_dir="$(tuic_instance_config_dir "$id")" state_dir="$(dirname "$(tuic_state_file "$id")")"
   tuic_remove_service "$id" || return 1
@@ -743,7 +744,7 @@ tuic_upgrade_runtime_rollback() {
 
 tuic_upgrade_runtime() {
   local id version state tmp candidate metadata_tmp snapshot active_file port failed=0
-  [ -n "$(tuic_instance_ids)" ] || die '没有可升级的 TUIC instance'
+  [ -n "$(tuic_instance_ids)" ] || die '没有可升级的 TUIC 实例'
   candidate="$(mktemp_file .sing-box-upgrade)" || return 1
   metadata_tmp="$(mktemp_file .tuic-runtime-meta)" || return 1
   snapshot="$(mktemp_dir)" || return 1
@@ -779,7 +780,7 @@ tuic_upgrade_runtime() {
      || ! nb_atomic_install_file "$metadata_tmp" "$NOBRAND_SING_BOX_RUNTIME_META" 0600 \
      || [ "$(tuic_runtime_version 2>/dev/null || true)" != "$version" ]; then
     tuic_upgrade_runtime_rollback "$snapshot" "$active_file" \
-      || warn 'TUIC runtime upgrade rollback verification failed'
+      || warn 'TUIC Runtime 升级回滚校验失败'
     admin_lock_release
     rm -f "$candidate" "$metadata_tmp"
     rm -rf -- "$snapshot"
@@ -808,7 +809,7 @@ tuic_upgrade_runtime() {
   fi
   if [ "$failed" -ne 0 ]; then
     tuic_upgrade_runtime_rollback "$snapshot" "$active_file" \
-      || warn 'TUIC runtime upgrade rollback verification failed'
+      || warn 'TUIC Runtime 升级回滚校验失败'
     admin_lock_release
     rm -f "$candidate" "$metadata_tmp"
     rm -rf -- "$snapshot"
@@ -848,35 +849,35 @@ nobrand_run_tuic_action() {
     status) tuic_status ;;
     doctor) tuic_doctor_all ;;
     show)
-      id="$(tuic_resolve_instance_id "${TUIC_NAME:-}")" || die '请用 --name 指定 TUIC instance'
+      id="$(tuic_resolve_instance_id "${TUIC_NAME:-}")" || die '请用 --name 指定 TUIC 实例'
       tuic_show_user "$id" "${TUIC_USER:-}"
       ;;
     export)
-      id="$(tuic_resolve_instance_id "${TUIC_NAME:-}")" || die '请用 --name 指定 TUIC instance'
+      id="$(tuic_resolve_instance_id "${TUIC_NAME:-}")" || die '请用 --name 指定 TUIC 实例'
       tuic_export_user "$id" "${TUIC_USER:-}"
       ;;
     set-endpoint)
-      id="$(tuic_resolve_instance_id "${TUIC_NAME:-}")" || die '请用 --name 指定 TUIC instance'
+      id="$(tuic_resolve_instance_id "${TUIC_NAME:-}")" || die '请用 --name 指定 TUIC 实例'
       tuic_set_endpoint_state "$id" "${ADVERTISE_HOST:-}" "${ADVERTISE_PORT:-}"
       ;;
     user-add)
-      id="$(tuic_resolve_instance_id "${TUIC_NAME:-}")" || die '请用 --name 指定 TUIC instance'
+      id="$(tuic_resolve_instance_id "${TUIC_NAME:-}")" || die '请用 --name 指定 TUIC 实例'
       tuic_user_add "$id" "$TUIC_USER"
       ;;
     user-delete)
-      id="$(tuic_resolve_instance_id "${TUIC_NAME:-}")" || die '请用 --name 指定 TUIC instance'
+      id="$(tuic_resolve_instance_id "${TUIC_NAME:-}")" || die '请用 --name 指定 TUIC 实例'
       tuic_user_delete "$id" "$TUIC_USER"
       ;;
     user-list)
-      id="$(tuic_resolve_instance_id "${TUIC_NAME:-}")" || die '请用 --name 指定 TUIC instance'
+      id="$(tuic_resolve_instance_id "${TUIC_NAME:-}")" || die '请用 --name 指定 TUIC 实例'
       tuic_user_list "$id"
       ;;
     user-show)
-      id="$(tuic_resolve_instance_id "${TUIC_NAME:-}")" || die '请用 --name 指定 TUIC instance'
+      id="$(tuic_resolve_instance_id "${TUIC_NAME:-}")" || die '请用 --name 指定 TUIC 实例'
       tuic_show_user "$id" "$TUIC_USER"
       ;;
     user-rotate)
-      id="$(tuic_resolve_instance_id "${TUIC_NAME:-}")" || die '请用 --name 指定 TUIC instance'
+      id="$(tuic_resolve_instance_id "${TUIC_NAME:-}")" || die '请用 --name 指定 TUIC 实例'
       tuic_user_rotate "$id" "$TUIC_USER"
       ;;
     upgrade-runtime) tuic_upgrade_runtime ;;
@@ -886,7 +887,7 @@ nobrand_run_tuic_action() {
       cat <<'EOF'
 nobrand tuic install|start|stop|restart|status|doctor|show|export|set-endpoint|upgrade-runtime|uninstall
 nobrand tuic user add|delete|list|show|rotate
-TUIC v5 only; official sing-box; UDP/QUIC; independent UUID + password per user.
+仅支持 TUIC v5；使用官方 sing-box；传输为 UDP / QUIC；每个用户拥有独立 UUID 与密码。
 EOF
       ;;
     *) die "未知 TUIC 操作: ${TUIC_ACTION}" ;;

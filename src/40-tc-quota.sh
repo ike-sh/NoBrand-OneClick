@@ -34,6 +34,52 @@ tc_clear_owned_filters() {
   rm -f "$state"
 }
 
+tc_owned_filter_absent() {
+  local dev="$1" dir="$2" proto="$3" pref="$4" output
+  if command -v ip >/dev/null 2>&1 && ! ip link show dev "$dev" >/dev/null 2>&1; then
+    return 0
+  fi
+  output="$(tc filter show dev "$dev" "$dir" protocol "$proto" pref "$pref" 2>/dev/null)" \
+    || return 1
+  [ -z "$output" ]
+}
+
+# Restore rollback must not discard the ownership manifest until every
+# recorded filter is proven absent. This strict variant is deliberately kept
+# separate so established best-effort cleanup semantics remain unchanged for
+# ordinary quota operations.
+tc_clear_owned_filters_strict() {
+  local state="${1:-$TC_OWNED_STATE}" dev="" dir proto pref rest
+  local failed=0 iface_count=0
+  [ -e "$state" ] || [ -L "$state" ] || return 0
+  [ -f "$state" ] && [ ! -L "$state" ] || return 1
+  dev="$(awk -F'|' '$1=="iface"{print $2; exit}' "$state" 2>/dev/null || true)"
+  [ -n "$dev" ] || return 1
+  while IFS='|' read -r dir proto pref rest; do
+    if [ "$dir" = iface ]; then
+      [ "$proto" = "$dev" ] && [ -z "$pref" ] && [ -z "$rest" ] \
+        && iface_count=$((iface_count + 1)) || failed=1
+      continue
+    fi
+    if { [ "$dir" != ingress ] && [ "$dir" != egress ]; } \
+       || ! [[ "$pref" =~ ^[0-9]+$ ]] \
+       || [ "$pref" -lt "$TC_PREF_MIN" ] || [ "$pref" -gt "$TC_PREF_MAX" ]; then
+      failed=1
+      continue
+    fi
+    case "$proto" in
+      ip|ipv6) ;;
+      *) failed=1; continue ;;
+    esac
+    tc filter del dev "$dev" "$dir" protocol "$proto" pref "$pref" \
+      >/dev/null 2>&1 || true
+    tc_owned_filter_absent "$dev" "$dir" "$proto" "$pref" || failed=1
+  done <"$state"
+  [ "$iface_count" -eq 1 ] || failed=1
+  [ "$failed" -eq 0 ] || return 1
+  rm -f -- "$state"
+}
+
 tc_restore_manifest() {
   local state="$1" dev="" dir family pref l4 field port bw burst
   [ -f "$state" ] || return 0
@@ -170,7 +216,8 @@ for u in d.get("users") or []:
   mv -f "$tmp" "$TC_OWNED_STATE"
   chmod 0600 "$TC_OWNED_STATE" 2>/dev/null || true
   [ -z "$previous" ] || rm -f "$previous"
-  users_log "tc: applied dedicated per-user port filters on $dev"
+  users_log "$(t "tc：已在 ${dev} 应用用户专属端口过滤器" \
+    "tc: applied dedicated per-user port filters on $dev")"
 }
 
 tc_rate_status() {
@@ -187,11 +234,11 @@ tc_rate_status() {
     warn "$(t '未检测到网卡' 'No NIC detected')"
     return 1
   fi
-  msg "--- qdisc ---"
+  t '--- 队列规则（qdisc）---' '--- qdisc ---'
   tc qdisc show dev "$dev" 2>/dev/null || true
-  msg "--- egress filter ---"
+  t '--- 出站过滤器（egress filter）---' '--- egress filter ---'
   tc filter show dev "$dev" egress 2>/dev/null | grep -E 'pref 42[0-9]{3}|police' | head -n 60 || true
-  msg "--- ingress filter ---"
+  t '--- 入站过滤器（ingress filter）---' '--- ingress filter ---'
   tc filter show dev "$dev" ingress 2>/dev/null | grep -E 'pref 42[0-9]{3}|police' | head -n 60 || true
   msg ""
   t '【套餐带宽】0 表示不限速' '[Package bandwidth] 0 means unlimited'
@@ -199,12 +246,15 @@ tc_rate_status() {
     python3 -c '
 import json,sys
 d=json.load(open(sys.argv[1]))
-print("%-16s %-8s %-8s %s" % ("USER","PORT","MBPS","STATUS"))
+user_h,port_h,mbps_h,status_h,on_l,off_l,unlim_l=sys.argv[2:9]
+print("%-16s %-8s %-8s %s" % (user_h,port_h,mbps_h,status_h))
 for u in d.get("users") or []:
     bw=int(u.get("bandwidth_mbps") or 0)
-    st="on" if u.get("enabled",True) else "off"
-    print("%-16s %-8s %-8s %s" % (u.get("name") or "", u.get("port") or "", bw if bw>0 else "unlim", st))
-' "$MITA_USERS_STATE"
+    st=on_l if u.get("enabled",True) else off_l
+    print("%-16s %-8s %-8s %s" % (u.get("name") or "", u.get("port") or "", bw if bw>0 else unlim_l, st))
+' "$MITA_USERS_STATE" \
+      "$(t '用户' 'USER')" "$(t '端口' 'PORT')" 'Mbps' "$(t '状态' 'STATUS')" \
+      "$(t '启用' 'on')" "$(t '停用' 'off')" "$(t '不限速' 'unlim')"
   fi
 }
 
@@ -259,13 +309,15 @@ print("\n".join(changed))
   local n
   while IFS= read -r n; do
     [ -n "$n" ] || continue
-    USERS_LOG_QUIET=1 users_log "expired disable: $n (expire_at<=$today)"
+    USERS_LOG_QUIET=1 users_log "$(t "到期停用: $n（expire_at<=${today}）" \
+      "expired disable: $n (expire_at<=$today)")"
   done <<< "$changed"
   if mita_installed 2>/dev/null; then
     load_install_state
     MULTI_USER_MODE=1
     if ! apply_users_config "$tx" >/dev/null 2>&1; then
-      USERS_LOG_QUIET=1 users_log "apply after expire scan failed; users state rolled back"
+      USERS_LOG_QUIET=1 users_log "$(t '到期扫描后的配置应用失败；用户状态已回滚' \
+        'apply after expire scan failed; users state rolled back')"
       admin_lock_release
       return 1
     fi
@@ -341,7 +393,8 @@ users_scan_calendar_quota_reset() {
   users_require_python || return 1
   users_state_exists || return 0
   if [ "${DRY_RUN:-0}" -eq 1 ]; then
-    msg "[dry-run] calendar quota scan (no users.json or metrics changes)"
+    t '[演练] 扫描日历月配额（不更改 users.json 或指标数据）' \
+      '[dry-run] calendar quota scan (no users.json or metrics changes)'
     return 0
   fi
   local ym reset_list method tx
@@ -362,13 +415,14 @@ users_scan_calendar_quota_reset() {
   local n
   while IFS= read -r n; do
     [ -n "$n" ] || continue
-    USERS_LOG_QUIET=1 users_log "calendar quota reset pending: $n month=$ym method=$method"
+    USERS_LOG_QUIET=1 users_log "$(t "日历月配额等待重置: $n，月份=${ym}，方式=${method}" \
+      "calendar quota reset pending: $n month=$ym method=$method")"
   done <<< "$reset_list"
 
   if ! mita_installed 2>/dev/null; then
     users_tx_rollback "$tx" 0
     admin_lock_release
-    warn "$(t 'mita 未安装，无法清空真实指标；未记录 calendar 重置成功' \
+    warn "$(t 'mita 未安装，无法清空真实指标；未记录日历月配额重置成功' \
       'mita is not installed, so real metrics cannot be cleared; calendar reset was not marked successful')"
     return 1
   fi
@@ -386,14 +440,15 @@ users_scan_calendar_quota_reset() {
   load_install_state
   MULTI_USER_MODE=1
   if ! apply_users_config "$tx" >/dev/null 2>&1; then
-    USERS_LOG_QUIET=1 users_log "calendar dedicated instance apply failed"
+    USERS_LOG_QUIET=1 users_log "$(t '日历月配额重置时，专属实例配置应用失败' \
+      'calendar dedicated instance apply failed')"
     admin_lock_release
     return 1
   fi
   users_isolated_mode || {
     users_tx_rollback "$tx" 1
     admin_lock_release
-    warn "$(t 'calendar 重置要求 isolated-v2，但当前模型无效' \
+    warn "$(t '日历月配额重置要求 isolated-v2，但当前部署模型无效' \
       'Calendar reset requires isolated-v2, but the current model is invalid')"
     return 1
   }
@@ -419,7 +474,8 @@ users_scan_calendar_quota_reset() {
       reset_failed=1
       break
     fi
-    USERS_LOG_QUIET=1 users_log "calendar reset cleared dedicated metrics: user=$n instance=$id"
+    USERS_LOG_QUIET=1 users_log "$(t "日历月配额重置已清除专属指标: 用户=${n}，实例=${id}" \
+      "calendar reset cleared dedicated metrics: user=$n instance=$id")"
   done <<<"$reset_list"
 
   if [ "$reset_failed" -eq 0 ] && _calendar_commit_reset "$ym"; then
@@ -446,7 +502,8 @@ users_scan_calendar_quota_reset() {
   done <<<"$reset_list"
   rm -rf "$backup_dir"
   users_tx_rollback "$tx" 1
-  USERS_LOG_QUIET=1 users_log "calendar dedicated metrics reset failed; state and metrics rolled back"
+  USERS_LOG_QUIET=1 users_log "$(t '日历月专属指标重置失败；状态与指标已回滚' \
+    'calendar dedicated metrics reset failed; state and metrics rolled back')"
   admin_lock_release
   return 1
 }
@@ -488,7 +545,8 @@ EOF
     systemctl enable --now nobrand-mieru-users-scan.timer 2>/dev/null || true
     install_logrotate_config 2>/dev/null || true
     harden_mita_permissions 2>/dev/null || true
-    users_log "scheduler: systemd expiry/quota timer"
+    users_log "$(t '调度器: systemd 到期与配额定时器' \
+      'scheduler: systemd expiry/quota timer')"
     return 0
   fi
 
@@ -500,7 +558,8 @@ EOF
     chmod 0644 "$MITA_USERS_CRON" 2>/dev/null || true
     install_logrotate_config 2>/dev/null || true
     harden_mita_permissions 2>/dev/null || true
-    users_log "scheduler: cron ${MITA_USERS_CRON}"
+    users_log "$(t "调度器: cron ${MITA_USERS_CRON}" \
+      "scheduler: cron ${MITA_USERS_CRON}")"
     return 0
   fi
   # OpenRC / 无 cron：写入 hint

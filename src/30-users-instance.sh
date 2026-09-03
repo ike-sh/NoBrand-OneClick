@@ -114,15 +114,16 @@ quota_label() {
     return
   fi
   if [ "$mb" -ge 1024 ] 2>/dev/null; then
-    printf '%sGB/%sd' "$((mb / 1024))" "${days:-30}"
+    t "$((mb / 1024))GB/${days:-30}天" "$((mb / 1024))GB/${days:-30}d"
   else
-    printf '%sMB/%sd' "$mb" "${days:-30}"
+    t "${mb}MB/${days:-30}天" "${mb}MB/${days:-30}d"
   fi
 }
 
 users_state_init_empty() {
   if [ "${DRY_RUN:-0}" -eq 1 ]; then
-    msg "[dry-run] initialize users state: $MITA_USERS_STATE"
+    t "[演练] 初始化用户状态: $MITA_USERS_STATE" \
+      "[dry-run] initialize users state: $MITA_USERS_STATE"
     return 0
   fi
   run mkdir -p "$(dirname "$MITA_USERS_STATE")"
@@ -189,7 +190,7 @@ users_tx_rollback() {
       apply_tc_limits 2>/dev/null || true
     else
       if ! reconcile_isolated_instances 2>/dev/null; then
-        warn "$(t '用户状态已回滚，但专属实例配置重新应用失败，请立即运行 doctor' \
+        warn "$(t '用户状态已回滚，但专属实例配置重新应用失败，请立即运行 Doctor / 诊断' \
           'Users state was rolled back, but reapplying dedicated instances failed; run doctor now')"
       fi
       apply_tc_limits 2>/dev/null || warn "$(t '用户状态已回滚，但旧限速规则未能完全恢复' \
@@ -322,7 +323,8 @@ install_instance_runtime() {
   sm="$(service_manager)"
   bin="$(mita_real_bin)"
   if [ "${DRY_RUN:-0}" -eq 1 ]; then
-    msg "[dry-run] install isolated mita instance runtime ($sm)"
+    t "[演练] 安装隔离的 mita 实例运行环境（${sm}）" \
+      "[dry-run] install isolated mita instance runtime ($sm)"
     return 0
   fi
   [ "$sm" != "none" ] || {
@@ -409,7 +411,8 @@ instance_ensure_openrc_service() {
   [ "$(service_manager)" = "openrc" ] || return 0
   svc="${MITA_INSTANCE_OPENRC_PREFIX}${id}"
   [ "${DRY_RUN:-0}" -eq 1 ] && {
-    msg "[dry-run] write OpenRC instance service $svc"
+    t "[演练] 写入 OpenRC 实例服务: $svc" \
+      "[dry-run] write OpenRC instance service $svc"
     return 0
   }
   cat >"$svc" <<EOF
@@ -478,7 +481,8 @@ PY
   dir="${MITA_INSTANCES_DIR}/${id}"
   final="$(instance_config_path "$id")"
   if [ "${DRY_RUN:-0}" -eq 1 ]; then
-    msg "[dry-run] install dedicated config $final"
+    t "[演练] 安装专属实例配置: $final" \
+      "[dry-run] install dedicated config $final"
     rm -f "$tmp"
     return 0
   fi

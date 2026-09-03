@@ -1,6 +1,20 @@
 # Changelog
 
-## 3.2.0 — Unreleased release candidate
+## 3.2.1 — 2026-09-03
+
+### Fixed
+
+- Fixed current-version state detection and recovery after interrupted install, repair, or uninstall operations.
+- Fixed a partially completed v3.2.0 uninstall being misclassified as a legacy installation.
+- Fixed full uninstall failing when the NoBrand configuration directory had already been removed.
+- Improved install, repair, and uninstall idempotency so lifecycle operations resume safely from actual remaining state.
+- Completed Chinese-first localization for the main CLI, menus, actions, prompts, status output, and errors.
+
+### Changed
+
+- Kept protocol behavior compatible with v3.2.0; Multi-Ingress, Strict Ingress, Forward, REALITY, and the Mieru latest-stable resolver retain their existing data-plane semantics.
+
+## 3.2.0 — 2026-09-02
 
 ### Added
 

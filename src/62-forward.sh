@@ -517,15 +517,28 @@ forward_import_validate() {
 }
 
 forward_sysctl_snapshot() {
-  local snapshot="$1"
+  local snapshot="$1" value
   mkdir -p "$snapshot" || return 1
-  [ ! -e "$NOBRAND_FORWARD_SYSCTL_STATE" ] \
-    || cp -a "$NOBRAND_FORWARD_SYSCTL_STATE" "$snapshot/state.json" || return 1
-  [ ! -e "$NOBRAND_FORWARD_SYSCTL_FRAGMENT" ] \
-    || cp -a "$NOBRAND_FORWARD_SYSCTL_FRAGMENT" "$snapshot/fragment" || return 1
-  if command -v sysctl >/dev/null 2>&1; then
-    sysctl -n net.ipv4.ip_forward 2>/dev/null >"$snapshot/live-value" || true
+  if [ -e "$NOBRAND_FORWARD_SYSCTL_STATE" ]; then
+    cp -a "$NOBRAND_FORWARD_SYSCTL_STATE" "$snapshot/state.json" || return 1
+  else
+    : >"$snapshot/state.absent" || return 1
   fi
+  if [ -e "$NOBRAND_FORWARD_SYSCTL_FRAGMENT" ]; then
+    cp -a "$NOBRAND_FORWARD_SYSCTL_FRAGMENT" "$snapshot/fragment" || return 1
+  else
+    : >"$snapshot/fragment.absent" || return 1
+  fi
+  if command -v sysctl >/dev/null 2>&1; then
+    value="$(sysctl -n net.ipv4.ip_forward 2>/dev/null)" || return 1
+  elif [ -r /proc/sys/net/ipv4/ip_forward ]; then
+    value="$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null)" || return 1
+  else
+    return 1
+  fi
+  value="$(printf '%s' "$value" | tr -d '[:space:]')" || return 1
+  case "$value" in 0|1) ;; *) return 1 ;; esac
+  printf '%s\n' "$value" >"$snapshot/live-value" || return 1
 }
 
 forward_sysctl_state_valid() {
@@ -549,19 +562,39 @@ forward_sysctl_fragment_owned() {
 }
 
 forward_sysctl_restore_snapshot() {
-  local snapshot="$1" value
+  local snapshot="$1" value="" failed=0
   if [ -e "$snapshot/state.json" ]; then
-    nb_atomic_install_file "$snapshot/state.json" "$NOBRAND_FORWARD_SYSCTL_STATE" 0600 || return 1
+    nb_atomic_install_file "$snapshot/state.json" "$NOBRAND_FORWARD_SYSCTL_STATE" 0600 || failed=1
+  elif [ -f "$snapshot/state.absent" ] && [ ! -L "$snapshot/state.absent" ]; then
+    rm -f "$NOBRAND_FORWARD_SYSCTL_STATE" || failed=1
   else
-    rm -f "$NOBRAND_FORWARD_SYSCTL_STATE"
+    failed=1
   fi
   if [ -e "$snapshot/fragment" ]; then
-    nb_atomic_install_file "$snapshot/fragment" "$NOBRAND_FORWARD_SYSCTL_FRAGMENT" 0644 || return 1
+    nb_atomic_install_file "$snapshot/fragment" "$NOBRAND_FORWARD_SYSCTL_FRAGMENT" 0644 || failed=1
+  elif [ -f "$snapshot/fragment.absent" ] && [ ! -L "$snapshot/fragment.absent" ]; then
+    rm -f "$NOBRAND_FORWARD_SYSCTL_FRAGMENT" || failed=1
   else
-    rm -f "$NOBRAND_FORWARD_SYSCTL_FRAGMENT"
+    failed=1
   fi
-  value="$(tr -d '[:space:]' <"$snapshot/live-value" 2>/dev/null || true)"
-  case "$value" in 0|1) sysctl -q -w "net.ipv4.ip_forward=${value}" >/dev/null || return 1 ;; esac
+  if [ -f "$snapshot/live-value" ] && [ ! -L "$snapshot/live-value" ]; then
+    value="$(tr -d '[:space:]' <"$snapshot/live-value" 2>/dev/null)" || failed=1
+  else
+    failed=1
+  fi
+  case "$value" in
+    0|1)
+      if command -v sysctl >/dev/null 2>&1; then
+        sysctl -q -w "net.ipv4.ip_forward=${value}" >/dev/null || failed=1
+      elif [ -w /proc/sys/net/ipv4/ip_forward ]; then
+        printf '%s\n' "$value" >/proc/sys/net/ipv4/ip_forward || failed=1
+      else
+        failed=1
+      fi
+      ;;
+    *) failed=1 ;;
+  esac
+  [ "$failed" -eq 0 ]
 }
 
 forward_sysctl_reconcile() {
@@ -793,11 +826,11 @@ forward_realm_install_runtime() {
   esac
   forward_ensure_realm_dependencies || return 1
   if [ -e "$NOBRAND_REALM_BIN" ] && ! forward_realm_runtime_metadata_valid; then
-    warn "Refusing to replace unowned Realm runtime: $NOBRAND_REALM_BIN"
+    warn "拒绝替换不属于 NoBrand 管理的 Realm Runtime: $NOBRAND_REALM_BIN"
     return 1
   fi
   if [ -e "$NOBRAND_REALM_RUNTIME_META" ] && ! forward_realm_runtime_metadata_valid; then
-    warn "Refusing to replace invalid Realm ownership metadata: $NOBRAND_REALM_RUNTIME_META"
+    warn "拒绝替换归属元数据无效的 Realm Runtime: $NOBRAND_REALM_RUNTIME_META"
     return 1
   fi
   [ "$channel" != latest ] && api="${NOBRAND_REALM_RELEASE_API}/tags/v${version}" \
@@ -882,7 +915,7 @@ forward_realm_install_service() {
   manager="$(nb_service_manager)"
   path="$(forward_realm_service_path)" || return 1
   [ ! -e "$path" ] || forward_realm_service_file_owned || {
-    warn "Refusing to replace unowned Realm service: $path"
+    warn "拒绝替换不属于 NoBrand 管理的 Realm 服务: $path"
     return 1
   }
   tmp="$(mktemp_file .realm-service)" || return 1
@@ -967,7 +1000,7 @@ forward_realm_listener_owned() {
 forward_realm_probe_config() {
   local config="$1" pid i
   [ -x "$NOBRAND_REALM_BIN" ] || return 1
-  "$NOBRAND_REALM_BIN" -c "$config" >/dev/null 2>&1 &
+  "$NOBRAND_REALM_BIN" -c "$config" 7>&- >/dev/null 2>&1 &
   pid=$!
   i=0
   while [ "$i" -lt 10 ]; do
@@ -1042,7 +1075,7 @@ forward_realm_apply_state() {
 
 forward_transaction_commit() {
   local candidate="$1" operation="${2:-modify}" old_backend="${3:-}" new_backend="${4:-}"
-  local snapshot old_state failed=0
+  local snapshot old_state failed=0 rollback_failed=0
   forward_state_valid "$candidate" || return 1
   snapshot="$(mktemp_dir)" || return 1
   old_state="$snapshot/old-state.json"
@@ -1062,13 +1095,17 @@ forward_transaction_commit() {
   fi
   [ "$failed" -ne 0 ] || forward_firewall_reconcile "$old_state" "$candidate" || failed=1
   if [ "$failed" -eq 0 ] && nb_atomic_install_file "$candidate" "$NOBRAND_FORWARD_STATE_FILE" 0600; then
-    rm -rf -- "$snapshot"
+    rm -rf -- "$snapshot" || return 1
     return 0
   fi
-  forward_firewall_reconcile "$candidate" "$old_state" >/dev/null 2>&1 || true
-  forward_restore_side_effect_snapshot "$snapshot/side-effects" >/dev/null 2>&1 || true
-  forward_realm_apply_state "$old_state" >/dev/null 2>&1 || true
-  rm -rf -- "$snapshot"
+  forward_firewall_reconcile "$candidate" "$old_state" >/dev/null 2>&1 || rollback_failed=1
+  forward_restore_side_effect_snapshot "$snapshot/side-effects" >/dev/null 2>&1 || rollback_failed=1
+  forward_realm_apply_state "$old_state" >/dev/null 2>&1 || rollback_failed=1
+  if [ "$rollback_failed" -ne 0 ]; then
+    warn "端口转发回滚未完整完成；恢复快照已保留: $snapshot"
+    return 1
+  fi
+  rm -rf -- "$snapshot" || return 1
   return 1
 }
 
@@ -1189,7 +1226,7 @@ forward_validate_requested_rule() {
   FORWARD_LISTEN_PORT="$(normalize_uint "$FORWARD_LISTEN_PORT")"
   FORWARD_TARGET_PORT="$(normalize_uint "$FORWARD_TARGET_PORT")"
   if [ "$FORWARD_BACKEND" = nftables ] && ! forward_valid_ipv4 "$FORWARD_TARGET_HOST"; then
-    warn 'nftables backend currently requires IP target; use Realm backend for domain targets.'
+    warn 'nftables 后端当前要求目标为 IP 地址；域名目标请使用 Realm 后端。'
     return 1
   fi
   forward_target_valid "$FORWARD_BACKEND" "$FORWARD_TARGET_HOST" || return 1
@@ -1223,18 +1260,18 @@ forward_add_rule() {
   [ -n "$FORWARD_NAME" ] && [ -n "$FORWARD_BACKEND" ] && [ -n "$FORWARD_PROTOCOL" ] \
     && [ -n "$FORWARD_TARGET_HOST" ] && [ -n "$FORWARD_TARGET_PORT" ] \
     || die 'forward add 非交互模式需要 --name --backend --protocol --target --target-port'
-  FORWARD_PROTOCOL="$(forward_normalize_protocol "$FORWARD_PROTOCOL")" || die 'Forward protocol 无效'
+  FORWARD_PROTOCOL="$(forward_normalize_protocol "$FORWARD_PROTOCOL")" || die 'Forward 协议无效'
   forward_prepare_ingress_enforcement "$FORWARD_BACKEND" "$INGRESS_PROFILE_ID" \
-    || die '所选 Ingress strict local address cannot be enforced by Forward'
+    || die '端口转发无法实施所选 Ingress 的 Strict 本地地址限制'
   if [ -z "$FORWARD_LISTEN_PORT" ]; then
     FORWARD_LISTEN_PORT="$(forward_select_available_port "$FORWARD_PROTOCOL" "$INGRESS_PROFILE_ID")" \
       || die '所选入口配置没有可用 Forward 自动端口；manual-only 必须显式使用 --port'
   fi
-  forward_validate_requested_rule || die 'Forward rule 参数无效、端口冲突或命中 xx00 保留端口'
+  forward_validate_requested_rule || die '端口转发规则参数无效、端口冲突或命中 xx00 保留端口'
   jq -e --arg name "$FORWARD_NAME" 'all(.rules[];.name!=$name)' "$NOBRAND_FORWARD_STATE_FILE" >/dev/null \
-    || die 'Forward rule name 已存在'
-  options="$(forward_default_options_json "$FORWARD_BACKEND")" || die 'Forward backend options 无效'
-  display="$(forward_requested_display_json)" || die 'Forward Display Endpoint 无效'
+    || die '端口转发规则名称已存在'
+  options="$(forward_default_options_json "$FORWARD_BACKEND")" || die '端口转发后端选项无效'
+  display="$(forward_requested_display_json)" || die '端口转发展示端点 / Display Endpoint 无效'
   id="$(forward_generate_rule_id)"
   now="$(forward_now)"
   rule="$(jq -n --arg id "$id" --arg name "$FORWARD_NAME" --arg note "$FORWARD_NOTE" \
@@ -1259,13 +1296,13 @@ forward_add_rule() {
     && forward_transaction_commit "$candidate" add '' "$FORWARD_BACKEND"
   local rc=$?
   rm -f "$candidate"
-  [ "$rc" -ne 0 ] || msg "Forward rule created: ${id} (${FORWARD_NAME})"
+  [ "$rc" -ne 0 ] || msg "已创建端口转发规则: ${id} (${FORWARD_NAME})"
   return "$rc"
 }
 
 forward_delete_rule() {
   local id old_backend candidate
-  id="$(forward_resolve_rule_id "$FORWARD_RULE_ID")" || die 'Forward rule 不存在'
+  id="$(forward_resolve_rule_id "$FORWARD_RULE_ID")" || die '端口转发规则不存在'
   old_backend="$(jq -r --arg id "$id" '.rules[]|select(.rule_id==$id)|.backend' "$NOBRAND_FORWARD_STATE_FILE")"
   candidate="$(mktemp_file .forward-delete)" || return 1
   jq --arg id "$id" '.rules |= map(select(.rule_id!=$id))' "$NOBRAND_FORWARD_STATE_FILE" >"$candidate" \
@@ -1277,7 +1314,7 @@ forward_delete_rule() {
 
 forward_set_enabled() {
   local enabled="$1" id backend candidate
-  id="$(forward_resolve_rule_id "$FORWARD_RULE_ID")" || die 'Forward rule 不存在'
+  id="$(forward_resolve_rule_id "$FORWARD_RULE_ID")" || die '端口转发规则不存在'
   backend="$(jq -r --arg id "$id" '.rules[]|select(.rule_id==$id)|.backend' "$NOBRAND_FORWARD_STATE_FILE")"
   candidate="$(mktemp_file .forward-enable)" || return 1
   jq --arg id "$id" --argjson enabled "$enabled" --arg now "$(forward_now)" \
@@ -1293,7 +1330,7 @@ forward_modify_rule() {
   local id old old_backend options candidate new_name new_note new_protocol new_listen_host
   local new_listen_port new_target_host new_target_port display
   local new_display_mode new_display_host new_display_port old_ingress_profile_id
-  id="$(forward_resolve_rule_id "$FORWARD_RULE_ID")" || die 'Forward rule 不存在'
+  id="$(forward_resolve_rule_id "$FORWARD_RULE_ID")" || die '端口转发规则不存在'
   old="$(forward_rule_json "$NOBRAND_FORWARD_STATE_FILE" "$id")"
   old_backend="$(jq -r .backend <<<"$old")"
   old_ingress_profile_id="$(jq -r '.ingress_profile_id // "legacy-default-route"' <<<"$old")"
@@ -1303,7 +1340,7 @@ forward_modify_rule() {
     INGRESS_PROFILE_ID="$old_ingress_profile_id"
   fi
   [ -z "$FORWARD_BACKEND" ] || [ "$FORWARD_BACKEND" = "$old_backend" ] \
-    || die 'modify 不切换 backend；请使用 switch-backend'
+    || die 'modify 不用于切换后端；请使用 switch-backend'
   FORWARD_BACKEND="$old_backend"
   new_name="${FORWARD_NAME:-$(jq -r .name <<<"$old")}"
   new_note="${FORWARD_NOTE:-$(jq -r .note <<<"$old")}"
@@ -1316,15 +1353,15 @@ forward_modify_rule() {
   FORWARD_LISTEN_HOST="$new_listen_host" FORWARD_LISTEN_PORT="$new_listen_port"
   FORWARD_TARGET_HOST="$new_target_host" FORWARD_TARGET_PORT="$new_target_port"
   forward_prepare_ingress_enforcement "$FORWARD_BACKEND" "$INGRESS_PROFILE_ID" \
-    || die 'Modified Forward rule cannot enforce the selected Ingress profile'
+    || die '修改后的端口转发规则无法实施所选 Ingress Profile'
   if [ "$INGRESS_ENFORCEMENT_RESOLVED" = permissive ] \
      && [ "$(jq -r '.ingress_enforcement // "permissive"' <<<"$old")" = strict ] \
      && [ "${FORWARD_LISTEN_HOST_CLI:-0}" -eq 0 ]; then
     FORWARD_LISTEN_HOST=0.0.0.0
   fi
-  forward_validate_requested_rule "forward:${id}" "$old" || die 'Forward 修改参数无效、冲突或命中 xx00'
+  forward_validate_requested_rule "forward:${id}" "$old" || die '端口转发修改参数无效、冲突或命中 xx00'
   if [ "$ADVERTISE_CLI" -eq 1 ]; then
-    display="$(forward_requested_display_json)" || die 'Forward Display Endpoint 无效'
+    display="$(forward_requested_display_json)" || die '端口转发展示端点 / Display Endpoint 无效'
     new_display_mode="$(jq -r .mode <<<"$display")"
     new_display_host="$(jq -r .host <<<"$display")"
     new_display_port="$(jq -r .port <<<"$display")"
@@ -1342,12 +1379,12 @@ forward_modify_rule() {
   fi
   if [ "$old_backend" = nftables ]; then
     if [ "$FORWARD_SOURCE_MODE_CLI" -eq 1 ]; then
-      options="$(forward_default_options_json nftables)" || die 'nftables source mode 无效'
+      options="$(forward_default_options_json nftables)" || die 'nftables 源地址模式无效'
     else
       options="$(jq -c .backend_options <<<"$old")"
     fi
   elif [ "$FORWARD_ADVANCED_CLI" -eq 1 ]; then
-    options="$(forward_default_options_json realm)" || die 'Realm advanced options 无效'
+    options="$(forward_default_options_json realm)" || die 'Realm 高级选项无效'
   else
     options="$(jq -c .backend_options <<<"$old")"
   fi
@@ -1375,16 +1412,16 @@ forward_modify_rule() {
 
 forward_switch_backend() {
   local id old old_backend new_backend options target candidate profile_id
-  id="$(forward_resolve_rule_id "$FORWARD_RULE_ID")" || die 'Forward rule 不存在'
+  id="$(forward_resolve_rule_id "$FORWARD_RULE_ID")" || die '端口转发规则不存在'
   old="$(forward_rule_json "$NOBRAND_FORWARD_STATE_FILE" "$id")"
   old_backend="$(jq -r .backend <<<"$old")"
   new_backend="$FORWARD_BACKEND"
   case "$new_backend" in nftables|realm) ;; *) die 'switch-backend 需要 --backend nftables|realm' ;; esac
-  [ "$new_backend" != "$old_backend" ] || die 'Forward rule 已使用该 backend'
+  [ "$new_backend" != "$old_backend" ] || die '端口转发规则已使用该后端'
   target="${FORWARD_TARGET_HOST:-$(jq -r .target_host <<<"$old")}"
   if [ "$new_backend" = nftables ] && ! forward_valid_ipv4 "$target"; then
     [ -n "$FORWARD_TARGET_HOST" ] \
-      || die 'Realm domain/IPv6 切换到 nftables 时必须显式提供 --target IPv4；不会静默解析并固定域名'
+      || die 'Realm 域名 / IPv6 目标切换到 nftables 时必须显式提供 --target IPv4；不会静默解析并固定域名'
   fi
   FORWARD_NAME="$(jq -r .name <<<"$old")"
   FORWARD_NOTE="$(jq -r .note <<<"$old")"
@@ -1399,9 +1436,9 @@ forward_switch_backend() {
   FORWARD_BACKEND="$new_backend"
   profile_id="$(jq -r '.ingress_profile_id // "legacy-default-route"' <<<"$old")"
   forward_prepare_ingress_enforcement "$new_backend" "$profile_id" \
-    || die 'Backend switch cannot enforce the retained Ingress profile'
-  forward_validate_requested_rule "forward:${id}" "$old" || die 'Backend switch 参数无效'
-  options="$(forward_default_options_json "$new_backend")" || die 'Backend options 无效'
+    || die '切换后端后无法实施原 Ingress Profile'
+  forward_validate_requested_rule "forward:${id}" "$old" || die '切换后端参数无效'
+  options="$(forward_default_options_json "$new_backend")" || die '后端选项无效'
   candidate="$(mktemp_file .forward-switch)" || return 1
   jq --arg id "$id" --arg backend "$new_backend" --arg listen_host "$FORWARD_LISTEN_HOST" \
     --arg target_host "$FORWARD_TARGET_HOST" --argjson target_port "$FORWARD_TARGET_PORT" \
@@ -1456,11 +1493,12 @@ forward_listener_enforcement_owned() {
 
 forward_list_rules() {
   forward_init_state || return 1
-  printf '%-18s %-20s %-10s %-6s %-22s %-11s %-28s %s\n' ID NAME BACKEND PROTO LISTEN ENFORCEMENT TARGET STATUS
+  printf '%-18s %-20s %-10s %-6s %-22s %-11s %-28s %s\n' ID 名称 后端 协议 实际监听 强制策略 目标 状态
   jq -r '.rules|sort_by(.rule_id)[]|[.rule_id,.name,.backend,.protocol,
     (.listen_host+":"+(.listen_port|tostring)),(.ingress_enforcement // "permissive"),(.target_host+":"+(.target_port|tostring)),
-    (if .enabled then "Enabled" else "Disabled" end)]|@tsv' "$NOBRAND_FORWARD_STATE_FILE" \
+    (.enabled|tostring)]|@tsv' "$NOBRAND_FORWARD_STATE_FILE" \
     | while IFS=$'\t' read -r id name backend protocol listen enforcement target status; do
+        [ "$status" = true ] && status='已启用' || status='已禁用'
         printf '%-18s %-20s %-10s %-6s %-22s %-11s %-28s %s\n' \
           "$id" "$name" "$backend" "$protocol" "$listen" "$enforcement" "$target" "$status"
       done
@@ -1497,53 +1535,57 @@ forward_node_rows() {
 }
 
 forward_show_rule() {
-  local id rule display_host display_port
-  id="$(forward_resolve_rule_id "$FORWARD_RULE_ID")" || die 'Forward rule 不存在'
+  local id rule display_host display_port enabled display_mode
+  id="$(forward_resolve_rule_id "$FORWARD_RULE_ID")" || die '端口转发规则不存在'
   rule="$(forward_rule_json "$NOBRAND_FORWARD_STATE_FILE" "$id")"
   display_host="$(nb_effective_advertise_host "$(jq -r .display_mode <<<"$rule")" "$(jq -r .display_host <<<"$rule")" "$(jq -r '.ingress_profile_id // "legacy-default-route"' <<<"$rule")")"
   display_port="$(nb_effective_advertise_port "$(jq -r .display_mode <<<"$rule")" \
     "$(jq -r .display_port <<<"$rule")" "$(jq -r .listen_port <<<"$rule")" "$(jq -r '.ingress_profile_id // "legacy-default-route"' <<<"$rule")")"
-  printf 'ID: %s\nName: %s\nNote: %s\nBackend: %s\nEnabled: %s\nProtocol: %s\n' \
+  enabled="$(jq -r .enabled <<<"$rule")"
+  [ "$enabled" = true ] && enabled='已启用' || enabled='已禁用'
+  display_mode="$(jq -r .display_mode <<<"$rule")"
+  case "$display_mode" in auto) display_mode='自动' ;; custom) display_mode='自定义' ;; esac
+  printf 'ID: %s\n名称: %s\n备注: %s\n后端: %s\n状态: %s\n协议: %s\n' \
     "$id" "$(jq -r .name <<<"$rule")" "$(jq -r .note <<<"$rule")" "$(jq -r .backend <<<"$rule")" \
-    "$(jq -r .enabled <<<"$rule")" "$(jq -r .protocol <<<"$rule")"
-  printf 'Real listener: %s:%s\nTarget: %s:%s\nDisplay endpoint: %s:%s\nDisplay mode: %s\n' \
+    "$enabled" "$(jq -r .protocol <<<"$rule")"
+  printf '实际监听 / Actual Listener: %s:%s\n目标: %s:%s\n展示端点 / Display Endpoint: %s:%s\n展示模式: %s\n' \
     "$(jq -r .listen_host <<<"$rule")" "$(jq -r .listen_port <<<"$rule")" \
     "$(jq -r .target_host <<<"$rule")" "$(jq -r .target_port <<<"$rule")" \
-    "$display_host" "$display_port" "$(jq -r .display_mode <<<"$rule")"
-  printf 'Ingress Profile: %s\n' "$(nb_ingress_profile_name "$(jq -r '.ingress_profile_id // "legacy-default-route"' <<<"$rule")")"
-  printf 'Ingress Enforcement: %s (%s)\nIngress Local Address: %s\n' \
+    "$display_host" "$display_port" "$display_mode"
+  printf '入口配置 / Ingress Profile: %s\n' "$(nb_ingress_profile_name "$(jq -r '.ingress_profile_id // "legacy-default-route"' <<<"$rule")")"
+  printf 'Ingress 强制策略: %s (%s)\nIngress 本地地址: %s\n' \
     "$(jq -r '.ingress_enforcement // "permissive"' <<<"$rule")" \
     "$(jq -r '.ingress_enforcement_method // "wildcard"' <<<"$rule")" \
     "$(jq -r '.ingress_local_address // empty' <<<"$rule")"
-  printf 'Backend options: %s\n' "$(jq -c .backend_options <<<"$rule")"
+  printf '后端选项: %s\n' "$(jq -c .backend_options <<<"$rule")"
 }
 
 forward_doctor() {
   local failed=0 id backend enabled protocol port target transport owner count
-  forward_state_valid "$NOBRAND_FORWARD_STATE_FILE" || { warn 'Forward state: FAIL'; return 1; }
-  msg 'Forward state: PASS (schema v3)'
+  forward_state_valid "$NOBRAND_FORWARD_STATE_FILE" || { warn '端口转发状态: FAIL'; return 1; }
+  msg '端口转发状态: PASS（schema v3）'
   while IFS=$'\t' read -r id backend enabled protocol port target; do
     owner="forward:${id}"
     while IFS= read -r transport; do
       [ "$(nb_registry_port_owner "$transport" "$port" 2>/dev/null || true)" = "$owner" ] \
-        || { warn "${id} port registry ${transport}/${port}: FAIL"; failed=1; }
+        || { warn "${id} 端口登记 ${transport}/${port}: FAIL"; failed=1; }
     done < <(forward_protocol_transports "$protocol")
-    forward_target_valid "$backend" "$target" || { warn "${id} target: FAIL"; failed=1; }
+    forward_target_valid "$backend" "$target" || { warn "${id} 目标地址: FAIL"; failed=1; }
     [ "$enabled" = true ] || continue
     if [ "$backend" = nftables ]; then
       forward_nft_rule_ingress_owned "$id" \
-        || { warn "${id} nft ownership: FAIL"; failed=1; }
+        || { warn "${id} nftables 归属校验: FAIL"; failed=1; }
       [ "$(sysctl -n net.ipv4.ip_forward 2>/dev/null || true)" = 1 ] \
         || { warn "${id} ip_forward: FAIL"; failed=1; }
     else
-      forward_realm_service_active || { warn "${id} Realm service: FAIL"; failed=1; }
+      forward_realm_service_active || { warn "${id} Realm 服务: FAIL"; failed=1; }
     fi
   done < <(jq -r '.rules[]|[.rule_id,.backend,(.enabled|tostring),.protocol,
     (.listen_port|tostring),.target_host]|@tsv' "$NOBRAND_FORWARD_STATE_FILE")
   count="$(jq '[.rules[]|select(.enabled and .backend=="realm")]|length' "$NOBRAND_FORWARD_STATE_FILE")"
   [ "$count" -eq 0 ] || forward_realm_listener_owned "$NOBRAND_FORWARD_STATE_FILE" \
-    || { warn 'Realm listener ownership: FAIL'; failed=1; }
-  [ "$failed" -eq 0 ] && msg 'Port Forward Doctor: PASS'
+    || { warn 'Realm 监听归属校验: FAIL'; failed=1; }
+  [ "$failed" -eq 0 ] && msg '端口转发 Doctor / 诊断: PASS'
   [ "$failed" -eq 0 ]
 }
 
@@ -1629,13 +1671,17 @@ forward_snapshot_restore_side_effects() {
 }
 
 forward_remove_restore_attempt_resources() {
-  forward_realm_service_action stop >/dev/null 2>&1 || true
-  forward_remove_owned_nft_table >/dev/null 2>&1 || true
+  local failed=0
+  if forward_realm_service_file_owned; then
+    forward_realm_service_action stop >/dev/null 2>&1 || failed=1
+  fi
+  forward_remove_owned_nft_table >/dev/null 2>&1 || failed=1
+  [ "$failed" -eq 0 ]
 }
 
 forward_restore_side_effect_snapshot() {
   local snapshot="$1" item label path mode failed=0
-  forward_remove_restore_attempt_resources
+  forward_remove_restore_attempt_resources || failed=1
   for item in \
     "binary|$NOBRAND_REALM_BIN|0755" \
     "metadata|$NOBRAND_REALM_RUNTIME_META|0600" \
@@ -1644,17 +1690,25 @@ forward_restore_side_effect_snapshot() {
     label="${item%%|*}"
     path="${item#*|}"; path="${path%%|*}"
     mode="${item##*|}"
-    if [ -e "$snapshot/${label}.external" ]; then
+    if [ -f "$snapshot/${label}.external" ] && [ ! -L "$snapshot/${label}.external" ]; then
       :
     elif [ -e "$snapshot/$label" ]; then
       nb_atomic_install_file "$snapshot/$label" "$path" "$mode" || failed=1
-    else
+    elif [ -f "$snapshot/${label}.absent" ] && [ ! -L "$snapshot/${label}.absent" ]; then
       rm -f "$path" || failed=1
+    else
+      failed=1
     fi
   done
   if [ -s "$snapshot/nft-table.nft" ]; then
     command -v nft >/dev/null 2>&1 && nft -c -f "$snapshot/nft-table.nft" >/dev/null 2>&1 \
       && nft -f "$snapshot/nft-table.nft" || failed=1
+  elif [ -f "$snapshot/nft-table.external" ] && [ ! -L "$snapshot/nft-table.external" ]; then
+    :
+  elif [ -f "$snapshot/nft-table.absent" ] && [ ! -L "$snapshot/nft-table.absent" ]; then
+    :
+  else
+    failed=1
   fi
   forward_sysctl_restore_snapshot "$snapshot/sysctl" || failed=1
   [ "$(nb_service_manager)" != systemd ] || systemctl daemon-reload >/dev/null 2>&1 || failed=1
@@ -1688,12 +1742,12 @@ forward_uninstall() {
   fi
   forward_remove_owned_nft_table || return 1
   rm -f "$NOBRAND_FORWARD_REALM_CONFIG" "$NOBRAND_FORWARD_NFT_RULESET" "$NOBRAND_FORWARD_STATE_FILE"
-  msg 'Port Forward uninstalled; external nftables tables and external Realm installations were preserved.'
+  msg '端口转发已卸载；外部 nftables 表与外部 Realm 安装均已保留。'
 }
 
 forward_usage() {
   cat <<'EOF'
-Port Forward:
+端口转发 / Port Forward：
   nobrand forward add --name NAME --backend nftables|realm --protocol TCP|UDP|BOTH \
     --listen 0.0.0.0 --port PORT --target HOST --target-port PORT
   nobrand forward list
@@ -1704,8 +1758,8 @@ Port Forward:
   nobrand forward export [FILE]
   nobrand forward import FILE
 
-nftables targets are IPv4 literals. Realm targets may be IPv4, IPv6, or domains.
-The local IPv4 tail base xx00 is reserved for every backend and transport.
+nftables 目标必须是 IPv4 字面地址；Realm 目标可以是 IPv4、IPv6 或域名。
+本地 IPv4 尾号推导的 xx00 基准端口会为所有后端和传输保留。
 EOF
 }
 

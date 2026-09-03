@@ -39,6 +39,17 @@ parse_reality() {
       "$VLESS_REALITY_TARGET" "$VLESS_REALITY_TARGET_PORT" "$INGRESS_PROFILE"
   ' test "$TEST_ROOT/install-nobrand.sh" "$@"
 }
+
+assert_cli_error_text() {
+  local expected="$1" forbidden="$2" output=""
+  shift 2
+  if output="$(bash "$TEST_ROOT/install-nobrand.sh" "$@" 2>&1)"; then
+    fail "CLI parser unexpectedly accepted: $*"
+  fi
+  assert_contains "$output" "$expected" "localized CLI error: $*"
+  assert_not_contains "$output" "$forbidden" "removed English CLI error wording: $*"
+}
+
 export TEST_ROOT
 cli_fixture="$(mktemp -d)"
 trap 'rm -rf -- "$cli_fixture"' EXIT
@@ -156,7 +167,21 @@ if parse install-nobrand.sh manager upgrade extra >/dev/null 2>&1; then
 fi
 
 version="$(bash "$TEST_ROOT/install-nobrand.sh" --version)"
-assert_eq $'NoBrand-OneClick 3.2.0\nAuthor: ike' "$version" 'NoBrand product version output'
+assert_eq $'NoBrand-OneClick 3.2.1\n作者: ike' "$version" 'NoBrand Chinese-first version output'
+english_version="$(bash -c '
+  installer="$1"
+  set --
+  MITA_SOURCE_ONLY=1 source "$installer"
+  LANG_ZH=0 nobrand_version
+' test "$TEST_ROOT/install-nobrand.sh")"
+assert_eq $'NoBrand-OneClick 3.2.1\nAuthor: ike' "$english_version" \
+  'NoBrand English version output'
+mieru_version="$(bash "$TEST_ROOT/install-nobrand.sh" mieru --version)"
+assert_eq $'NoBrand-OneClick Mieru 3.2.1\n作者: ike' "$mieru_version" \
+  'Mieru Chinese-first version output'
+mieru_english_version="$(bash "$TEST_ROOT/install-nobrand.sh" mieru --lang en --version)"
+assert_eq $'NoBrand-OneClick Mieru 3.2.1\nAuthor: ike' "$mieru_english_version" \
+  'Mieru English version output'
 cp "$TEST_ROOT/install-nobrand.sh" "$cli_fixture/nb"
 short_version="$(bash "$cli_fixture/nb" --version)"
 assert_eq "$version" "$short_version" 'nb version alias'
@@ -170,6 +195,23 @@ fi
 if bash "$TEST_ROOT/install-nobrand.sh" --version extra >/dev/null 2>&1; then
   fail 'version extra argument must fail'
 fi
+
+assert_cli_error_text '--name 需要 VLESS REALITY 实例名称' 'instance name' \
+  vless-reality install --name
+assert_cli_error_text '未知 TUIC 用户操作: invalid' 'TUIC user 操作' \
+  tuic user invalid
+assert_cli_error_text 'TUIC 通道只支持 stable、latest、pinned' 'TUIC channel' \
+  tuic install --channel invalid
+assert_cli_error_text '--token 需要看门狗令牌' 'watchdog token' \
+  ssh confirm-admin --token
+assert_cli_error_text '--rule 需要规则 ID 或名称' 'rule ID or name' \
+  forward show --rule
+assert_cli_error_text '--interface 需要网络接口' '需要 interface' \
+  forward add --interface
+assert_cli_error_text '--dns-mode 需要 Realm DNS 模式' 'Realm DNS mode' \
+  forward add --dns-mode
+assert_cli_error_text '--listen-transport 需要 Realm 传输字符串' 'transport string' \
+  forward add --listen-transport
 
 for option in --protocol --traffic-pattern --low-entropy --multiplexing --handshake-mode \
   --user --password --package --quota-mb --quota-days --quota-mode --expire \

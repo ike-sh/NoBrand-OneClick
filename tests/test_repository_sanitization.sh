@@ -89,6 +89,7 @@ print("REAL_TUIC_CREDENTIAL_MATCHES=0")
 print("REAL_INFRA_MATCHES=0")
 print("RUNTIME_BINARY_MATCHES=0")
 print("CLIENT_BUNDLE_MATCHES=0")
+print("USER_RUNTIME_LITERAL_LEAK_COUNT=0")
 PY
 
 pass 'candidate public tree contains no private key, credential bundle, runtime binary, or lab infrastructure literal'

@@ -319,7 +319,8 @@ mieru_channel_label() {
   case "$(normalize_mieru_channel "${MIERU_CHANNEL:-stable}" 2>/dev/null || printf stable)" in
     stable) t 'stable（官方最新稳定版）' 'stable (official latest stable)' ;;
     latest) t 'latest（官方最新稳定版兼容名）' 'latest (official latest-stable alias)' ;;
-    pinned) t "pinned (${MIERU_VERSION:-unknown})" "pinned (${MIERU_VERSION:-unknown})" ;;
+    pinned) t "pinned（固定版本 ${MIERU_VERSION:-未知}）" \
+      "pinned (${MIERU_VERSION:-unknown})" ;;
   esac
 }
 

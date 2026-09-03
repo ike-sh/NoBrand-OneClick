@@ -23,7 +23,9 @@ reality_openrc_service_owned() {
 reality_remove_service_runtime_if_owned() {
   if [ -e "$NOBRAND_REALITY_SYSTEMD_TEMPLATE" ]; then
     reality_systemd_template_owned || {
-      warn "Refusing to remove unowned VLESS REALITY service template: ${NOBRAND_REALITY_SYSTEMD_TEMPLATE}"
+      warn "$(t \
+        "拒绝删除不属于 NoBrand 的 VLESS REALITY 服务模板: ${NOBRAND_REALITY_SYSTEMD_TEMPLATE}" \
+        "Refusing to remove unowned VLESS REALITY service template: ${NOBRAND_REALITY_SYSTEMD_TEMPLATE}")"
       return 1
     }
     rm -f "$NOBRAND_REALITY_SYSTEMD_TEMPLATE" || return 1
@@ -37,7 +39,9 @@ reality_install_service_runtime() {
     systemd)
       if [ -e "$NOBRAND_REALITY_SYSTEMD_TEMPLATE" ] \
          && ! reality_systemd_template_owned; then
-        warn "Refusing to replace unowned VLESS REALITY service template: ${NOBRAND_REALITY_SYSTEMD_TEMPLATE}"
+        warn "$(t \
+          "拒绝替换不属于 NoBrand 的 VLESS REALITY 服务模板: ${NOBRAND_REALITY_SYSTEMD_TEMPLATE}" \
+          "Refusing to replace unowned VLESS REALITY service template: ${NOBRAND_REALITY_SYSTEMD_TEMPLATE}")"
         return 1
       fi
       tmp="$(mktemp_file .reality-service)" || return 1
@@ -84,7 +88,8 @@ reality_ensure_openrc_service() {
   [ "$(nb_service_manager)" = openrc ] || return 0
   path="${NOBRAND_REALITY_OPENRC_PREFIX}${id}"
   if [ -e "$path" ] && ! reality_openrc_service_owned "$id"; then
-    warn "Refusing to replace unowned VLESS REALITY OpenRC service: ${path}"
+    warn "$(t "拒绝替换不属于 NoBrand 的 VLESS REALITY OpenRC 服务: ${path}" \
+      "Refusing to replace unowned VLESS REALITY OpenRC service: ${path}")"
     return 1
   fi
   tmp="$(mktemp_file .reality-openrc)" || return 1

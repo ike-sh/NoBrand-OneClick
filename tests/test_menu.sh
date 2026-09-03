@@ -65,7 +65,7 @@ set_inputs invalid -1 999 '' 1 2 3 4 5 6 7 8 9 10 11 yes 0
 # shellcheck disable=SC2218
 vless_sudoku_menu_loop >"$fixture/vless.out"
 vless_output="$(<"$fixture/vless.out")"
-assert_contains "$vless_output" 'VLESS Encryption: NOT USED' 'VLESS submenu plain-mode notice'
+assert_contains "$vless_output" 'VLESS Encryption：未使用（NOT USED）' 'VLESS submenu plain-mode notice'
 for action in install show set-endpoint status start stop restart doctor smoke upgrade remove; do
   grep -qx "vless:${action}" "$action_log" || fail "VLESS submenu handler not reached: $action"
 done
@@ -88,16 +88,33 @@ snell_menu_loop() { printf 'top:snell\n' >>"$action_log"; }
 set_inputs invalid -1 999 '' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 0
 nobrand_menu_loop >"$fixture/top.out"
 top_output="$(<"$fixture/top.out")"
-assert_contains "$top_output" 'VLESS REALITY + Vision (TCP; Public Recommended)' 'top REALITY menu visibility'
-assert_contains "$top_output" 'VLESS + FinalMask + Sudoku (TCP)' 'top VLESS menu visibility'
-assert_contains "$top_output" 'TUIC v5 (official sing-box)' 'top TUIC menu visibility'
-assert_contains "$top_output" 'SSH Tunnel (existing OpenSSH)' 'top SSH Tunnel menu visibility'
-assert_contains "$top_output" 'Port Forward (nftables / Realm)' 'top Port Forward menu visibility'
+assert_contains "$top_output" 'VLESS REALITY + Vision（TCP；推荐 Public Ingress）' 'top REALITY menu visibility'
+assert_contains "$top_output" 'VLESS + FinalMask + Sudoku（TCP）' 'top VLESS menu visibility'
+assert_contains "$top_output" 'TUIC v5（官方 sing-box Runtime）' 'top TUIC menu visibility'
+assert_contains "$top_output" 'SSH Tunnel（现有 OpenSSH）' 'top SSH Tunnel menu visibility'
+assert_contains "$top_output" '端口转发 / Port Forward（nftables / Realm）' 'top Port Forward menu visibility'
 assert_contains "$top_output" '网络入口 / Ingress' 'top Ingress menu visibility'
 assert_contains "$top_output" '卸载 NoBrand-OneClick（全部协议）' 'top unified uninstall label'
 assert_not_contains "$top_output" '保留 Mieru' 'top uninstall must not claim Mieru preservation'
 for item in mieru snell hy2 tuic reality vless ssh forward ingress nodes status doctor backup network help uninstall; do
   grep -qx "top:${item}" "$action_log" || fail "top menu handler not reached: $item"
 done
+
+# A menu action that arms the SSH rollback watchdog must unwind the root menu,
+# allowing the fresh administrator connection to acquire the lifecycle lock.
+nobrand_ssh_confirmation_pending() { return 0; }
+nobrand_pending_ssh_confirmation_notice() { printf 'pending SSH confirmation\n'; }
+set_inputs 7
+nobrand_menu_loop >"$fixture/pending-ssh-menu.out"
+assert_contains "$(<"$fixture/pending-ssh-menu.out")" 'pending SSH confirmation' \
+  'top menu exits for fresh-admin SSH watchdog confirmation'
+
+menu_pause() { : >"$fixture/unified-uninstall-pause"; }
+set_inputs 16
+nobrand_menu_loop >"$fixture/pending-unified-uninstall-menu.out"
+[ ! -e "$fixture/unified-uninstall-pause" ] \
+  || fail 'unified uninstall paused while SSH confirmation needed the lifecycle lock'
+assert_contains "$(<"$fixture/pending-unified-uninstall-menu.out")" \
+  'pending SSH confirmation' 'unified uninstall unwinds for fresh-admin confirmation'
 
 pass 'menu-to-handler mapping, invalid/empty input safety, VLESS 1-11, and backup/restore reachability'

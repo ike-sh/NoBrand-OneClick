@@ -75,12 +75,12 @@ run_case() {
 }
 
 run_case debian docker.io/library/debian:bookworm-slim \
-  'apt-get update -qq >/dev/null && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq bash python3 iproute2 jq openssl openssh-server openssh-client passwd procps >/dev/null'
+  'apt-get update -qq >/dev/null && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq bash git python3 iproute2 jq openssl openssh-server openssh-client passwd procps >/dev/null'
 run_case ubuntu docker.io/library/ubuntu:24.04 \
-  'apt-get update -qq >/dev/null && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq bash python3 iproute2 jq openssl openssh-server openssh-client passwd procps >/dev/null'
+  'apt-get update -qq >/dev/null && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq bash git python3 iproute2 jq openssl openssh-server openssh-client passwd procps >/dev/null'
 run_case rocky docker.io/library/rockylinux:9 \
-  'dnf install -y -q bash python3 iproute jq openssl openssh-server openssh-clients shadow-utils procps-ng >/dev/null'
+  'dnf install -y -q bash diffutils git python3 iproute jq openssl openssh-server openssh-clients shadow-utils procps-ng >/dev/null'
 run_case alpine docker.io/library/alpine:3.20 \
-  'apk add --no-cache bash python3 iproute2 jq openssl openssh-server openssh-keygen shadow procps-ng >/dev/null'
+  'apk add --no-cache bash git python3 iproute2 jq openssl openssh-server openssh-keygen shadow procps-ng >/dev/null'
 
 printf '%s\n' 'platform-rootfs-smoke: PASS (Debian/Ubuntu/Rocky/Alpine)'

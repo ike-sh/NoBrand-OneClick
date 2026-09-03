@@ -2,18 +2,18 @@ doctor_check_tc_limits() {
   local dev rate_users
   rate_users="$(users_rate_limited_count)"
   if [ "${rate_users:-0}" -eq 0 ]; then
-    check "rate-limit rules" 1 "$(t '未配置用户限速，clsact/filter 无需创建' \
+    check "$(t '用户限速规则' 'rate-limit rules')" 1 "$(t '未配置用户限速，clsact/filter 无需创建' \
       'No users have rate limits; clsact/filter rules are not required')"
   elif ! command -v tc >/dev/null 2>&1; then
-    check "tc binary" 0 "$(t "${rate_users} 个限速用户，但 tc 未安装" \
+    check "$(t 'tc 命令' 'tc binary')" 0 "$(t "${rate_users} 个限速用户，但 tc 未安装" \
       "${rate_users} rate-limited user(s), but tc is not installed")"
   else
     dev="$(tc_default_iface 2>/dev/null || true)"
     if [ -z "$dev" ]; then
-      check "nic detect" 0 "$(t "${rate_users} 个限速用户，但未检测到网卡；可设置 TC_IFACE" \
+      check "$(t '网卡检测' 'nic detect')" 0 "$(t "${rate_users} 个限速用户，但未检测到网卡；可设置 TC_IFACE" \
         "${rate_users} rate-limited user(s), but no interface was detected; set TC_IFACE")"
     else
-      check "nic" 1 "$dev"
+      check "$(t '网卡' 'nic')" 1 "$dev"
       if tc qdisc show dev "$dev" 2>/dev/null | grep -qw clsact; then
         check "clsact" 1
       else
@@ -21,9 +21,9 @@ doctor_check_tc_limits() {
           "${rate_users} rate-limited user(s), but clsact is missing")"
       fi
       if [ -s "$TC_OWNED_STATE" ]; then
-        check "owned filter manifest" 1 "$TC_OWNED_STATE"
+        check "$(t '自有 filter 清单' 'owned filter manifest')" 1 "$TC_OWNED_STATE"
       else
-        check "owned filter manifest" 0 "$(t "${rate_users} 个限速用户，但规则清单缺失" \
+        check "$(t '自有 filter 清单' 'owned filter manifest')" 0 "$(t "${rate_users} 个限速用户，但规则清单缺失" \
           "${rate_users} rate-limited user(s), but the owned-filter manifest is missing")"
       fi
     fi
@@ -47,35 +47,42 @@ do_doctor() {
     fi
   }
   print_banner
-  t '========== 一键验收 doctor ==========' '========== doctor / verify =========='
+  t '========== 一键验收 Doctor ==========' '========== doctor / verify =========='
   msg ""
 
   t '【环境】' '[Environment]'
-  check "root" "$([ "$(id -u 2>/dev/null || echo 1)" -eq 0 ] && echo 1 || echo 0)"
+  check "$(t 'root 权限' 'root')" "$([ "$(id -u 2>/dev/null || echo 1)" -eq 0 ] && echo 1 || echo 0)"
   check "python3" "$(command -v python3 >/dev/null 2>&1 && echo 1 || echo 0)"
-  check "tc (iproute2)" "$(command -v tc >/dev/null 2>&1 && echo 1 || echo 2)" "专属端口限速"
-  check "flock" "$(command -v flock >/dev/null 2>&1 && echo 1 || echo 2)" "并发锁"
+  check "tc (iproute2)" "$(command -v tc >/dev/null 2>&1 && echo 1 || echo 2)" \
+    "$(t '专属端口限速' 'dedicated-port rate limits')"
+  check "flock" "$(command -v flock >/dev/null 2>&1 && echo 1 || echo 2)" \
+    "$(t '并发锁' 'concurrency lock')"
 
   t '【mita】' '[mita]'
   load_install_state 2>/dev/null || true
   if mita_installed; then
-    check "mita installed" 1 "$(installed_version 2>/dev/null || echo ok)"
+    check "$(t 'mita 已安装' 'mita installed')" 1 "$(installed_version 2>/dev/null || echo ok)"
     local bin st iid iname iport cfg_ok
     bin="$(mita_bin)"
     if users_isolated_mode; then
-      check "deployment model" 1 "$MITA_DEPLOYMENT_MODEL"
+      check "$(t '部署模型' 'deployment model')" 1 "$MITA_DEPLOYMENT_MODEL"
       if [ "$(service_manager)" = systemd ]; then
-        check "instance service template" "$([ -f "$MITA_INSTANCE_SYSTEMD_TEMPLATE" ] && echo 1 || echo 0)"
-        check "instance runtime tmpfiles" "$([ -f "$MITA_INSTANCE_TMPFILES" ] && echo 1 || echo 0)"
+        check "$(t '实例 systemd 服务模板' 'instance service template')" \
+          "$([ -f "$MITA_INSTANCE_SYSTEMD_TEMPLATE" ] && echo 1 || echo 0)"
+        check "$(t '实例运行时 tmpfiles' 'instance runtime tmpfiles')" \
+          "$([ -f "$MITA_INSTANCE_TMPFILES" ] && echo 1 || echo 0)"
       else
-        check "instance runner" "$([ -x "$MITA_INSTANCE_RUNNER" ] && echo 1 || echo 0)"
+        check "$(t '实例启动器' 'instance runner')" "$([ -x "$MITA_INSTANCE_RUNNER" ] && echo 1 || echo 0)"
       fi
       while IFS=$'\t' read -r iid iname iport; do
         [ -n "$iid" ] || continue
-        check "instance ${iname} config" "$([ -r "$(instance_config_path "$iid")" ] && echo 1 || echo 0)" "$iid"
-        check "instance ${iname} socket" "$([ -S "$(instance_socket_path "$iid")" ] && echo 1 || echo 0)" "$iid"
+        check "$(t "实例 ${iname} 配置" "instance ${iname} config")" \
+          "$([ -r "$(instance_config_path "$iid")" ] && echo 1 || echo 0)" "$iid"
+        check "$(t "实例 ${iname} 套接字" "instance ${iname} socket")" \
+          "$([ -S "$(instance_socket_path "$iid")" ] && echo 1 || echo 0)" "$iid"
         st="$(instance_cmd "$iid" status 2>/dev/null || true)"
-        check "instance ${iname} RUNNING" "$(printf '%s' "$st" | grep -q 'status is \"RUNNING\"' && echo 1 || echo 0)" "$iid"
+        check "$(t "实例 ${iname} 运行状态" "instance ${iname} RUNNING")" \
+          "$(printf '%s' "$st" | grep -q 'status is \"RUNNING\"' && echo 1 || echo 0)" "$iid"
         cfg_ok="$(python3 - "$(instance_config_path "$iid")" "$iname" "$iport" "${PROTOCOL:-TCP}" <<'PY' 2>/dev/null && echo 1 || echo 0
 import json,sys
 path,name,port,proto=sys.argv[1],sys.argv[2],int(sys.argv[3]),sys.argv[4]
@@ -88,54 +95,68 @@ actual={(int(x.get("port") or 0),x.get("protocol")) for x in bindings}
 raise SystemExit(0 if len(users)==1 and users[0].get("name")==name and actual==expected else 1)
 PY
 )"
-        check "instance ${iname} isolation" "$cfg_ok" "one user / dedicated bindings"
-        check "instance ${iname} metrics dir" "$([ -d "$(instance_metrics_dir "$iid")" ] && echo 1 || echo 0)" "$iid"
+        check "$(t "实例 ${iname} 隔离配置" "instance ${iname} isolation")" "$cfg_ok" \
+          "$(t '单用户 / 专属端口绑定' 'one user / dedicated bindings')"
+        check "$(t "实例 ${iname} 指标目录" "instance ${iname} metrics dir")" \
+          "$([ -d "$(instance_metrics_dir "$iid")" ] && echo 1 || echo 0)" "$iid"
         if instance_cmd "$iid" get users >/dev/null 2>&1; then
-          check "instance ${iname} metrics API" 1
+          check "$(t "实例 ${iname} 指标 API" "instance ${iname} metrics API")" 1
         else
-          check "instance ${iname} metrics API" 2 "get users unavailable"
+          check "$(t "实例 ${iname} 指标 API" "instance ${iname} metrics API")" 2 \
+            "$(t 'get users 不可用' 'get users unavailable')"
         fi
       done < <(users_enabled_instance_rows)
     else
-      check "deployment model" 0 "schema v3 requires isolated-v2"
+      check "$(t '部署模型' 'deployment model')" 0 \
+        "$(t 'schema v3 要求 isolated-v2' 'schema v3 requires isolated-v2')"
     fi
   else
-    check "mita installed" 0
+    check "$(t 'mita 已安装' 'mita installed')" 0
   fi
 
   t '【用户状态】' '[Users state]'
   if users_state_exists; then
-    check "users.json" 1 "$(users_count) users"
-    local en
+    local en user_count enabled_detail
+    user_count="$(users_count)"
+    check "users.json" 1 "$(t "${user_count} 位用户" "${user_count} users")"
     en="$(python3 -c '
 import json,sys
 d=json.load(open(sys.argv[1]))
 print(sum(1 for u in (d.get("users") or []) if u.get("enabled",True)))
 ' "$MITA_USERS_STATE" 2>/dev/null || echo 0)"
-    check "enabled users" "$([ "${en:-0}" -ge 1 ] && echo 1 || echo 2)" \
-      "$en$([ "${en:-0}" -eq 0 ] && printf ' (all disabled/expired)' || true)"
+    enabled_detail="$en"
+    if [ "${en:-0}" -eq 0 ]; then
+      enabled_detail="$(t "${en}（全部已停用或已过期）" "${en} (all disabled/expired)")"
+    fi
+    check "$(t '已启用用户' 'enabled users')" "$([ "${en:-0}" -ge 1 ] && echo 1 || echo 2)" \
+      "$enabled_detail"
     if users_isolated_mode; then
-      check "user-to-instance mapping" 1 "$en dedicated instances"
+      check "$(t '用户到实例映射' 'user-to-instance mapping')" 1 \
+        "$(t "${en} 个专属实例" "${en} dedicated instances")"
     else
-      check "user-to-instance mapping" 0 "schema v3 requires isolated-v2"
+      check "$(t '用户到实例映射' 'user-to-instance mapping')" 0 \
+        "$(t 'schema v3 要求 isolated-v2' 'schema v3 requires isolated-v2')"
     fi
     # 目录权限
     local mode
     mode="$(stat -c '%a' /etc/mita 2>/dev/null || stat -f '%OLp' /etc/mita 2>/dev/null || echo '?')"
     if [ "$mode" = "750" ] || [ "$mode" = "0750" ] || [ "$mode" = "770" ] || [ "$mode" = "0770" ] || [ "$mode" = "700" ] || [ "$mode" = "0700" ]; then
-      check "/etc/mita mode" 1 "$mode"
+      check "$(t '/etc/mita 权限模式' '/etc/mita mode')" 1 "$mode"
     else
-      check "/etc/mita mode" 2 "$mode (建议 mita:mita 750)"
+      check "$(t '/etc/mita 权限模式' '/etc/mita mode')" 2 \
+        "$(t "$mode（建议 mita:mita 750）" "$mode (recommended: mita:mita 750)")"
     fi
   else
-    check "users.json" 0 "schema v3 Mieru user state missing"
+    check "users.json" 0 "$(t 'schema v3 Mieru 用户状态缺失' 'schema v3 Mieru user state missing')"
   fi
 
   t '【防火墙所有权】' '[Firewall ownership]'
   if [ -f "$MITA_FIREWALL_OWNED_STATE" ]; then
-    check "owned firewall manifest" 1 "$MITA_FIREWALL_OWNED_STATE"
+    check "$(t '自有防火墙规则清单' 'owned firewall manifest')" 1 "$MITA_FIREWALL_OWNED_STATE"
   else
-    check "owned firewall manifest" 2 "未新增本地规则或沿用预先存在的规则"
+    check "$(t '自有防火墙规则清单' 'owned firewall manifest')" 2 \
+      "$(t '未新增本地规则或沿用预先存在的规则' \
+        'no local rule was added, or a pre-existing rule is in use')"
   fi
 
   t '【专属实例 tc 限速】' '[Dedicated-instance tc limits]'
@@ -143,16 +164,16 @@ print(sum(1 for u in (d.get("users") or []) if u.get("enabled",True)))
 
   t '【定时任务】' '[Scheduler]'
   if [ -f "$MITA_USERS_TIMER" ] || systemctl is-enabled nobrand-mieru-users-scan.timer >/dev/null 2>&1; then
-    check "systemd timer" 1
+    check "$(t 'systemd 定时器' 'systemd timer')" 1
   elif [ -f "$MITA_USERS_CRON" ]; then
     check "cron.d" 1 "$MITA_USERS_CRON"
   else
-    check "scheduler" 2 "未安装 timer/cron"
+    check "$(t '定时任务' 'scheduler')" 2 "$(t '未安装 timer/cron' 'timer/cron is not installed')"
   fi
   if [ -f "$MITA_LOGROTATE_CONF" ]; then
     check "logrotate" 1
   else
-    check "logrotate" 2 "可选"
+    check "logrotate" 2 "$(t '可选' 'optional')"
   fi
 
   msg ""
@@ -194,16 +215,36 @@ perf_sysctl_value() {
   fi
 }
 
+perf_display_value() {
+  local value="${1:-}"
+  case "$value" in
+    enabled) t '已启用' 'enabled' ;;
+    disabled) t '未启用' 'disabled' ;;
+    inactive) t '未启用' 'inactive' ;;
+    unknown) t '未知' 'unknown' ;;
+    unavailable) t '不可用' 'unavailable' ;;
+    auto) t '自动' 'auto' ;;
+    'owned filters recorded') t '已记录 OneClick 管理的 filter' 'owned filters recorded' ;;
+    'no OneClick-owned rate filters') t '没有 OneClick 管理的限速 filter' 'no OneClick-owned rate filters' ;;
+    *) msg "$value" ;;
+  esac
+}
+
 do_perf() {
   # 严格只读：本函数不得调用 run/save/apply/reconcile/ensure/start/enable 等写路径。
   local iface="" iface_mtu="" public4="" public6="" cc="" default_qdisc="" qdisc_live=""
-  local cpu_cores="" load_now="" memory="" instance_count=0 process_rows="" rate_users=0 tc_state="inactive"
-  local bbr_state="disabled" fq_state="disabled" installed="unknown" advertised="auto"
+  local cpu_cores="" load_now="" memory="" memory_total="" memory_available=""
+  local instance_count=0 process_rows="" rate_users=0 tc_state="inactive"
+  local bbr_state="disabled" fq_state="disabled" installed="unknown" advertised=""
+  local unknown_text="" auto_text=""
   load_install_state 2>/dev/null || true
   if users_state_exists && [ "$(users_count 2>/dev/null || echo 0)" -gt 0 ]; then
     users_sync_primary_globals
   fi
   profile_reconcile_metadata
+  unknown_text="$(perf_display_value unknown)"
+  auto_text="$(perf_display_value auto)"
+  advertised="$auto_text"
   installed="$(installed_version 2>/dev/null || printf unknown)"
   iface="$(tc_default_iface 2>/dev/null || true)"
   [ -z "$iface" ] || iface_mtu="$(mtu_iface_value "$iface" 2>/dev/null || true)"
@@ -222,8 +263,15 @@ do_perf() {
   fi
   [ -n "$cpu_cores" ] || cpu_cores=unknown
   load_now="$(awk '{print $1" "$2" "$3}' /proc/loadavg 2>/dev/null || printf unknown)"
-  memory="$(awk '/^MemTotal:/{t=$2}/^MemAvailable:/{a=$2}END{if(t)printf "%.0f MiB total / %.0f MiB available",t/1024,a/1024}' /proc/meminfo 2>/dev/null || true)"
-  [ -n "$memory" ] || memory=unknown
+  memory="$(awk '/^MemTotal:/{t=$2}/^MemAvailable:/{a=$2}END{if(t)printf "%.0f|%.0f",t/1024,a/1024}' /proc/meminfo 2>/dev/null || true)"
+  if [[ "$memory" == *'|'* ]]; then
+    memory_total="${memory%%|*}"
+    memory_available="${memory#*|}"
+    memory="$(t "${memory_total} MiB 总计 / ${memory_available} MiB 可用" \
+      "${memory_total} MiB total / ${memory_available} MiB available")"
+  else
+    memory=unknown
+  fi
   if users_state_exists; then
     instance_count="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(sum(1 for u in d.get("users",[]) if u.get("enabled",True)))' \
       "$MITA_USERS_STATE" 2>/dev/null || echo 0)"
@@ -244,70 +292,87 @@ do_perf() {
   if [ -n "${ADVERTISE_HOST:-}" ]; then
     advertised="$(url_host "$ADVERTISE_HOST"):${ADVERTISE_PORT}"
   elif [ -n "$public4" ]; then
-    advertised="${public4}:${PORT:-unknown} (auto)"
+    advertised="${public4}:${PORT:-$unknown_text} (${auto_text})"
   elif [ -n "$public6" ]; then
-    advertised="[$public6]:${PORT:-unknown} (auto)"
+    advertised="[$public6]:${PORT:-$unknown_text} (${auto_text})"
   fi
 
-  msg '========== Mieru Performance ========='
+  t '========== Mieru 性能诊断 ==========' '========== Mieru Performance ========='
   msg ''
-  t 'Profile' 'Profile'
+  t '配置预设 / Profile' 'Profile'
   t "  $(profile_label)" "  $(profile_label)"
   msg ''
   t 'Mieru' 'Mieru'
-  t "  Version: ${installed}" "  Version: ${installed}"
-  t "  Transport: ${PROTOCOL:-unknown}" "  Transport: ${PROTOCOL:-unknown}"
-  t "  MTU: ${MTU:-unknown}" "  MTU: ${MTU:-unknown}"
-  t "  Multiplexing: ${MULTIPLEXING:-unknown}" "  Multiplexing: ${MULTIPLEXING:-unknown}"
-  t "  Handshake: ${HANDSHAKE_MODE:-unknown}" "  Handshake: ${HANDSHAKE_MODE:-unknown}"
-  t "  Traffic Pattern: $(traffic_label)" "  Traffic Pattern: $(traffic_label)"
-  t "  Low Entropy: $(low_entropy_label)" "  Low Entropy: $(low_entropy_label)"
+  t "  版本: $(perf_display_value "$installed")" "  Version: $(perf_display_value "$installed")"
+  t "  传输协议: $(perf_display_value "${PROTOCOL:-unknown}")" \
+    "  Transport: $(perf_display_value "${PROTOCOL:-unknown}")"
+  t "  MTU: $(perf_display_value "${MTU:-unknown}")" "  MTU: $(perf_display_value "${MTU:-unknown}")"
+  t "  多路复用 / Multiplexing: $(perf_display_value "${MULTIPLEXING:-unknown}")" \
+    "  Multiplexing: $(perf_display_value "${MULTIPLEXING:-unknown}")"
+  t "  握手模式 / Handshake: $(perf_display_value "${HANDSHAKE_MODE:-unknown}")" \
+    "  Handshake: $(perf_display_value "${HANDSHAKE_MODE:-unknown}")"
+  t "  流量模式 / Traffic Pattern: $(traffic_label)" "  Traffic Pattern: $(traffic_label)"
+  t "  低熵模式 / Low Entropy: $(low_entropy_label)" "  Low Entropy: $(low_entropy_label)"
   msg ''
-  t 'Kernel' 'Kernel'
-  t "  TCP congestion control: ${cc:-unknown}" "  TCP congestion control: ${cc:-unknown}"
-  t "  Default qdisc: ${default_qdisc:-unknown}" "  Default qdisc: ${default_qdisc:-unknown}"
-  t "  BBR status: ${bbr_state}" "  BBR status: ${bbr_state}"
-  t "  fq status: ${fq_state}" "  fq status: ${fq_state}"
+  t '内核' 'Kernel'
+  t "  TCP 拥塞控制: $(perf_display_value "${cc:-unknown}")" \
+    "  TCP congestion control: $(perf_display_value "${cc:-unknown}")"
+  t "  默认 qdisc: $(perf_display_value "${default_qdisc:-unknown}")" \
+    "  Default qdisc: $(perf_display_value "${default_qdisc:-unknown}")"
+  t "  BBR 状态: $(perf_display_value "$bbr_state")" "  BBR status: $(perf_display_value "$bbr_state")"
+  t "  FQ 状态: $(perf_display_value "$fq_state")" "  fq status: $(perf_display_value "$fq_state")"
   msg ''
-  t 'Network' 'Network'
-  t "  Default interface: ${iface:-unknown}" "  Default interface: ${iface:-unknown}"
-  t "  Interface MTU: ${iface_mtu:-unknown}" "  Interface MTU: ${iface_mtu:-unknown}"
-  t "  Detected public IPv4: ${public4:-unavailable}" "  Detected public IPv4: ${public4:-unavailable}"
-  t "  Detected public IPv6: ${public6:-unavailable}" "  Detected public IPv6: ${public6:-unavailable}"
+  t '网络' 'Network'
+  t "  默认网卡: $(perf_display_value "${iface:-unknown}")" \
+    "  Default interface: $(perf_display_value "${iface:-unknown}")"
+  t "  网卡 MTU: $(perf_display_value "${iface_mtu:-unknown}")" \
+    "  Interface MTU: $(perf_display_value "${iface_mtu:-unknown}")"
+  t "  检测到的公网 IPv4: $(perf_display_value "${public4:-unavailable}")" \
+    "  Detected public IPv4: $(perf_display_value "${public4:-unavailable}")"
+  t "  检测到的公网 IPv6: $(perf_display_value "${public6:-unavailable}")" \
+    "  Detected public IPv6: $(perf_display_value "${public6:-unavailable}")"
   msg ''
-  t 'Endpoint' 'Endpoint'
-  t "  Backend listen address: all interfaces" "  Backend listen address: all interfaces"
-  t "  Backend listen port: ${PORT:-unknown}" "  Backend listen port: ${PORT:-unknown}"
-  t "  Advertised client address: ${ADVERTISE_HOST:-auto}" "  Advertised client address: ${ADVERTISE_HOST:-auto}"
-  t "  Advertised client port: ${ADVERTISE_PORT:-${PORT:-unknown}}" "  Advertised client port: ${ADVERTISE_PORT:-${PORT:-unknown}}"
+  t '连接端点 / Endpoint' 'Endpoint'
+  t '  后端监听地址: 所有网卡' '  Backend listen address: all interfaces'
+  t "  后端监听端口: $(perf_display_value "${PORT:-unknown}")" \
+    "  Backend listen port: $(perf_display_value "${PORT:-unknown}")"
+  t "  客户端展示地址 / Display Endpoint: $(perf_display_value "${ADVERTISE_HOST:-auto}")" \
+    "  Advertised client address: $(perf_display_value "${ADVERTISE_HOST:-auto}")"
+  t "  客户端展示端口: $(perf_display_value "${ADVERTISE_PORT:-${PORT:-unknown}}")" \
+    "  Advertised client port: $(perf_display_value "${ADVERTISE_PORT:-${PORT:-unknown}}")"
   if client_endpoint_is_independent "$public4" "$public6"; then
-    local backend_endpoint="${public4:-${public6:-<undetected>}}"
+    local backend_endpoint="${public4:-${public6:-}}" backend_display=""
+    if [ -n "$backend_endpoint" ]; then
+      backend_display="$(url_host "$backend_endpoint")"
+    else
+      backend_display="$(t '<未检测到>' '<undetected>')"
+    fi
     t '  [INFO] 当前使用独立客户端入口' \
       '  [INFO] An independent client endpoint is in use'
-    t "    Client: ${advertised}" "    Client: ${advertised}"
-    t "    Backend: $(url_host "$backend_endpoint"):${PORT:-unknown}" \
-      "    Backend: $(url_host "$backend_endpoint"):${PORT:-unknown}"
+    t "    客户端: ${advertised}" "    Client: ${advertised}"
+    t "    后端: ${backend_display}:$(perf_display_value "${PORT:-unknown}")" \
+      "    Backend: ${backend_display}:$(perf_display_value "${PORT:-unknown}")"
   fi
   msg ''
-  t 'Resource' 'Resource'
-  t "  CPU cores: ${cpu_cores}" "  CPU cores: ${cpu_cores}"
-  t "  Current load: ${load_now}" "  Current load: ${load_now}"
-  t "  Memory: ${memory}" "  Memory: ${memory}"
-  t "  Number of mita instances: ${instance_count}" "  Number of mita instances: ${instance_count}"
+  t '系统资源' 'Resource'
+  t "  CPU 核心数: $(perf_display_value "$cpu_cores")" "  CPU cores: $(perf_display_value "$cpu_cores")"
+  t "  当前负载: $(perf_display_value "$load_now")" "  Current load: $(perf_display_value "$load_now")"
+  t "  内存: $(perf_display_value "$memory")" "  Memory: $(perf_display_value "$memory")"
+  t "  mita 实例数: ${instance_count}" "  Number of mita instances: ${instance_count}"
   if [ -n "$process_rows" ]; then
-    t '  Relevant processes:' '  Relevant processes:'
+    t '  相关进程:' '  Relevant processes:'
     msg "$process_rows"
   else
-    t '  Relevant processes: none detected' '  Relevant processes: none detected'
+    t '  相关进程: 未检测到' '  Relevant processes: none detected'
   fi
   msg ''
-  t 'Traffic Control' 'Traffic Control'
-  t '  Global bandwidth limit: not configured by OneClick' \
+  t '流量控制 / Traffic Control' 'Traffic Control'
+  t '  全局带宽限制: OneClick 未配置' \
     '  Global bandwidth limit: not configured by OneClick'
-  t "  Per-user bandwidth limits: ${rate_users}" "  Per-user bandwidth limits: ${rate_users}"
-  t "  tc status: ${tc_state}" "  tc status: ${tc_state}"
+  t "  按用户带宽限制: ${rate_users}" "  Per-user bandwidth limits: ${rate_users}"
+  t "  tc 状态: $(perf_display_value "$tc_state")" "  tc status: $(perf_display_value "$tc_state")"
   msg ''
-  t 'Warnings' 'Warnings'
+  t '注意事项' 'Warnings'
   local warning_count=0
   if [ "$(normalize_traffic_pattern "${TRAFFIC_PATTERN:-off}" 2>/dev/null || printf off)" != off ]; then
     warn "$(t 'Traffic Pattern 已开启；性能基准测试时建议关闭后进行 A/B 对比。' \

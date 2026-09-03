@@ -112,8 +112,8 @@ nb_port_is_listening() { return 1; }
 rows="$(snell_node_rows)"
 assert_contains "$rows" 'Snell/v4|node-v4|' 'v4 node row'
 assert_contains "$rows" 'Snell/v5|node-v5-off|' 'v5 OFF node row'
-assert_contains "$rows" 'QUIC Off' 'v5 OFF node label'
-assert_contains "$rows" 'QUIC On (UDP same port)' 'v5 ON node label'
+assert_contains "$rows" 'QUIC 已关闭' 'v5 OFF node label'
+assert_contains "$rows" 'QUIC 已开启（UDP 同端口）' 'v5 ON node label'
 assert_not_contains "$rows" 'removed-v6' 'v6 nodes absent'
 
 snell_service_active() { return 0; }
@@ -127,12 +127,12 @@ nb_firewall_binding_owned() {
   case "$1:$2" in TCP:3615|TCP:3625|UDP:3625) return 0 ;; *) return 1 ;; esac
 }
 doctor_off="$(snell_doctor_instance "$id5off")"
-assert_contains "$doctor_off" '[PASS] QUIC Proxy Disabled; UDP public ownership OFF' 'OFF Doctor state'
-assert_contains "$doctor_off" '[INFO] runtime auxiliary listener UDP/3615 detected' 'OFF auxiliary socket INFO'
+assert_contains "$doctor_off" '[PASS] QUIC Proxy 已禁用；UDP 公网归属已关闭' 'OFF Doctor state'
+assert_contains "$doctor_off" '[INFO] 检测到 Runtime 辅助监听 UDP/3615' 'OFF auxiliary socket INFO'
 assert_not_contains "$doctor_off" '[FAIL]' 'OFF Doctor clean'
 doctor_on="$(snell_doctor_instance "$id5on")"
-assert_contains "$doctor_on" '[PASS] QUIC Proxy Enabled; same-process UDP/3625 listener' 'ON Doctor socket'
-assert_contains "$doctor_on" '[PASS] QUIC firewall ownership UDP/3625' 'ON Doctor firewall'
+assert_contains "$doctor_on" '[PASS] QUIC Proxy 已启用；同进程 UDP/3625 监听正常' 'ON Doctor socket'
+assert_contains "$doctor_on" '[PASS] QUIC 防火墙归属正常: UDP/3625' 'ON Doctor firewall'
 assert_not_contains "$doctor_on" '[FAIL]' 'ON Doctor clean'
 
 nb_service_manager() { printf systemd; }

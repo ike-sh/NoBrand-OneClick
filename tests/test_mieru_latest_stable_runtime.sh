@@ -162,6 +162,14 @@ export NOBRAND_STATE_DIR="$fixture/nobrand/state"
 export NOBRAND_CONFIG_DIR="$fixture/nobrand/config"
 export NOBRAND_LIB_DIR="$fixture/nobrand/lib"
 export NOBRAND_LEGACY_MIERU_STATE_DIR="$fixture/legacy"
+export NOBRAND_LIFECYCLE_DIR="$fixture/nobrand-oneclick-lifecycle"
+export NOBRAND_LIFECYCLE_TX_FILE="$NOBRAND_LIFECYCLE_DIR/transaction.env"
+export NOBRAND_LIFECYCLE_LOCK_FILE="$fixture/run/nobrand-oneclick/lifecycle.lock"
+mkdir -p "$(dirname "$NOBRAND_LIFECYCLE_LOCK_FILE")"
+chmod 0700 "$(dirname "$NOBRAND_LIFECYCLE_LOCK_FILE")"
+export NOBRAND_INSTALL_SCRIPT_PATH="$fixture/nobrand/bin/install-nobrand"
+export NOBRAND_COMMAND_PATH="$fixture/nobrand/bin/nobrand"
+export NOBRAND_SHORT_COMMAND_PATH="$fixture/nobrand/bin/nb"
 source_installer
 
 server_port="$(free_tcp_port)"
@@ -195,6 +203,12 @@ start_server() {
     return 1
   fi
   wait_tcp "$server_port"
+}
+
+verify_mita_running() {
+  local running_pid
+  running_pid="$(sed -n '1p' "$server_pid_file" 2>/dev/null || true)"
+  [ -n "$running_pid" ] && kill -0 "$running_pid" && wait_tcp "$server_port" 50
 }
 
 start_client() {
@@ -239,12 +253,27 @@ print_runtime_logs() {
 
 write_runtime_state() {
   cat >"$MITA_STATE" <<EOF
+SCHEMA_VERSION=3
+OWNERSHIP=nobrand-v3
+INSTALL_METHOD=nobrand-v3
 MIERU_CHANNEL=stable
 MIERU_VERSION=${MIERU_VERSION}
 PROTOCOL=TCP
 PORT=${server_port}
+PORT_RANGE=
+PROFILE=${PROFILE}
+ADVERTISE_HOST=${ADVERTISE_HOST}
+ADVERTISE_PORT=${ADVERTISE_PORT}
+MTU=${MTU}
+MTU_POLICY=${MTU_POLICY}
 USERNAME=${USERNAME}
 PASSWORD=${PASSWORD}
+TRAFFIC_PATTERN=${TRAFFIC_PATTERN}
+TRAFFIC_SEED=${TRAFFIC_SEED}
+LOW_ENTROPY_MODE=${LOW_ENTROPY_MODE}
+MULTIPLEXING=${MULTIPLEXING}
+HANDSHAKE_MODE=${HANDSHAKE_MODE}
+INSTALL_SCRIPT=${INSTALL_SCRIPT_PATH}
 EOF
   chmod 0600 "$MITA_STATE"
 }
@@ -272,10 +301,14 @@ warn_traffic_unsupported() { :; }
 warn_low_entropy_unsupported() { :; }
 offer_bbr_fq() { :; }
 print_summary() { :; }
-install_self_script() { :; }
+install_self_script() {
+  install -d -m 0755 "$(dirname "$NOBRAND_INSTALL_SCRIPT_PATH")"
+  install -m 0755 "$TEST_ROOT/install-nobrand.sh" "$NOBRAND_INSTALL_SCRIPT_PATH"
+}
 
 install_fresh_isolated() {
   local generated
+  install_self_script
   generated="$(write_server_config)" || return 1
   install -m 0600 "$generated" "$server_config"
   rm -f "$generated"
@@ -396,11 +429,6 @@ mita_v3_install_state_valid() { [ -s "$MITA_STATE" ]; }
 isolated_stop_all() { stop_server; }
 apply_users_config() { start_server; }
 reconcile_isolated_instances() { start_server; }
-verify_mita_running() {
-  local running_pid
-  running_pid="$(sed -n '1p' "$server_pid_file" 2>/dev/null || true)"
-  [ -n "$running_pid" ] && kill -0 "$running_pid" && wait_tcp "$server_port" 50
-}
 save_install_state() { write_runtime_state; }
 
 MIERU_CHANNEL=stable

@@ -94,7 +94,7 @@ if forward_validate_requested_rule >"$domain_guidance" 2>&1; then
   fail 'nftables accepted a domain target on requested-rule validation'
 fi
 assert_contains "$(cat "$domain_guidance")" \
-  'nftables backend currently requires IP target; use Realm backend for domain targets.' \
+  'nftables 后端当前要求目标为 IP 地址；域名目标请使用 Realm 后端。' \
   'nftables domain rejection includes Realm guidance'
 
 cat >"$NOBRAND_FORWARD_STATE_FILE" <<'JSON'

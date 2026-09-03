@@ -7,11 +7,114 @@ mieru_prepare_noninteractive_ingress_endpoint() {
   nb_require_explicit_endpoint_noninteractive
 }
 
-do_install() {
-  require_root
-  require_linux
-  require_cmd curl
+nb_authoritative_protocol_state_exists() {
+  local path root
+  for path in \
+    "$MITA_STATE" "$MITA_USERS_STATE" \
+    "$NOBRAND_HY2_STATE_FILE" "$NOBRAND_VLESS_STATE_FILE" \
+    "$NOBRAND_SSH_STATE_FILE" "$NOBRAND_FORWARD_STATE_FILE"; do
+    [ ! -s "$path" ] || return 0
+  done
+  for root in "$NOBRAND_SNELL_STATE_DIR" "$NOBRAND_REALITY_STATE_DIR" "$NOBRAND_TUIC_STATE_DIR"; do
+    [ ! -d "$root" ] || ! nb_directory_has_entries "$root" || return 0
+  done
+  return 1
+}
+
+nb_lifecycle_validate_manager_repair() {
+  local installed=""
+  nb_schema_v3_file_valid || return 1
+  installed="$(nb_installed_manager_version 2>/dev/null || true)"
+  [ "$installed" = "$SCRIPT_VERSION" ]
+}
+
+nb_reconcile_partial_uninstall() {
+  local ssh_pending="" ssh_policy="" ssh_token="" ssh_pid="" ssh_origin=""
+  # A durable backup restore in `applying` state may have crashed between
+  # clearing and copying state/config. Restore its pre-restore snapshot before
+  # ordinary repair is allowed to initialize or infer any authoritative state.
+  if declare -F nobrand_backup_restore_transaction_present >/dev/null 2>&1 \
+     && nobrand_backup_restore_transaction_present; then
+    nobrand_backup_restore_transaction_valid || {
+      warn "$(t '备份恢复的持久快照或事务元数据无效；拒绝初始化新状态' \
+        'The durable backup-restore snapshot or transaction metadata is invalid; refusing to initialize new state')"
+      return 1
+    }
+    case "$(nb_lifecycle_field STATUS "$NOBRAND_BACKUP_RESTORE_META_FILE")" in
+      applying|runtime-applying|rollback-roots)
+        nobrand_backup_restore_recover_applying || return $?
+        ;;
+    esac
+  fi
+  ensure_manager_state_layout 1 || return 1
+  nb_lifecycle_checkpoint repair partial-uninstall-state-layout || return 1
+  install_self_script || return 1
+  nb_lifecycle_checkpoint repair partial-uninstall-manager-ready || return 1
+  if ! nb_authoritative_protocol_state_exists; then
+    return 0
+  fi
+  # Restore only from the protocol state that survived the interrupted
+  # uninstall. These routines are state-driven and do not synthesize a fresh
+  # Mieru user, node, key, or credential.
+  nobrand_restore_protocol_runtimes || return 1
+  nb_lifecycle_checkpoint repair partial-uninstall-runtimes-reconciled || return 1
+  nobrand_start_enabled_services || return 1
+  nb_lifecycle_checkpoint repair partial-uninstall-services-reconciled || return 1
+  if [ -e "$NOBRAND_SSH_STATE_FILE" ] || [ -L "$NOBRAND_SSH_STATE_FILE" ]; then
+    ssh_tunnel_state_exists || return 1
+    ssh_tunnel_state_identity_valid || return 1
+    ssh_pending="$(ssh_tunnel_state_field pending_operation 2>/dev/null || true)"
+    ssh_policy="$(ssh_tunnel_state_field policy_applied 2>/dev/null || true)"
+    ssh_token="$(ssh_tunnel_state_field pending_watchdog_token 2>/dev/null || true)"
+    ssh_pid="$(ssh_tunnel_state_field pending_watchdog_pid 2>/dev/null || true)"
+    ssh_origin="$(ssh_tunnel_state_field pending_origin_connection 2>/dev/null || true)"
+    if [ "$ssh_policy" = false ] && { [ -z "$ssh_pending" ] \
+       || [ "$ssh_pending" = uninstall ] || [ "$ssh_pending" = unified-uninstall ]; } \
+       && [ -z "$ssh_token" ] && [ -z "$ssh_pid" ] && [ -z "$ssh_origin" ]; then
+      ssh_tunnel_restore_system_state || return 1
+      ssh_pending="$(ssh_tunnel_state_field pending_operation 2>/dev/null || true)"
+      ssh_policy="$(ssh_tunnel_state_field policy_applied 2>/dev/null || true)"
+      ssh_token="$(ssh_tunnel_state_field pending_watchdog_token 2>/dev/null || true)"
+      ssh_pid="$(ssh_tunnel_state_field pending_watchdog_pid 2>/dev/null || true)"
+      ssh_origin="$(ssh_tunnel_state_field pending_origin_connection 2>/dev/null || true)"
+    fi
+    if [ "$ssh_pending" = restore ]; then
+      ssh_tunnel_pending_tuple_valid "$ssh_pending" "$ssh_token" "$ssh_pid" \
+        "$ssh_origin" "$ssh_policy" || return 1
+      if [ "$ssh_token" = disabled ]; then
+        ssh_tunnel_confirm_admin disabled || return 1
+        ssh_pending="$(ssh_tunnel_state_field pending_operation 2>/dev/null || true)"
+        ssh_policy="$(ssh_tunnel_state_field policy_applied 2>/dev/null || true)"
+        ssh_token="$(ssh_tunnel_state_field pending_watchdog_token 2>/dev/null || true)"
+        ssh_pid="$(ssh_tunnel_state_field pending_watchdog_pid 2>/dev/null || true)"
+        ssh_origin="$(ssh_tunnel_state_field pending_origin_connection 2>/dev/null || true)"
+      else
+        ssh_tunnel_watchdog_claim_ready "$ssh_token" "$ssh_pid" || return 1
+        ssh_tunnel_watchdog_prompt "$ssh_token" || return 1
+        if declare -F nobrand_backup_restore_transaction_present >/dev/null 2>&1 \
+           && nobrand_backup_restore_transaction_present; then
+          nobrand_backup_restore_transaction_mark_ssh_pending || return 1
+        fi
+        nb_lifecycle_mark_phase partial-uninstall-ssh-confirmation-pending || return 1
+        return 0
+      fi
+    fi
+    [ -z "$ssh_pending" ] && [ -z "$ssh_token" ] && [ -z "$ssh_pid" ] \
+      && [ -z "$ssh_origin" ] && [ "$ssh_policy" = true ] || return 1
+    ssh_tunnel_cleanup_disarmed_watchdogs || return 1
+  fi
+  if [ -s "$MITA_STATE" ] || [ -s "$MITA_USERS_STATE" ]; then
+    mita_v3_install_state_valid || return 1
+    users_state_exists && [ "$(users_count)" -gt 0 ] || return 1
+    verify_mita_running 1 || return 1
+  fi
+  nobrand_doctor || return 1
+  nb_lifecycle_checkpoint repair partial-uninstall-state-validated || return 1
+}
+
+do_install_impl() {
   ensure_manager_state_layout 1
+  nb_lifecycle_checkpoint "$NOBRAND_LIFECYCLE_OPERATION" state-layout || return 1
 
   local pm arch ver url tmp tx runtime_tx reinstall_existing=0 managed_existing=0
   pm="$(detect_pkg_manager)"
@@ -27,8 +130,8 @@ do_install() {
         'To change port/password/protocol, use menu Reconfigure or: nobrand mieru reconfigure'
       if ! confirm '继续重新下载安装包并保留当前用户/节点配置？[y/N]: ' \
         'Re-download the package and keep the current users/node config? [y/N]: ' n; then
-        [ "${MENU_MODE:-0}" -eq 1 ] && return 0
-        exit 0
+        NOBRAND_INSTALL_CANCELLED=1
+        return 0
       fi
       if [ "$USERNAME_CLI" -eq 1 ] || [ "$PASSWORD_CLI" -eq 1 ] \
          || [ "$PORT_CLI" -eq 1 ] || [ "$PORT_RANGE_CLI" -eq 1 ] \
@@ -51,8 +154,8 @@ do_install() {
         'Previous install is incomplete and has no recoverable OneClick state; configuration will be regenerated')"
       if ! confirm '继续修复并完成安装？[y/N]: ' \
         'Repair and complete the installation? [y/N]: ' n; then
-        [ "${MENU_MODE:-0}" -eq 1 ] && return 0
-        exit 0
+        NOBRAND_INSTALL_CANCELLED=1
+        return 0
       fi
     fi
   fi
@@ -92,6 +195,7 @@ do_install() {
   rm -f "$tmp"
   mieru_runtime_commit "$runtime_tx" || return 1
   MIERU_VERSION="$ver"
+  nb_lifecycle_checkpoint "$NOBRAND_LIFECYCLE_OPERATION" runtime-ready || return 1
 
   add_op_user "$OP_USER"
   warn_traffic_unsupported
@@ -128,17 +232,14 @@ do_install() {
     fi
     install_fresh_isolated
   fi
+  nb_lifecycle_checkpoint "$NOBRAND_LIFECYCLE_OPERATION" state-committed || return 1
 
   offer_bbr_fq
 
   print_summary
 }
 
-do_reconfigure() {
-  require_root
-  require_linux
-  mita_installed || die "$(t 'mita 未安装，请先执行安装' 'mita is not installed; run install first')"
-
+do_reconfigure_impl() {
   local old_bindings new_bindings close_bindings desired_bindings binding_proto binding_port tx
   local old_port old_port_range old_protocol old_mtu old_mtu_policy old_user old_password
   local old_profile old_traffic old_seed old_low_entropy old_mux old_handshake
@@ -404,6 +505,233 @@ json.dump(d, open(path, "w"), indent=2)
   print_summary current
 }
 
+do_install() {
+  local operation state manager_only=0 partial_uninstall_repair=0 lifecycle_phase="" rc=0
+  local allow_transition=0 prior_tx_valid=0 prior_operation="" prior_status=""
+  local prior_txid="" prior_started="" prior_phase="" prior_mieru_owned=0
+  local prior_preserve_package=0 prior_preserve_user=0 prior_preserve_group=0
+  local prior_preserve_shared=0
+  NOBRAND_INSTALL_CANCELLED=0
+  require_root
+  require_linux
+  require_cmd curl
+  state="$(nb_classify_installation_state)" || return 1
+  case "$state" in
+    CLEAN|CURRENT_PARTIAL_INSTALL) operation=install ;;
+    CURRENT_COMPLETE|CURRENT_PARTIAL_REPAIR|CURRENT_PARTIAL_UNINSTALL|LEGACY_SUPPORTED)
+      operation=repair
+      ;;
+    LEGACY_UNSUPPORTED) nb_fail_legacy_state; return 1 ;;
+    *) nb_fail_ambiguous_state; return 1 ;;
+  esac
+  nb_lifecycle_lock_acquire || return 1
+  # Reclassify while holding the process lock so no competing lifecycle can
+  # change the evidence between classification and the transaction write.
+  state="$(nb_classify_installation_state)" || {
+    nb_lifecycle_lock_release
+    return 1
+  }
+  case "$state" in
+    CLEAN|CURRENT_PARTIAL_INSTALL) operation=install ;;
+    CURRENT_COMPLETE|CURRENT_PARTIAL_REPAIR|CURRENT_PARTIAL_UNINSTALL|LEGACY_SUPPORTED)
+      operation=repair
+      ;;
+    LEGACY_UNSUPPORTED)
+      nb_lifecycle_lock_release
+      nb_fail_legacy_state
+      return 1
+      ;;
+    *)
+      nb_lifecycle_lock_release
+      nb_fail_ambiguous_state
+      return 1
+      ;;
+  esac
+  if [ "$state" = CURRENT_PARTIAL_UNINSTALL ]; then
+    partial_uninstall_repair=1
+  elif [ "$state" = CURRENT_PARTIAL_REPAIR ] \
+       && declare -F nobrand_backup_restore_transaction_present >/dev/null 2>&1 \
+       && nobrand_backup_restore_transaction_present \
+       && nobrand_backup_restore_transaction_valid; then
+    partial_uninstall_repair=1
+  elif [ "$state" = CURRENT_PARTIAL_REPAIR ] && nb_lifecycle_tx_valid \
+       && [ "$(nb_lifecycle_field OPERATION)" = repair ]; then
+    lifecycle_phase="$(nb_lifecycle_field LAST_COMPLETED_PHASE)"
+    case "$lifecycle_phase" in partial-uninstall-*) partial_uninstall_repair=1 ;; esac
+  fi
+  if [ "$partial_uninstall_repair" -eq 1 ]; then
+    lifecycle_phase='partial-uninstall-prepare'
+    [ "$state" != CURRENT_PARTIAL_UNINSTALL ] || allow_transition=1
+  else
+    lifecycle_phase=prepare
+  fi
+  if nb_lifecycle_tx_valid; then
+    prior_tx_valid=1
+    prior_operation="$(nb_lifecycle_field OPERATION)"
+    prior_status="$(nb_lifecycle_field STATUS)"
+    prior_txid="$(nb_lifecycle_field TRANSACTION_ID)"
+    prior_started="$(nb_lifecycle_field STARTED_AT)"
+    prior_phase="$(nb_lifecycle_field LAST_COMPLETED_PHASE)"
+    prior_mieru_owned="$(nb_lifecycle_field MIERU_OWNED)"
+    prior_preserve_package="$(nb_lifecycle_field MIERU_PRESERVE_PACKAGE)"
+    prior_preserve_user="$(nb_lifecycle_field MIERU_PRESERVE_USER)"
+    prior_preserve_group="$(nb_lifecycle_field MIERU_PRESERVE_GROUP)"
+    prior_preserve_shared="$(nb_lifecycle_field MIERU_PRESERVE_SHARED)"
+  fi
+  nb_lifecycle_begin "$operation" "$lifecycle_phase" 0 0 0 0 0 "$allow_transition" || {
+    nb_lifecycle_lock_release
+    return 1
+  }
+  if [ "$partial_uninstall_repair" -eq 1 ]; then
+    # This is a global lifecycle recovery, not a request to create a fresh
+    # Mieru node. State-backed protocols are reconciled individually; if no
+    # authoritative node state survived, only manager/schema are repaired.
+    manager_only=1
+    nb_reconcile_partial_uninstall
+    rc=$?
+  else
+    do_install_impl
+    rc=$?
+  fi
+  if [ "${NOBRAND_INSTALL_CANCELLED:-0}" -eq 1 ]; then
+    if [ "$prior_tx_valid" -eq 1 ]; then
+      nb_lifecycle_write "$prior_operation" "$prior_status" "$prior_txid" \
+        "$prior_started" "$prior_phase" "$prior_mieru_owned" \
+        "$prior_preserve_package" "$prior_preserve_user" "$prior_preserve_group" \
+        "$prior_preserve_shared" || {
+          nb_lifecycle_lock_release
+          return 1
+        }
+      NOBRAND_LIFECYCLE_ACTIVE=0
+      NOBRAND_LIFECYCLE_OPERATION=""
+    else
+      nb_lifecycle_clear || {
+        nb_lifecycle_lock_release
+        return 1
+      }
+    fi
+    nb_lifecycle_lock_release
+    return 0
+  fi
+  if [ "$rc" -ne 0 ]; then
+    nb_lifecycle_lock_release
+    return "$rc"
+  fi
+  if [ "$partial_uninstall_repair" -eq 1 ] \
+     && declare -F ssh_tunnel_state_exists >/dev/null 2>&1 \
+     && ssh_tunnel_state_exists \
+     && [ "$(ssh_tunnel_state_field pending_operation 2>/dev/null || true)" = restore ] \
+     && [ -n "$(ssh_tunnel_state_field pending_watchdog_token 2>/dev/null || true)" ]; then
+    nb_lifecycle_lock_release
+    return 0
+  fi
+  if [ "$partial_uninstall_repair" -eq 1 ]; then
+    nb_lifecycle_checkpoint "$operation" partial-uninstall-ready-to-validate || {
+      rc=$?
+      nb_lifecycle_lock_release
+      return "$rc"
+    }
+  else
+    nb_lifecycle_checkpoint "$operation" ready-to-validate || {
+      rc=$?
+      nb_lifecycle_lock_release
+      return "$rc"
+    }
+  fi
+  nb_lifecycle_validate_manager_repair || {
+    nb_lifecycle_lock_release
+    return 1
+  }
+  if [ "$manager_only" -eq 0 ]; then
+    mita_v3_install_state_valid || {
+      nb_lifecycle_lock_release
+      return 1
+    }
+    if ! users_state_exists || [ "$(users_count)" -le 0 ]; then
+      nb_lifecycle_lock_release
+      return 1
+    fi
+    verify_mita_running 1 || {
+      nb_lifecycle_lock_release
+      return 1
+    }
+  fi
+  nb_lifecycle_complete "$operation" || {
+    nb_lifecycle_lock_release
+    return 1
+  }
+  if declare -F nobrand_backup_restore_transaction_present >/dev/null 2>&1 \
+     && nobrand_backup_restore_transaction_present; then
+    nobrand_backup_restore_confirmation_finalize repair-accepted || {
+      nb_lifecycle_lock_release
+      return 1
+    }
+  fi
+  nb_lifecycle_lock_release
+}
+
+do_reconfigure() {
+  local rc=0
+  require_root
+  require_linux
+  mita_installed || die "$(t 'mita 未安装，请先执行安装' 'mita is not installed; run install first')"
+  nb_lifecycle_lock_acquire || return 1
+  nb_lifecycle_begin repair prepare || {
+    nb_lifecycle_lock_release
+    return 1
+  }
+  ensure_manager_state_layout 1
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    nb_lifecycle_lock_release
+    return "$rc"
+  fi
+  nb_lifecycle_checkpoint repair state-layout || {
+    rc=$?
+    nb_lifecycle_lock_release
+    return "$rc"
+  }
+  install_self_script
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    nb_lifecycle_lock_release
+    return "$rc"
+  fi
+  nb_lifecycle_checkpoint repair manager-ready || {
+    rc=$?
+    nb_lifecycle_lock_release
+    return "$rc"
+  }
+  do_reconfigure_impl
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    nb_lifecycle_lock_release
+    return "$rc"
+  fi
+  nb_lifecycle_checkpoint repair ready-to-validate || {
+    rc=$?
+    nb_lifecycle_lock_release
+    return "$rc"
+  }
+  nb_lifecycle_validate_manager_repair || {
+    nb_lifecycle_lock_release
+    return 1
+  }
+  mita_v3_install_state_valid || {
+    nb_lifecycle_lock_release
+    return 1
+  }
+  verify_mita_running 1 || {
+    nb_lifecycle_lock_release
+    return 1
+  }
+  nb_lifecycle_complete repair || {
+    nb_lifecycle_lock_release
+    return 1
+  }
+  nb_lifecycle_lock_release
+}
+
 mieru_upgrade_rollback() {
   local runtime_tx="$1" users_tx="$2" old_channel="$3" old_version="$4" rc=0
   MIERU_CHANNEL="$old_channel"
@@ -472,7 +800,7 @@ do_upgrade() {
     exit 0
   fi
   if [ "${YES:-0}" -ne 1 ] && [ -t 0 ]; then
-    t "已安装: ${cur:-unknown}" "Installed: ${cur:-unknown}"
+    t "已安装: ${cur:-未知}" "Installed: ${cur:-unknown}"
     t "最新稳定版: ${ver}" "Latest stable: ${ver}"
     if ! confirm '升级？[Y/n]: ' 'Upgrade? [Y/n]: ' y; then
       [ "${MENU_MODE:-0}" -eq 1 ] && return 0
@@ -528,7 +856,49 @@ do_upgrade() {
     "Upgraded to ${ver} ($(mieru_channel_label))"
 }
 
+mita_nobrand_specific_residue_present() {
+  local path pattern
+  for path in "$MITA_BIN" "$MITA_MARKER" "$MITA_STATE" "$MITA_USERS_STATE" \
+    "$MITA_INSTANCE_SYSTEMD_TEMPLATE" "$MITA_INSTANCE_TMPFILES" \
+    "$MITA_INSTANCE_RUNNER" "$MITA_USERS_TIMER" "$MITA_USERS_SERVICE" \
+    "$MITA_USERS_CRON" "$MITA_LOGROTATE_CONF" "$MITA_CLIENT_EXPORT_DIR"; do
+    [ ! -e "$path" ] && [ ! -L "$path" ] || return 0
+  done
+  for pattern in "${MITA_INSTANCE_OPENRC_PREFIX}*" '/var/log/nobrand-mieru-*.log' \
+    '/var/log/nobrand-mieru-*.err' '/root/nobrand_mieru_client_*.json'; do
+    compgen -G "$pattern" >/dev/null 2>&1 && return 0
+  done
+  return 1
+}
+
+mita_uninstall_ledger_active() {
+  nb_lifecycle_tx_valid \
+    && [ "$(nb_lifecycle_field STATUS)" = in-progress ] \
+    && [ "$(nb_lifecycle_field OPERATION)" = uninstall ] \
+    && [ "$(nb_lifecycle_field MIERU_OWNED)" = 1 ]
+}
+
+mita_uninstall_ledger_capture() {
+  local preserve_package=0 preserve_user=0 preserve_group=0 preserve_shared=0
+  if nb_schema_v3_file_valid && [ -f "$MITA_MARKER" ] && [ ! -L "$MITA_MARKER" ]; then
+    [ ! -f "$MITA_PRESERVE_PACKAGE_MARKER" ] || preserve_package=1
+    [ ! -f "$MITA_PRESERVE_USER_MARKER" ] || preserve_user=1
+    [ ! -f "$MITA_PRESERVE_GROUP_MARKER" ] || preserve_group=1
+    [ ! -f "$MITA_PRESERVE_SHARED_MARKER" ] || preserve_shared=1
+    printf '1|%s|%s|%s|%s' "$preserve_package" "$preserve_user" \
+      "$preserve_group" "$preserve_shared"
+  elif mita_nobrand_specific_residue_present; then
+    # Exact NoBrand-named artifacts are positive ownership evidence, but a
+    # missing authoritative marker cannot prove ownership of the upstream
+    # package, shared directories, or generic mita account. Preserve them.
+    printf '1|1|1|1|1'
+  else
+    printf '0|0|0|0|0'
+  fi
+}
+
 mita_uninstall_target_present() {
+  mita_uninstall_ledger_active && return 0
   nb_schema_v3_file_valid || return 1
   installed_by_oneclick \
     || [ -s "$MITA_USERS_STATE" ] \
@@ -681,6 +1051,7 @@ verify_mita_uninstalled() {
 }
 
 do_uninstall() {
+  local ledger_owned=0
   require_root
   UNINSTALL_CANCELLED=0
   UNINSTALL_PRESERVE_EXTERNAL=0
@@ -691,7 +1062,8 @@ do_uninstall() {
   mita_uninstall_target_present \
     || die "$(t '未检测到 mita 或 OneClick 残留，无需卸载' \
       'No mita or OneClick residue detected; nothing to uninstall')"
-  if ! installed_by_oneclick; then
+  mita_uninstall_ledger_active && ledger_owned=1
+  if ! installed_by_oneclick && [ "$ledger_owned" -ne 1 ]; then
     die "$(t '缺少 schema v3 Mieru ownership 标记，拒绝清理未知资源' \
       'Schema-v3 Mieru ownership marker is missing; refusing to clean unknown resources')"
   fi
@@ -703,7 +1075,18 @@ do_uninstall() {
     fi
     exit 0
   fi
-  if preexisting_mita_resources_recorded; then
+  if [ "$ledger_owned" -eq 1 ]; then
+    UNINSTALL_PRESERVE_PACKAGE="$(nb_lifecycle_field MIERU_PRESERVE_PACKAGE)"
+    UNINSTALL_PRESERVE_USER="$(nb_lifecycle_field MIERU_PRESERVE_USER)"
+    UNINSTALL_PRESERVE_GROUP="$(nb_lifecycle_field MIERU_PRESERVE_GROUP)"
+    UNINSTALL_PRESERVE_SHARED="$(nb_lifecycle_field MIERU_PRESERVE_SHARED)"
+    if [ "$UNINSTALL_PRESERVE_PACKAGE" -eq 1 ] \
+       || [ "$UNINSTALL_PRESERVE_USER" -eq 1 ] \
+       || [ "$UNINSTALL_PRESERVE_GROUP" -eq 1 ] \
+       || [ "$UNINSTALL_PRESERVE_SHARED" -eq 1 ]; then
+      UNINSTALL_PRESERVE_EXTERNAL=1
+    fi
+  elif preexisting_mita_resources_recorded; then
     UNINSTALL_PRESERVE_EXTERNAL=1
     [ -f "$MITA_PRESERVE_PACKAGE_MARKER" ] && UNINSTALL_PRESERVE_PACKAGE=1
     [ -f "$MITA_PRESERVE_USER_MARKER" ] && UNINSTALL_PRESERVE_USER=1

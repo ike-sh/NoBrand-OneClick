@@ -17,6 +17,9 @@ export NOBRAND_FORWARD_SYSCTL_FRAGMENT="$fixture/sysctl.d/90-nobrand-forward.con
 export NOBRAND_TEST_LOCAL_IPV4=192.0.2.168
 
 source_installer
+# Exercise the live source fragment without rebuilding the generated installer.
+# shellcheck source=../src/62-forward.sh
+source "$TEST_ROOT/src/62-forward.sh"
 nb_init_state_layout
 
 live_value="$fixture/live-ip-forward"
@@ -95,5 +98,52 @@ assert_eq 1 "$(cat "$live_value")" 'fragment mismatch fails without forcing ip_f
 [ -s "$NOBRAND_FORWARD_SYSCTL_STATE" ] || fail 'fragment mismatch must retain ownership state for diagnosis'
 assert_eq '# external replacement' "$(sed -n '1p' "$NOBRAND_FORWARD_SYSCTL_FRAGMENT")" \
   'mismatched sysctl fragment preserved'
+
+run_forward_sysctl_snapshot_failure_regressions() (
+  set -euo pipefail
+  local case_fixture snapshot
+  case_fixture="$(mktemp -d)"
+  trap 'rm -rf -- "$case_fixture"' EXIT
+  NOBRAND_FORWARD_SYSCTL_STATE="$case_fixture/live/sysctl.json"
+  NOBRAND_FORWARD_SYSCTL_FRAGMENT="$case_fixture/live/90-nobrand-forward.conf"
+
+  sysctl() { return 71; }
+  snapshot="$case_fixture/read-failure"
+  if forward_sysctl_snapshot "$snapshot" 2>/dev/null; then
+    fail 'Forward sysctl snapshot masked a live-value read failure'
+  fi
+
+  sysctl() {
+    case "$*" in
+      '-n net.ipv4.ip_forward') printf '0\n' ;;
+      '-q -w net.ipv4.ip_forward=0') : ;;
+      *) return 1 ;;
+    esac
+  }
+  snapshot="$case_fixture/marker-failure"
+  mkdir -p "$snapshot/state.absent"
+  if forward_sysctl_snapshot "$snapshot" 2>/dev/null; then
+    fail 'Forward sysctl snapshot masked an absent-marker write failure'
+  fi
+
+  snapshot="$case_fixture/remove-failure"
+  mkdir -p "$snapshot" "$(dirname "$NOBRAND_FORWARD_SYSCTL_STATE")"
+  : >"$snapshot/state.absent"
+  : >"$snapshot/fragment.absent"
+  printf '0\n' >"$snapshot/live-value"
+  printf '%s\n' state >"$NOBRAND_FORWARD_SYSCTL_STATE"
+  printf '%s\n' fragment >"$NOBRAND_FORWARD_SYSCTL_FRAGMENT"
+  rm() {
+    local arg
+    for arg in "$@"; do
+      [ "$arg" != "$NOBRAND_FORWARD_SYSCTL_STATE" ] || return 72
+    done
+    command rm "$@"
+  }
+  if forward_sysctl_restore_snapshot "$snapshot" 2>/dev/null; then
+    fail 'Forward sysctl restore masked an owned-state removal failure'
+  fi
+)
+run_forward_sysctl_snapshot_failure_regressions
 
 pass 'Forward ip_forward ownership/refcount and mismatch safety'

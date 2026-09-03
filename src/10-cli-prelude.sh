@@ -51,11 +51,11 @@ NoBrand-OneClick Mieru 管理 ${SCRIPT_VERSION}
   --user-usage        查看 mita 用户流量/配额用量（mita get users/quotas）
   --user-export-clients [DIR]  批量导出各用户客户端 JSON/链接
   --user-backup       备份 users.json
-  --user-restore FILE 从备份恢复用户状态并 apply + tc
+  --user-restore FILE 从备份恢复用户状态并应用配置与 tc 限速
   --user-export [FILE] 导出用户状态 JSON（默认 stdout）
   --user-import FILE  导入用户状态（覆盖前自动备份）
   --doctor / verify   一键验收：服务/用户/配额/tc/定时任务
-  --perf              只读性能诊断（不会修改服务、内核、firewall 或 tc）
+  --perf              只读性能诊断（不会修改服务、内核、防火墙或 tc）
   --profile-config    选择并应用配置预设
 
 安装选项：
@@ -314,7 +314,7 @@ parse_nobrand_snell_args() {
     *) die "Snell 只支持 v4、v5" ;;
   esac
   if [ "$SNELL_VERSION" = 4 ] && [ "$SNELL_QUIC_PROXY" = on ]; then
-    die "Snell v4 不支持 QUIC Proxy Mode"
+    die "Snell v4 不支持 QUIC Proxy 模式"
   fi
   ACTION="nobrand-snell"
   NOBRAND_ARGS_HANDLED=1
@@ -405,13 +405,13 @@ parse_nobrand_vless_reality_args() {
       --name)
         VLESS_REALITY_NAME="${2:-}"
         [ -n "$VLESS_REALITY_NAME" ] && [[ "$VLESS_REALITY_NAME" != --* ]] \
-          || die '--name 需要 VLESS REALITY instance name'
+          || die '--name 需要 VLESS REALITY 实例名称'
         shift 2
         ;;
       --target|--server-name|--sni)
         VLESS_REALITY_TARGET="${2:-}"
         [ -n "$VLESS_REALITY_TARGET" ] && [[ "$VLESS_REALITY_TARGET" != --* ]] \
-          || die "$1 需要公网 hostname"
+          || die "$1 需要公网主机名"
         VLESS_REALITY_TARGET_CLI=1
         shift 2
         ;;
@@ -451,7 +451,7 @@ parse_nobrand_tuic_args() {
       list) TUIC_ACTION="user-list" ;;
       show|export) TUIC_ACTION="user-show" ;;
       rotate|rotate-key) TUIC_ACTION="user-rotate" ;;
-      *) die "未知 TUIC user 操作: $TUIC_USER_ACTION" ;;
+      *) die "未知 TUIC 用户操作: $TUIC_USER_ACTION" ;;
     esac
   else
     case "$TUIC_ACTION" in
@@ -468,17 +468,17 @@ parse_nobrand_tuic_args() {
     case "$1" in
       --name)
         TUIC_NAME="${2:-}"
-        [ -n "$TUIC_NAME" ] && [[ "$TUIC_NAME" != --* ]] || die '--name 需要 TUIC instance name'
+        [ -n "$TUIC_NAME" ] && [[ "$TUIC_NAME" != --* ]] || die '--name 需要 TUIC 实例名称'
         shift 2
         ;;
       --user)
         TUIC_USER="${2:-}"
-        [ -n "$TUIC_USER" ] && [[ "$TUIC_USER" != --* ]] || die '--user 需要 TUIC user name'
+        [ -n "$TUIC_USER" ] && [[ "$TUIC_USER" != --* ]] || die '--user 需要 TUIC 用户名称'
         shift 2
         ;;
       --sni)
         TUIC_SNI="${2:-}"
-        [ -n "$TUIC_SNI" ] && [[ "$TUIC_SNI" != --* ]] || die '--sni 需要 domain 或 IPv4'
+        [ -n "$TUIC_SNI" ] && [[ "$TUIC_SNI" != --* ]] || die '--sni 需要域名或 IPv4'
         shift 2
         ;;
       --channel)
@@ -504,7 +504,7 @@ parse_nobrand_tuic_args() {
         ;;
     esac
   done
-  case "$TUIC_CHANNEL" in stable|latest|pinned) ;; *) die 'TUIC channel 只支持 stable、latest、pinned' ;; esac
+  case "$TUIC_CHANNEL" in stable|latest|pinned) ;; *) die 'TUIC 通道只支持 stable、latest、pinned' ;; esac
   ACTION="nobrand-tuic"
   NOBRAND_ARGS_HANDLED=1
 }
@@ -523,7 +523,7 @@ parse_nobrand_ssh_args() {
       show) SSH_TUNNEL_ACTION="user-show" ;;
       export) SSH_TUNNEL_ACTION="user-export" ;;
       rotate|rotate-key) SSH_TUNNEL_ACTION="user-rotate-key" ;;
-      *) die "未知 SSH Tunnel user 操作: $SSH_TUNNEL_USER_ACTION" ;;
+      *) die "未知 SSH Tunnel 用户操作: $SSH_TUNNEL_USER_ACTION" ;;
     esac
   else
     case "$SSH_TUNNEL_ACTION" in
@@ -539,13 +539,13 @@ parse_nobrand_ssh_args() {
     case "$1" in
       --user)
         SSH_TUNNEL_USER="${2:-}"
-        [ -n "$SSH_TUNNEL_USER" ] && [[ "$SSH_TUNNEL_USER" != --* ]] || die '--user 需要 SSH Tunnel user label'
+        [ -n "$SSH_TUNNEL_USER" ] && [[ "$SSH_TUNNEL_USER" != --* ]] || die '--user 需要 SSH Tunnel 用户标签'
         shift 2
         ;;
       --token)
         SSH_TUNNEL_WATCHDOG_TOKEN="${2:-}"
         [ -n "$SSH_TUNNEL_WATCHDOG_TOKEN" ] && [[ "$SSH_TUNNEL_WATCHDOG_TOKEN" != --* ]] \
-          || die '--token 需要 watchdog token'
+          || die '--token 需要看门狗令牌'
         shift 2
         ;;
       *)
@@ -589,7 +589,7 @@ parse_nobrand_forward_args() {
     case "$1" in
       --id|--rule|--rule-id)
         FORWARD_RULE_ID="${2:-}"
-        [ -n "$FORWARD_RULE_ID" ] && [[ "$FORWARD_RULE_ID" != --* ]] || die "$1 需要 rule ID 或 name"
+        [ -n "$FORWARD_RULE_ID" ] && [[ "$FORWARD_RULE_ID" != --* ]] || die "$1 需要规则 ID 或名称"
         shift 2
         ;;
       --name)
@@ -639,20 +639,20 @@ parse_nobrand_forward_args() {
         FORWARD_SOURCE_MODE_CLI=1
         shift 2
         ;;
-      --through) FORWARD_THROUGH="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--through 需要 outgoing IP'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
-      --interface) FORWARD_INTERFACE="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--interface 需要 interface'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
-      --listen-interface) FORWARD_LISTEN_INTERFACE="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--listen-interface 需要 interface'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
+      --through) FORWARD_THROUGH="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--through 需要出站 IP'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
+      --interface) FORWARD_INTERFACE="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--interface 需要网络接口'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
+      --listen-interface) FORWARD_LISTEN_INTERFACE="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--listen-interface 需要监听网络接口'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
       --tcp-timeout) FORWARD_TCP_TIMEOUT="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--tcp-timeout 需要秒数'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
       --udp-timeout) FORWARD_UDP_TIMEOUT="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--udp-timeout 需要秒数'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
       --proxy-send) FORWARD_PROXY_SEND="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--proxy-send 需要 true 或 false'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
       --proxy-accept) FORWARD_PROXY_ACCEPT="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--proxy-accept 需要 true 或 false'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
       --proxy-version) FORWARD_PROXY_VERSION="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--proxy-version 需要 1 或 2'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
       --proxy-accept-timeout) FORWARD_PROXY_ACCEPT_TIMEOUT="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--proxy-accept-timeout 需要秒数'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
-      --dns-mode) FORWARD_DNS_MODE="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--dns-mode 需要 Realm DNS mode'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
+      --dns-mode) FORWARD_DNS_MODE="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--dns-mode 需要 Realm DNS 模式'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
       --dns-protocol) FORWARD_DNS_PROTOCOL="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--dns-protocol 需要 tcp、udp 或 tcp_and_udp'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
       --dns-nameservers) FORWARD_DNS_NAMESERVERS="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--dns-nameservers 需要逗号分隔地址'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
-      --listen-transport) FORWARD_LISTEN_TRANSPORT="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--listen-transport 需要 Realm transport string'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
-      --remote-transport) FORWARD_REMOTE_TRANSPORT="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--remote-transport 需要 Realm transport string'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
+      --listen-transport) FORWARD_LISTEN_TRANSPORT="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--listen-transport 需要 Realm 传输字符串'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
+      --remote-transport) FORWARD_REMOTE_TRANSPORT="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--remote-transport 需要 Realm 传输字符串'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
       --extra-targets) FORWARD_EXTRA_TARGETS="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--extra-targets 需要逗号分隔 host:port'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
       --balance) FORWARD_BALANCE="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--balance 需要 off、roundrobin 或 iphash'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
       --weights) FORWARD_WEIGHTS="${2:-}"; [[ -n "${2:-}" && "${2:-}" != --* ]] || die '--weights 需要逗号分隔权重'; FORWARD_ADVANCED_CLI=1; shift 2 ;;
@@ -1089,7 +1089,14 @@ while [ "$NOBRAND_ARGS_HANDLED" -eq 0 ] && [ $# -gt 0 ]; do
       shift
       ;;
     --help|-h) usage; exit 0 ;;
-    --version) printf '%s Mieru %s\nAuthor: %s\n' "$SCRIPT_NAME" "$SCRIPT_VERSION" "$SCRIPT_AUTHOR"; exit 0 ;;
+    --version)
+      if [ "$LANG_ZH" -eq 1 ]; then
+        printf '%s Mieru %s\n作者: %s\n' "$SCRIPT_NAME" "$SCRIPT_VERSION" "$SCRIPT_AUTHOR"
+      else
+        printf '%s Mieru %s\nAuthor: %s\n' "$SCRIPT_NAME" "$SCRIPT_VERSION" "$SCRIPT_AUTHOR"
+      fi
+      exit 0
+      ;;
     *)
       if [[ "$1" == --* ]]; then
         die "未知参数：$1（使用 --help 查看帮助）"

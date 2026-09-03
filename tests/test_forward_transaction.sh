@@ -104,4 +104,65 @@ assert_eq 0.0.0.0 "$(jq -r '.rules[0].listen_host' "$captured_switch")" \
 assert_eq 203.0.113.30 "$(jq -r '.rules[0].target_host' "$captured_switch")" \
   'valid IPv4 target is preserved during backend switch'
 
+# Exercise the live cleanup helpers without rebuilding the generated installer.
+# shellcheck source=../src/62-forward.sh
+source "$TEST_ROOT/src/62-forward.sh"
+run_forward_restore_cleanup_failure_regressions() (
+  set -euo pipefail
+  local case_fixture snapshot label call_log
+  case_fixture="$(mktemp -d)"
+  trap 'rm -rf -- "$case_fixture"' EXIT
+  call_log="$case_fixture/cleanup.log"
+  forward_realm_service_file_owned() { return 0; }
+  forward_realm_service_action() { printf '%s\n' service >>"$call_log"; return 71; }
+  forward_remove_owned_nft_table() { printf '%s\n' nft >>"$call_log"; return 72; }
+  if forward_remove_restore_attempt_resources; then
+    fail 'Forward restore-attempt cleanup masked service and nft failures'
+  fi
+  assert_contains "$(cat "$call_log")" service \
+    'Forward restore-attempt cleanup tried the owned Realm service'
+  assert_contains "$(cat "$call_log")" nft \
+    'Forward restore-attempt cleanup continued through the owned nft table'
+
+  snapshot="$case_fixture/side-effects"
+  mkdir -p "$snapshot/sysctl"
+  for label in binary metadata systemd-service openrc-service; do
+    : >"$snapshot/${label}.external"
+  done
+  : >"$snapshot/nft-table.external"
+  forward_remove_restore_attempt_resources() { return 73; }
+  forward_sysctl_restore_snapshot() { :; }
+  nb_service_manager() { printf none; }
+  if forward_restore_side_effect_snapshot "$snapshot" 2>/dev/null; then
+    fail 'Forward side-effect restore masked restore-attempt cleanup failure'
+  fi
+)
+run_forward_restore_cleanup_failure_regressions
+
+run_forward_transaction_snapshot_retention_regression() (
+  set -euo pipefail
+  local case_fixture transaction_snapshot transaction_state transaction_candidate
+  case_fixture="$(mktemp -d)"
+  trap 'rm -rf -- "$case_fixture"' EXIT
+  transaction_snapshot="$case_fixture/transaction-snapshot"
+  transaction_state="$case_fixture/transaction-state.json"
+  transaction_candidate="$case_fixture/transaction-candidate.json"
+  printf '%s\n' old >"$transaction_state"
+  printf '%s\n' candidate >"$transaction_candidate"
+  NOBRAND_FORWARD_STATE_FILE="$transaction_state"
+  mktemp_dir() { mkdir -p "$transaction_snapshot"; printf '%s' "$transaction_snapshot"; }
+  forward_state_valid() { :; }
+  forward_snapshot_restore_side_effects() { mkdir -p "$1"; }
+  forward_apply_nft_state() { return 74; }
+  forward_firewall_reconcile() { return 75; }
+  forward_restore_side_effect_snapshot() { return 76; }
+  forward_realm_apply_state() { return 77; }
+  if forward_transaction_commit "$transaction_candidate" modify nftables nftables >/dev/null 2>&1; then
+    fail 'Forward transaction succeeded after apply and rollback failures'
+  fi
+  [ -d "$transaction_snapshot" ] \
+    || fail 'Forward transaction deleted the only snapshot after rollback failure'
+)
+run_forward_transaction_snapshot_retention_regression
+
 pass 'Port Forward transaction and backend-switch rollback'

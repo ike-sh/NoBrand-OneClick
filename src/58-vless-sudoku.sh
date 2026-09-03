@@ -331,7 +331,7 @@ vless_sudoku_configure_requests() {
     nb_prepare_ingress_request || return 1
   fi
   nb_prepare_ingress_deployment "$INGRESS_PROFILE_ID" native-bind \
-    || die '所选 Ingress strict local address cannot be bound by VLESS Sudoku'
+    || die 'VLESS Sudoku 无法绑定所选 Ingress 的 Strict 本地地址'
   VLESS_SUDOKU_LISTEN="$INGRESS_LISTEN_HOST"
   if vless_sudoku_state_exists; then
     old_port="$(vless_sudoku_state_field listen_port 2>/dev/null || true)"
@@ -373,7 +373,7 @@ vless_sudoku_configure_requests() {
   else
     VLESS_SUDOKU_PASSWORD="$(openssl rand -hex 16 2>/dev/null || true)"
     [[ "$VLESS_SUDOKU_PASSWORD" =~ ^[0-9A-Fa-f]{32}$ ]] \
-      || die '无法生成 FinalMask Sudoku password'
+      || die '无法生成 FinalMask Sudoku 密码'
   fi
 }
 
@@ -646,7 +646,7 @@ vless_sudoku_node_rows() {
 
 print_vless_sudoku_result() {
   local context="${1:-show}" uuid listen_host listen_port mode advertise_host advertise_port
-  local host port status link finalmask password
+  local host port status link finalmask password mode_label
   vless_sudoku_state_exists || { t 'VLESS Sudoku 未安装' 'VLESS Sudoku is not installed'; return 0; }
   uuid="$(vless_sudoku_state_field uuid)"
   listen_host="$(vless_sudoku_state_field listen_host)"
@@ -659,34 +659,35 @@ print_vless_sudoku_result() {
   finalmask="$(jq -c '.finalmask_json' "$NOBRAND_VLESS_STATE_FILE")"
   password="$(jq -r '.finalmask_json.tcp[0].settings.password' "$NOBRAND_VLESS_STATE_FILE")"
   link="$(vless_sudoku_current_share_link)"
-  status=Stopped; vless_sudoku_running && status=Running
+  status=已停止; vless_sudoku_running && status=运行中
+  mode_label="$mode"; case "$mode" in auto) mode_label='自动' ;; custom) mode_label='自定义' ;; esac
   nobrand_print_banner
   msg ''
   [ "$context" != install ] || t '部署完成' 'Deployment complete'
-  msg '协议        Plain VLESS + FinalMask + Sudoku'
+  msg '协议        VLESS + FinalMask + Sudoku'
   msg '传输        TCP'
-  msg 'VLESS Encryption: NOT USED'
+  msg 'VLESS Encryption：未使用（NOT USED）'
   msg "状态        ${status}"
   msg ''
-  msg '真实监听'
-  msg "  Address   ${listen_host}"
-  msg "  Port      ${listen_port}"
+  msg '实际监听 / Actual Listener'
+  msg "  地址      ${listen_host}"
+  msg "  端口      ${listen_port}"
   msg ''
-  msg '网络入口'
-  msg "  Profile   $(nb_ingress_profile_name "$(vless_sudoku_state_field ingress_profile_id 2>/dev/null || true)")"
+  msg '网络入口 / Ingress'
+  msg "  入口配置 / Ingress Profile  $(nb_ingress_profile_name "$(vless_sudoku_state_field ingress_profile_id 2>/dev/null || true)")"
   msg ''
-  msg '客户端入口'
-  msg "  Host      ${host}"
-  msg "  Port      ${port}"
-  msg "  Mode      ${mode}"
+  msg '展示端点 / Display Endpoint'
+  msg "  主机      ${host}"
+  msg "  端口      ${port}"
+  msg "  模式      ${mode_label}"
   msg ''
   msg '认证与 FinalMask'
   msg "  UUID      ${uuid}"
-  msg "  Mode      sudoku"
-  msg "  Password  ${password}"
+  msg "  模式      sudoku"
+  msg "  密码      ${password}"
   msg "  JSON      ${finalmask}"
   msg ''
-  msg "Xray client JSON: ${NOBRAND_VLESS_CLIENT_FILE}"
+  msg "Xray 客户端 JSON: ${NOBRAND_VLESS_CLIENT_FILE}"
   msg '========================================'
   msg "$link"
 }
@@ -717,7 +718,7 @@ vless_sudoku_service_command() {
       fi
       ;;
     status)
-      if vless_sudoku_running; then msg 'VLESS Sudoku: Running'; else msg 'VLESS Sudoku: Stopped'; return 1; fi
+      if vless_sudoku_running; then msg 'VLESS Sudoku：运行中'; else msg 'VLESS Sudoku：已停止'; return 1; fi
       ;;
   esac
 }
@@ -741,67 +742,67 @@ remove_vless_sudoku_config() {
 vless_sudoku_doctor() {
   local failed=0 port mode host advertise_port uuid password cached_link current_link
   if ! vless_sudoku_state_exists; then
-    nb_doctor_line INFO 'not installed'
+    nb_doctor_line INFO 'VLESS Sudoku 未安装'
     return 0
   fi
   port="$(vless_sudoku_state_field listen_port)"
   uuid="$(vless_sudoku_state_field uuid)"
   password="$(jq -r '.finalmask_json.tcp[0].settings.password // empty' "$NOBRAND_VLESS_STATE_FILE")"
   [ -x "$NOBRAND_XRAY_BIN" ] \
-    && nb_doctor_line PASS "Xray $(nobrand_xray_version 2>/dev/null || printf unknown)" \
-    || { nb_doctor_line FAIL 'NoBrand Xray binary'; failed=1; }
+    && nb_doctor_line PASS "Xray $(nobrand_xray_version 2>/dev/null || printf '未知版本')" \
+    || { nb_doctor_line FAIL 'NoBrand Xray 可执行文件'; failed=1; }
   vless_sudoku_state_matches \
-    && nb_doctor_line PASS 'state schema + plain VLESS metadata' \
-    || { nb_doctor_line FAIL 'state schema/metadata'; failed=1; }
+    && nb_doctor_line PASS '状态 schema 与 VLESS 元数据有效' \
+    || { nb_doctor_line FAIL '状态 schema / 元数据无效'; failed=1; }
   vless_sudoku_server_config_matches "$NOBRAND_VLESS_CONFIG_FILE" "$uuid" "$port" "$password" \
-    && nb_doctor_line PASS 'plain VLESS + TCP + FinalMask Sudoku config' \
-    || { nb_doctor_line FAIL 'server config semantics'; failed=1; }
+    && nb_doctor_line PASS 'VLESS + TCP + FinalMask Sudoku 配置有效' \
+    || { nb_doctor_line FAIL '服务端配置语义无效'; failed=1; }
   nobrand_xray_test_config "$NOBRAND_VLESS_CONFIG_FILE" \
-    && nb_doctor_line PASS 'Xray config test' \
-    || { nb_doctor_line FAIL 'Xray config test'; failed=1; }
+    && nb_doctor_line PASS 'Xray 配置校验' \
+    || { nb_doctor_line FAIL 'Xray 配置校验'; failed=1; }
   vless_sudoku_forbidden_absent "$NOBRAND_VLESS_CONFIG_FILE" \
     "$NOBRAND_VLESS_STATE_FILE" "$NOBRAND_VLESS_CLIENT_FILE" \
-    && nb_doctor_line PASS 'VLESS Encryption absent' \
-    || { nb_doctor_line FAIL 'forbidden encryption dependency/field detected'; failed=1; }
+    && nb_doctor_line PASS 'VLESS Encryption 未使用' \
+    || { nb_doctor_line FAIL '检测到禁用的 Encryption 依赖或字段'; failed=1; }
   vless_sudoku_client_config_matches \
-    && nb_doctor_line PASS 'Xray client JSON' \
-    || { nb_doctor_line FAIL 'Xray client JSON'; failed=1; }
+    && nb_doctor_line PASS 'Xray 客户端 JSON' \
+    || { nb_doctor_line FAIL 'Xray 客户端 JSON'; failed=1; }
   vless_sudoku_running \
-    && nb_doctor_line PASS "service + TCP/${port}" \
-    || { nb_doctor_line FAIL "service/listener TCP/${port}"; failed=1; }
+    && nb_doctor_line PASS "服务与 TCP/${port} 监听正常" \
+    || { nb_doctor_line FAIL "服务 / 监听异常: TCP/${port}"; failed=1; }
   nb_firewall_binding_owned TCP "$port" \
-    && nb_doctor_line PASS "firewall ownership TCP/${port}" \
-    || nb_doctor_line INFO "firewall rule not owned (pre-existing/no local firewall): TCP/${port}"
+    && nb_doctor_line PASS "防火墙归属正常: TCP/${port}" \
+    || nb_doctor_line INFO "防火墙规则不归 NoBrand 管理（预先存在 / 无本地防火墙）: TCP/${port}"
   mode="$(vless_sudoku_state_field advertise_mode)"
   host="$(vless_sudoku_state_field advertise_host)"
   advertise_port="$(vless_sudoku_state_field advertise_port)"
   nb_validate_advertise_endpoint "$host" "$advertise_port" TCP \
-    && nb_doctor_line PASS "display endpoint mode=${mode}" \
-    || { nb_doctor_line FAIL 'display endpoint state'; failed=1; }
+    && nb_doctor_line PASS "展示端点 / Display Endpoint 模式=${mode}" \
+    || { nb_doctor_line FAIL '展示端点 / Display Endpoint 状态无效'; failed=1; }
   vless_sudoku_current_share_link >/dev/null \
-    && nb_doctor_line PASS 'VLESS URL generation' \
-    || { nb_doctor_line FAIL 'VLESS URL generation'; failed=1; }
+    && nb_doctor_line PASS 'VLESS URL 生成正常' \
+    || { nb_doctor_line FAIL 'VLESS URL 生成失败'; failed=1; }
   cached_link="$(vless_sudoku_state_field link 2>/dev/null || true)"
   current_link="$(vless_sudoku_current_share_link 2>/dev/null || true)"
   [ -n "$current_link" ] && [ "$cached_link" = "$current_link" ] \
-    && nb_doctor_line PASS 'cached VLESS URL matches state' \
-    || { nb_doctor_line FAIL 'cached VLESS URL mismatch'; failed=1; }
+    && nb_doctor_line PASS '缓存的 VLESS URL 与状态一致' \
+    || { nb_doctor_line FAIL '缓存的 VLESS URL 与状态不一致'; failed=1; }
   return "$failed"
 }
 
 vless_sudoku_smoke() {
   local failed=0
-  vless_sudoku_state_exists || { nb_doctor_line INFO 'VLESS Sudoku not installed'; return 0; }
+  vless_sudoku_state_exists || { nb_doctor_line INFO 'VLESS Sudoku 未安装'; return 0; }
   vless_sudoku_state_matches \
-    && nb_doctor_line PASS 'state schema' || { nb_doctor_line FAIL 'state schema'; failed=1; }
+    && nb_doctor_line PASS '状态 schema 有效' || { nb_doctor_line FAIL '状态 schema 无效'; failed=1; }
   nobrand_xray_test_config "$NOBRAND_VLESS_CONFIG_FILE" \
     && nb_doctor_line PASS 'xray run -test' || { nb_doctor_line FAIL 'xray run -test'; failed=1; }
   vless_sudoku_forbidden_absent "$NOBRAND_VLESS_CONFIG_FILE" \
     "$NOBRAND_VLESS_STATE_FILE" "$NOBRAND_VLESS_CLIENT_FILE" \
     && nb_doctor_line PASS 'VLESS_ENCRYPTION_ENABLED=false' \
-    || { nb_doctor_line FAIL 'VLESS Encryption material detected'; failed=1; }
+    || { nb_doctor_line FAIL '检测到 VLESS Encryption 数据'; failed=1; }
   vless_sudoku_running \
-    && nb_doctor_line PASS 'service/listener' || { nb_doctor_line FAIL 'service/listener'; failed=1; }
+    && nb_doctor_line PASS '服务 / 监听正常' || { nb_doctor_line FAIL '服务 / 监听异常'; failed=1; }
   return "$failed"
 }
 

@@ -179,7 +179,7 @@ assert_eq 192.0.2.10 "$(jq -r '.inbounds[0].listen' "$tuic_config")" \
 assert_eq "$tuic_identity_hash" \
   "$(jq -Sc '{instance_id,name,listen_port,advertise_mode,advertise_host,advertise_port,sni,tls,users,runtime_channel,runtime_version}' "$tuic_state" | sha256sum)" \
   'TUIC enforcement migration preserves credentials, TLS, port, runtime, and Display metadata'
-assert_contains "$(tuic_show_user "$tuic_id" alice)" 'Actual: 192.0.2.10:41040/UDP' \
+assert_contains "$(tuic_show_user "$tuic_id" alice)" '实际监听 / Actual Listener: 192.0.2.10:41040/UDP' \
   'TUIC show reports the real strict listener address'
 
 pass 'Profile-wide explicit migration, compensating rollback, native-bind failure rollback, and identity preservation'

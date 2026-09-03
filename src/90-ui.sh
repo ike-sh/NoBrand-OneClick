@@ -126,9 +126,9 @@ show_performance_menu() {
   msg '  2) 配置预设 Profile'
   msg '  3) MTU'
   msg '  4) BBR / FQ'
-  msg '  5) Multiplexing / Handshake'
-  msg '  6) Traffic Pattern'
-  msg '  7) Low Entropy'
+  msg '  5) 多路复用 / Multiplexing 与握手 / Handshake'
+  msg '  6) 流量模式 / Traffic Pattern'
+  msg '  7) 低熵模式 / Low Entropy'
   msg '  8) 带宽限制状态'
   msg '  9) Mieru 版本通道'
   msg ' 10) 清理并恢复本项目 tc 规则'
@@ -218,8 +218,8 @@ show_menu() {
   t "状态: $([ "$installed" = yes ] && printf '已安装' || printf '未安装')" \
     "Status: $([ "$installed" = yes ] && printf 'installed' || printf 'not installed')"
   t "用户: ${users}" "Users: ${users}"
-  t "Profile: ${profile_text}" "Profile: ${profile_text}"
-  t "Mieru Version: ${version_text}" "Mieru Version: ${version_text}"
+  t "配置预设 / Profile: ${profile_text}" "Profile: ${profile_text}"
+  t "Mieru 版本: ${version_text}" "Mieru Version: ${version_text}"
   msg ''
   if [ "$installed" = yes ]; then
     msg '  1) 修复安装'
@@ -237,7 +237,7 @@ show_menu() {
   msg '  6) 服务管理'
   msg '  7) 备份 / 恢复'
   msg '  8) 升级'
-  msg '  9) Doctor'
+  msg '  9) Doctor / 诊断'
   msg ' 10) 卸载'
   msg '  0) 退出'
   msg ""
@@ -369,10 +369,10 @@ snell_menu_loop() {
     msg '  2) 安装 Snell v4 [兼容]'
     msg '  3) 查看 Snell 节点'
     msg '  4) QUIC 设置'
-    msg '  5) 修改 Display Endpoint'
+    msg '  5) 修改展示端点 / Display Endpoint'
     msg '  6) 服务管理'
-    msg '  7) 升级官方 runtime'
-    msg '  8) Doctor'
+    msg '  7) 升级官方 Runtime'
+    msg '  8) Doctor / 诊断'
     msg '  9) 删除节点'
     msg '  0) 返回'
     read_tty choice "$(t '请选择 [0-9]: ' 'Choose [0-9]: ')" || choice=""
@@ -417,13 +417,13 @@ hysteria2_menu_loop() {
     msg '========== Hysteria2 / Xray-core =========='
     msg '  1) 安装 / 重新部署'
     msg '  2) 查看节点'
-    msg '  3) 修改 Display Endpoint'
+    msg '  3) 修改展示端点 / Display Endpoint'
     msg '  4) 状态'
     msg '  5) 启动'
     msg '  6) 停止'
     msg '  7) 重启'
     msg '  8) 升级 NoBrand 独立 Xray-core'
-    msg '  9) Doctor'
+    msg '  9) Doctor / 诊断'
     msg ' 10) 删除 Hysteria2'
     msg '  0) 返回'
     read_tty choice "$(t '请选择 [0-10]: ' 'Choose [0-10]: ')" || choice=""
@@ -462,8 +462,8 @@ vless_sudoku_menu_loop() {
   trap - ERR
   while true; do
     msg ''
-    msg '========== Plain VLESS + FinalMask + Sudoku / TCP =========='
-    msg 'VLESS Encryption: NOT USED'
+    msg '========== VLESS + FinalMask + Sudoku（TCP） =========='
+    msg 'VLESS Encryption：未使用（NOT USED）'
     msg '  1) 安装 / 重新配置'
     msg '  2) 查看节点'
     msg '  3) 修改客户端展示入口'
@@ -471,9 +471,9 @@ vless_sudoku_menu_loop() {
     msg '  5) 启动'
     msg '  6) 停止'
     msg '  7) 重启'
-    msg '  8) Doctor'
-    msg '  9) Smoke / 配置验证'
-    msg ' 10) 升级共享 Xray runtime'
+    msg '  8) Doctor / 诊断'
+    msg '  9) 配置冒烟测试 / Smoke'
+    msg ' 10) 升级共享 Xray Runtime'
     msg ' 11) 删除'
     msg '  0) 返回'
     read_tty choice "$(t '请选择 [0-11]: ' 'Choose [0-11]: ')" || choice=""
@@ -517,10 +517,10 @@ reality_menu_select_instance() {
     printf '  - %s (%s)\n' "$name" "$id"
     found=1
   done < <(reality_instance_ids)
-  [ "$found" -eq 1 ] || { warn 'VLESS REALITY 尚无 instance'; return 1; }
-  read_tty choice '输入 VLESS REALITY instance name: ' || choice=""
+  [ "$found" -eq 1 ] || { warn 'VLESS REALITY 尚无实例'; return 1; }
+  read_tty choice '请输入 VLESS REALITY 实例名称: ' || choice=""
   reality_find_id_by_name "$choice" >/dev/null 2>&1 \
-    || { warn 'VLESS REALITY instance 不存在'; return 1; }
+    || { warn 'VLESS REALITY 实例不存在'; return 1; }
   VLESS_REALITY_NAME="$choice"
 }
 
@@ -530,18 +530,18 @@ vless_reality_menu_loop() {
   while true; do
     msg ''
     msg '========== VLESS + TCP + REALITY + XTLS Vision =========='
-    msg 'Public Ingress: Recommended; mapped/dedicated: allowed with warning'
-    msg '  1) 安装新 instance'
+    msg 'Public Ingress：推荐；Mapped / Dedicated：允许，但会提示警告'
+    msg '  1) 安装新实例'
     msg '  2) 查看节点 / URI'
     msg '  3) 导出 Xray / Mihomo / sing-box'
-    msg '  4) 修改 Display Endpoint'
+    msg '  4) 修改展示端点 / Display Endpoint'
     msg '  5) 状态'
     msg '  6) 启动'
     msg '  7) 停止'
     msg '  8) 重启'
-    msg '  9) Doctor'
-    msg ' 10) 升级共享 Xray runtime'
-    msg ' 11) 删除 instance'
+    msg '  9) Doctor / 诊断'
+    msg ' 10) 升级共享 Xray Runtime'
+    msg ' 11) 删除实例'
     msg '  0) 返回'
     read_tty choice "$(t '请选择 [0-11]: ' 'Choose [0-11]: ')" || choice=""
     case "$choice" in
@@ -551,12 +551,12 @@ vless_reality_menu_loop() {
           VLESS_REALITY_TARGET_PORT_CLI=0 VLESS_REALITY_FINGERPRINT=chrome VLESS_REALITY_SPIDER_X=/
         ADVERTISE_HOST="" ADVERTISE_PORT="" ADVERTISE_CLI=0 ADVERTISE_AUTO_REQUESTED=0
         INGRESS_PROFILE="" INGRESS_PROFILE_CLI=0 YES=0
-        read_tty VLESS_REALITY_NAME 'Instance name [primary]: ' || VLESS_REALITY_NAME=""
+        read_tty VLESS_REALITY_NAME '实例名称 [primary]: ' || VLESS_REALITY_NAME=""
         VLESS_REALITY_NAME="${VLESS_REALITY_NAME:-primary}"
         msg ''
         nb_ingress_list
         profile_default="$(nb_ingress_profile_name "$(nb_ingress_default_profile_id 2>/dev/null || true)")"
-        read_tty selected "Ingress Profile [${profile_default}]: " || selected=""
+        read_tty selected "请选择 Ingress Profile [${profile_default}]: " || selected=""
         if [ -n "$selected" ]; then
           INGRESS_PROFILE="$selected"; INGRESS_PROFILE_CLI=1
         fi
@@ -583,7 +583,7 @@ vless_reality_menu_loop() {
       10) VLESS_REALITY_ACTION=upgrade; nobrand_menu_run nobrand_run_vless_reality_action ;;
       11)
         if reality_menu_select_instance; then
-          read_tty confirm '确认删除该 VLESS REALITY instance？输入 yes: ' || confirm=""
+          read_tty confirm '确认删除该 VLESS REALITY 实例？输入 yes 确认: ' || confirm=""
           [ "$confirm" = yes ] || { warn '已取消'; continue; }
           VLESS_REALITY_ACTION=remove
           nobrand_menu_run nobrand_run_vless_reality_action
@@ -603,9 +603,9 @@ tuic_menu_select_instance() {
     printf '  - %s (%s)\n' "$name" "$id"
     found=1
   done < <(tuic_instance_ids)
-  [ "$found" -eq 1 ] || { warn 'TUIC 尚无 instance'; return 1; }
-  read_tty choice '输入 TUIC instance name: ' || choice=""
-  tuic_find_id_by_name "$choice" >/dev/null 2>&1 || { warn 'TUIC instance 不存在'; return 1; }
+  [ "$found" -eq 1 ] || { warn 'TUIC 尚无实例'; return 1; }
+  read_tty choice '请输入 TUIC 实例名称: ' || choice=""
+  tuic_find_id_by_name "$choice" >/dev/null 2>&1 || { warn 'TUIC 实例不存在'; return 1; }
   TUIC_NAME="$choice"
 }
 
@@ -614,25 +614,25 @@ tuic_menu_loop() {
   trap - ERR
   while true; do
     msg ''
-    msg '========== TUIC v5 / official sing-box =========='
-    msg '  1) 安装 TUIC v5 instance'
+    msg '========== TUIC v5 / 官方 sing-box Runtime =========='
+    msg '  1) 安装 TUIC v5 实例'
     msg '  2) 查看 / 导出用户节点'
-    msg '  3) 用户管理（add/delete/list/rotate）'
-    msg '  4) 修改 Display Endpoint'
+    msg '  3) 用户管理（列出 / 添加 / 删除 / 轮换凭据）'
+    msg '  4) 修改展示端点 / Display Endpoint'
     msg '  5) 状态'
     msg '  6) 启动'
     msg '  7) 停止'
     msg '  8) 重启'
-    msg '  9) 升级 official sing-box runtime'
-    msg ' 10) Doctor'
-    msg ' 11) 卸载 instance'
+    msg '  9) 升级官方 sing-box Runtime'
+    msg ' 10) Doctor / 诊断'
+    msg ' 11) 卸载实例'
     msg '  0) 返回'
     read_tty choice '请选择 [0-11]: ' || choice=""
     case "$choice" in
       1)
-        read_tty TUIC_NAME 'Instance name [primary]: ' || TUIC_NAME=""
+        read_tty TUIC_NAME '实例名称 [primary]: ' || TUIC_NAME=""
         TUIC_NAME="${TUIC_NAME:-primary}"
-        read_tty TUIC_USER 'First user [default]: ' || TUIC_USER=""
+        read_tty TUIC_USER '首个用户名称 [default]: ' || TUIC_USER=""
         TUIC_USER="${TUIC_USER:-default}"
         PORT="" ADVERTISE_HOST="" ADVERTISE_PORT="" ADVERTISE_CLI=0 ADVERTISE_AUTO_REQUESTED=0
         TUIC_SNI="" TUIC_CHANNEL=stable TUIC_VERSION="" YES=0 TUIC_ACTION=install
@@ -640,18 +640,18 @@ tuic_menu_loop() {
         ;;
       2)
         tuic_menu_select_instance || continue
-        read_tty TUIC_USER 'User name（唯一 user 可留空）: ' || TUIC_USER=""
+        read_tty TUIC_USER '用户名称（仅有一个用户时可留空）: ' || TUIC_USER=""
         TUIC_ACTION="export"; nobrand_menu_run nobrand_run_tuic_action
         ;;
       3)
         tuic_menu_select_instance || continue
-        msg '  1) list  2) add  3) delete  4) rotate UUID+password'
+        msg '  1) 列出用户  2) 添加用户  3) 删除用户  4) 轮换 UUID + 密码'
         read_tty confirm '请选择 [1-4]: ' || confirm=""
         case "$confirm" in
           1) TUIC_ACTION="user-list" ;;
-          2) read_tty user 'New user name: ' || user=""; TUIC_USER="$user"; TUIC_ACTION="user-add" ;;
-          3) read_tty user 'Delete user name: ' || user=""; TUIC_USER="$user"; TUIC_ACTION="user-delete" ;;
-          4) read_tty user 'Rotate user name: ' || user=""; TUIC_USER="$user"; TUIC_ACTION="user-rotate" ;;
+          2) read_tty user '新用户名称: ' || user=""; TUIC_USER="$user"; TUIC_ACTION="user-add" ;;
+          3) read_tty user '要删除的用户名称: ' || user=""; TUIC_USER="$user"; TUIC_ACTION="user-delete" ;;
+          4) read_tty user '要轮换凭据的用户名称: ' || user=""; TUIC_USER="$user"; TUIC_ACTION="user-rotate" ;;
           *) warn '无效选择'; continue ;;
         esac
         nobrand_menu_run nobrand_run_tuic_action
@@ -687,27 +687,27 @@ ssh_tunnel_menu_loop() {
   trap - ERR
   while true; do
     msg ''
-    msg '========== SSH Tunnel / existing OpenSSH =========='
-    msg 'TCP forwarding: -L / -D / -R; no shell/exec/TTY/SFTP/SCP; GatewayPorts=no'
-    msg '  1) 安装 SSH Tunnel policy + first user'
+    msg '========== SSH Tunnel（现有 OpenSSH） =========='
+    msg 'TCP 转发：支持 -L / -D / -R；禁用 shell / exec / TTY / SFTP / SCP；GatewayPorts=no'
+    msg '  1) 安装 SSH Tunnel 策略并创建首个用户'
     msg '  2) 查看用户'
-    msg '  3) 显式导出用户 private key/命令'
-    msg '  4) 用户管理（add/delete/list/rotate-key）'
-    msg '  5) 修改 Display Endpoint'
+    msg '  3) 显式导出用户私钥与连接命令'
+    msg '  4) 用户管理（列出 / 添加 / 删除 / 轮换密钥）'
+    msg '  5) 修改展示端点 / Display Endpoint'
     msg '  6) 状态'
-    msg '  7) Doctor'
+    msg '  7) Doctor / 诊断'
     msg '  8) 卸载 SSH Tunnel'
     msg '  0) 返回'
     read_tty choice '请选择 [0-8]: ' || choice=""
     case "$choice" in
       1)
-        read_tty SSH_TUNNEL_USER 'First tunnel user [default]: ' || SSH_TUNNEL_USER=""
+        read_tty SSH_TUNNEL_USER '首个隧道用户标签 [default]: ' || SSH_TUNNEL_USER=""
         SSH_TUNNEL_USER="${SSH_TUNNEL_USER:-default}"
         ADVERTISE_HOST="" ADVERTISE_PORT="" ADVERTISE_CLI=0 ADVERTISE_AUTO_REQUESTED=0 YES=0
         SSH_TUNNEL_ACTION=install; nobrand_menu_run nobrand_run_ssh_tunnel_action
         ;;
       2|3)
-        read_tty user 'Tunnel user label（唯一 user 可留空）: ' || user=""
+        read_tty user '隧道用户标签（仅有一个用户时可留空）: ' || user=""
         SSH_TUNNEL_USER="$user"
         if [ "$choice" = 2 ]; then
           SSH_TUNNEL_ACTION="show"
@@ -717,13 +717,13 @@ ssh_tunnel_menu_loop() {
         nobrand_menu_run nobrand_run_ssh_tunnel_action
         ;;
       4)
-        msg '  1) list  2) add  3) delete  4) rotate-key'
+        msg '  1) 列出用户  2) 添加用户  3) 删除用户  4) 轮换密钥'
         read_tty confirm '请选择 [1-4]: ' || confirm=""
         case "$confirm" in
           1) SSH_TUNNEL_ACTION="user-list" ;;
-          2) read_tty user 'New tunnel user label: ' || user=""; SSH_TUNNEL_USER="$user"; SSH_TUNNEL_ACTION="user-add" ;;
-          3) read_tty user 'Delete tunnel user label: ' || user=""; SSH_TUNNEL_USER="$user"; SSH_TUNNEL_ACTION="user-delete" ;;
-          4) read_tty user 'Rotate tunnel user label: ' || user=""; SSH_TUNNEL_USER="$user"; SSH_TUNNEL_ACTION="user-rotate-key" ;;
+          2) read_tty user '新隧道用户标签: ' || user=""; SSH_TUNNEL_USER="$user"; SSH_TUNNEL_ACTION="user-add" ;;
+          3) read_tty user '要删除的隧道用户标签: ' || user=""; SSH_TUNNEL_USER="$user"; SSH_TUNNEL_ACTION="user-delete" ;;
+          4) read_tty user '要轮换密钥的隧道用户标签: ' || user=""; SSH_TUNNEL_USER="$user"; SSH_TUNNEL_ACTION="user-rotate-key" ;;
           *) warn '无效选择'; continue ;;
         esac
         nobrand_menu_run nobrand_run_ssh_tunnel_action
@@ -742,6 +742,7 @@ ssh_tunnel_menu_loop() {
       0) return 0 ;;
       *) warn '无效选择' ;;
     esac
+    nobrand_ssh_confirmation_pending && return 0
     menu_pause
   done
 }
@@ -761,32 +762,32 @@ forward_menu_reset_requests() {
 forward_menu_select_rule() {
   local selector=""
   forward_list_rules
-  read_tty selector '输入 rule ID 或 name: ' || selector=""
+  read_tty selector '请输入规则 ID 或名称: ' || selector=""
   [ -n "$selector" ] && forward_resolve_rule_id "$selector" >/dev/null 2>&1 \
-    || { warn 'Forward rule 不存在'; return 1; }
+    || { warn '端口转发规则不存在'; return 1; }
   FORWARD_RULE_ID="$selector"
 }
 
 forward_menu_collect_add() {
   local choice="" advanced=""
   forward_menu_reset_requests
-  read_tty FORWARD_NAME 'Rule name: ' || FORWARD_NAME=""
-  [ -n "$FORWARD_NAME" ] || { warn 'Rule name 不能为空'; return 1; }
-  msg 'Backend: 1) nftables — Kernel NAT [simple IP forwarding]'
-  msg '         2) Realm — Userspace Relay [domain / advanced forwarding]'
+  read_tty FORWARD_NAME '规则名称: ' || FORWARD_NAME=""
+  [ -n "$FORWARD_NAME" ] || { warn '规则名称不能为空'; return 1; }
+  msg '转发后端：1) nftables — 内核 NAT（简单 IP 转发）'
+  msg '          2) Realm — 用户态中继（域名 / 高级转发）'
   read_tty choice '请选择 [1-2]: ' || choice=""
-  case "$choice" in 1) FORWARD_BACKEND=nftables ;; 2) FORWARD_BACKEND=realm ;; *) warn '无效 backend'; return 1 ;; esac
-  msg 'Protocol: 1) TCP  2) UDP  3) TCP + UDP'
+  case "$choice" in 1) FORWARD_BACKEND=nftables ;; 2) FORWARD_BACKEND=realm ;; *) warn '无效转发后端'; return 1 ;; esac
+  msg '协议：1) TCP  2) UDP  3) TCP + UDP'
   read_tty choice '请选择 [1-3]: ' || choice=""
-  case "$choice" in 1) FORWARD_PROTOCOL=tcp ;; 2) FORWARD_PROTOCOL=udp ;; 3) FORWARD_PROTOCOL=both ;; *) warn '无效 protocol'; return 1 ;; esac
-  read_tty FORWARD_LISTEN_HOST 'Listen address [0.0.0.0]: ' || FORWARD_LISTEN_HOST=""
+  case "$choice" in 1) FORWARD_PROTOCOL=tcp ;; 2) FORWARD_PROTOCOL=udp ;; 3) FORWARD_PROTOCOL=both ;; *) warn '无效协议'; return 1 ;; esac
+  read_tty FORWARD_LISTEN_HOST '监听地址 [0.0.0.0]: ' || FORWARD_LISTEN_HOST=""
   FORWARD_LISTEN_HOST="${FORWARD_LISTEN_HOST:-0.0.0.0}"
-  read_tty FORWARD_LISTEN_PORT 'Listen port: ' || FORWARD_LISTEN_PORT=""
-  read_tty FORWARD_TARGET_HOST 'Target host: ' || FORWARD_TARGET_HOST=""
-  read_tty FORWARD_TARGET_PORT 'Target port: ' || FORWARD_TARGET_PORT=""
-  read_tty FORWARD_NOTE 'Note [optional]: ' || FORWARD_NOTE=""
+  read_tty FORWARD_LISTEN_PORT '监听端口: ' || FORWARD_LISTEN_PORT=""
+  read_tty FORWARD_TARGET_HOST '目标地址: ' || FORWARD_TARGET_HOST=""
+  read_tty FORWARD_TARGET_PORT '目标端口: ' || FORWARD_TARGET_PORT=""
+  read_tty FORWARD_NOTE '备注（可选）: ' || FORWARD_NOTE=""
   if [ "$FORWARD_BACKEND" = nftables ]; then
-    msg 'Source mode: 1) MASQUERADE [default]  2) Preserve Source [advanced; target needs return route]'
+    msg '源地址模式：1) MASQUERADE（默认）  2) Preserve Source（高级；目标端需要正确回程路由）'
     read_tty choice '请选择 [1-2，默认 1]: ' || choice=""
     case "${choice:-1}" in
       1) FORWARD_SOURCE_MODE=masquerade ;;
@@ -794,22 +795,22 @@ forward_menu_collect_add() {
         FORWARD_SOURCE_MODE=preserve
         warn 'Preserve Source 不做 SNAT；目标服务器必须经本转发机正确回程，否则连接会失败。'
         ;;
-      *) warn '无效 source mode'; return 1 ;;
+      *) warn '无效源地址模式'; return 1 ;;
     esac
   else
-    read_tty advanced '配置 Realm advanced options？[y/N]: ' || advanced=""
+    read_tty advanced '配置 Realm 高级选项？[y/N]: ' || advanced=""
     case "$advanced" in
       y|Y|yes|YES)
         FORWARD_ADVANCED_CLI=1
-        read_tty FORWARD_THROUGH 'Outgoing IP / through [empty=system]: ' || FORWARD_THROUGH=""
-        read_tty FORWARD_INTERFACE 'Outgoing interface [empty=system]: ' || FORWARD_INTERFACE=""
-        read_tty FORWARD_LISTEN_INTERFACE 'Listen interface [empty=system]: ' || FORWARD_LISTEN_INTERFACE=""
-        read_tty FORWARD_DNS_NAMESERVERS 'DNS nameservers, comma-separated [empty=system]: ' || FORWARD_DNS_NAMESERVERS=""
+        read_tty FORWARD_THROUGH '出站 IP / through（留空使用系统默认）: ' || FORWARD_THROUGH=""
+        read_tty FORWARD_INTERFACE '出站网络接口（留空使用系统默认）: ' || FORWARD_INTERFACE=""
+        read_tty FORWARD_LISTEN_INTERFACE '监听网络接口（留空使用系统默认）: ' || FORWARD_LISTEN_INTERFACE=""
+        read_tty FORWARD_DNS_NAMESERVERS 'DNS 服务器（逗号分隔；留空使用系统默认）: ' || FORWARD_DNS_NAMESERVERS=""
         if [ -n "$FORWARD_DNS_NAMESERVERS" ]; then FORWARD_DNS_MODE=ipv4_and_ipv6; fi
-        read_tty FORWARD_EXTRA_TARGETS 'Extra targets host:port, comma-separated [empty=none]: ' || FORWARD_EXTRA_TARGETS=""
+        read_tty FORWARD_EXTRA_TARGETS '额外目标 host:port（逗号分隔；留空表示无）: ' || FORWARD_EXTRA_TARGETS=""
         if [ -n "$FORWARD_EXTRA_TARGETS" ]; then
-          read_tty FORWARD_BALANCE 'Balance [roundrobin/iphash]: ' || FORWARD_BALANCE=""
-          read_tty FORWARD_WEIGHTS 'Weights including primary, comma-separated: ' || FORWARD_WEIGHTS=""
+          read_tty FORWARD_BALANCE '负载均衡方式 [roundrobin/iphash]: ' || FORWARD_BALANCE=""
+          read_tty FORWARD_WEIGHTS '权重（包含主目标，逗号分隔）: ' || FORWARD_WEIGHTS=""
         fi
         ;;
     esac
@@ -822,20 +823,20 @@ forward_menu_loop() {
   trap - ERR
   while true; do
     msg ''
-    msg '========== Port Forward / nftables + Realm =========='
-    msg '  1) Add rule'
-    msg '  2) List rules'
-    msg '  3) Show rule'
-    msg '  4) Modify rule'
-    msg '  5) Switch backend'
-    msg '  6) Enable rule'
-    msg '  7) Disable rule'
-    msg '  8) Set Display Endpoint'
-    msg '  9) Delete rule'
-    msg ' 10) Doctor'
-    msg ' 11) Export JSON'
-    msg ' 12) Import JSON'
-    msg ' 13) Upgrade official Realm runtime'
+    msg '========== 端口转发 / Port Forward =========='
+    msg '  1) 添加转发规则'
+    msg '  2) 查看规则列表'
+    msg '  3) 查看规则详情'
+    msg '  4) 修改规则'
+    msg '  5) 切换转发后端'
+    msg '  6) 启用规则'
+    msg '  7) 禁用规则'
+    msg '  8) 设置展示端点 / Display Endpoint'
+    msg '  9) 删除规则'
+    msg ' 10) Doctor / 诊断'
+    msg ' 11) 导出 JSON'
+    msg ' 12) 导入 JSON'
+    msg ' 13) 升级官方 Realm Runtime'
     msg '  0) 返回'
     read_tty choice '请选择 [0-13]: ' || choice=""
     case "$choice" in
@@ -847,17 +848,17 @@ forward_menu_loop() {
       3) forward_menu_reset_requests; forward_menu_select_rule || continue; FORWARD_ACTION=show; nobrand_menu_run nobrand_run_forward_action ;;
       4)
         forward_menu_reset_requests; forward_menu_select_rule || continue
-        read_tty FORWARD_TARGET_HOST 'New target host [empty=unchanged]: ' || FORWARD_TARGET_HOST=""
-        read_tty FORWARD_TARGET_PORT 'New target port [empty=unchanged]: ' || FORWARD_TARGET_PORT=""
+        read_tty FORWARD_TARGET_HOST '新目标地址（留空保持不变）: ' || FORWARD_TARGET_HOST=""
+        read_tty FORWARD_TARGET_PORT '新目标端口（留空保持不变）: ' || FORWARD_TARGET_PORT=""
         FORWARD_ACTION=modify; nobrand_menu_run nobrand_run_forward_action
         ;;
       5)
         forward_menu_reset_requests; forward_menu_select_rule || continue
-        msg 'New backend: 1) nftables  2) Realm'
+        msg '新转发后端：1) nftables  2) Realm'
         read_tty backend_choice '请选择 [1-2]: ' || backend_choice=""
-        case "$backend_choice" in 1) FORWARD_BACKEND=nftables ;; 2) FORWARD_BACKEND=realm ;; *) warn '无效 backend'; continue ;; esac
+        case "$backend_choice" in 1) FORWARD_BACKEND=nftables ;; 2) FORWARD_BACKEND=realm ;; *) warn '无效转发后端'; continue ;; esac
         if [ "$FORWARD_BACKEND" = nftables ]; then
-          read_tty FORWARD_TARGET_HOST 'nftables IPv4 target（domain rule 必须明确填写）[empty=keep if IPv4]: ' || FORWARD_TARGET_HOST=""
+          read_tty FORWARD_TARGET_HOST 'nftables IPv4 目标地址（域名规则必须明确填写；留空时保留已有 IPv4）: ' || FORWARD_TARGET_HOST=""
         fi
         FORWARD_ACTION=switch-backend; nobrand_menu_run nobrand_run_forward_action
         ;;
@@ -874,17 +875,17 @@ forward_menu_loop() {
         ;;
       9)
         forward_menu_reset_requests; forward_menu_select_rule || continue
-        read_tty confirm '确认删除此 Forward rule？输入 yes: ' || confirm=""
+        read_tty confirm '确认删除此转发规则？输入 yes 确认: ' || confirm=""
         [ "$confirm" = yes ] || { warn '已取消'; continue; }
         FORWARD_ACTION=delete; nobrand_menu_run nobrand_run_forward_action
         ;;
       10) FORWARD_ACTION=doctor; nobrand_menu_run nobrand_run_forward_action ;;
       11)
-        read_tty path 'Export path [empty=stdout]: ' || path=""
+        read_tty path '导出路径（留空输出到终端）: ' || path=""
         FORWARD_EXPORT_FILE="$path" FORWARD_ACTION=export; nobrand_menu_run nobrand_run_forward_action
         ;;
       12)
-        read_tty path 'Import JSON path: ' || path=""
+        read_tty path '请输入要导入的 JSON 文件路径: ' || path=""
         [ -n "$path" ] || { warn '路径不能为空'; continue; }
         FORWARD_IMPORT_FILE="$path" FORWARD_ACTION=import; nobrand_menu_run nobrand_run_forward_action
         ;;
@@ -925,6 +926,7 @@ nobrand_backup_menu_loop() {
       0) return 0 ;;
       *) warn '无效选择' ;;
     esac
+    nobrand_ssh_confirmation_pending && return 0
     menu_pause
   done
 }
@@ -951,7 +953,7 @@ ingress_menu_collect_add() {
   local choice="" value=""
   ingress_menu_reset_requests
   msg ''
-  t '可用 non-loopback IPv4（[默认出口] 仅为只读提示，不决定 Ingress）:' \
+  t '可用非回环 IPv4（[默认出口] 仅为只读提示，不决定 Ingress）:' \
     'Available non-loopback IPv4 addresses ([default egress] is read-only and does not select Ingress):'
   nb_ingress_interface_rows | while IFS='|' read -r iface address state is_default; do
     printf '  %s  %s  [%s]%s\n' "$iface" "$address" "$state" "$([ "$is_default" = 1 ] && printf ' [默认出口/default egress]' || true)"
@@ -962,20 +964,20 @@ ingress_menu_collect_add() {
   read_tty choice "$(t '类型 [1-2]: ' 'Type [1-2]: ')" || choice=""
   case "$choice" in 1|public) INGRESS_TYPE=public ;; 2|mapped) INGRESS_TYPE=mapped ;; *) warn '无效类型'; return 1 ;; esac
   INGRESS_TYPE_CLI=1
-  read_tty INGRESS_INTERFACE "$(t 'Interface: ' 'Interface: ')" || INGRESS_INTERFACE=""
+  read_tty INGRESS_INTERFACE "$(t '网络接口 / Interface: ' 'Interface: ')" || INGRESS_INTERFACE=""
   INGRESS_INTERFACE_CLI=1
-  read_tty INGRESS_ADDRESS "$(t '该 interface 的本地 IPv4: ' 'Local IPv4 on that interface: ')" || INGRESS_ADDRESS=""
+  read_tty INGRESS_ADDRESS "$(t '该网络接口的本地 IPv4: ' 'Local IPv4 on that interface: ')" || INGRESS_ADDRESS=""
   INGRESS_ADDRESS_CLI=1
   msg '  1) derived-tail（由所选本地 IPv4 尾号推导）'
-  msg '  2) custom-range'
-  msg '  3) manual-only'
+  msg '  2) custom-range（自定义范围）'
+  msg '  3) manual-only（仅手动指定）'
   read_tty choice "$(t '端口策略 [1-3]: ' 'Port policy [1-3]: ')" || choice=""
   case "$choice" in
     1|derived-tail) INGRESS_PORT_POLICY='derived-tail' ;;
     2|custom-range)
       INGRESS_PORT_POLICY='custom-range'
-      read_tty INGRESS_RANGE_START 'Range start: ' || INGRESS_RANGE_START=""
-      read_tty INGRESS_RANGE_END 'Range end: ' || INGRESS_RANGE_END=""
+      read_tty INGRESS_RANGE_START '范围起始端口: ' || INGRESS_RANGE_START=""
+      read_tty INGRESS_RANGE_END '范围结束端口: ' || INGRESS_RANGE_END=""
       INGRESS_RANGE_START_CLI=1 INGRESS_RANGE_END_CLI=1
       ;;
     3|manual-only) INGRESS_PORT_POLICY='manual-only' ;;
@@ -984,7 +986,7 @@ ingress_menu_collect_add() {
   INGRESS_PORT_POLICY_CLI=1
   read_tty value "$(t '额外保留端口（逗号分隔，可留空）: ' 'Additional reserved ports (comma-separated, optional): ')" || value=""
   if [ -n "$value" ]; then INGRESS_RESERVED_PORTS="$value"; INGRESS_RESERVED_CLI=1; fi
-  read_tty INGRESS_DISPLAY_HOST_DEFAULT "$(t '默认 Display Host（mapped 必填；public 留空=本地地址）: ' 'Default Display Host (required for mapped; public blank=local address): ')" \
+  read_tty INGRESS_DISPLAY_HOST_DEFAULT "$(t '默认展示主机 / Display Host（mapped 必填；public 留空=本地地址）: ' 'Default Display Host (required for mapped; public blank=local address): ')" \
     || INGRESS_DISPLAY_HOST_DEFAULT=""
   [ -z "$INGRESS_DISPLAY_HOST_DEFAULT" ] || INGRESS_DISPLAY_HOST_CLI=1
   INGRESS_DISPLAY_PORT_POLICY='follow-actual' INGRESS_DISPLAY_PORT_POLICY_CLI=1
@@ -1015,13 +1017,13 @@ ingress_menu_modify() {
     2|mapped) INGRESS_TYPE=mapped; INGRESS_TYPE_CLI=1 ;;
     *) warn '无效类型'; return 1 ;;
   esac
-  read_tty value "$(t '新 Interface（留空保持）: ' 'New interface (blank keeps current): ')" || value=""
+  read_tty value "$(t '新网络接口 / Interface（留空保持）: ' 'New interface (blank keeps current): ')" || value=""
   if [ -n "$value" ]; then INGRESS_INTERFACE="$value"; INGRESS_INTERFACE_CLI=1; fi
   read_tty value "$(t '新本地 IPv4（留空保持）: ' 'New local IPv4 (blank keeps current): ')" || value=""
   if [ -n "$value" ]; then INGRESS_ADDRESS="$value"; INGRESS_ADDRESS_CLI=1; fi
 
   current_policy="$(jq -r .port_policy <<<"$current")"
-  msg '  1) derived-tail   2) custom-range   3) manual-only'
+  msg '  1) derived-tail（按 IPv4 尾号推导）  2) custom-range（自定义范围）  3) manual-only（仅手动指定）'
   read_tty choice "$(t "新端口策略 [${current_policy}；留空保持]: " "New port policy [${current_policy}; blank keeps current]: ")" || choice=""
   case "$choice" in
     '') effective_policy="$current_policy" ;;
@@ -1033,9 +1035,9 @@ ingress_menu_modify() {
   if [ "$effective_policy" = custom-range ]; then
     range_start="$(jq -r '.range_start // empty' <<<"$current")"
     range_end="$(jq -r '.range_end // empty' <<<"$current")"
-    read_tty value "$(t "Range start [${range_start:-required}]: " "Range start [${range_start:-required}]: ")" || value=""
+    read_tty value "$(t "范围起始端口 [${range_start:-必填}]: " "Range start [${range_start:-required}]: ")" || value=""
     if [ -n "$value" ]; then range_start="$value"; INGRESS_RANGE_START="$value"; INGRESS_RANGE_START_CLI=1; fi
-    read_tty value "$(t "Range end [${range_end:-required}]: " "Range end [${range_end:-required}]: ")" || value=""
+    read_tty value "$(t "范围结束端口 [${range_end:-必填}]: " "Range end [${range_end:-required}]: ")" || value=""
     if [ -n "$value" ]; then range_end="$value"; INGRESS_RANGE_END="$value"; INGRESS_RANGE_END_CLI=1; fi
     if [ "$INGRESS_PORT_POLICY_CLI" -eq 1 ]; then
       [ -n "$range_start" ] && [ -n "$range_end" ] || { warn 'custom-range 需要起止端口'; return 1; }
@@ -1049,7 +1051,7 @@ ingress_menu_modify() {
   elif [ -n "$value" ]; then
     INGRESS_RESERVED_PORTS="$value"; INGRESS_RESERVED_CLI=1
   fi
-  read_tty value "$(t '新默认 Display Host（留空保持，- 清空）: ' 'New default Display Host (blank keeps current, - clears): ')" || value=""
+  read_tty value "$(t '新默认展示主机 / Display Host（留空保持，- 清空）: ' 'New default Display Host (blank keeps current, - clears): ')" || value=""
   if [ "$value" = - ]; then
     INGRESS_DISPLAY_HOST_DEFAULT=""; INGRESS_DISPLAY_HOST_CLI=1
   elif [ -n "$value" ]; then
@@ -1057,8 +1059,8 @@ ingress_menu_modify() {
   fi
 
   current_display_policy="$(jq -r .display_port_policy <<<"$current")"
-  msg '  1) follow-actual   2) custom'
-  read_tty choice "$(t "新 Display Port 策略 [${current_display_policy}；留空保持]: " "New Display Port policy [${current_display_policy}; blank keeps current]: ")" || choice=""
+  msg '  1) follow-actual（跟随实际监听）  2) custom（自定义）'
+  read_tty choice "$(t "新展示端口 / Display Port 策略 [${current_display_policy}；留空保持]: " "New Display Port policy [${current_display_policy}; blank keeps current]: ")" || choice=""
   case "$choice" in
     '') effective_display_policy="$current_display_policy" ;;
     1|follow-actual) INGRESS_DISPLAY_PORT_POLICY='follow-actual'; INGRESS_DISPLAY_PORT_POLICY_CLI=1; effective_display_policy='follow-actual' ;;
@@ -1067,7 +1069,7 @@ ingress_menu_modify() {
   esac
   if [ "$effective_display_policy" = custom ]; then
     display_port="$(jq -r '.display_port // empty' <<<"$current")"
-    read_tty value "$(t "新 Display Port [${display_port:-required}]: " "New Display Port [${display_port:-required}]: ")" || value=""
+    read_tty value "$(t "新展示端口 / Display Port [${display_port:-必填}]: " "New Display Port [${display_port:-required}]: ")" || value=""
     if [ -n "$value" ]; then display_port="$value"; INGRESS_DISPLAY_PORT="$value"; INGRESS_DISPLAY_PORT_CLI=1; fi
     if [ "$INGRESS_DISPLAY_PORT_POLICY_CLI" -eq 1 ]; then
       [ -n "$display_port" ] || { warn 'custom Display Port 策略需要端口'; return 1; }
@@ -1120,7 +1122,7 @@ ingress_menu_loop() {
     msg '  5) 设置默认入口'
     msg '  6) 取消默认入口'
     msg '  7) 应用入口强制策略'
-    msg '  8) 入口 Doctor'
+    msg '  8) Doctor / 入口诊断'
     msg '  0) 返回'
     read_tty choice "$(t '请选择 [0-8]: ' 'Choose [0-8]: ')" || choice=""
     case "$choice" in
@@ -1152,16 +1154,16 @@ nobrand_menu_loop() {
     msg ''
     msg '  1) Mieru'
     msg '  2) Snell v4 / v5'
-    msg '  3) Hysteria2 (Xray-core)'
-    msg '  4) TUIC v5 (official sing-box)'
-    msg '  5) VLESS REALITY + Vision (TCP; Public Recommended)'
-    msg '  6) VLESS + FinalMask + Sudoku (TCP)'
-    msg '  7) SSH Tunnel (existing OpenSSH)'
-    msg '  8) Port Forward (nftables / Realm)'
+    msg '  3) Hysteria2（Xray-core）'
+    msg '  4) TUIC v5（官方 sing-box Runtime）'
+    msg '  5) VLESS REALITY + Vision（TCP；推荐 Public Ingress）'
+    msg '  6) VLESS + FinalMask + Sudoku（TCP）'
+    msg '  7) SSH Tunnel（现有 OpenSSH）'
+    msg '  8) 端口转发 / Port Forward（nftables / Realm）'
     msg '  9) 网络入口 / Ingress'
     msg ' 10) 查看全部节点'
     msg ' 11) 综合状态'
-    msg ' 12) Doctor'
+    msg ' 12) Doctor / 诊断'
     msg ' 13) 备份 / 恢复'
     msg ' 14) 性能 / BBR / FQ（Mieru 公共网络工具）'
     msg ' 15) 帮助 / CLI'
@@ -1184,9 +1186,17 @@ nobrand_menu_loop() {
       13) nobrand_backup_menu_loop ;;
       14) nobrand_menu_run do_perf; menu_pause ;;
       15) nobrand_usage; menu_pause ;;
-      16) YES=0; nobrand_menu_run nobrand_uninstall; menu_pause ;;
+      16)
+        YES=0
+        nobrand_menu_run nobrand_uninstall
+        nobrand_ssh_confirmation_pending || menu_pause
+        ;;
       0) return 0 ;;
       *) warn '无效选择' ;;
     esac
+    if nobrand_ssh_confirmation_pending; then
+      nobrand_pending_ssh_confirmation_notice
+      return 0
+    fi
   done
 }

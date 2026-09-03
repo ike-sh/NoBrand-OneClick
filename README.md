@@ -5,7 +5,7 @@
 
 NoBrand-OneClick 是一个面向 Linux 服务器的多协议代理、隧道与网络入口管理工具。它通过统一的 `nobrand` 管理界面部署和维护 Mieru、Snell、Hysteria2、TUIC、VLESS 与 SSH Tunnel，并提供 Multi-Ingress、Strict Ingress、Port Forward、备份与恢复等能力。
 
-当前稳定版本：[v3.2.0](https://github.com/ike-sh/NoBrand-OneClick/releases/tag/v3.2.0)
+当前稳定版本：[v3.2.1](https://github.com/ike-sh/NoBrand-OneClick/releases/tag/v3.2.1)
 
 正式管理命令：`nobrand`；短别名：`nb`
 
@@ -53,6 +53,8 @@ sudo bash install-nobrand.sh
 ```
 
 Alpine Linux 默认可能没有 Bash；请先安装 `bash` 与 `curl`，然后以 root 身份执行 `bash install-nobrand.sh`，不使用 `sudo`。
+
+如果安装或修复意外中断，可重新运行同一安装脚本。安装器会识别当前版本的未完成状态并按实际状态安全修复，不会主动删除已有节点、凭据或 Ingress Profile；遇到无法确认归属或无法安全迁移的数据时会停止并提示处理。
 
 ## 快速开始
 
@@ -287,6 +289,8 @@ sudo nobrand uninstall -y
 卸载只清理由 NoBrand 明确管理的协议实例、配置、服务、端口、转发规则、凭据和命令；系统 `sshd`、外部 Xray/sing-box/Realm、无关 firewall 规则、系统网络配置与服务商映射不会被接管或删除。
 
 如果安装了 SSH Tunnel，策略变更和卸载采用管理员连接确认流程。请保持原管理员会话打开，并从全新的 SSH 管理员连接执行 NoBrand 输出的 `nobrand ssh confirm-admin --token ...` 命令；确认完成前，统一卸载不会继续删除其他协议。
+
+完整卸载若因异常中断，再次运行当前 NoBrand 管理器或同一安装脚本即可选择继续清理由 NoBrand 管理的剩余资源，或在仍有权威状态时执行安全修复。
 
 ## 平台支持
 

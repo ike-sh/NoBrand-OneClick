@@ -8,7 +8,7 @@ firewall_owned_add() {
   local key="$1"
   firewall_owned_has "$key" && return 0
   if [ "${DRY_RUN:-0}" -eq 1 ]; then
-    msg "[dry-run] own firewall rule: $key"
+    t "[演练] 记录自有防火墙规则: $key" "[dry-run] own firewall rule: $key"
     return 0
   fi
   mkdir -p "$(dirname "$MITA_FIREWALL_OWNED_STATE")"
@@ -20,7 +20,7 @@ firewall_owned_remove() {
   local key="$1" tmp
   [ -f "$MITA_FIREWALL_OWNED_STATE" ] || return 0
   if [ "${DRY_RUN:-0}" -eq 1 ]; then
-    msg "[dry-run] release firewall rule: $key"
+    t "[演练] 释放自有防火墙规则: $key" "[dry-run] release firewall rule: $key"
     return 0
   fi
   tmp="${MITA_FIREWALL_OWNED_STATE}.new.$$"
@@ -212,7 +212,8 @@ iptables_accept_port() {
 persist_iptables_rules() {
   if [ -d /etc/iptables ] || [ -f /etc/alpine-release ]; then
     if [ "${DRY_RUN:-0}" -eq 1 ]; then
-      msg "[dry-run] iptables-save > /etc/iptables/rules.v4"
+      t '[演练] 将运行 iptables-save > /etc/iptables/rules.v4' \
+        '[dry-run] iptables-save > /etc/iptables/rules.v4'
       return 0
     fi
     local rules_tmp

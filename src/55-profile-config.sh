@@ -98,7 +98,7 @@ apply_requested_profile_preserving_cli() {
   local cli_protocol="$PROTOCOL" cli_mtu_request="$MTU_REQUEST"
   local cli_mux="$MULTIPLEXING" cli_handshake="$HANDSHAKE_MODE"
   local cli_traffic="$TRAFFIC_PATTERN" cli_low="$LOW_ENTROPY_MODE"
-  apply_profile_values "$PROFILE" || die "$(t '非法 Profile（iplc/balanced/stealth/custom）' \
+  apply_profile_values "$PROFILE" || die "$(t '非法配置预设（仅支持 iplc/balanced/stealth/custom）' \
     'Invalid profile (iplc/balanced/stealth/custom)')"
   [ "${PROTOCOL_CLI:-0}" -eq 0 ] || PROTOCOL="$cli_protocol"
   [ "${MTU_CLI:-0}" -eq 0 ] || MTU_REQUEST="$cli_mtu_request"
@@ -140,7 +140,7 @@ choose_profile_interactive() {
     4) PROFILE=custom ;;
     *) apply_profile_values balanced ;;
   esac
-  t "已选 Profile: $(profile_label)" "Selected profile: $(profile_label)"
+  t "已选配置预设（Profile）: $(profile_label)" "Selected profile: $(profile_label)"
 }
 
 choose_protocol_interactive() {
@@ -494,10 +494,10 @@ collect_config_interactive() {
     bounds="$(nb_ingress_profile_auto_range "$INGRESS_PROFILE_ID" 2>/dev/null || true)"
     default_port="$(select_available_port 2>/dev/null || true)"
     if [ -n "$bounds" ]; then
-      t "入口配置 ${profile_name} 的自动端口段: ${bounds%%|*}-${bounds#*|}（Derived 表示由所选本地 IPv4 尾号推导）" \
+      t "入口配置 ${profile_name} 的自动端口段: ${bounds%%|*}-${bounds#*|}（派生值由所选本地 IPv4 尾号推导）" \
         "Ingress profile ${profile_name} auto range: ${bounds%%|*}-${bounds#*|} (Derived means inferred from the selected local IPv4 tail)"
     else
-      t "入口配置 ${profile_name} 为 manual-only，必须输入端口" \
+      t "入口配置 ${profile_name} 仅支持手动端口，必须输入端口" \
         "Ingress profile ${profile_name} is manual-only; a port is required"
     fi
     while true; do
@@ -549,7 +549,7 @@ collect_config_interactive() {
     [ "${MTU_CLI:-0}" -eq 0 ] || resolve_mtu_request
     t "预设参数: $(protocol_label) / MTU ${MTU} / ${MULTIPLEXING} / ${HANDSHAKE_MODE}" \
       "Preset parameters: $(protocol_label) / MTU ${MTU} / ${MULTIPLEXING} / ${HANDSHAKE_MODE}"
-    t "Traffic Pattern: $(traffic_label)；Low Entropy: $(low_entropy_label)" \
+    t "流量伪装（Traffic Pattern）: $(traffic_label)；低熵模式: $(low_entropy_label)" \
       "Traffic Pattern: $(traffic_label); Low Entropy: $(low_entropy_label)"
   fi
   profile_reconcile_metadata
@@ -688,9 +688,9 @@ ensure_config_noninteractive() {
   [ "$TRAFFIC_PATTERN" != "off" ] || LOW_ENTROPY_MODE="LOW_ENTROPY_MODE_OFF"
   warn_low_entropy_client_compat
   MULTIPLEXING="$(normalize_multiplexing "$MULTIPLEXING")" || \
-    die "$(t '非法 multiplexing 模式' 'Invalid multiplexing mode')"
+    die "$(t '非法多路复用模式' 'Invalid multiplexing mode')"
   HANDSHAKE_MODE="$(normalize_handshake_mode "$HANDSHAKE_MODE")" || \
-    die "$(t '非法 handshake mode' 'Invalid handshake mode')"
+    die "$(t '非法握手模式' 'Invalid handshake mode')"
   profile_reconcile_metadata
   ensure_traffic_seed
 }

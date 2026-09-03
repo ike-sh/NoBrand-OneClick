@@ -47,7 +47,7 @@ done
 assert_eq 3600 "$(ssh_tunnel_default_display_port)" 'SSH Display Endpoint tail-base default'
 
 state="$fixture/ssh-state.json"
-users='[{"account_id":"a1111111111111111","display_name":"alice","linux_user":"nbt-alice-11111111","uid":61001,"group":"nobrand-ssh-tunnel","key_fingerprint":"SHA256:alice","created_at":"2026-08-30T00:00:00Z"}]'
+users='[{"account_id":"a1111111111111111","display_name":"alice","linux_user":"nbt-alice-11111111","uid":61001,"group":"nobrand-ssh-tunnel","key_fingerprint":"SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","created_at":"2026-08-30T00:00:00Z"}]'
 ssh_tunnel_generate_state "$state" custom entry.example.com 443 22 dropin \
   "$NOBRAND_SSH_CONFIG_DROPIN" "$users" 2026-08-30T00:00:00Z
 jq -e '
@@ -79,7 +79,7 @@ assert_file_mode 644 "$NOBRAND_SSH_AUTHORIZED_KEYS_DIR/nbt-alice-11111111"
 
 show="$(ssh_tunnel_show_user alice)"
 assert_contains "$show" 'nbt-alice-11111111@entry.example.com' 'SSH show connection identity'
-assert_contains "$show" 'TCP forwarding: -L / -D / -R' 'SSH show forwarding scope'
+assert_contains "$show" 'TCP 转发：-L / -D / -R' 'SSH show forwarding scope'
 assert_not_contains "$show" 'PRIVATE-KEY-MATERIAL' 'SSH show must not reveal private key'
 
 exported="$(ssh_tunnel_export_user alice)"

@@ -283,7 +283,7 @@ snell_collect_install_requests() {
     || die "当前 OS/arch 不支持官方 Snell v${SNELL_VERSION} runtime"
   nb_prepare_ingress_request || return 1
   nb_prepare_ingress_deployment "$INGRESS_PROFILE_ID" native-bind \
-    || die '所选 Ingress strict local address cannot be bound by Snell'
+    || die 'Snell 无法绑定所选 Ingress 的 Strict 本地地址'
   if [ -z "${SNELL_NAME:-}" ]; then
     if [ "$interactive" -eq 1 ]; then
       read_tty SNELL_NAME "$(t "节点名 [snell-v${SNELL_VERSION}]: " "Node name [snell-v${SNELL_VERSION}]: ")" || SNELL_NAME=""
@@ -314,23 +314,23 @@ snell_collect_install_requests() {
   if [ "$SNELL_VERSION" = 5 ]; then
     if [ "$interactive" -eq 1 ] && [ "${SNELL_QUIC_CLI:-0}" -eq 0 ]; then
       msg ''
-      msg '是否启用 Snell v5 QUIC Proxy Mode？'
+      msg '是否启用 Snell v5 QUIC Proxy 模式？'
       msg '  1) 否 [默认 / 推荐兼容]'
       msg '  2) 是 [同时开放 UDP，同端口]'
       read_tty quic_choice "$(t '请选择 [1]: ' 'Choose [1]: ')" || quic_choice=""
       case "$quic_choice" in
         ""|1) SNELL_QUIC_PROXY=off ;;
         2) SNELL_QUIC_PROXY=on ;;
-        *) die 'QUIC Proxy Mode 选择无效' ;;
+        *) die 'QUIC Proxy 模式选择无效' ;;
       esac
     else
       SNELL_QUIC_PROXY="${SNELL_QUIC_PROXY:-off}"
     fi
   else
-    [ "${SNELL_QUIC_PROXY:-off}" != on ] || die 'Snell v4 不支持 QUIC Proxy Mode'
+    [ "${SNELL_QUIC_PROXY:-off}" != on ] || die 'Snell v4 不支持 QUIC Proxy 模式'
     SNELL_QUIC_PROXY=off
   fi
-  case "$SNELL_QUIC_PROXY" in on|off) ;; *) die 'QUIC Proxy Mode 只支持 on 或 off' ;; esac
+  case "$SNELL_QUIC_PROXY" in on|off) ;; *) die 'QUIC Proxy 模式只支持 on 或 off' ;; esac
   if [ "$SNELL_QUIC_PROXY" = on ] \
      && ! nb_port_available_for_profile "$PORT" UDP "$INGRESS_PROFILE_ID"; then
     if [ "${PORT_AUTO_SELECTED:-0}" -eq 1 ]; then
@@ -528,16 +528,16 @@ snell_set_quic() {
   require_root
   id="$(snell_resolve_target_id "${SNELL_NAME:-}")" \
     || die '请用 --name 指定唯一存在的 Snell v5 节点'
-  [ "$(snell_state_field "$id" version)" = 5 ] || die 'QUIC Proxy Mode 只适用于 Snell v5'
+  [ "$(snell_state_field "$id" version)" = 5 ] || die 'QUIC Proxy 模式只适用于 Snell v5'
   desired="${SNELL_QUIC_PROXY:-}"
   if [ -z "$desired" ] && [ "${YES:-0}" -ne 1 ]; then
-    read_tty desired "$(t 'QUIC Proxy Mode [on/off]: ' 'QUIC Proxy Mode [on/off]: ')" || desired=""
+    read_tty desired "$(t 'QUIC Proxy 模式 [on/off]: ' 'QUIC Proxy Mode [on/off]: ')" || desired=""
   fi
   case "$desired" in on|off) ;; *) die '请用 --quic on 或 --quic off 明确选择' ;; esac
   current=off; snell_quic_proxy_enabled "$id" && current=on
   snell_quic_state_consistent "$id" && state_consistent=1
   if [ "$current" = "$desired" ] && [ "$state_consistent" -eq 1 ]; then
-    t "Snell v5 QUIC Proxy Mode 已是 ${desired}" "Snell v5 QUIC Proxy Mode is already ${desired}"
+    t "Snell v5 QUIC Proxy 模式已是 ${desired}" "Snell v5 QUIC Proxy Mode is already ${desired}"
     return 0
   fi
   port="$(snell_state_field "$id" listen_port)"
@@ -571,7 +571,7 @@ snell_set_quic() {
     fi
   fi
   admin_lock_release
-  t "Snell v5 QUIC Proxy Mode: ${desired}；server config/service/PSK 未改变" \
+  t "Snell v5 QUIC Proxy 模式: ${desired}；服务器配置、服务与 PSK 未改变" \
     "Snell v5 QUIC Proxy Mode: ${desired}; server config/service/PSK unchanged"
   snell_print_result "$id" show
 }
@@ -680,10 +680,10 @@ snell_node_rows() {
     host="${endpoint%%|*}"; port="${endpoint#*|}"
     status=Stopped; snell_running "$id" && status=Running
     quic=off; snell_quic_proxy_enabled "$id" && quic=on
-    endpoint_text="$(url_host "$host"):${port}/TCP; QUIC Off"
+    endpoint_text="$(url_host "$host"):${port}/TCP; $(t 'QUIC 已关闭' 'QUIC Off')"
     transport=TCP
     if [ "$quic" = on ]; then
-      endpoint_text="$(url_host "$host"):${port}/TCP; QUIC On (UDP same port)"
+      endpoint_text="$(url_host "$host"):${port}/TCP; $(t 'QUIC 已开启（UDP 同端口）' 'QUIC On (UDP same port)')"
       transport=TCP+UDP
     fi
     printf 'Snell/v%s|%s|%s|%s|%s\n' "$major" "$name" "$endpoint_text" "$status" "$transport"
@@ -691,27 +691,28 @@ snell_node_rows() {
 }
 
 snell_print_result() {
-  local id="$1" context="${2:-show}" name major psk listen_host listen_port endpoint host port status runtime quic
+  local id="$1" context="${2:-show}" name major psk listen_host listen_port endpoint host port status runtime quic quic_label
   snell_state_exists "$id" || { t 'Snell 节点不存在' 'Snell node does not exist'; return 1; }
   name="$(snell_state_field "$id" name)"; major="$(snell_state_field "$id" version)"
   psk="$(snell_state_field "$id" psk)"; listen_host="$(snell_state_field "$id" listen_host)"
   listen_port="$(snell_state_field "$id" listen_port)"; runtime="$(snell_state_field "$id" runtime_version)"
   endpoint="$(snell_effective_endpoint "$id")"; host="${endpoint%%|*}"; port="${endpoint#*|}"
-  status=Stopped; snell_running "$id" && status=Running
+  status=已停止; snell_running "$id" && status=运行中
   quic=Disabled; snell_quic_proxy_enabled "$id" && quic=Enabled
+  quic_label='已禁用'; [ "$quic" != Enabled ] || quic_label='已启用'
   nobrand_print_banner
   msg "$([ "$context" = install ] && printf '部署完成' || printf '节点配置')"
   msg ''
-  printf '协议        Snell v%s\n节点        %s\nInstance    %s\n状态        %s\nRuntime     %s\n' \
+  printf '协议        Snell v%s\n节点        %s\n实例        %s\n状态        %s\nRuntime     %s\n' \
     "$major" "$name" "$id" "$status" "$runtime"
   msg ''
-  printf '真实监听\n  Address   %s\n  Port      %s\n  Transport TCP\n' "$listen_host" "$listen_port"
-  printf '  QUIC Proxy %s\n' "$quic"
-  [ "$quic" != Enabled ] || printf '  QUIC Transport UDP/%s (same port)\n' "$listen_port"
+  printf '实际监听 / Actual Listener\n  地址      %s\n  端口      %s\n  传输      TCP\n' "$listen_host" "$listen_port"
+  printf '  QUIC Proxy %s\n' "$quic_label"
+  [ "$quic" != Enabled ] || printf '  QUIC 传输 UDP/%s（同端口）\n' "$listen_port"
   msg ''
-  printf '网络入口\n  Profile   %s\n' "$(nb_ingress_profile_name "$(snell_state_field "$id" ingress_profile_id 2>/dev/null || true)")"
+  printf '网络入口 / Ingress\n  入口配置 / Ingress Profile  %s\n' "$(nb_ingress_profile_name "$(snell_state_field "$id" ingress_profile_id 2>/dev/null || true)")"
   msg ''
-  printf '客户端入口\n  Host      %s\n  Port      %s\n' "$host" "$port"
+  printf '展示端点 / Display Endpoint\n  主机      %s\n  端口      %s\n' "$host" "$port"
   msg ''
   printf '认证\n  PSK       %s\n' "$psk"
   msg ''
@@ -761,7 +762,7 @@ snell_service_command() {
       snell_service_action "$id" restart && snell_wait_for_required_listeners "$id" 25
       ;;
     status)
-      if snell_running "$id"; then msg "Snell $(snell_state_field "$id" name): Running"; else msg "Snell $(snell_state_field "$id" name): Stopped"; return 1; fi
+      if snell_running "$id"; then msg "Snell $(snell_state_field "$id" name)：运行中"; else msg "Snell $(snell_state_field "$id" name)：已停止"; return 1; fi
       ;;
   esac
 }
@@ -785,55 +786,55 @@ snell_doctor_instance() {
   case "$(snell_state_field "$id" version 2>/dev/null || true)" in 4|5) ;; *) return 1 ;; esac
   name="$(snell_state_field "$id" name)"; major="$(snell_state_field "$id" version)"
   port="$(snell_state_field "$id" listen_port)"; runtime="$(snell_state_field "$id" runtime_version)"
-  printf 'Instance %s (%s, v%s)\n' "$name" "$id" "$major"
+  printf '实例 %s（%s，v%s）\n' "$name" "$id" "$major"
   if [ -x "$(snell_runtime_path "$major")" ]; then
     actual_runtime="$(snell_runtime_reported_version "$(snell_runtime_path "$major")" 2>/dev/null || true)"
     [[ "$actual_runtime" = "$major".* ]] \
-      && nb_doctor_line PASS "official runtime v${actual_runtime}" \
-      || { nb_doctor_line FAIL "runtime major mismatch: ${actual_runtime:-unknown}"; failed=1; }
-    [ "$actual_runtime" = "$runtime" ] || nb_doctor_line INFO "state runtime=${runtime}, installed=${actual_runtime}"
+      && nb_doctor_line PASS "官方 Runtime v${actual_runtime}" \
+      || { nb_doctor_line FAIL "Runtime 主版本不匹配: ${actual_runtime:-未知}"; failed=1; }
+    [ "$actual_runtime" = "$runtime" ] || nb_doctor_line INFO "状态记录 Runtime=${runtime}，已安装=${actual_runtime}"
   else
-    nb_doctor_line FAIL "runtime missing: $(snell_runtime_path "$major")"; failed=1
+    nb_doctor_line FAIL "缺少 Runtime: $(snell_runtime_path "$major")"; failed=1
   fi
-  snell_config_matches_state "$id" && nb_doctor_line PASS 'config/state consistency' \
-    || { nb_doctor_line FAIL 'config/state consistency'; failed=1; }
+  snell_config_matches_state "$id" && nb_doctor_line PASS '配置 / 状态一致' \
+    || { nb_doctor_line FAIL '配置 / 状态不一致'; failed=1; }
   snell_quic_state_consistent "$id" \
-    && nb_doctor_line PASS 'QUIC state/managed UDP consistency' \
-    || { nb_doctor_line FAIL 'QUIC state/managed UDP consistency'; failed=1; }
-  snell_running "$id" && nb_doctor_line PASS "service + TCP/${port}" \
-    || { nb_doctor_line FAIL "service/listener TCP/${port}"; failed=1; }
+    && nb_doctor_line PASS 'QUIC 状态 / 受管 UDP 一致' \
+    || { nb_doctor_line FAIL 'QUIC 状态 / 受管 UDP 不一致'; failed=1; }
+  snell_running "$id" && nb_doctor_line PASS "服务与 TCP/${port} 监听正常" \
+    || { nb_doctor_line FAIL "服务 / 监听异常: TCP/${port}"; failed=1; }
   quic=off; snell_quic_proxy_enabled "$id" && quic=on
   if [ "$major" = 5 ] && [ "$quic" = on ]; then
     snell_v5_auxiliary_udp_same_process "$port" \
-      && nb_doctor_line PASS "QUIC Proxy Enabled; same-process UDP/${port} listener" \
-      || { nb_doctor_line FAIL "QUIC Proxy Enabled but same-process UDP/${port} listener missing"; failed=1; }
+      && nb_doctor_line PASS "QUIC Proxy 已启用；同进程 UDP/${port} 监听正常" \
+      || { nb_doctor_line FAIL "QUIC Proxy 已启用，但缺少同进程 UDP/${port} 监听"; failed=1; }
     nb_firewall_binding_owned UDP "$port" \
-      && nb_doctor_line PASS "QUIC firewall ownership UDP/${port}" \
-      || { nb_doctor_line FAIL "QUIC Proxy Enabled but UDP/${port} firewall ownership missing"; failed=1; }
+      && nb_doctor_line PASS "QUIC 防火墙归属正常: UDP/${port}" \
+      || { nb_doctor_line FAIL "QUIC Proxy 已启用，但缺少 UDP/${port} 防火墙归属"; failed=1; }
   elif [ "$major" = 5 ]; then
-    nb_doctor_line PASS 'QUIC Proxy Disabled; UDP public ownership OFF'
+    nb_doctor_line PASS 'QUIC Proxy 已禁用；UDP 公网归属已关闭'
     if nb_firewall_binding_owned UDP "$port"; then
-      nb_doctor_line FAIL "QUIC Proxy Disabled but UDP/${port} is still NoBrand-owned"
+      nb_doctor_line FAIL "QUIC Proxy 已禁用，但 UDP/${port} 仍归 NoBrand 管理"
       failed=1
     elif nb_port_is_listening UDP "$port"; then
       if snell_v5_auxiliary_udp_same_process "$port"; then
         nb_doctor_line INFO \
-          "runtime auxiliary listener UDP/${port} detected; owner=snell-server; public ownership=OFF; canonical ownership=TCP/${port}"
+          "检测到 Runtime 辅助监听 UDP/${port}；owner=snell-server；公网归属=OFF；规范归属=TCP/${port}"
       else
         nb_doctor_line WARN \
-          "same-port UDP/${port} listener detected, but ownership could not be matched to the primary Snell process"
+          "检测到同端口 UDP/${port} 监听，但无法确认其归属于 Snell 主进程"
       fi
     fi
   fi
-  nb_firewall_binding_owned TCP "$port" && nb_doctor_line PASS "firewall ownership TCP/${port}" \
-    || nb_doctor_line INFO "firewall rule not owned (pre-existing/no local firewall): TCP/${port}"
+  nb_firewall_binding_owned TCP "$port" && nb_doctor_line PASS "防火墙归属正常: TCP/${port}" \
+    || nb_doctor_line INFO "防火墙规则不归 NoBrand 管理（预先存在 / 无本地防火墙）: TCP/${port}"
   mode="$(snell_state_field "$id" advertise_mode)"; host="$(snell_state_field "$id" advertise_host)"
   advertise_port="$(snell_state_field "$id" advertise_port)"
   nb_validate_advertise_endpoint "$host" "$advertise_port" TCP \
-    && nb_doctor_line PASS "display endpoint mode=${mode}" \
-    || { nb_doctor_line FAIL 'display endpoint state'; failed=1; }
+    && nb_doctor_line PASS "展示端点 / Display Endpoint 模式=${mode}" \
+    || { nb_doctor_line FAIL '展示端点 / Display Endpoint 状态无效'; failed=1; }
   endpoint="$(snell_effective_endpoint "$id" 2>/dev/null || true)"
-  [ -n "$endpoint" ] || { nb_doctor_line FAIL 'effective endpoint'; failed=1; }
+  [ -n "$endpoint" ] || { nb_doctor_line FAIL '无法解析有效展示端点'; failed=1; }
   return "$failed"
 }
 
@@ -844,7 +845,7 @@ snell_doctor_all() {
     snell_doctor_instance "$id" || failed=1
     found=1
   done < <(snell_instance_ids)
-  [ "$found" -eq 1 ] || nb_doctor_line INFO 'not installed'
+  [ "$found" -eq 1 ] || nb_doctor_line INFO 'Snell 未安装'
   return "$failed"
 }
 
@@ -896,7 +897,7 @@ snell_upgrade_runtime() {
     while IFS= read -r id; do [ -z "$id" ] || snell_service_action "$id" restart >/dev/null 2>&1 || true; done <<<"$active_ids"
     rm -f "$backup" "$metadata_backup"
     admin_lock_release
-    warn "Snell v${major} 升级后实例验收失败，已恢复旧 runtime"
+    warn "Snell v${major} 升级后实例验收失败，已恢复旧 Runtime"
     return 1
   fi
   ids="$(snell_instance_ids)"
@@ -906,7 +907,7 @@ snell_upgrade_runtime() {
   done <<<"$ids"
   rm -f "$backup" "$metadata_backup"
   admin_lock_release
-  t "Snell v${major} runtime 升级完成" "Snell v${major} runtime upgraded"
+  t "Snell v${major} Runtime 升级完成" "Snell v${major} runtime upgraded"
 }
 
 snell_refresh_runtime_metadata() {

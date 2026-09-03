@@ -427,7 +427,7 @@ mv "$invalid_state" "$(snell_state_path "$mapped_node")"
 if invalid_doctor="$(nb_ingress_doctor 2>&1)"; then
   fail 'Doctor accepted an unknown node ingress association'
 fi
-assert_contains "$invalid_doctor" 'unknown ingress profile i0000000000000000' \
+assert_contains "$invalid_doctor" '未知 Ingress Profile i0000000000000000' \
   'Doctor identifies the unknown profile association'
 jq --arg id "$mapped_id" '.ingress_profile_id=$id' "$(snell_state_path "$mapped_node")" >"$invalid_state"
 mv "$invalid_state" "$(snell_state_path "$mapped_node")"
@@ -451,9 +451,9 @@ fi
 doctor_output="$(nb_ingress_doctor)"
 assert_not_contains "$doctor_output" '[FAIL]' 'Ingress Doctor clean result'
 assert_contains "$doctor_output" 'OUTSIDE_CURRENT_AUTO_POOL' 'Doctor range-change observation'
-assert_contains "$doctor_output" 'Current system default egress (read-only): eth0 / 192.0.2.110' \
+assert_contains "$doctor_output" '当前系统默认出口（只读）: eth0 / 192.0.2.110' \
   'Doctor read-only egress observation'
-assert_contains "$doctor_output" 'Host-global, transport-aware actual port ownership valid' \
+assert_contains "$doctor_output" '主机全局、按传输区分的实际端口归属有效' \
   'Doctor ownership check'
 
 status_output="$(nobrand_status)"
@@ -461,9 +461,9 @@ assert_contains "$status_output" 'Default Profile: Public-Derived' 'status defau
 assert_contains "$status_output" '11001-11099' 'status derived auto range'
 assert_contains "$status_output" '30101-30120' 'status custom auto range'
 nodes_output="$(nobrand_nodes)"
-assert_contains "$nodes_output" 'Actual / Display / Ingress Profile' 'nodes detail section'
+assert_contains "$nodes_output" '实际监听 / Actual Listener' 'nodes detail section'
 assert_contains "$nodes_output" "192.0.2.110:${hy2_port}" 'nodes profile display endpoint'
-assert_contains "$nodes_output" 'Ingress: Public-Derived' 'nodes ingress identity'
+assert_contains "$nodes_output" '入口配置: Public-Derived' 'nodes ingress identity'
 
 # Final association inventory covers every protocol and both Forward backends.
 assert_eq "$public_id" "$(jq -r '.users[0].ingress_profile_id' "$MITA_USERS_STATE")" 'Mieru final association'

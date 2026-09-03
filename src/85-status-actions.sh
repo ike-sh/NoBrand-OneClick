@@ -8,7 +8,7 @@ status_binding_text() {
 }
 
 do_status() {
-  local sm status_out iid iname iport
+  local sm status_out iid iname iport unknown_text unavailable_text
   sm="$(service_manager)"
   if ! mita_installed; then
     t 'mita 未安装' 'mita is not installed'
@@ -16,15 +16,17 @@ do_status() {
     exit 1
   fi
   load_install_state 2>/dev/null || true
+  unknown_text="$(t '未知' 'unknown')"
+  unavailable_text="$(t '状态不可用' 'status unavailable')"
   msg ""
   t '【版本与配置】' '[Version and configuration]'
-  t "  OneClick Version: ${SCRIPT_VERSION}" "  OneClick Version: ${SCRIPT_VERSION}"
-  t "  Installed Mieru: $(installed_version 2>/dev/null || printf unknown)" \
+  t "  OneClick 版本: ${SCRIPT_VERSION}" "  OneClick Version: ${SCRIPT_VERSION}"
+  t "  已安装的 Mieru: $(installed_version 2>/dev/null || printf '%s' "$unknown_text")" \
     "  Installed Mieru: $(installed_version 2>/dev/null || printf unknown)"
-  t "  Channel: $(mieru_channel_label)" "  Channel: $(mieru_channel_label)"
-  t "  Qualified last-known-good Mieru: ${LAST_KNOWN_GOOD_MIERU_VERSION}" \
+  t "  版本通道: $(mieru_channel_label)" "  Channel: $(mieru_channel_label)"
+  t "  已验证可用的 Mieru 回退版本: ${LAST_KNOWN_GOOD_MIERU_VERSION}" \
     "  Qualified last-known-good Mieru: ${LAST_KNOWN_GOOD_MIERU_VERSION}"
-  t "  Profile: $(profile_label)" "  Profile: $(profile_label)"
+  t "  配置预设 / Profile: $(profile_label)" "  Profile: $(profile_label)"
   msg ""
   users_isolated_mode || {
     warn "$(t 'schema v3 Mieru 状态不是 isolated-v2' \
@@ -47,7 +49,7 @@ do_status() {
       openrc) rc-service "$(instance_openrc_service "$iid")" status 2>/dev/null || true ;;
     esac
     status_out="$(instance_cmd "$iid" status 2>/dev/null || true)"
-    msg "${status_out:-status unavailable}"
+    msg "${status_out:-$unavailable_text}"
   done < <(users_enabled_instance_rows)
   msg ""
   t '状态页已隐藏密码；查看或导出节点配置请使用主菜单「查看节点」' \
@@ -136,7 +138,7 @@ do_profile_config() {
   repair_mita_binary_paths 2>/dev/null || true
   load_config_from_mita || return 1
   if [ "${PROFILE_CLI:-0}" -eq 1 ]; then
-    PROFILE="$(normalize_profile "$PROFILE")" || die "$(t '非法 Profile' 'Invalid profile')"
+    PROFILE="$(normalize_profile "$PROFILE")" || die "$(t '配置预设 Profile 无效' 'Invalid profile')"
   else
     choose_profile_interactive
   fi

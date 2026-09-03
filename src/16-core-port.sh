@@ -411,10 +411,17 @@ nb_warn_if_outside_recommended_range() {
 nb_describe_port_conflict() {
   local transport="$1" port="$2" profile_id="${3:-$NOBRAND_LEGACY_INGRESS_PROFILE_ID}" owner details
   if nb_ingress_port_is_reserved "$profile_id" "$port"; then
-    msg "  reserved by ingress profile: $(nb_ingress_profile_name "$profile_id")"
+    t "  由入口配置保留: $(nb_ingress_profile_name "$profile_id")" \
+      "  reserved by ingress profile: $(nb_ingress_profile_name "$profile_id")"
   fi
   owner="$(nb_registry_port_owner "$transport" "$port" 2>/dev/null || true)"
-  [ -z "$owner" ] || msg "  state owner: ${owner}"
+  [ -z "$owner" ] || t "  状态归属: ${owner}" "  state owner: ${owner}"
   details="$(nb_port_listener_details "$transport" "$port" 2>/dev/null || true)"
-  [ -z "$details" ] || printf '%s\n' "$details" | sed 's/^/  listener: /'
+  [ -z "$details" ] || {
+    if [ "$LANG_ZH" -eq 1 ]; then
+      printf '%s\n' "$details" | sed 's/^/  监听进程: /'
+    else
+      printf '%s\n' "$details" | sed 's/^/  listener: /'
+    fi
+  }
 }

@@ -33,8 +33,9 @@ permissive_id="$(nb_ingress_profile_id Permissive-B)"
 
 assert_eq strict "$(nb_ingress_profile_enforcement "$strict_id")" 'explicit strict profile policy'
 assert_eq permissive "$(nb_ingress_profile_enforcement "$permissive_id")" 'explicit permissive profile policy'
-assert_contains "$(ingress_cli list)" 'strict' 'Ingress list exposes strict policy'
-assert_contains "$(ingress_cli show Strict-A)" 'Ingress enforcement: strict' 'Ingress show exposes strict policy'
+assert_contains "$(ingress_cli list)" '严格 / strict' 'Ingress list exposes Chinese-first strict policy'
+assert_contains "$(ingress_cli show Strict-A)" 'Ingress 强制策略: 严格 / strict' \
+  'Ingress show exposes Chinese-first strict policy'
 
 legacy_profile="$fixture/legacy-profile.json"
 jq 'del(.profiles[1].ingress_enforcement)' "$NOBRAND_INGRESS_STATE_FILE" >"$legacy_profile"

@@ -2,7 +2,8 @@
 users_py_locked() {
   users_require_python
   if [ "${DRY_RUN:-0}" -eq 1 ]; then
-    msg "[dry-run] update users state: $MITA_USERS_STATE"
+    t "[演练] 更新用户状态: $MITA_USERS_STATE" \
+      "[dry-run] update users state: $MITA_USERS_STATE"
     return 0
   fi
   run mkdir -p "$(dirname "$MITA_USERS_STATE")" "$(dirname "$MITA_USERS_LOCK")"
@@ -233,7 +234,8 @@ users_port_pool_bounds() {
     return 0
   fi
   [ "$profile_id" = "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ] \
-    || { die 'Selected ingress profile is manual-only; pass --port for the new Mieru user'; return 1; }
+    || { die "$(t '所选 Ingress Profile 仅支持手动端口；请为新的 Mieru 用户指定 --port' \
+      'Selected ingress profile is manual-only; pass --port for the new Mieru user')"; return 1; }
   # 无 IP 尾号时：主端口附近 或 默认 20000-29999
   if [ -n "${PORT:-}" ] && valid_port "$PORT"; then
     _pool_lo=$((PORT + 2))
@@ -388,7 +390,8 @@ users_add() {
   users_require_python || return 1
   nb_prepare_ingress_request || return 1
   nb_prepare_ingress_deployment "$INGRESS_PROFILE_ID" firewall \
-    || die '所选 Ingress strict local address cannot be firewall-enforced for Mieru'
+    || die "$(t '所选 Ingress 的 Strict 本地地址无法通过防火墙为 Mieru 强制实施' \
+      'The selected Ingress strict local address cannot be firewall-enforced for Mieru')"
   [ -n "$name" ] || { die "$(t '用户名不能为空' 'Username required')" || return 1; }
   [ -n "$password" ] || password="$(random_token)"
   validate_proxy_credentials "$name" "$password" || return 1
@@ -571,7 +574,8 @@ ${tp}"
   cfg="$(mktemp_file .json)"
   if ! MITA_USERS_STATE="$MITA_USERS_STATE" \
     _PROTO="${PROTOCOL:-TCP}" _MTU="${MTU:-1400}" \
-    _CFG="$cfg" python3 - <<'PY'
+    _CFG="$cfg" _NO_ENABLED_USERS="$(t '没有启用中的用户' 'no enabled users')" \
+    python3 - <<'PY'
 import json, os, sys
 path = os.environ["MITA_USERS_STATE"]
 proto = os.environ.get("_PROTO", "TCP")
@@ -623,7 +627,7 @@ for u in d.get("users") or []:
         seen.add(key)
         bindings.append({"port": p, "protocol": pr})
 if not users_out:
-    sys.stderr.write("no enabled users\n")
+    sys.stderr.write(os.environ["_NO_ENABLED_USERS"] + "\n")
     sys.exit(1)
 doc = {
     "portBindings": bindings,

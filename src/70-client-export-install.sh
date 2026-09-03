@@ -358,7 +358,7 @@ print_summary() {
   t "  协议:   $(client_protocol_label)" "  Protocol: $(client_protocol_label)"
   t "  网络入口: $(nb_ingress_profile_name "${INGRESS_PROFILE_ID:-}")" \
     "  Ingress:  $(nb_ingress_profile_name "${INGRESS_PROFILE_ID:-}")"
-  t "  Profile: $(profile_label)" "  Profile:  $(profile_label)"
+  t "  配置预设（Profile）: $(profile_label)" "  Profile:  $(profile_label)"
   t "  MTU:    ${MTU}（$(mtu_policy_label)）" \
     "  MTU:      ${MTU} ($(mtu_policy_label))"
   t "  流量伪装: $(traffic_label)" "  Obfuscation: $(traffic_label)"

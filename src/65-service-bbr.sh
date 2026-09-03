@@ -1,7 +1,8 @@
 start_mita() {
   STAGE="启动 Mieru 专属实例"
   if [ "${DRY_RUN:-0}" -eq 1 ]; then
-    msg "[dry-run] start dedicated Mieru instances"
+    t '[演练] 启动 Mieru 用户专属实例' \
+      '[dry-run] start dedicated Mieru instances'
     return 0
   fi
   users_isolated_mode || {
@@ -23,7 +24,8 @@ verify_mita_running() {
   STAGE="验证服务状态"
   local quiet="${1:-0}"
   if [ "${DRY_RUN:-0}" -eq 1 ]; then
-    msg "[dry-run] verify mita RUNNING"
+    t '[演练] 验证 mita 运行状态（RUNNING）' \
+      '[dry-run] verify mita RUNNING'
     return 0
   fi
   users_isolated_mode || {
@@ -36,7 +38,7 @@ verify_mita_running() {
     [ -n "$iid" ] || continue
     istatus="$(instance_cmd "$iid" status 2>/dev/null || true)"
     if ! printf '%s' "$istatus" | grep -q 'status is "RUNNING"'; then
-      warn "$(t "用户 ${iname} 的专属实例未处于 RUNNING（${iid}）" \
+      warn "$(t "用户 ${iname} 的专属实例未处于运行状态（RUNNING，${iid}）" \
         "Dedicated instance for ${iname} is not RUNNING (${iid})")"
       failed=1
     fi
