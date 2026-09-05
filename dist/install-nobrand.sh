@@ -15,7 +15,7 @@
 set -euo pipefail
 umask 077
 
-SCRIPT_VERSION="3.2.1"
+SCRIPT_VERSION="3.2.2"
 SCRIPT_AUTHOR="ike"
 SCRIPT_NAME="NoBrand-OneClick"
 SCRIPT_REPO="ike-sh/NoBrand-OneClick"
@@ -258,8 +258,18 @@ UNINSTALL_PRESERVE_SHARED=0
 MITA_REINSTALL_TRIED=0
 NOBRAND_INSTALL_STATE=""
 NOBRAND_LIFECYCLE_OPERATION=""
+NOBRAND_LIFECYCLE_SCOPE=""
 NOBRAND_LIFECYCLE_ACTIVE=0
+NOBRAND_LIFECYCLE_MUTATION_STARTED=0
 NOBRAND_LIFECYCLE_LOCK_HELD=0
+NOBRAND_MANAGER_SESSION_ACTIVE=0
+NOBRAND_RECOVERY_EXPECTED_SCOPE=""
+NOBRAND_RECOVERY_EXPECTED_STATE=""
+NOBRAND_RECOVERY_EXPECTED_TX_PRESENT=0
+NOBRAND_RECOVERY_EXPECTED_TX_STATUS=""
+NOBRAND_RECOVERY_EXPECTED_TX_ID=""
+NOBRAND_RECOVERY_EXPECTED_TX_RECORD=""
+NOBRAND_MENU_EXIT_SUCCESS=4
 YES=0
 DRY_RUN=0
 LANG_ZH=1
@@ -457,14 +467,23 @@ if [ -z "${BASH_VERSION:-}" ]; then
   if [ -f /etc/alpine-release ]; then
     echo "Alpine 默认无 bash，请先安装后执行（root 无需 sudo）：" >&2
     echo "  apk add --no-cache bash curl" >&2
-    echo "  curl -fsSL https://github.com/ike-sh/NoBrand-OneClick/releases/latest/download/install-nobrand.sh | bash" >&2
+    echo "  curl -fsSLO https://github.com/ike-sh/NoBrand-OneClick/releases/latest/download/install-nobrand.sh" >&2
+    echo "  bash install-nobrand.sh" >&2
   else
-    echo "  curl -fsSL https://github.com/ike-sh/NoBrand-OneClick/releases/latest/download/install-nobrand.sh | sudo bash" >&2
+    echo "  curl -fsSLO https://github.com/ike-sh/NoBrand-OneClick/releases/latest/download/install-nobrand.sh" >&2
+    echo "  sudo bash install-nobrand.sh" >&2
   fi
   exit 1
 fi
 
 on_error() {
+  if declare -F nb_lifecycle_restore_pre_mutation >/dev/null 2>&1 \
+     && [ "${NOBRAND_LIFECYCLE_ACTIVE:-0}" -eq 1 ] \
+     && nb_lifecycle_tx_valid \
+     && [ "$(nb_lifecycle_field STATUS)" = in-progress ] \
+     && [ "$(nb_lifecycle_mutation_started)" = 0 ]; then
+    nb_lifecycle_restore_pre_mutation >/dev/null 2>&1 || true
+  fi
   msg "[错误] 步骤失败: ${STAGE}" >&2
   exit 1
 }
@@ -559,11 +578,13 @@ NoBrand-OneClick Mieru 管理 ${SCRIPT_VERSION}
   nobrand mieru restart            重启服务（start/stop 同理）
 
 一键安装（交互式，Debian/Ubuntu/CentOS 等）：
-  curl -fsSL ${NOBRAND_RELEASE_INSTALLER_URL} | sudo bash
+  curl -fsSLO ${NOBRAND_RELEASE_INSTALLER_URL}
+  sudo bash install-nobrand.sh
 
 Alpine Linux（无 sudo，需先装 bash）：
   apk add --no-cache bash curl
-  curl -fsSL ${NOBRAND_RELEASE_INSTALLER_URL} | bash
+  curl -fsSLO ${NOBRAND_RELEASE_INSTALLER_URL}
+  bash install-nobrand.sh
 
 非交互示例：
   nobrand mieru install -y --port 2088 --advertise-auto --user alice --password 'secret'
@@ -665,11 +686,27 @@ parse_nobrand_ingress_args() {
         [ -n "$INGRESS_PROFILE_SELECTOR" ] && [[ "$INGRESS_PROFILE_SELECTOR" != --* ]] || die "$1 需要入口配置 ID 或名称"
         shift 2
         ;;
-      --name) INGRESS_NAME="${2:-}"; INGRESS_NAME_CLI=1; [ -n "$INGRESS_NAME" ] || die '--name 需要名称'; shift 2 ;;
-      --type) INGRESS_TYPE="$(printf '%s' "${2:-}" | tr '[:upper:]' '[:lower:]')"; INGRESS_TYPE_CLI=1; shift 2 ;;
-      --interface) INGRESS_INTERFACE="${2:-}"; INGRESS_INTERFACE_CLI=1; [ -n "$INGRESS_INTERFACE" ] || die '--interface 需要网卡名'; shift 2 ;;
-      --address) INGRESS_ADDRESS="${2:-}"; INGRESS_ADDRESS_CLI=1; [ -n "$INGRESS_ADDRESS" ] || die '--address 需要本地 IPv4'; shift 2 ;;
-      --port-policy) INGRESS_PORT_POLICY="$(printf '%s' "${2:-}" | tr '_' '-' | tr '[:upper:]' '[:lower:]')"; INGRESS_PORT_POLICY_CLI=1; shift 2 ;;
+      --name)
+        [ -n "${2:-}" ] && [[ "${2:-}" != --* ]] || die '--name 需要名称' || return 1
+        INGRESS_NAME="$2"; INGRESS_NAME_CLI=1; shift 2
+        ;;
+      --type)
+        [ -n "${2:-}" ] && [[ "${2:-}" != --* ]] || die '--type 需要类型' || return 1
+        INGRESS_TYPE="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')"; INGRESS_TYPE_CLI=1; shift 2
+        ;;
+      --interface)
+        [ -n "${2:-}" ] && [[ "${2:-}" != --* ]] || die '--interface 需要网卡名' || return 1
+        INGRESS_INTERFACE="$2"; INGRESS_INTERFACE_CLI=1; shift 2
+        ;;
+      --address)
+        [ -n "${2:-}" ] && [[ "${2:-}" != --* ]] || die '--address 需要本地 IPv4' || return 1
+        INGRESS_ADDRESS="$2"; INGRESS_ADDRESS_CLI=1; shift 2
+        ;;
+      --port-policy)
+        [ -n "${2:-}" ] && [[ "${2:-}" != --* ]] || die '--port-policy 需要端口策略' || return 1
+        INGRESS_PORT_POLICY="$(printf '%s' "$2" | tr '_' '-' | tr '[:upper:]' '[:lower:]')"
+        INGRESS_PORT_POLICY_CLI=1; shift 2
+        ;;
       --range-start) INGRESS_RANGE_START="${2:-}"; INGRESS_RANGE_START_CLI=1; shift 2 ;;
       --range-end) INGRESS_RANGE_END="${2:-}"; INGRESS_RANGE_END_CLI=1; shift 2 ;;
       --reserve|--reserved)
@@ -704,6 +741,15 @@ parse_nobrand_ingress_args() {
   case "$INGRESS_ACTION" in
     show|modify|delete|set-default|apply) [ -n "$INGRESS_PROFILE_SELECTOR" ] || die "${INGRESS_ACTION} 需要入口配置 ID 或名称" ;;
   esac
+  if [ "$INGRESS_ACTION" = add ]; then
+    [ "$INGRESS_NAME_CLI" -eq 1 ] && [ -n "$INGRESS_NAME" ] \
+      && [ "$INGRESS_TYPE_CLI" -eq 1 ] && [ -n "$INGRESS_TYPE" ] \
+      && [ "$INGRESS_INTERFACE_CLI" -eq 1 ] && [ -n "$INGRESS_INTERFACE" ] \
+      && [ "$INGRESS_ADDRESS_CLI" -eq 1 ] && [ -n "$INGRESS_ADDRESS" ] \
+      && [ "$INGRESS_PORT_POLICY_CLI" -eq 1 ] && [ -n "$INGRESS_PORT_POLICY" ] \
+      || die 'ingress add 非交互模式需要 --name --type --interface --address --port-policy' \
+      || return 1
+  fi
   ACTION="nobrand-ingress"
   NOBRAND_ARGS_HANDLED=1
 }
@@ -1778,18 +1824,93 @@ nb_lifecycle_field() {
   awk -F= -v wanted="$key" '$1==wanted {print substr($0, length($1)+2); exit}' "$path" 2>/dev/null
 }
 
+nb_lifecycle_scope_valid() {
+  local operation="$1" scope="$2"
+  case "$operation:$scope" in
+    install:manager|install:mieru|install:snell|install:hy2|install:tuic|\
+      install:vless-reality|install:vless-sudoku|install:ssh-tunnel|install:forward|\
+      repair:manager|repair:mieru|repair:global|configure:ingress|uninstall:global)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+nb_lifecycle_default_scope() {
+  local operation="$1" phase="${2:-prepare}"
+  case "$operation" in
+    configure) printf 'ingress' ;;
+    uninstall) printf 'global' ;;
+    repair)
+      case "$phase" in partial-uninstall-*) printf 'global' ;; *) printf 'mieru' ;; esac
+      ;;
+    install) printf 'mieru' ;;
+    *) return 1 ;;
+  esac
+}
+
+# Public v3.2.1 wrote lifecycle-v1 records before component scope existed.
+# Its ordinary install/repair writer was Mieru-only; partial-uninstall repair
+# and uninstall were global. Keep that exact compatibility boundary rather
+# than guessing from protocol files or absence.
+nb_lifecycle_v1_scope() {
+  local operation="$1" phase="$2"
+  case "$operation" in
+    uninstall) printf 'global' ;;
+    repair)
+      case "$phase" in partial-uninstall-*) printf 'global' ;; *) printf 'mieru' ;; esac
+      ;;
+    install) printf 'mieru' ;;
+    *) return 1 ;;
+  esac
+}
+
+nb_lifecycle_scope() {
+  local path="${1:-$NOBRAND_LIFECYCLE_TX_FILE}" format operation phase
+  format="$(nb_lifecycle_field FORMAT "$path")"
+  case "$format" in
+    nobrand-lifecycle-v2) nb_lifecycle_field SCOPE "$path" ;;
+    nobrand-lifecycle-v1)
+      operation="$(nb_lifecycle_field OPERATION "$path")"
+      phase="$(nb_lifecycle_field LAST_COMPLETED_PHASE "$path")"
+      nb_lifecycle_v1_scope "$operation" "$phase"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+nb_lifecycle_mutation_started() {
+  local path="${1:-$NOBRAND_LIFECYCLE_TX_FILE}" format status
+  format="$(nb_lifecycle_field FORMAT "$path")"
+  case "$format" in
+    nobrand-lifecycle-v2) nb_lifecycle_field MUTATION_STARTED "$path" ;;
+    nobrand-lifecycle-v1)
+      status="$(nb_lifecycle_field STATUS "$path")"
+      [ "$status" = in-progress ] && printf '1' || printf '0'
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 nb_lifecycle_phase_valid() {
   local operation="$1" status="$2" phase="$3"
   if [ "$status" = complete ]; then
     case "$operation:$phase" in
-      install:complete|repair:complete) return 0 ;;
+      install:complete|repair:complete|configure:complete) return 0 ;;
       *) return 1 ;;
     esac
   fi
   [ "$status" = in-progress ] || return 1
+  # Protocol installs persist a truncated SHA-256 of their authoritative
+  # pre-callback state in this phase.  The 55 hex digits keep the phase within
+  # the existing 64-byte field limit while retaining 220 bits of identity.
+  if [ "$operation" = install ] \
+     && [[ "$phase" =~ ^callback-[0-9a-f]{55}$ ]]; then
+    return 0
+  fi
   case "$operation:$phase" in
-    install:prepare|install:state-layout|install:runtime-ready|install:state-committed|\
-      install:ready-to-validate)
+    install:prepare|install:state-layout|install:manager-ready|install:runtime-ready|\
+      install:state-committed|install:ready-to-validate)
       return 0
       ;;
     repair:prepare|repair:state-layout|repair:runtime-ready|repair:state-committed|\
@@ -1800,6 +1921,9 @@ nb_lifecycle_phase_valid() {
       repair:partial-uninstall-ssh-confirmation-pending|\
       repair:partial-uninstall-state-validated|\
       repair:partial-uninstall-ready-to-validate)
+      return 0
+      ;;
+    configure:prepare|configure:state-committed|configure:ready-to-validate)
       return 0
       ;;
     uninstall:prepare|uninstall:runtime-removed|uninstall:before-state-removal|\
@@ -1814,7 +1938,8 @@ nb_lifecycle_phase_valid() {
 }
 
 nb_lifecycle_tx_valid() {
-  local path="$NOBRAND_LIFECYCLE_TX_FILE" operation status manager schema txid started phase
+  local path="$NOBRAND_LIFECYCLE_TX_FILE" format operation scope mutation_started
+  local status manager schema txid started phase
   local mieru_owned preserve_package preserve_user preserve_group preserve_shared
   [ -f "$path" ] && [ ! -L "$path" ] || return 1
   nb_lifecycle_paths_valid || return 1
@@ -1822,23 +1947,48 @@ nb_lifecycle_tx_valid() {
     secure_stat_path "$NOBRAND_LIFECYCLE_DIR" dir || return 1
     secure_stat_path "$path" file || return 1
   fi
-  awk -F= '
-    BEGIN {
-      required["FORMAT"]=1; required["OPERATION"]=1; required["STATUS"]=1;
-      required["MANAGER_VERSION"]=1; required["SCHEMA_GENERATION"]=1;
-      required["TRANSACTION_ID"]=1; required["STARTED_AT"]=1;
-      required["LAST_COMPLETED_PHASE"]=1; required["MIERU_OWNED"]=1;
-      required["MIERU_PRESERVE_PACKAGE"]=1; required["MIERU_PRESERVE_USER"]=1;
-      required["MIERU_PRESERVE_GROUP"]=1; required["MIERU_PRESERVE_SHARED"]=1
-    }
-    NF != 2 || !($1 in required) || seen[$1]++ { bad=1 }
-    END {
-      for (key in required) if (seen[key] != 1) bad=1
-      exit bad ? 1 : 0
-    }
-  ' "$path" || return 1
-  [ "$(nb_lifecycle_field FORMAT "$path")" = nobrand-lifecycle-v1 ] || return 1
+  format="$(nb_lifecycle_field FORMAT "$path")"
+  case "$format" in
+    nobrand-lifecycle-v1)
+      awk -F= '
+        BEGIN {
+          required["FORMAT"]=1; required["OPERATION"]=1; required["STATUS"]=1;
+          required["MANAGER_VERSION"]=1; required["SCHEMA_GENERATION"]=1;
+          required["TRANSACTION_ID"]=1; required["STARTED_AT"]=1;
+          required["LAST_COMPLETED_PHASE"]=1; required["MIERU_OWNED"]=1;
+          required["MIERU_PRESERVE_PACKAGE"]=1; required["MIERU_PRESERVE_USER"]=1;
+          required["MIERU_PRESERVE_GROUP"]=1; required["MIERU_PRESERVE_SHARED"]=1
+        }
+        NF != 2 || !($1 in required) || seen[$1]++ { bad=1 }
+        END {
+          for (key in required) if (seen[key] != 1) bad=1
+          exit bad ? 1 : 0
+        }
+      ' "$path" || return 1
+      ;;
+    nobrand-lifecycle-v2)
+      awk -F= '
+        BEGIN {
+          required["FORMAT"]=1; required["OPERATION"]=1; required["SCOPE"]=1;
+          required["MUTATION_STARTED"]=1; required["STATUS"]=1;
+          required["MANAGER_VERSION"]=1; required["SCHEMA_GENERATION"]=1;
+          required["TRANSACTION_ID"]=1; required["STARTED_AT"]=1;
+          required["LAST_COMPLETED_PHASE"]=1; required["MIERU_OWNED"]=1;
+          required["MIERU_PRESERVE_PACKAGE"]=1; required["MIERU_PRESERVE_USER"]=1;
+          required["MIERU_PRESERVE_GROUP"]=1; required["MIERU_PRESERVE_SHARED"]=1
+        }
+        NF != 2 || !($1 in required) || seen[$1]++ { bad=1 }
+        END {
+          for (key in required) if (seen[key] != 1) bad=1
+          exit bad ? 1 : 0
+        }
+      ' "$path" || return 1
+      ;;
+    *) return 1 ;;
+  esac
   operation="$(nb_lifecycle_field OPERATION "$path")"
+  scope="$(nb_lifecycle_scope "$path")" || return 1
+  mutation_started="$(nb_lifecycle_mutation_started "$path")" || return 1
   status="$(nb_lifecycle_field STATUS "$path")"
   manager="$(nb_lifecycle_field MANAGER_VERSION "$path")"
   schema="$(nb_lifecycle_field SCHEMA_GENERATION "$path")"
@@ -1850,7 +2000,12 @@ nb_lifecycle_tx_valid() {
   preserve_user="$(nb_lifecycle_field MIERU_PRESERVE_USER "$path")"
   preserve_group="$(nb_lifecycle_field MIERU_PRESERVE_GROUP "$path")"
   preserve_shared="$(nb_lifecycle_field MIERU_PRESERVE_SHARED "$path")"
-  case "$operation" in install|repair|uninstall) ;; *) return 1 ;; esac
+  case "$operation" in install|repair|configure|uninstall) ;; *) return 1 ;; esac
+  [ "$format" != nobrand-lifecycle-v1 ] || {
+    case "$operation" in install|repair|uninstall) ;; *) return 1 ;; esac
+  }
+  nb_lifecycle_scope_valid "$operation" "$scope" || return 1
+  case "$mutation_started" in 0|1) ;; *) return 1 ;; esac
   case "$status" in in-progress|complete) ;; *) return 1 ;; esac
   [ "$operation:$status" != uninstall:complete ] || return 1
   case "$manager" in
@@ -1866,7 +2021,8 @@ nb_lifecycle_tx_valid() {
     0:0:0:0:0|1:[01]:[01]:[01]:[01]) ;;
     *) return 1 ;;
   esac
-  [ "$operation" = uninstall ] || [ "$mieru_owned:$preserve_package:$preserve_user:$preserve_group:$preserve_shared" = 0:0:0:0:0 ]
+  [ "$operation:$scope" = uninstall:global ] \
+    || [ "$mieru_owned:$preserve_package:$preserve_user:$preserve_group:$preserve_shared" = 0:0:0:0:0 ]
 }
 
 nb_lifecycle_prepare_dir() {
@@ -1897,7 +2053,11 @@ nb_lifecycle_write() {
   local operation="$1" status="$2" txid="$3" started="$4" phase="$5" tmp
   local mieru_owned="${6:-0}" preserve_package="${7:-0}" preserve_user="${8:-0}"
   local preserve_group="${9:-0}" preserve_shared="${10:-0}"
-  case "$operation" in install|repair|uninstall) ;; *) return 1 ;; esac
+  local scope="${11:-}" mutation_started="${12:-0}"
+  [ -n "$scope" ] || scope="$(nb_lifecycle_default_scope "$operation" "$phase")" || return 1
+  case "$operation" in install|repair|configure|uninstall) ;; *) return 1 ;; esac
+  nb_lifecycle_scope_valid "$operation" "$scope" || return 1
+  case "$mutation_started" in 0|1) ;; *) return 1 ;; esac
   case "$status" in in-progress|complete) ;; *) return 1 ;; esac
   [[ "$txid" =~ ^[A-Za-z0-9._-]{8,128}$ ]] || return 1
   [[ "$started" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || return 1
@@ -1907,12 +2067,16 @@ nb_lifecycle_write() {
     0:0:0:0:0|1:[01]:[01]:[01]:[01]) ;;
     *) return 1 ;;
   esac
-  [ "$operation" = uninstall ] || [ "$mieru_owned:$preserve_package:$preserve_user:$preserve_group:$preserve_shared" = 0:0:0:0:0 ] || return 1
+  [ "$operation:$scope" = uninstall:global ] \
+    || [ "$mieru_owned:$preserve_package:$preserve_user:$preserve_group:$preserve_shared" = 0:0:0:0:0 ] \
+    || return 1
   nb_lifecycle_prepare_dir || return 1
   tmp="$(mktemp "${NOBRAND_LIFECYCLE_DIR}/.transaction.XXXXXX")" || return 1
   if ! printf '%s\n' \
-      'FORMAT=nobrand-lifecycle-v1' \
+      'FORMAT=nobrand-lifecycle-v2' \
       "OPERATION=${operation}" \
+      "SCOPE=${scope}" \
+      "MUTATION_STARTED=${mutation_started}" \
       "STATUS=${status}" \
       "MANAGER_VERSION=${SCRIPT_VERSION}" \
       "SCHEMA_GENERATION=${NOBRAND_SCHEMA_VERSION}" \
@@ -1939,10 +2103,14 @@ nb_lifecycle_begin() {
   local operation="$1" phase="${2:-prepare}" txid="" started=""
   local mieru_owned="${3:-0}" preserve_package="${4:-0}" preserve_user="${5:-0}"
   local preserve_group="${6:-0}" preserve_shared="${7:-0}" allow_transition="${8:-0}"
-  local existing_operation=""
+  local scope="${9:-}" existing_operation="" existing_scope="" mutation_started=0
+  [ -n "$scope" ] || scope="$(nb_lifecycle_default_scope "$operation" "$phase")" || return 1
+  nb_lifecycle_scope_valid "$operation" "$scope" || return 1
   [ "${DRY_RUN:-0}" -eq 0 ] || {
     NOBRAND_LIFECYCLE_OPERATION="$operation"
+    NOBRAND_LIFECYCLE_SCOPE="$scope"
     NOBRAND_LIFECYCLE_ACTIVE=1
+    NOBRAND_LIFECYCLE_MUTATION_STARTED=0
     return 0
   }
   if ! nb_test_mode_enabled && [ "$(id -u 2>/dev/null || printf 1)" -ne 0 ]; then
@@ -1950,8 +2118,9 @@ nb_lifecycle_begin() {
   fi
   if nb_lifecycle_tx_valid && [ "$(nb_lifecycle_field STATUS)" = in-progress ]; then
     existing_operation="$(nb_lifecycle_field OPERATION)"
-    if [ "$existing_operation" != "$operation" ]; then
-      if [ "$allow_transition:$existing_operation:$operation" = 1:uninstall:repair ]; then
+    existing_scope="$(nb_lifecycle_scope)" || return 1
+    if [ "$existing_operation:$existing_scope" != "$operation:$scope" ]; then
+      if [ "$allow_transition:$existing_operation:$existing_scope:$operation:$scope" = 1:uninstall:global:repair:global ]; then
         txid="$(nb_lifecycle_random_id)"
         started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
         mieru_owned=0
@@ -1960,8 +2129,8 @@ nb_lifecycle_begin() {
         preserve_group=0
         preserve_shared=0
       else
-        warn "$(t "未完成的 ${existing_operation} 生命周期事务仍在进行，拒绝以 ${operation} 覆盖" \
-          "An unfinished ${existing_operation} lifecycle transaction is active; refusing to replace it with ${operation}")"
+        warn "$(t "未完成的 ${existing_operation}:${existing_scope} 生命周期事务仍在进行，拒绝以 ${operation}:${scope} 覆盖" \
+          "An unfinished ${existing_operation}:${existing_scope} lifecycle transaction is active; refusing to replace it with ${operation}:${scope}")"
         return 1
       fi
     else
@@ -1972,21 +2141,30 @@ nb_lifecycle_begin() {
       preserve_user="$(nb_lifecycle_field MIERU_PRESERVE_USER)"
       preserve_group="$(nb_lifecycle_field MIERU_PRESERVE_GROUP)"
       preserve_shared="$(nb_lifecycle_field MIERU_PRESERVE_SHARED)"
+      mutation_started="$(nb_lifecycle_mutation_started)" || return 1
     fi
   else
     txid="$(nb_lifecycle_random_id)"
     started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   fi
-  nb_lifecycle_write "$operation" in-progress "$txid" "$started" "$phase" \
-    "$mieru_owned" "$preserve_package" "$preserve_user" "$preserve_group" \
-    "$preserve_shared" || return 1
   NOBRAND_LIFECYCLE_OPERATION="$operation"
+  NOBRAND_LIFECYCLE_SCOPE="$scope"
   NOBRAND_LIFECYCLE_ACTIVE=1
+  NOBRAND_LIFECYCLE_MUTATION_STARTED="$mutation_started"
+  if ! nb_lifecycle_write "$operation" in-progress "$txid" "$started" "$phase" \
+      "$mieru_owned" "$preserve_package" "$preserve_user" "$preserve_group" \
+      "$preserve_shared" "$scope" "$mutation_started"; then
+    NOBRAND_LIFECYCLE_ACTIVE=0
+    NOBRAND_LIFECYCLE_OPERATION=""
+    NOBRAND_LIFECYCLE_SCOPE=""
+    NOBRAND_LIFECYCLE_MUTATION_STARTED=0
+    return 1
+  fi
 }
 
 nb_lifecycle_mark_phase() {
   local phase="$1" operation txid started status mieru_owned preserve_package
-  local preserve_user preserve_group preserve_shared
+  local preserve_user preserve_group preserve_shared scope mutation_started
   [ "${DRY_RUN:-0}" -eq 0 ] || return 0
   nb_lifecycle_tx_valid || return 1
   operation="$(nb_lifecycle_field OPERATION)"
@@ -1998,18 +2176,129 @@ nb_lifecycle_mark_phase() {
   preserve_user="$(nb_lifecycle_field MIERU_PRESERVE_USER)"
   preserve_group="$(nb_lifecycle_field MIERU_PRESERVE_GROUP)"
   preserve_shared="$(nb_lifecycle_field MIERU_PRESERVE_SHARED)"
+  scope="$(nb_lifecycle_scope)" || return 1
+  mutation_started="$(nb_lifecycle_mutation_started)" || return 1
   [ "$status" = in-progress ] || return 1
   nb_lifecycle_write "$operation" in-progress "$txid" "$started" "$phase" \
     "$mieru_owned" "$preserve_package" "$preserve_user" "$preserve_group" \
-    "$preserve_shared"
+    "$preserve_shared" "$scope" "$mutation_started"
+}
+
+# A fresh component action can temporarily replace a completed lifecycle
+# record before it reaches its first durable component mutation. Keep that
+# closed-schema record in memory only so validation failures, cancellation, or
+# a handled signal can restore it exactly. Lifecycle records contain no node
+# credentials; protocol request values are deliberately never captured here.
+nb_lifecycle_pre_mutation_snapshot() {
+  local record=""
+  NOBRAND_LIFECYCLE_PREMUTATION_ARMED=1
+  NOBRAND_LIFECYCLE_PREMUTATION_PRIOR_PRESENT=0
+  NOBRAND_LIFECYCLE_PREMUTATION_PRIOR_RECORD=""
+  [ "${DRY_RUN:-0}" -eq 0 ] || return 0
+  if nb_lifecycle_tx_valid; then
+    record="$(<"$NOBRAND_LIFECYCLE_TX_FILE")" || {
+      nb_lifecycle_pre_mutation_disarm
+      return 1
+    }
+    [ -n "$record" ] || {
+      nb_lifecycle_pre_mutation_disarm
+      return 1
+    }
+    NOBRAND_LIFECYCLE_PREMUTATION_PRIOR_PRESENT=1
+    NOBRAND_LIFECYCLE_PREMUTATION_PRIOR_RECORD="$record"
+  fi
+}
+
+nb_lifecycle_pre_mutation_disarm() {
+  NOBRAND_LIFECYCLE_PREMUTATION_ARMED=0
+  NOBRAND_LIFECYCLE_PREMUTATION_PRIOR_PRESENT=0
+  NOBRAND_LIFECYCLE_PREMUTATION_PRIOR_RECORD=""
+}
+
+nb_lifecycle_restore_pre_mutation() {
+  local tmp=""
+  if [ "${NOBRAND_LIFECYCLE_PREMUTATION_ARMED:-0}" -eq 1 ] \
+     && [ "${NOBRAND_LIFECYCLE_PREMUTATION_PRIOR_PRESENT:-0}" -eq 1 ]; then
+    nb_lifecycle_prepare_dir || return 1
+    tmp="$(mktemp "${NOBRAND_LIFECYCLE_DIR}/.transaction.XXXXXX")" || return 1
+    if ! printf '%s\n' "$NOBRAND_LIFECYCLE_PREMUTATION_PRIOR_RECORD" >"$tmp" \
+       || ! chmod 0600 "$tmp"; then
+      rm -f "$tmp"
+      return 1
+    fi
+    chown root:root "$tmp" 2>/dev/null || true
+    if ! mv -f "$tmp" "$NOBRAND_LIFECYCLE_TX_FILE"; then
+      rm -f "$tmp"
+      return 1
+    fi
+  else
+    nb_lifecycle_clear || return 1
+  fi
+  NOBRAND_LIFECYCLE_ACTIVE=0
+  NOBRAND_LIFECYCLE_OPERATION=""
+  NOBRAND_LIFECYCLE_SCOPE=""
+  NOBRAND_LIFECYCLE_MUTATION_STARTED=0
+  nb_lifecycle_pre_mutation_disarm
+}
+
+nb_lifecycle_mark_mutation_started() {
+  local operation txid started phase status mieru_owned preserve_package
+  local preserve_user preserve_group preserve_shared scope
+  [ "${DRY_RUN:-0}" -eq 0 ] || {
+    NOBRAND_LIFECYCLE_MUTATION_STARTED=1
+    return 0
+  }
+  nb_lifecycle_tx_valid || return 1
+  operation="$(nb_lifecycle_field OPERATION)"
+  status="$(nb_lifecycle_field STATUS)"
+  txid="$(nb_lifecycle_field TRANSACTION_ID)"
+  started="$(nb_lifecycle_field STARTED_AT)"
+  phase="$(nb_lifecycle_field LAST_COMPLETED_PHASE)"
+  mieru_owned="$(nb_lifecycle_field MIERU_OWNED)"
+  preserve_package="$(nb_lifecycle_field MIERU_PRESERVE_PACKAGE)"
+  preserve_user="$(nb_lifecycle_field MIERU_PRESERVE_USER)"
+  preserve_group="$(nb_lifecycle_field MIERU_PRESERVE_GROUP)"
+  preserve_shared="$(nb_lifecycle_field MIERU_PRESERVE_SHARED)"
+  scope="$(nb_lifecycle_scope)" || return 1
+  [ "$status" = in-progress ] || return 1
+  nb_lifecycle_write "$operation" in-progress "$txid" "$started" "$phase" \
+    "$mieru_owned" "$preserve_package" "$preserve_user" "$preserve_group" \
+    "$preserve_shared" "$scope" 1 || return 1
+  NOBRAND_LIFECYCLE_MUTATION_STARTED=1
+  nb_lifecycle_pre_mutation_disarm
+}
+
+# Protocol installers collect and validate their requests inside the callback
+# run by the lifecycle wrapper.  Marking in the wrapper is therefore too early:
+# an invalid answer or cancellation would be recorded as a partial install.
+# Installers call this immediately before their first durable protocol change.
+# Direct module invocations do not own a manager lifecycle and remain no-ops.
+nb_lifecycle_mark_protocol_mutation_started() {
+  local scope="$1"
+  # Module helpers can also be reached by non-lifecycle maintenance actions in
+  # or outside a manager process. Only an active scoped transaction turns this
+  # into a required lifecycle write; otherwise the hook is deliberately a no-op.
+  [ "${NOBRAND_LIFECYCLE_ACTIVE:-0}" -eq 1 ] || return 0
+  [ "${NOBRAND_LIFECYCLE_SCOPE:-}" = "$scope" ] || return 1
+  case "${NOBRAND_LIFECYCLE_OPERATION:-}" in install|repair) ;; *) return 1 ;; esac
+  nb_lifecycle_tx_valid \
+    && [ "$(nb_lifecycle_field STATUS)" = in-progress ] \
+    && [ "$(nb_lifecycle_scope)" = "$scope" ] || return 1
+  case "$(nb_lifecycle_field OPERATION)" in install|repair) ;; *) return 1 ;; esac
+  nb_lifecycle_mark_mutation_started || return 1
+  # This proof is intentionally process-local. A prior interrupted attempt may
+  # already have MUTATION_STARTED=1; recovery may advance past its callback
+  # fingerprint only when this invocation reached its own mutation boundary.
+  NOBRAND_PROTOCOL_CALLBACK_ATTEMPT_MUTATION=1
 }
 
 nb_lifecycle_complete() {
   local operation="$1" txid started mieru_owned preserve_package preserve_user
-  local preserve_group preserve_shared
+  local preserve_group preserve_shared scope mutation_started
   [ "${NOBRAND_LIFECYCLE_ACTIVE:-0}" -eq 1 ] || return 0
   if [ "${DRY_RUN:-0}" -eq 1 ]; then
     NOBRAND_LIFECYCLE_ACTIVE=0
+    NOBRAND_LIFECYCLE_MUTATION_STARTED=0
     return 0
   fi
   nb_lifecycle_tx_valid || return 1
@@ -2021,10 +2310,14 @@ nb_lifecycle_complete() {
   preserve_user="$(nb_lifecycle_field MIERU_PRESERVE_USER)"
   preserve_group="$(nb_lifecycle_field MIERU_PRESERVE_GROUP)"
   preserve_shared="$(nb_lifecycle_field MIERU_PRESERVE_SHARED)"
+  scope="$(nb_lifecycle_scope)" || return 1
+  mutation_started="$(nb_lifecycle_mutation_started)" || return 1
   nb_lifecycle_write "$operation" complete "$txid" "$started" complete \
     "$mieru_owned" "$preserve_package" "$preserve_user" "$preserve_group" \
-    "$preserve_shared" || return 1
+    "$preserve_shared" "$scope" "$mutation_started" || return 1
   NOBRAND_LIFECYCLE_ACTIVE=0
+  NOBRAND_LIFECYCLE_MUTATION_STARTED=0
+  nb_lifecycle_pre_mutation_disarm
 }
 
 nb_lifecycle_clear() {
@@ -2034,6 +2327,9 @@ nb_lifecycle_clear() {
   fi
   NOBRAND_LIFECYCLE_ACTIVE=0
   NOBRAND_LIFECYCLE_OPERATION=""
+  NOBRAND_LIFECYCLE_SCOPE=""
+  NOBRAND_LIFECYCLE_MUTATION_STARTED=0
+  nb_lifecycle_pre_mutation_disarm
 }
 
 nb_lifecycle_lock_acquire() {
@@ -2100,8 +2396,9 @@ nb_lifecycle_lock_release() {
 }
 
 nb_lifecycle_lock_release_all() {
-  local rc=0
-  while [ "${NOBRAND_LIFECYCLE_LOCK_HELD:-0}" -gt 0 ]; do
+  local floor="${1:-0}" rc=0
+  case "$floor" in ''|*[!0-9]*) floor=0 ;; esac
+  while [ "${NOBRAND_LIFECYCLE_LOCK_HELD:-0}" -gt "$floor" ]; do
     if ! nb_lifecycle_lock_release; then
       rc=1
       break
@@ -2111,20 +2408,33 @@ nb_lifecycle_lock_release_all() {
 }
 
 nb_lifecycle_signal_exit() {
-  local signal="$1" exit_status=1
+  local signal="$1" exit_status=1 lifecycle_in_progress=0 mutation_started=0
   # Never invoke the generic ERR handler or recursively re-enter this handler.
-  # The durable in-progress transaction is intentionally left byte-for-byte
-  # intact; interruption recovery reconciles it on the next invocation.
   trap - ERR HUP INT TERM
   case "$signal" in
     HUP) exit_status=129 ;;
     INT) exit_status=130 ;;
     TERM) exit_status=143 ;;
   esac
-  nb_lifecycle_lock_release_all >/dev/null 2>&1 || true
-  warn "$(t '生命周期操作被信号中断；恢复信息已保留，请重新运行以安全继续。' \
-    'The lifecycle operation was interrupted; recovery metadata was preserved. Run it again to continue safely.')" \
-    || true
+  if [ "${NOBRAND_LIFECYCLE_ACTIVE:-0}" -eq 1 ] && nb_lifecycle_tx_valid \
+     && [ "$(nb_lifecycle_field STATUS)" = in-progress ]; then
+    lifecycle_in_progress=1
+    mutation_started="$(nb_lifecycle_mutation_started 2>/dev/null || printf 1)"
+  fi
+  if [ "$lifecycle_in_progress" -eq 1 ] && [ "$mutation_started" = 0 ]; then
+    nb_lifecycle_restore_pre_mutation >/dev/null 2>&1 || true
+    warn "$(t '生命周期操作在写入变更前被中断；临时恢复信息已清除。' \
+      'The lifecycle operation was interrupted before mutation; temporary recovery metadata was cleared.')" \
+      || true
+  elif [ "$lifecycle_in_progress" -eq 1 ]; then
+    warn "$(t '生命周期操作被信号中断；已保留带组件范围的恢复信息，请重新运行以安全继续。' \
+      'The lifecycle operation was interrupted; scoped recovery metadata was preserved. Run it again to continue safely.')" \
+      || true
+  fi
+  # Menu callbacks run in a subshell that inherits the parent's fd 7 open-file
+  # description.  Releasing below the inherited count there would unlock the
+  # parent's guard as well, so child handlers set a floor before doing work.
+  nb_lifecycle_lock_release_all "${NOBRAND_LIFECYCLE_LOCK_FLOOR:-0}" >/dev/null 2>&1 || true
   exit "$exit_status"
 }
 
@@ -2135,12 +2445,16 @@ nb_lifecycle_signal_handlers_install() {
 }
 
 nb_lifecycle_checkpoint() {
-  local operation="$1" phase="$2" requested=""
+  local operation="$1" phase="$2" mutation_started="${3:-}" requested=""
   nb_lifecycle_mark_phase "$phase" || return 1
+  if [ "$mutation_started" = 1 ]; then
+    nb_lifecycle_mark_mutation_started || return 1
+  fi
   nb_test_mode_enabled || return 0
   case "$operation" in
     install) requested="${NOBRAND_TEST_INTERRUPT_INSTALL_AT:-}" ;;
     repair) requested="${NOBRAND_TEST_INTERRUPT_REPAIR_AT:-}" ;;
+    configure) requested="${NOBRAND_TEST_INTERRUPT_CONFIGURE_AT:-}" ;;
     uninstall) requested="${NOBRAND_TEST_INTERRUPT_UNINSTALL_AT:-}" ;;
     *) return 1 ;;
   esac
@@ -2150,7 +2464,7 @@ nb_lifecycle_checkpoint() {
 nb_classify_installation_state() {
   local operation manager_version="" canonical_manager_version="" command_version="" root
   local lifecycle_valid=0 schema_valid=0 current_evidence=0 backup_restore_valid=0
-  local command_path expected_target
+  local command_path expected_target manager_command_valid=0 short_command_valid=0
   if { [ -e "$NOBRAND_LIFECYCLE_TX_FILE" ] || [ -L "$NOBRAND_LIFECYCLE_TX_FILE" ]; } \
      && ! nb_lifecycle_tx_valid; then
     printf 'AMBIGUOUS_OR_FOREIGN'
@@ -2213,6 +2527,13 @@ nb_classify_installation_state() {
       fi
       manager_version="$command_version"
       current_evidence=1
+      if [ -L "$command_path" ]; then
+        if [ "$command_path" = "$NOBRAND_COMMAND_PATH" ]; then
+          manager_command_valid=1
+        else
+          short_command_valid=1
+        fi
+      fi
     fi
   done
   if [ "$lifecycle_valid" -eq 1 ]; then
@@ -2257,6 +2578,7 @@ nb_classify_installation_state() {
     case "$operation" in
       install) printf 'CURRENT_PARTIAL_INSTALL' ;;
       repair) printf 'CURRENT_PARTIAL_REPAIR' ;;
+      configure) printf 'CURRENT_PARTIAL_CONFIGURE' ;;
       uninstall) printf 'CURRENT_PARTIAL_UNINSTALL' ;;
     esac
     return 0
@@ -2274,7 +2596,9 @@ nb_classify_installation_state() {
     case "$manager_version" in
       3.0.*|3.1.*) printf 'LEGACY_SUPPORTED' ;;
       3.2.*)
-        if [ -n "$canonical_manager_version" ]; then
+        if [ -n "$canonical_manager_version" ] \
+           && [ "$manager_command_valid" -eq 1 ] \
+           && [ "$short_command_valid" -eq 1 ]; then
           printf 'CURRENT_COMPLETE'
         else
           printf 'CURRENT_PARTIAL_INSTALL'
@@ -2337,6 +2661,10 @@ nb_install_state_notice() {
       t '[提示] 检测到上一次修复未完成，将根据当前状态继续检查和修复。' \
         '[Info] The previous repair was interrupted; checks and repair will continue from actual current state.'
       ;;
+    CURRENT_PARTIAL_CONFIGURE)
+      t '[提示] 检测到未完成的组件配置，将仅恢复记录的组件，不会启动其它协议安装。' \
+        '[Info] An incomplete component configuration was detected. Only its recorded component will be recovered; no other protocol installer will start.'
+      ;;
     CURRENT_PARTIAL_UNINSTALL)
       t '[提示] 检测到上一次 NoBrand-OneClick 卸载未完成。可重新运行安装器安全修复，或再次选择完整卸载继续清理剩余的 NoBrand 管理资源。' \
         '[Info] The previous NoBrand-OneClick uninstall was interrupted. Re-run the installer to repair safely, or choose full uninstall again to continue cleaning managed resources.'
@@ -2354,7 +2682,7 @@ nb_validate_authoritative_state_boundary() {
     LEGACY_UNSUPPORTED) nb_fail_legacy_state; return 1 ;;
     AMBIGUOUS_OR_FOREIGN) nb_fail_ambiguous_state; return 1 ;;
     CLEAN|CURRENT_COMPLETE|CURRENT_PARTIAL_INSTALL|CURRENT_PARTIAL_REPAIR|\
-      CURRENT_PARTIAL_UNINSTALL|LEGACY_SUPPORTED) return 0 ;;
+      CURRENT_PARTIAL_CONFIGURE|CURRENT_PARTIAL_UNINSTALL|LEGACY_SUPPORTED) return 0 ;;
     *) nb_fail_ambiguous_state; return 1 ;;
   esac
 }
@@ -3439,6 +3767,20 @@ raise SystemExit(0 if value.version == 4 and not value.is_loopback and not value
 PY
 }
 
+nb_ingress_is_rfc1918() {
+  local value="${1:-}" first second third fourth
+  [[ "$value" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+  IFS=. read -r first second third fourth <<<"$value"
+  for value in "$first" "$second" "$third" "$fourth"; do
+    [[ "$value" =~ ^[0-9]+$ ]] && [ "$((10#$value))" -le 255 ] || return 1
+  done
+  first=$((10#$first))
+  second=$((10#$second))
+  [ "$first" -eq 10 ] \
+    || { [ "$first" -eq 172 ] && [ "$second" -ge 16 ] && [ "$second" -le 31 ]; } \
+    || { [ "$first" -eq 192 ] && [ "$second" -eq 168 ]; }
+}
+
 # interface|IPv4|state|default-route-marker. Tests may provide exact rows
 # through NOBRAND_TEST_INTERFACE_ROWS without changing the host network.
 nb_ingress_interface_rows() {
@@ -3466,18 +3808,30 @@ nb_ingress_interface_rows() {
 
 nb_ingress_interface_exists() {
   local expected="$1" iface _address _state _default
-  while IFS='|' read -r iface _address _state _default; do
-    [ "$iface" = "$expected" ] && return 0
-  done < <(nb_ingress_interface_rows)
+  if [ "$#" -ge 2 ]; then
+    while IFS='|' read -r iface _address _state _default; do
+      [ "$iface" = "$expected" ] && return 0
+    done <<<"${2-}"
+  else
+    while IFS='|' read -r iface _address _state _default; do
+      [ "$iface" = "$expected" ] && return 0
+    done < <(nb_ingress_interface_rows)
+  fi
   return 1
 }
 
 nb_ingress_address_on_interface() {
   local expected_iface="$1" expected_address="$2" iface address _state _default
   nb_ingress_valid_ipv4 "$expected_address" || return 1
-  while IFS='|' read -r iface address _state _default; do
-    [ "$iface" = "$expected_iface" ] && [ "$address" = "$expected_address" ] && return 0
-  done < <(nb_ingress_interface_rows)
+  if [ "$#" -ge 3 ]; then
+    while IFS='|' read -r iface address _state _default; do
+      [ "$iface" = "$expected_iface" ] && [ "$address" = "$expected_address" ] && return 0
+    done <<<"${3-}"
+  else
+    while IFS='|' read -r iface address _state _default; do
+      [ "$iface" = "$expected_iface" ] && [ "$address" = "$expected_address" ] && return 0
+    done < <(nb_ingress_interface_rows)
+  fi
   return 1
 }
 
@@ -3557,7 +3911,7 @@ nb_ingress_ensure_state() {
   local tmp
   nb_init_state_layout || return 1
   if [ -e "$NOBRAND_INGRESS_STATE_FILE" ]; then
-    nb_ingress_state_valid || die 'Ingress Profile 状态无效；为避免覆盖现有数据，操作已停止'
+    nb_ingress_state_valid || die 'Ingress Profile 状态无效；为避免覆盖现有数据，操作已停止' || return 1
     return 0
   fi
   tmp="$(mktemp_file .ingress.json)" || return 1
@@ -3639,14 +3993,14 @@ nb_resolve_ingress_profile() {
   local requested="${1:-}" resolved=""
   if [ -n "$requested" ]; then
     resolved="$(nb_ingress_profile_id "$requested" 2>/dev/null || true)"
-    [ -n "$resolved" ] || die "找不到 Ingress Profile，或选择结果不唯一: ${requested}"
+    [ -n "$resolved" ] || die "找不到 Ingress Profile，或选择结果不唯一: ${requested}" || return 1
   else
     resolved="$(nb_ingress_default_profile_id 2>/dev/null || true)"
     [ -n "$resolved" ] || resolved="$NOBRAND_LEGACY_INGRESS_PROFILE_ID"
   fi
   local profile
   profile="$(nb_ingress_profile_json "$resolved")" || return 1
-  [ "$(jq -r .enabled <<<"$profile")" = true ] || die "Ingress Profile 已禁用: ${resolved}"
+  [ "$(jq -r .enabled <<<"$profile")" = true ] || die "Ingress Profile 已禁用: ${resolved}" || return 1
   printf '%s' "$resolved"
 }
 
@@ -4012,9 +4366,16 @@ nb_ingress_reserved_json() {
 nb_ingress_validate_profile_values() {
   local type="$1" interface="$2" address="$3" policy="$4" range_start="$5" range_end="$6"
   local reserved="$7" display_host="$8" display_port_policy="$9" display_port="${10}" enforcement="${11:-permissive}" base item
+  local interface_rows="${12-}" interface_rows_supplied=0
+  [ "$#" -lt 12 ] || interface_rows_supplied=1
   case "$type" in public|mapped) ;; *) return 1 ;; esac
-  nb_ingress_interface_exists "$interface" || return 1
-  nb_ingress_address_on_interface "$interface" "$address" || return 1
+  if [ "$interface_rows_supplied" -eq 1 ]; then
+    nb_ingress_interface_exists "$interface" "$interface_rows" || return 1
+    nb_ingress_address_on_interface "$interface" "$address" "$interface_rows" || return 1
+  else
+    nb_ingress_interface_exists "$interface" || return 1
+    nb_ingress_address_on_interface "$interface" "$address" || return 1
+  fi
   case "$policy" in
     derived-tail)
       base="$(nb_port_base_for_ip "$address")" || return 1
@@ -4051,43 +4412,88 @@ nb_ingress_reserved_conflicts() {
   return 1
 }
 
-nb_ingress_add() {
-  local id now base reserved_json range_start_json=null range_end_json=null display_port_json=null tmp profile conflict enabled
-  require_root
-  [ -n "$INGRESS_NAME" ] && [ -n "$INGRESS_TYPE" ] && [ -n "$INGRESS_INTERFACE" ] \
-    && [ -n "$INGRESS_ADDRESS" ] && [ -n "$INGRESS_PORT_POLICY" ] \
-    || die 'ingress add 非交互模式需要 --name --type --interface --address --port-policy'
-  [ "${#INGRESS_NAME}" -le 64 ] && ! has_control_chars "$INGRESS_NAME" || die 'Ingress Profile 名称无效'
+nb_ingress_mark_lifecycle_mutation() {
+  if [ "${NOBRAND_LIFECYCLE_ACTIVE:-0}" -eq 1 ] \
+     && [ "${NOBRAND_LIFECYCLE_OPERATION:-}" = configure ] \
+     && [ "${NOBRAND_LIFECYCLE_SCOPE:-}" = ingress ] \
+     && [ "${NOBRAND_LIFECYCLE_MUTATION_STARTED:-0}" -ne 1 ]; then
+    nb_lifecycle_mark_mutation_started || return 1
+  fi
+}
+
+nb_ingress_prepare_add_request() {
+  local base="" conflict="" enabled normalized interface_rows=""
+  if [ "$#" -ge 1 ]; then
+    interface_rows="$1"
+  else
+    interface_rows="$(nb_ingress_interface_rows)"
+  fi
+  [ -n "${INGRESS_NAME:-}" ] && [ -n "${INGRESS_TYPE:-}" ] \
+    && [ -n "${INGRESS_INTERFACE:-}" ] && [ -n "${INGRESS_ADDRESS:-}" ] \
+    && [ -n "${INGRESS_PORT_POLICY:-}" ] \
+    || die 'Ingress Profile 需要名称、类型、网络接口、本地 IPv4 和端口策略' \
+    || return 1
+  [ "${#INGRESS_NAME}" -le 64 ] && ! has_control_chars "$INGRESS_NAME" \
+    || die 'Ingress Profile 名称无效' || return 1
   case "$INGRESS_NAME" in
     "$NOBRAND_LEGACY_INGRESS_PROFILE_ID"|'Legacy Default Route')
-      die 'Ingress Profile 名称与保留选择器冲突'
+      die 'Ingress Profile 名称与保留选择器冲突' || return 1
       ;;
   esac
   [[ ! "$INGRESS_NAME" =~ ^i[0-9a-f]{16}$ ]] \
-    || die 'Ingress Profile 名称与 Profile ID 命名空间冲突'
+    || die 'Ingress Profile 名称与 Profile ID 命名空间冲突' || return 1
+
   INGRESS_DISPLAY_PORT_POLICY="${INGRESS_DISPLAY_PORT_POLICY:-follow-actual}"
   INGRESS_ENFORCEMENT="${INGRESS_ENFORCEMENT:-permissive}"
   enabled="${INGRESS_ENABLED:-true}"
-  case "$enabled" in true|false) ;; *) die 'Ingress 启用状态无效' ;; esac
-  if [ "$INGRESS_TYPE" = public ] && [ -z "$INGRESS_DISPLAY_HOST_DEFAULT" ]; then
+  case "$enabled" in
+    true|false) INGRESS_ENABLED="$enabled" ;;
+    *) die 'Ingress 启用状态无效' || return 1 ;;
+  esac
+  if [ "$INGRESS_TYPE" = public ] && [ -z "${INGRESS_DISPLAY_HOST_DEFAULT:-}" ]; then
     INGRESS_DISPLAY_HOST_DEFAULT="$INGRESS_ADDRESS"
   fi
-  if [ "$INGRESS_PORT_POLICY" = derived-tail ] && [ "$INGRESS_RESERVED_CLI" -eq 0 ]; then
+
+  nb_ingress_interface_exists "$INGRESS_INTERFACE" "$interface_rows" \
+    || die "网络接口不存在或没有可用的非回环 IPv4: ${INGRESS_INTERFACE}" || return 1
+  nb_ingress_address_on_interface "$INGRESS_INTERFACE" "$INGRESS_ADDRESS" "$interface_rows" \
+    || die "所选本地 IPv4 未配置在网络接口 ${INGRESS_INTERFACE} 上: ${INGRESS_ADDRESS}" || return 1
+  if [ "$INGRESS_PORT_POLICY" = derived-tail ]; then
     base="$(nb_port_base_for_ip "$INGRESS_ADDRESS" 2>/dev/null || true)"
-    [ -n "$base" ] || die '此 IPv4 无法使用 derived-tail；请改用 custom-range 或 manual-only'
-    INGRESS_RESERVED_PORTS="$base"
+    [ -n "$base" ] \
+      || die '此 IPv4 无法使用 derived-tail；请改用 custom-range 或 manual-only' || return 1
+    if [ "${INGRESS_RESERVED_CLI:-0}" -eq 0 ]; then
+      INGRESS_RESERVED_PORTS="$base"
+    fi
   fi
+
   nb_ingress_validate_profile_values "$INGRESS_TYPE" "$INGRESS_INTERFACE" "$INGRESS_ADDRESS" \
-    "$INGRESS_PORT_POLICY" "$INGRESS_RANGE_START" "$INGRESS_RANGE_END" "$INGRESS_RESERVED_PORTS" \
-    "$INGRESS_DISPLAY_HOST_DEFAULT" "$INGRESS_DISPLAY_PORT_POLICY" "$INGRESS_DISPLAY_PORT" "$INGRESS_ENFORCEMENT" \
-    || die 'Ingress Profile 参数无效，或所选网络接口未配置该本地 IPv4'
-  INGRESS_RESERVED_PORTS="$(nb_ingress_normalize_reserved "$INGRESS_RESERVED_PORTS")"
+    "$INGRESS_PORT_POLICY" "${INGRESS_RANGE_START:-}" "${INGRESS_RANGE_END:-}" \
+    "${INGRESS_RESERVED_PORTS:-}" "${INGRESS_DISPLAY_HOST_DEFAULT:-}" \
+    "$INGRESS_DISPLAY_PORT_POLICY" "${INGRESS_DISPLAY_PORT:-}" "$INGRESS_ENFORCEMENT" "$interface_rows" \
+    || die 'Ingress Profile 参数无效' || return 1
+  normalized="$(nb_ingress_normalize_reserved "${INGRESS_RESERVED_PORTS:-}")" \
+    || die 'Ingress 保留端口列表无效' || return 1
+  INGRESS_RESERVED_PORTS="$normalized"
   if conflict="$(nb_ingress_reserved_conflicts "$INGRESS_RESERVED_PORTS" 2>/dev/null)"; then
-    die "保留端口与现有受管监听冲突: ${conflict}"
+    die "保留端口与现有受管监听冲突: ${conflict}" || return 1
   fi
-  nb_ingress_ensure_state || return 1
-  jq -e --arg name "$INGRESS_NAME" 'all(.profiles[];.name!=$name)' "$NOBRAND_INGRESS_STATE_FILE" >/dev/null \
-    || die "Ingress Profile 名称已存在: ${INGRESS_NAME}"
+  return 0
+}
+
+nb_ingress_add() {
+  local id now reserved_json range_start_json=null range_end_json=null display_port_json=null tmp profile enabled
+  require_root || return 1
+  nb_ingress_prepare_add_request || return 1
+  enabled="$INGRESS_ENABLED"
+  if [ -e "$NOBRAND_INGRESS_STATE_FILE" ]; then
+    nb_ingress_ensure_state || return 1
+    jq -e --arg name "$INGRESS_NAME" 'all(.profiles[];.name!=$name)' "$NOBRAND_INGRESS_STATE_FILE" >/dev/null \
+      || die "Ingress Profile 名称已存在: ${INGRESS_NAME}" || return 1
+  else
+    nb_ingress_mark_lifecycle_mutation || return 1
+    nb_ingress_ensure_state || return 1
+  fi
   id="$(nb_ingress_generate_id)" || return 1
   now="$(nb_ingress_now)"
   reserved_json="$(nb_ingress_reserved_json "$INGRESS_RESERVED_PORTS")" || return 1
@@ -4110,8 +4516,12 @@ nb_ingress_add() {
     ')" || return 1
   tmp="$(mktemp_file .ingress-add)" || return 1
   jq --argjson profile "$profile" '.profiles += [$profile]' "$NOBRAND_INGRESS_STATE_FILE" >"$tmp" \
-    && nb_ingress_state_valid "$tmp" && nb_atomic_install_file "$tmp" "$NOBRAND_INGRESS_STATE_FILE" 0600
+    && nb_ingress_state_valid "$tmp"
   local rc=$?
+  if [ "$rc" -eq 0 ]; then
+    nb_ingress_mark_lifecycle_mutation \
+      && nb_atomic_install_file "$tmp" "$NOBRAND_INGRESS_STATE_FILE" 0600 || rc=$?
+  fi
   rm -f "$tmp"
   [ "$rc" -ne 0 ] || printf '已创建 Ingress Profile: %s (%s)\n' "$id" "$INGRESS_NAME"
   return "$rc"
@@ -4163,18 +4573,22 @@ PY
 
 nb_ingress_delete() {
   local id refs tmp
-  require_root
+  require_root || return 1
   id="$(nb_ingress_profile_id "$INGRESS_PROFILE_SELECTOR" 2>/dev/null || true)"
-  [ -n "$id" ] && [ "$id" != "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ] || die '找不到 Ingress Profile，或内置 Profile 不允许删除'
+  [ -n "$id" ] && [ "$id" != "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ] \
+    || die '找不到 Ingress Profile，或内置 Profile 不允许删除' || return 1
   refs="$(nb_ingress_profile_reference_rows "$id")"
   [ -z "$refs" ] || { printf 'Ingress Profile 正被以下对象引用:\n%s\n' "$refs" >&2; return 1; }
   tmp="$(mktemp_file .ingress-delete)" || return 1
   jq --arg id "$id" '
     .profiles |= map(select(.profile_id!=$id)) |
     if .default_profile_id==$id then .default_profile_id=null else . end
-  ' "$NOBRAND_INGRESS_STATE_FILE" >"$tmp" \
-    && nb_ingress_state_valid "$tmp" && nb_atomic_install_file "$tmp" "$NOBRAND_INGRESS_STATE_FILE" 0600
+  ' "$NOBRAND_INGRESS_STATE_FILE" >"$tmp" && nb_ingress_state_valid "$tmp"
   local rc=$?
+  if [ "$rc" -eq 0 ]; then
+    nb_ingress_mark_lifecycle_mutation \
+      && nb_atomic_install_file "$tmp" "$NOBRAND_INGRESS_STATE_FILE" 0600 || rc=$?
+  fi
   rm -f "$tmp"
   return "$rc"
 }
@@ -4183,9 +4597,10 @@ nb_ingress_modify() {
   local id old name type interface address policy range_start range_end reserved display_host display_policy display_port enabled enforcement
   local old_enforcement old_interface old_address runtime_change=0 refs="" snapshot=""
   local base reserved_json range_start_json=null range_end_json=null display_port_json=null conflict tmp
-  require_root
+  require_root || return 1
   id="$(nb_ingress_profile_id "$INGRESS_PROFILE_SELECTOR" 2>/dev/null || true)"
-  [ -n "$id" ] && [ "$id" != "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ] || die '找不到 Ingress Profile，或内置 Profile 不允许修改'
+  [ -n "$id" ] && [ "$id" != "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ] \
+    || die '找不到 Ingress Profile，或内置 Profile 不允许修改' || return 1
   old="$(nb_ingress_profile_json "$id")"
   name="$(jq -r .name <<<"$old")"; type="$(jq -r .type <<<"$old")"
   interface="$(jq -r .interface <<<"$old")"; address="$(jq -r .local_address <<<"$old")"
@@ -4215,31 +4630,31 @@ nb_ingress_modify() {
   [ "$INGRESS_ENFORCEMENT_CLI" -eq 0 ] || enforcement="$INGRESS_ENFORCEMENT"
   case "$name" in
     "$NOBRAND_LEGACY_INGRESS_PROFILE_ID"|'Legacy Default Route')
-      die 'Ingress Profile 名称与保留选择器冲突'
+      die 'Ingress Profile 名称与保留选择器冲突' || return 1
       ;;
   esac
   [[ ! "$name" =~ ^i[0-9a-f]{16}$ ]] \
-    || die 'Ingress Profile 名称与 Profile ID 命名空间冲突'
+    || die 'Ingress Profile 名称与 Profile ID 命名空间冲突' || return 1
   if [ "$enabled" = false ] \
      && [ "$(nb_ingress_default_profile_id 2>/dev/null || true)" = "$id" ]; then
-    die '请先取消默认 Ingress Profile，再将其禁用'
+    die '请先取消默认 Ingress Profile，再将其禁用' || return 1
   fi
   if [ "$policy" = derived-tail ]; then
     base="$(nb_port_base_for_ip "$address" 2>/dev/null || true)"
-    [ -n "$base" ] || die '此 IPv4 无法使用 derived-tail；请改用 custom-range 或 manual-only'
+    [ -n "$base" ] || die '此 IPv4 无法使用 derived-tail；请改用 custom-range 或 manual-only' || return 1
     [ "$INGRESS_PORT_POLICY_CLI" -eq 0 ] || [ "$INGRESS_RESERVED_CLI" -eq 1 ] || reserved="$base"
   fi
   [ "$policy" = custom-range ] || { range_start=""; range_end=""; }
   [ "$display_policy" = custom ] || display_port=""
   nb_ingress_validate_profile_values "$type" "$interface" "$address" "$policy" "$range_start" "$range_end" \
     "$reserved" "$display_host" "$display_policy" "$display_port" "$enforcement" \
-    || die '修改后的 Ingress Profile 参数无效'
-  reserved="$(nb_ingress_normalize_reserved "$reserved")"
+    || die '修改后的 Ingress Profile 参数无效' || return 1
+  reserved="$(nb_ingress_normalize_reserved "$reserved")" || return 1
   if conflict="$(nb_ingress_reserved_conflicts "$reserved" 2>/dev/null)"; then
-    die "保留端口与现有受管监听冲突: ${conflict}"
+    die "保留端口与现有受管监听冲突: ${conflict}" || return 1
   fi
   jq -e --arg id "$id" --arg name "$name" 'all(.profiles[]; .profile_id==$id or .name!=$name)' \
-    "$NOBRAND_INGRESS_STATE_FILE" >/dev/null || die "Ingress Profile 名称已存在: ${name}"
+    "$NOBRAND_INGRESS_STATE_FILE" >/dev/null || die "Ingress Profile 名称已存在: ${name}" || return 1
   reserved_json="$(nb_ingress_reserved_json "$reserved")" || return 1
   if [ "$policy" = custom-range ]; then range_start_json="$range_start"; range_end_json="$range_end"; fi
   [ "$display_policy" != custom ] || display_port_json="$display_port"
@@ -4252,7 +4667,7 @@ nb_ingress_modify() {
     refs="$(nb_ingress_profile_reference_rows "$id" | grep -Ev '^ssh-tunnel:' || true)"
     if [ -n "$refs" ] && [ "${INGRESS_APPLY_EXISTING:-0}" -ne 1 ]; then
       printf 'Ingress 强制策略或监听身份变化会影响以下受管节点:\n%s\n' "$refs" >&2
-      die '请使用 --apply-existing 重新运行，以明确执行事务迁移'
+      die '请使用 --apply-existing 重新运行，以明确执行事务迁移' || return 1
     fi
   fi
   tmp="$(mktemp_file .ingress-modify)" || return 1
@@ -4273,7 +4688,10 @@ nb_ingress_modify() {
     snapshot="$(mktemp_file .ingress-profile-rollback)" || rc=1
   fi
   if [ "$rc" -eq 0 ]; then
-    cp -a "$NOBRAND_INGRESS_STATE_FILE" "$snapshot" \
+    cp -a "$NOBRAND_INGRESS_STATE_FILE" "$snapshot" || rc=1
+  fi
+  if [ "$rc" -eq 0 ]; then
+    nb_ingress_mark_lifecycle_mutation \
       && nb_atomic_install_file "$tmp" "$NOBRAND_INGRESS_STATE_FILE" 0600 || rc=1
   fi
   if [ "$rc" -eq 0 ] && [ "$runtime_change" -eq 1 ] && [ -n "$refs" ]; then
@@ -4291,27 +4709,42 @@ nb_ingress_modify() {
 
 nb_ingress_set_default() {
   local id tmp
-  require_root
+  require_root || return 1
   id="$(nb_ingress_profile_id "$INGRESS_PROFILE_SELECTOR" 2>/dev/null || true)"
-  [ -n "$id" ] && [ "$id" != "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ] || die '默认 Ingress 必须是显式创建且已启用的 Profile'
-  [ "$(nb_ingress_profile_json "$id" | jq -r .enabled)" = true ] || die '已禁用的 Ingress Profile 不能设为默认'
+  [ -n "$id" ] && [ "$id" != "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ] \
+    || die '默认 Ingress 必须是显式创建且已启用的 Profile' || return 1
+  [ "$(nb_ingress_profile_json "$id" | jq -r .enabled)" = true ] \
+    || die '已禁用的 Ingress Profile 不能设为默认' || return 1
   nb_ingress_ensure_state || return 1
   tmp="$(mktemp_file .ingress-default)" || return 1
   jq --arg id "$id" '.default_profile_id=$id' "$NOBRAND_INGRESS_STATE_FILE" >"$tmp" \
-    && nb_ingress_state_valid "$tmp" && nb_atomic_install_file "$tmp" "$NOBRAND_INGRESS_STATE_FILE" 0600
+    && nb_ingress_state_valid "$tmp"
   local rc=$?
+  if [ "$rc" -eq 0 ]; then
+    nb_ingress_mark_lifecycle_mutation \
+      && nb_atomic_install_file "$tmp" "$NOBRAND_INGRESS_STATE_FILE" 0600 || rc=$?
+  fi
   rm -f "$tmp"
   return "$rc"
 }
 
 nb_ingress_unset_default() {
   local tmp
-  require_root
-  nb_ingress_ensure_state || return 1
+  require_root || return 1
+  if [ -e "$NOBRAND_INGRESS_STATE_FILE" ]; then
+    nb_ingress_ensure_state || return 1
+  else
+    nb_ingress_mark_lifecycle_mutation || return 1
+    nb_ingress_ensure_state || return 1
+  fi
   tmp="$(mktemp_file .ingress-default)" || return 1
   jq '.default_profile_id=null' "$NOBRAND_INGRESS_STATE_FILE" >"$tmp" \
-    && nb_ingress_state_valid "$tmp" && nb_atomic_install_file "$tmp" "$NOBRAND_INGRESS_STATE_FILE" 0600
+    && nb_ingress_state_valid "$tmp"
   local rc=$?
+  if [ "$rc" -eq 0 ]; then
+    nb_ingress_mark_lifecycle_mutation \
+      && nb_atomic_install_file "$tmp" "$NOBRAND_INGRESS_STATE_FILE" 0600 || rc=$?
+  fi
   rm -f "$tmp"
   return "$rc"
 }
@@ -4407,7 +4840,7 @@ nb_ingress_list() {
 
 nb_ingress_show() {
   local profile selector="${INGRESS_PROFILE_SELECTOR:-}" range type policy enforcement display_policy
-  profile="$(nb_ingress_profile_json "$selector")" || die "找不到 Ingress Profile: ${selector}"
+  profile="$(nb_ingress_profile_json "$selector")" || die "找不到 Ingress Profile: ${selector}" || return 1
   range="$(nb_ingress_profile_auto_range "$(jq -r .profile_id <<<"$profile")" 2>/dev/null | tr '|' '-' || printf '无')"
   type="$(nb_ingress_type_label "$(jq -r .type <<<"$profile")")"
   policy="$(nb_ingress_port_policy_label "$(jq -r .port_policy <<<"$profile")")"
@@ -4457,8 +4890,9 @@ nb_ingress_apply_owner() {
 }
 
 nb_ingress_apply_profile() {
-  local profile_id="$1" owner failed=0 seen='|'
+  local profile_id="$1" owner owners failed=0 seen='|'
   nb_ingress_profile_json "$profile_id" >/dev/null || return 1
+  owners="$(nb_ingress_profile_reference_rows "$profile_id")" || return 1
   while IFS= read -r owner; do
     [ -n "$owner" ] || continue
     case "$seen" in *"|${owner}|"*) continue ;; esac
@@ -4469,16 +4903,17 @@ nb_ingress_apply_profile() {
       failed=1
       break
     fi
-  done < <(nb_ingress_profile_reference_rows "$profile_id")
+  done <<<"$owners"
   return "$failed"
 }
 
 nb_ingress_apply() {
   local id
-  require_root
+  require_root || return 1
   id="$(nb_ingress_profile_id "$INGRESS_PROFILE_SELECTOR" 2>/dev/null || true)"
   [ -n "$id" ] && [ "$id" != "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ] \
-    || die '找不到 Ingress Profile，或内置 Profile 不允许应用'
+    || die '找不到 Ingress Profile，或内置 Profile 不允许应用' || return 1
+  nb_ingress_mark_lifecycle_mutation || return 1
   nb_ingress_apply_profile "$id" || return 1
   printf '已应用 Ingress 强制策略: %s (%s)\n' "$id" "$(nb_ingress_profile_name "$id")"
 }
@@ -4626,12 +5061,27 @@ nb_ingress_doctor() {
 }
 
 nobrand_run_ingress_action() {
+  if [ "${INGRESS_ACTION:-list}" = add ]; then
+    nb_ingress_prepare_add_request || return 1
+  fi
+  case "${INGRESS_ACTION:-list}" in
+    add|modify|delete|set-default|unset-default|apply)
+      if [ "${NOBRAND_MANAGER_SESSION_ACTIVE:-0}" -eq 1 ]; then
+        nb_lifecycle_run_ingress_action
+      else
+        nobrand_run_ingress_action_unscoped
+      fi
+      ;;
+    *) nobrand_run_ingress_action_unscoped ;;
+  esac
+}
+
+nobrand_run_ingress_action_unscoped() {
   local lock_required=0 rc=0
   case "${INGRESS_ACTION:-list}" in
     add|modify|delete|set-default|unset-default|apply)
       lock_required=1
       require_root || return 1
-      nb_init_state_layout || return 1
       admin_lock_acquire || return 1
       ;;
   esac
@@ -4929,7 +5379,7 @@ nobrand_version() {
 
 nobrand_usage() {
   cat <<EOF
-NoBrand-OneClick 3.2.1 — Multi-Ingress / Mieru / Snell v4-v5 / Hysteria2 / TUIC v5 / VLESS REALITY / VLESS + FinalMask + Sudoku / SSH Tunnel / Port Forward
+NoBrand-OneClick 3.2.2 — Multi-Ingress / Mieru / Snell v4-v5 / Hysteria2 / TUIC v5 / VLESS REALITY / VLESS + FinalMask + Sudoku / SSH Tunnel / Port Forward
 
 用法:
   nobrand                         打开统一菜单
@@ -5033,22 +5483,35 @@ NoBrand-OneClick 3.2.1 — Multi-Ingress / Mieru / Snell v4-v5 / Hysteria2 / TUI
 EOF
 }
 
+nobrand_manager_source_valid() {
+  local path="$1"
+  [ -r "$path" ] && [ -f "$path" ] || return 1
+  grep -qxF 'SCRIPT_NAME="NoBrand-OneClick"' "$path" 2>/dev/null \
+    && grep -qxF 'SCRIPT_REPO="ike-sh/NoBrand-OneClick"' "$path" 2>/dev/null \
+    && grep -qxF "SCRIPT_VERSION=\"${SCRIPT_VERSION}\"" "$path" 2>/dev/null
+}
+
+nobrand_manager_source_path() {
+  if [ -n "${BASH_SOURCE[0]:-}" ] \
+     && nobrand_manager_source_valid "${BASH_SOURCE[0]}"; then
+    printf '%s' "${BASH_SOURCE[0]}"
+  elif nobrand_manager_source_valid "$INSTALL_SCRIPT_PATH"; then
+    printf '%s' "$INSTALL_SCRIPT_PATH"
+  elif nobrand_manager_source_valid "$NOBRAND_INSTALL_SCRIPT_PATH"; then
+    printf '%s' "$NOBRAND_INSTALL_SCRIPT_PATH"
+  else
+    return 1
+  fi
+}
+
 nobrand_install_manager_script() {
-  local source_path="" source_real="" destination_real=""
+  local source_path="" source_real="" destination_real="" link_tmp=""
   if [ "${DRY_RUN:-0}" -eq 1 ]; then
     t '[演练] 安装 NoBrand 管理器与 nobrand/nb 命令' \
       '[dry-run] install NoBrand manager and nobrand/nb commands'
     return 0
   fi
-  if [ -n "${BASH_SOURCE[0]:-}" ] && [ -r "${BASH_SOURCE[0]}" ] \
-     && grep -qxF "SCRIPT_NAME=\"NoBrand-OneClick\"" "${BASH_SOURCE[0]}" 2>/dev/null; then
-    source_path="${BASH_SOURCE[0]}"
-  elif [ -r "$INSTALL_SCRIPT_PATH" ] \
-       && grep -qxF "SCRIPT_NAME=\"NoBrand-OneClick\"" "$INSTALL_SCRIPT_PATH" 2>/dev/null; then
-    source_path="$INSTALL_SCRIPT_PATH"
-  elif [ -r "$NOBRAND_INSTALL_SCRIPT_PATH" ]; then
-    source_path="$NOBRAND_INSTALL_SCRIPT_PATH"
-  fi
+  source_path="$(nobrand_manager_source_path 2>/dev/null || true)"
   [ -n "$source_path" ] || {
     warn "$(t '找不到当前 NoBrand 单文件安装器，未安装统一快捷命令' \
       'Current NoBrand single-file installer not found; unified shortcuts were not installed')"
@@ -5058,21 +5521,57 @@ nobrand_install_manager_script() {
   destination_real="$(readlink -f "$NOBRAND_INSTALL_SCRIPT_PATH" 2>/dev/null \
     || realpath "$NOBRAND_INSTALL_SCRIPT_PATH" 2>/dev/null || printf '%s' "$NOBRAND_INSTALL_SCRIPT_PATH")"
   if [ "$source_real" != "$destination_real" ]; then
-    install -m 0755 "$source_path" "$NOBRAND_INSTALL_SCRIPT_PATH" || return 1
+    nb_atomic_install_file "$source_path" "$NOBRAND_INSTALL_SCRIPT_PATH" 0755 || return 1
   else
     chmod 0755 "$NOBRAND_INSTALL_SCRIPT_PATH" || return 1
   fi
-  ln -sfn "$NOBRAND_INSTALL_SCRIPT_PATH" "$NOBRAND_COMMAND_PATH" || return 1
-  ln -sfn "$NOBRAND_COMMAND_PATH" "$NOBRAND_SHORT_COMMAND_PATH" || return 1
+  mkdir -p "$(dirname "$NOBRAND_COMMAND_PATH")" "$(dirname "$NOBRAND_SHORT_COMMAND_PATH")" \
+    || return 1
+  link_tmp="$(mktemp "${NOBRAND_COMMAND_PATH}.tmp.XXXXXX")" || return 1
+  rm -f "$link_tmp"
+  if ! ln -s "$NOBRAND_INSTALL_SCRIPT_PATH" "$link_tmp" \
+     || ! mv -f "$link_tmp" "$NOBRAND_COMMAND_PATH"; then
+    rm -f "$link_tmp"
+    return 1
+  fi
+  link_tmp="$(mktemp "${NOBRAND_SHORT_COMMAND_PATH}.tmp.XXXXXX")" || return 1
+  rm -f "$link_tmp"
+  if ! ln -s "$NOBRAND_COMMAND_PATH" "$link_tmp" \
+     || ! mv -f "$link_tmp" "$NOBRAND_SHORT_COMMAND_PATH"; then
+    rm -f "$link_tmp"
+    return 1
+  fi
   cmp -s "$source_path" "$NOBRAND_INSTALL_SCRIPT_PATH" || return 1
   [ "$(readlink "$NOBRAND_COMMAND_PATH" 2>/dev/null || true)" = "$NOBRAND_INSTALL_SCRIPT_PATH" ] || return 1
   [ "$(readlink "$NOBRAND_SHORT_COMMAND_PATH" 2>/dev/null || true)" = "$NOBRAND_COMMAND_PATH" ] || return 1
 }
 
+nobrand_manager_installation_valid() {
+  local installed="" version_line="" source_path="" source_real="" destination_real=""
+  [ -x "$NOBRAND_INSTALL_SCRIPT_PATH" ] \
+    && [ -L "$NOBRAND_COMMAND_PATH" ] && [ -L "$NOBRAND_SHORT_COMMAND_PATH" ] \
+    || return 1
+  [ "$(readlink "$NOBRAND_COMMAND_PATH" 2>/dev/null || true)" = "$NOBRAND_INSTALL_SCRIPT_PATH" ] \
+    || return 1
+  [ "$(readlink "$NOBRAND_SHORT_COMMAND_PATH" 2>/dev/null || true)" = "$NOBRAND_COMMAND_PATH" ] \
+    || return 1
+  installed="$(nb_installed_manager_version 2>/dev/null || true)"
+  [ "$installed" = "$SCRIPT_VERSION" ] || return 1
+  version_line="$("$NOBRAND_COMMAND_PATH" --version 2>/dev/null | sed -n '1p')" || return 1
+  [ "$version_line" = "${SCRIPT_NAME} ${SCRIPT_VERSION}" ] || return 1
+  source_path="$(nobrand_manager_source_path 2>/dev/null || true)"
+  [ -n "$source_path" ] || return 1
+  source_real="$(readlink -f "$source_path" 2>/dev/null \
+    || realpath "$source_path" 2>/dev/null || printf '%s' "$source_path")"
+  destination_real="$(readlink -f "$NOBRAND_INSTALL_SCRIPT_PATH" 2>/dev/null \
+    || realpath "$NOBRAND_INSTALL_SCRIPT_PATH" 2>/dev/null \
+    || printf '%s' "$NOBRAND_INSTALL_SCRIPT_PATH")"
+  [ "$source_real" = "$destination_real" ] \
+    || cmp -s "$source_path" "$NOBRAND_INSTALL_SCRIPT_PATH"
+}
+
 nobrand_manager_upgrade() {
-  require_root
-  require_linux
-  nobrand_install_manager_script \
+  nobrand_manager_bootstrap \
     || die "$(t 'NoBrand 管理器安装/升级失败；协议状态未修改' \
       'NoBrand manager install/upgrade failed; protocol state was not modified')"
   t "NoBrand 统一管理器已从当前精确安装器安装/升级至 v${SCRIPT_VERSION}" \
@@ -6736,7 +7235,7 @@ nobrand_uninstall_impl() {
   if [ "$had_mieru" -eq 1 ]; then
     saved_yes="$YES"
     YES=1
-    do_uninstall || { YES="$saved_yes"; return 1; }
+    UNINSTALL_CONTEXT=global do_uninstall || { YES="$saved_yes"; return 1; }
     YES="$saved_yes"
   fi
   nb_strict_firewall_clear_all || return 1
@@ -6764,7 +7263,7 @@ nobrand_uninstall_impl() {
 nobrand_uninstall() {
   local state rc=0 mieru_ledger="" mieru_owned=0
   local preserve_package=0 preserve_user=0 preserve_group=0 preserve_shared=0
-  require_root
+  require_root || return 1
   if nobrand_backup_restore_transaction_present; then
     die "$(t '备份恢复事务尚未完成；请先通过修复流程完成 SSH 验收，拒绝卸载恢复证据' \
       'A backup-restore transaction is unfinished; complete SSH acceptance through repair before uninstalling recovery evidence')"
@@ -6777,7 +7276,8 @@ nobrand_uninstall() {
         'NoBrand-managed resources are already absent; nothing remains to uninstall.'
       return 0
       ;;
-    CURRENT_COMPLETE|CURRENT_PARTIAL_INSTALL|CURRENT_PARTIAL_REPAIR|LEGACY_SUPPORTED)
+    CURRENT_COMPLETE|CURRENT_PARTIAL_INSTALL|CURRENT_PARTIAL_REPAIR|\
+      CURRENT_PARTIAL_CONFIGURE|LEGACY_SUPPORTED)
       nb_schema_v3_file_valid \
         || die '未检测到有效的 NoBrand schema v3 state，拒绝卸载未知资源'
       ;;
@@ -6801,7 +7301,8 @@ nobrand_uninstall() {
       nb_lifecycle_lock_release
       return 0
       ;;
-    CURRENT_COMPLETE|CURRENT_PARTIAL_INSTALL|CURRENT_PARTIAL_REPAIR|LEGACY_SUPPORTED)
+    CURRENT_COMPLETE|CURRENT_PARTIAL_INSTALL|CURRENT_PARTIAL_REPAIR|\
+      CURRENT_PARTIAL_CONFIGURE|LEGACY_SUPPORTED)
       if ! nb_schema_v3_file_valid; then
         nb_lifecycle_lock_release
         return 1
@@ -6835,10 +7336,21 @@ nobrand_uninstall() {
       return 1
       ;;
   esac
-  nb_lifecycle_begin uninstall prepare "$mieru_owned" "$preserve_package" \
-    "$preserve_user" "$preserve_group" "$preserve_shared" || {
+  nb_lifecycle_pre_mutation_snapshot || {
     nb_lifecycle_lock_release
     return 1
+  }
+  nb_lifecycle_begin uninstall prepare "$mieru_owned" "$preserve_package" \
+    "$preserve_user" "$preserve_group" "$preserve_shared" 0 global || {
+    nb_lifecycle_pre_mutation_disarm
+    nb_lifecycle_lock_release
+    return 1
+  }
+  nb_lifecycle_mark_mutation_started || {
+    rc=$?
+    nb_lifecycle_restore_pre_mutation || rc=1
+    nb_lifecycle_lock_release
+    return "$rc"
   }
   nobrand_uninstall_impl
   rc=$?
@@ -6872,6 +7384,15 @@ nobrand_uninstall() {
   nb_lifecycle_lock_release
   t 'NoBrand 3 的 Mieru/Snell/HY2/TUIC/VLESS REALITY/VLESS Sudoku/SSH Tunnel/Forward/Common 资源与 nobrand/nb 已完整删除；外部资源未触碰' \
     'NoBrand 3 Mieru/Snell/HY2/TUIC/VLESS REALITY/VLESS Sudoku/SSH Tunnel/Forward/Common resources and nobrand/nb were removed; external resources were untouched'
+  t '如当前 Bash 会话仍缓存 nb/nobrand 路径，可执行 `hash -r` 清除命令缓存。' \
+    'If the current Bash session still caches the nb/nobrand path, run `hash -r` to clear its command cache.'
+  if [ "${MENU_MODE:-0}" -eq 1 ]; then
+    # Status 4 is an ordinary shell status and cannot authenticate this path
+    # by itself. The menu wrapper resets and checks this completion marker in
+    # the same subprocess, after every global-uninstall postcondition above.
+    NOBRAND_MENU_GLOBAL_UNINSTALL_CONFIRMED=1
+    return "$NOBRAND_MENU_EXIT_SUCCESS"
+  fi
 }
 
 nobrand_stop_all_services() {
@@ -7482,7 +8003,8 @@ ensure_management_dependencies() {
         && command -v tar >/dev/null 2>&1 && command -v sha256sum >/dev/null 2>&1 \
         && command -v python3 >/dev/null 2>&1 && command -v tc >/dev/null 2>&1 \
         && command -v sysctl >/dev/null 2>&1 && command -v unshare >/dev/null 2>&1 \
-        && command -v setpriv >/dev/null 2>&1 && return 0
+        && command -v setpriv >/dev/null 2>&1 && command -v flock >/dev/null 2>&1 \
+        && return 0
       run apt-get update
       run apt-get install -y curl ca-certificates jq tar coreutils python3 iproute2 procps util-linux
       ;;
@@ -7491,14 +8013,23 @@ ensure_management_dependencies() {
         && command -v tar >/dev/null 2>&1 && command -v sha256sum >/dev/null 2>&1 \
         && command -v python3 >/dev/null 2>&1 && command -v tc >/dev/null 2>&1 \
         && command -v sysctl >/dev/null 2>&1 && command -v unshare >/dev/null 2>&1 \
-        && command -v setpriv >/dev/null 2>&1 && return 0
+        && command -v setpriv >/dev/null 2>&1 && command -v flock >/dev/null 2>&1 \
+        && return 0
       if command -v dnf >/dev/null 2>&1; then
         run dnf install -y curl ca-certificates jq tar coreutils python3 iproute procps-ng util-linux
       else
         run yum install -y curl ca-certificates jq tar coreutils python3 iproute procps-ng util-linux
       fi
       ;;
-    alpine) install_alpine_deps ;;
+    alpine)
+      command -v curl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 \
+        && command -v tar >/dev/null 2>&1 && command -v sha256sum >/dev/null 2>&1 \
+        && command -v python3 >/dev/null 2>&1 && command -v tc >/dev/null 2>&1 \
+        && command -v sysctl >/dev/null 2>&1 && command -v unshare >/dev/null 2>&1 \
+        && command -v setpriv >/dev/null 2>&1 && command -v flock >/dev/null 2>&1 \
+        && return 0
+      install_alpine_deps
+      ;;
   esac
 }
 
@@ -7879,6 +8410,11 @@ nobrand_install_xray_runtime() {
   fi
   new_assets="${NOBRAND_XRAY_ASSET_DIR}.new.$$"
   if [ "$rc" -eq 0 ]; then
+    nb_lifecycle_mark_protocol_mutation_started "${NOBRAND_LIFECYCLE_SCOPE:-}" || {
+      rm -f "$candidate"
+      rm -rf -- "$candidate_assets" "$snapshot"
+      return 1
+    }
     mkdir -p "$(dirname "$NOBRAND_XRAY_BIN")" "$(dirname "$NOBRAND_XRAY_ASSET_DIR")" \
       && rm -rf -- "$new_assets" \
       && mkdir -p "$new_assets" \
@@ -8514,6 +9050,10 @@ snell_install_runtime() {
       "Snell v${major} official runtime validation failed")"
     return 1
   fi
+  nb_lifecycle_mark_protocol_mutation_started "${NOBRAND_LIFECYCLE_SCOPE:-snell}" || {
+    rm -f "$candidate"
+    return 1
+  }
   mkdir -p "$NOBRAND_SNELL_RUNTIME_DIR" || { rm -f "$candidate"; return 1; }
   if [ -e "$destination" ]; then
     backup="$(mktemp "${destination}.rollback.XXXXXX")" || { rm -f "$candidate"; return 1; }
@@ -8993,35 +9533,59 @@ tuic_restore_side_effect_snapshot() {
 tuic_install_runtime() {
   local channel="${1:-stable}" requested_version="${2:-}" candidate snapshot metadata_tmp version
   candidate="$(mktemp_file .sing-box)" || return 1
-  tuic_download_runtime_candidate "$candidate" "$channel" "$requested_version" || return 1
-  snapshot="$(mktemp_dir)" || return 1
-  tuic_snapshot_runtime_files "$snapshot" || return 1
+  tuic_download_runtime_candidate "$candidate" "$channel" "$requested_version" || {
+    rm -f "$candidate"
+    return 1
+  }
+  snapshot="$(mktemp_dir)" || { rm -f "$candidate"; return 1; }
+  tuic_snapshot_runtime_files "$snapshot" || {
+    rm -f "$candidate"
+    rm -rf -- "$snapshot"
+    return 1
+  }
+  nb_lifecycle_mark_protocol_mutation_started "${NOBRAND_LIFECYCLE_SCOPE:-tuic}" || {
+    rm -f "$candidate"
+    rm -rf -- "$snapshot"
+    return 1
+  }
   mkdir -p "$NOBRAND_BIN_DIR" "$(dirname "$NOBRAND_SING_BOX_RUNTIME_META")" || {
     tuic_restore_runtime_files "$snapshot" || true
+    rm -f "$candidate"
+    rm -rf -- "$snapshot"
     return 1
   }
   chmod 0755 "$NOBRAND_BIN_DIR" || {
     tuic_restore_runtime_files "$snapshot" || true
+    rm -f "$candidate"
+    rm -rf -- "$snapshot"
     return 1
   }
   if ! nb_atomic_install_file "$candidate" "$NOBRAND_SING_BOX_BIN" 0755; then
     tuic_restore_runtime_files "$snapshot" || true
+    rm -f "$candidate"
+    rm -rf -- "$snapshot"
     return 1
   fi
   version="$(tuic_runtime_version)" || {
     tuic_restore_runtime_files "$snapshot" || true
+    rm -f "$candidate"
+    rm -rf -- "$snapshot"
     return 1
   }
   metadata_tmp="$(mktemp_file .tuic-runtime-meta)" || {
     tuic_restore_runtime_files "$snapshot" || true
+    rm -f "$candidate"
+    rm -rf -- "$snapshot"
     return 1
   }
   tuic_generate_runtime_metadata "$metadata_tmp" "$channel" "$version" \
     && nb_atomic_install_file "$metadata_tmp" "$NOBRAND_SING_BOX_RUNTIME_META" 0600 \
-    || {
-      tuic_restore_runtime_files "$snapshot" || true
-      return 1
-    }
+     || {
+       tuic_restore_runtime_files "$snapshot" || true
+       rm -f "$candidate" "$metadata_tmp"
+       rm -rf -- "$snapshot"
+       return 1
+     }
   rm -f "$candidate" "$metadata_tmp"
   rm -rf -- "$snapshot"
 }
@@ -12332,7 +12896,7 @@ print_user_outputs() {
 
 open_firewall_for_pairs() {
   local pairs="$1"
-  local fw="" pp proto p proto_lc
+  local fw="" pp proto p proto_lc failed=0
   [ -n "$pairs" ] || return 0
   if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: active'; then
     fw=ufw
@@ -12348,12 +12912,13 @@ open_firewall_for_pairs() {
     proto="${pp%%|*}"
     p="${pp#*|}"
     proto_lc="$(proto_lower "$proto")"
-    firewall_apply_binding "$fw" add "$proto_lc" "$p"
+    firewall_apply_binding "$fw" add "$proto_lc" "$p" || failed=1
   done <<< "$pairs"
   case "$fw" in
-    firewalld) run firewall-cmd --reload || true ;;
-    iptables) persist_iptables_rules ;;
+    firewalld) run firewall-cmd --reload || failed=1 ;;
+    iptables) persist_iptables_rules || failed=1 ;;
   esac
+  [ "$failed" -eq 0 ]
 }
 
 do_user_list() {
@@ -14599,6 +15164,48 @@ snell_valid_psk() {
   [[ "$value" =~ ^[A-Za-z0-9._~+/@:=,-]+$ ]]
 }
 
+snell_state_valid() {
+  local id="$1" path name psk listen_host listen_port mode host advertise_port
+  path="$(snell_state_path "$id")" || return 1
+  [ -f "$path" ] && [ ! -L "$path" ] && snell_state_exists "$id" || return 1
+  jq -e --arg id "$id" '
+    .protocol=="snell" and .instance_id==$id and (.version==4 or .version==5) and
+    (.name|type)=="string" and (.psk|type)=="string" and
+    (.listen_host|type)=="string" and
+    (.listen_port|type)=="number" and (.listen_port|floor)==.listen_port and
+    .listen_port>=1 and .listen_port<=65535 and .transport=="tcp" and
+    (.advertise_mode=="auto" or .advertise_mode=="custom") and
+    (.advertise_host|type)=="string" and
+    (.advertise_port=="" or ((.advertise_port|type)=="number" and
+      (.advertise_port|floor)==.advertise_port and .advertise_port>=1 and .advertise_port<=65535)) and
+    (.enabled|type)=="boolean" and
+    (.quic_proxy_enabled|type)=="boolean" and (.managed_udp|type)=="boolean" and
+    .quic_proxy_enabled==.managed_udp and
+    (.version==5 or (.quic_proxy_enabled==false and .managed_udp==false)) and
+    (.runtime_version|type)=="string" and (.runtime_version|length)>0 and
+    (.runtime_status|type)=="string" and (.runtime_status|length)>0 and
+    (.created_at|type)=="string" and (.created_at|length)>0 and
+    (.updated_at|type)=="string" and (.updated_at|length)>0 and
+    (has("ingress_profile_id")==false or
+      ((.ingress_profile_id|type)=="string" and (.ingress_profile_id|length)>0))
+  ' "$path" >/dev/null 2>&1 || return 1
+  name="$(snell_state_field "$id" name)" || return 1
+  psk="$(snell_state_field "$id" psk)" || return 1
+  listen_host="$(snell_state_field "$id" listen_host)" || return 1
+  listen_port="$(snell_state_field "$id" listen_port)" || return 1
+  mode="$(snell_state_field "$id" advertise_mode)" || return 1
+  host="$(snell_state_field "$id" advertise_host)" || return 1
+  advertise_port="$(snell_state_field "$id" advertise_port)" || return 1
+  snell_valid_name "$name" && snell_valid_psk "$psk" \
+    && nb_ingress_valid_ipv4 "$listen_host" && nb_valid_port "$listen_port" \
+    && nb_validate_advertise_endpoint "$host" "$advertise_port" TCP || return 1
+  case "$mode" in
+    auto) [ -z "$host" ] && [ -z "$advertise_port" ] ;;
+    custom) [ -n "$host" ] && [ -n "$advertise_port" ] ;;
+    *) return 1 ;;
+  esac
+}
+
 snell_generate_psk() {
   local value
   value="$(openssl rand -base64 24 2>/dev/null | tr -d '\r\n')"
@@ -14921,6 +15528,11 @@ install_snell() {
   fi
   nb_firewall_binding_owned TCP "$PORT" && tcp_was_owned=1
   nb_firewall_binding_owned UDP "$PORT" && udp_was_owned=1
+  nb_lifecycle_mark_protocol_mutation_started snell || {
+    rm -f "$config_tmp" "$state_tmp"
+    admin_lock_release
+    return 1
+  }
   if ! nb_atomic_install_file "$config_tmp" "$(snell_config_path "$id")" 0600 \
      || ! nb_atomic_install_file "$state_tmp" "$(snell_state_path "$id")" 0600 \
      || ! snell_install_service_runtime \
@@ -15301,11 +15913,12 @@ remove_snell_instance() {
 }
 
 snell_doctor_instance() {
-  local id="$1" failed=0 name major port endpoint host advertise_port mode runtime actual_runtime quic
-  snell_state_exists "$id" || return 1
-  case "$(snell_state_field "$id" version 2>/dev/null || true)" in 4|5) ;; *) return 1 ;; esac
+  local id="$1" failed=0 name major port endpoint host advertise_port mode runtime actual_runtime quic enabled
+  snell_state_valid "$id" || return 1
   name="$(snell_state_field "$id" name)"; major="$(snell_state_field "$id" version)"
   port="$(snell_state_field "$id" listen_port)"; runtime="$(snell_state_field "$id" runtime_version)"
+  enabled="$(snell_state_field "$id" enabled 2>/dev/null || true)"
+  case "$enabled" in true|false) ;; *) return 1 ;; esac
   printf '实例 %s（%s，v%s）\n' "$name" "$id" "$major"
   if [ -x "$(snell_runtime_path "$major")" ]; then
     actual_runtime="$(snell_runtime_reported_version "$(snell_runtime_path "$major")" 2>/dev/null || true)"
@@ -15321,13 +15934,23 @@ snell_doctor_instance() {
   snell_quic_state_consistent "$id" \
     && nb_doctor_line PASS 'QUIC 状态 / 受管 UDP 一致' \
     || { nb_doctor_line FAIL 'QUIC 状态 / 受管 UDP 不一致'; failed=1; }
-  snell_running "$id" && nb_doctor_line PASS "服务与 TCP/${port} 监听正常" \
-    || { nb_doctor_line FAIL "服务 / 监听异常: TCP/${port}"; failed=1; }
   quic=off; snell_quic_proxy_enabled "$id" && quic=on
+  if [ "$enabled" = true ]; then
+    snell_running "$id" && nb_doctor_line PASS "服务与 TCP/${port} 监听正常" \
+      || { nb_doctor_line FAIL "服务 / 监听异常: TCP/${port}"; failed=1; }
+  elif snell_service_active "$id" || nb_port_is_listening TCP "$port" \
+       || { [ "$quic" = on ] && nb_port_is_listening UDP "$port"; }; then
+    nb_doctor_line FAIL "服务标记为已停止，但仍有服务或监听: TCP/UDP ${port}"
+    failed=1
+  else
+    nb_doctor_line PASS '服务按状态保持停止，且无残留监听'
+  fi
   if [ "$major" = 5 ] && [ "$quic" = on ]; then
-    snell_v5_auxiliary_udp_same_process "$port" \
-      && nb_doctor_line PASS "QUIC Proxy 已启用；同进程 UDP/${port} 监听正常" \
-      || { nb_doctor_line FAIL "QUIC Proxy 已启用，但缺少同进程 UDP/${port} 监听"; failed=1; }
+    if [ "$enabled" = true ]; then
+      snell_v5_auxiliary_udp_same_process "$port" \
+        && nb_doctor_line PASS "QUIC Proxy 已启用；同进程 UDP/${port} 监听正常" \
+        || { nb_doctor_line FAIL "QUIC Proxy 已启用，但缺少同进程 UDP/${port} 监听"; failed=1; }
+    fi
     nb_firewall_binding_owned UDP "$port" \
       && nb_doctor_line PASS "QUIC 防火墙归属正常: UDP/${port}" \
       || { nb_doctor_line FAIL "QUIC Proxy 已启用，但缺少 UDP/${port} 防火墙归属"; failed=1; }
@@ -15447,7 +16070,13 @@ snell_refresh_runtime_metadata() {
 nobrand_run_snell_action() {
   case "${SNELL_ACTION:-menu}" in
     menu) snell_menu_loop ;;
-    install) install_snell ;;
+    install)
+      if [ "${NOBRAND_MANAGER_SESSION_ACTIVE:-0}" -eq 1 ]; then
+        nb_lifecycle_run_protocol_install snell install_snell
+      else
+        install_snell
+      fi
+      ;;
     show) snell_show ;;
     set-endpoint) snell_set_endpoint ;;
     set-quic) snell_set_quic ;;
@@ -15764,6 +16393,7 @@ install_hysteria2() {
   local was_active=0 binding_was_owned=0 binding_now_owned=0
   [ "${YES:-0}" -eq 1 ] || interactive=1
   nobrand_prepare_common
+  hysteria2_configure_requests "$interactive" || return 1
   admin_lock_acquire || return 1
   snapshot="$(mktemp_dir)" || { admin_lock_release; return 1; }
   hysteria2_snapshot_file "$NOBRAND_HY2_CONFIG_FILE" "$snapshot/config"
@@ -15778,14 +16408,20 @@ install_hysteria2() {
     old_port="$(hysteria2_state_field listen_port 2>/dev/null || true)"
     old_created="$(hysteria2_state_field created_at 2>/dev/null || true)"
   fi
-  if ! nobrand_install_xray_runtime 0 || ! hysteria2_configure_requests "$interactive"; then
-    hysteria2_install_rollback "$snapshot" "$was_active" 0
+  if ! nobrand_install_xray_runtime 0; then
+    if [ "${NOBRAND_LIFECYCLE_ACTIVE:-0}" -ne 1 ] \
+       || [ "$(nb_lifecycle_mutation_started 2>/dev/null || printf 1)" = 1 ]; then
+      hysteria2_install_rollback "$snapshot" "$was_active" 0
+    fi
     rm -rf -- "$snapshot"
     admin_lock_release
     return 1
   fi
   nb_firewall_binding_owned UDP "$PORT" && binding_was_owned=1
   if [ "$was_active" -eq 1 ]; then
+    nb_lifecycle_mark_protocol_mutation_started hy2 || {
+      rm -rf -- "$snapshot"; admin_lock_release; return 1
+    }
     nobrand_hy2_service_action stop || {
       hysteria2_install_rollback "$snapshot" "$was_active" 0
       rm -rf -- "$snapshot"; admin_lock_release; return 1;
@@ -15795,8 +16431,16 @@ install_hysteria2() {
   if ! nb_port_available_for_profile "$PORT" UDP "$INGRESS_PROFILE_ID" 'hy2:default'; then
     warn "提交前发现 UDP/${PORT} 已被其它进程占用"
     nb_describe_port_conflict UDP "$PORT"
-    hysteria2_install_rollback "$snapshot" "$was_active" 0
+    if [ "${NOBRAND_LIFECYCLE_ACTIVE:-0}" -ne 1 ] \
+       || [ "$(nb_lifecycle_mutation_started 2>/dev/null || printf 1)" = 1 ]; then
+      hysteria2_install_rollback "$snapshot" "$was_active" 0
+    fi
     rm -rf -- "$snapshot"; admin_lock_release; return 1
+  fi
+  if [ "$was_active" -eq 0 ]; then
+    nb_lifecycle_mark_protocol_mutation_started hy2 || {
+      rm -rf -- "$snapshot"; admin_lock_release; return 1
+    }
   fi
   if ! generate_hysteria2_cert; then
     hysteria2_install_rollback "$snapshot" "$was_active" 0
@@ -16061,12 +16705,14 @@ remove_hysteria2_config() {
 }
 
 hysteria2_doctor() {
-  local failed=0 port mode host advertise_port key_mode cert_cn expected_sni
+  local failed=0 port mode host advertise_port key_mode cert_cn expected_sni enabled
   if ! hysteria2_state_exists; then
     nb_doctor_line INFO 'Hysteria2 未安装'
     return 0
   fi
   port="$(hysteria2_state_field listen_port)"
+  enabled="$(hysteria2_state_field enabled 2>/dev/null || true)"
+  case "$enabled" in true|false) ;; *) return 1 ;; esac
   [ -x "$NOBRAND_XRAY_BIN" ] && nb_doctor_line PASS "Xray $(nobrand_xray_version 2>/dev/null || printf '未知版本')" \
     || { nb_doctor_line FAIL 'NoBrand Xray 可执行文件'; failed=1; }
   nobrand_xray_test_config "$NOBRAND_HY2_CONFIG_FILE" \
@@ -16091,8 +16737,15 @@ hysteria2_doctor() {
   else
     nb_doctor_line FAIL '证书'; failed=1
   fi
-  hysteria2_running && nb_doctor_line PASS "服务与 UDP/${port} 监听正常" \
-    || { nb_doctor_line FAIL "服务 / 监听异常: UDP/${port}"; failed=1; }
+  if [ "$enabled" = true ]; then
+    hysteria2_running && nb_doctor_line PASS "服务与 UDP/${port} 监听正常" \
+      || { nb_doctor_line FAIL "服务 / 监听异常: UDP/${port}"; failed=1; }
+  elif nobrand_hy2_service_active || nb_port_is_listening UDP "$port"; then
+    nb_doctor_line FAIL "服务标记为已停止，但仍有服务或监听: UDP/${port}"
+    failed=1
+  else
+    nb_doctor_line PASS '服务按状态保持停止，且无残留监听'
+  fi
   nb_firewall_binding_owned UDP "$port" && nb_doctor_line PASS "防火墙归属正常: UDP/${port}" \
     || nb_doctor_line INFO "防火墙规则不归 NoBrand 管理（预先存在 / 无本地防火墙）: UDP/${port}"
   mode="$(hysteria2_state_field advertise_mode)"; host="$(hysteria2_state_field advertise_host)"
@@ -16125,7 +16778,13 @@ hysteria2_upgrade_runtime() {
 nobrand_run_hy2_action() {
   case "${HY2_ACTION:-menu}" in
     menu) hysteria2_menu_loop ;;
-    install) install_hysteria2 ;;
+    install)
+      if [ "${NOBRAND_MANAGER_SESSION_ACTIVE:-0}" -eq 1 ]; then
+        nb_lifecycle_run_protocol_install hy2 install_hysteria2
+      else
+        install_hysteria2
+      fi
+      ;;
     show) print_hysteria2_result show ;;
     set-endpoint) hysteria2_set_endpoint ;;
     remove) remove_hysteria2_config ;;
@@ -16534,8 +17193,10 @@ vless_sudoku_install_rollback() {
 install_vless_sudoku() {
   local interactive=0 snapshot config_tmp state_tmp client_tmp advertise_mode
   local old_port="" old_created="" was_active=0 binding_was_owned=0 binding_now_owned=0
+  local rollback_needed=1
   [ "${YES:-0}" -eq 1 ] || interactive=1
   nobrand_prepare_common
+  vless_sudoku_configure_requests "$interactive" || return 1
   admin_lock_acquire || return 1
   snapshot="$(mktemp_dir)" || { admin_lock_release; return 1; }
   vless_sudoku_snapshot_file "$NOBRAND_VLESS_CONFIG_FILE" "$snapshot/config"
@@ -16549,14 +17210,26 @@ install_vless_sudoku() {
     old_port="$(vless_sudoku_state_field listen_port 2>/dev/null || true)"
     old_created="$(vless_sudoku_state_field created_at 2>/dev/null || true)"
   fi
-  if ! nobrand_install_xray_runtime 0 || ! vless_sudoku_configure_requests "$interactive"; then
-    vless_sudoku_install_rollback "$snapshot" "$was_active" 0
+  if ! nobrand_install_xray_runtime 0; then
+    if [ "${NOBRAND_LIFECYCLE_ACTIVE:-0}" -ne 1 ] \
+       || [ "$(nb_lifecycle_mutation_started 2>/dev/null || printf 1)" = 1 ]; then
+      vless_sudoku_install_rollback "$snapshot" "$was_active" 0
+    fi
     rm -rf -- "$snapshot"
     admin_lock_release
     return 1
   fi
+  if [ "${NOBRAND_LIFECYCLE_ACTIVE:-0}" -eq 1 ]; then
+    rollback_needed="$(nb_lifecycle_mutation_started)" || {
+      rm -rf -- "$snapshot"; admin_lock_release; return 1
+    }
+  fi
   nb_firewall_binding_owned TCP "$PORT" && binding_was_owned=1
   if [ "$was_active" -eq 1 ]; then
+    nb_lifecycle_mark_protocol_mutation_started vless-sudoku || {
+      rm -rf -- "$snapshot"; admin_lock_release; return 1
+    }
+    rollback_needed=1
     nobrand_vless_sudoku_service_action stop || {
       vless_sudoku_install_rollback "$snapshot" "$was_active" 0
       rm -rf -- "$snapshot"; admin_lock_release; return 1;
@@ -16565,19 +17238,25 @@ install_vless_sudoku() {
   if ! nb_port_available_for_profile "$PORT" TCP "$INGRESS_PROFILE_ID" 'vless-sudoku:default'; then
     warn "提交前发现 TCP/${PORT} 已被其它进程占用"
     nb_describe_port_conflict TCP "$PORT"
-    vless_sudoku_install_rollback "$snapshot" "$was_active" 0
+    [ "$rollback_needed" -eq 0 ] \
+      || vless_sudoku_install_rollback "$snapshot" "$was_active" 0
     rm -rf -- "$snapshot"; admin_lock_release; return 1
   fi
   config_tmp="$(mktemp_file .json)" || {
-    vless_sudoku_install_rollback "$snapshot" "$was_active" 0
+    [ "$rollback_needed" -eq 0 ] \
+      || vless_sudoku_install_rollback "$snapshot" "$was_active" 0
     rm -rf -- "$snapshot"; admin_lock_release; return 1;
   }
   state_tmp="$(mktemp_file .json)" || {
-    rm -f "$config_tmp"; vless_sudoku_install_rollback "$snapshot" "$was_active" 0
+    rm -f "$config_tmp"
+    [ "$rollback_needed" -eq 0 ] \
+      || vless_sudoku_install_rollback "$snapshot" "$was_active" 0
     rm -rf -- "$snapshot"; admin_lock_release; return 1;
   }
   client_tmp="$(mktemp_file .json)" || {
-    rm -f "$config_tmp" "$state_tmp"; vless_sudoku_install_rollback "$snapshot" "$was_active" 0
+    rm -f "$config_tmp" "$state_tmp"
+    [ "$rollback_needed" -eq 0 ] \
+      || vless_sudoku_install_rollback "$snapshot" "$was_active" 0
     rm -rf -- "$snapshot"; admin_lock_release; return 1;
   }
   advertise_mode="$(nb_endpoint_mode_from_values "$ADVERTISE_HOST")"
@@ -16597,8 +17276,22 @@ install_vless_sudoku() {
        "$VLESS_SUDOKU_UUID" "$VLESS_SUDOKU_PASSWORD" \
      || ! vless_sudoku_client_config_matches "$client_tmp" "$effective_host" "$effective_port" \
        "$VLESS_SUDOKU_UUID" "$VLESS_SUDOKU_PASSWORD" \
-     || ! vless_sudoku_state_matches "$state_tmp" \
-     || ! nb_atomic_install_file "$config_tmp" "$NOBRAND_VLESS_CONFIG_FILE" 0600 \
+     || ! vless_sudoku_state_matches "$state_tmp"; then
+    rm -f "$config_tmp" "$state_tmp" "$client_tmp"
+    [ "$rollback_needed" -eq 0 ] \
+      || vless_sudoku_install_rollback "$snapshot" "$was_active" 0
+    rm -rf -- "$snapshot"; admin_lock_release; return 1
+  fi
+  if [ "$was_active" -eq 0 ]; then
+    nb_lifecycle_mark_protocol_mutation_started vless-sudoku || {
+      rm -f "$config_tmp" "$state_tmp" "$client_tmp"
+      [ "$rollback_needed" -eq 0 ] \
+        || vless_sudoku_install_rollback "$snapshot" "$was_active" 0
+      rm -rf -- "$snapshot"; admin_lock_release; return 1
+    }
+    rollback_needed=1
+  fi
+  if ! nb_atomic_install_file "$config_tmp" "$NOBRAND_VLESS_CONFIG_FILE" 0600 \
      || ! nobrand_write_vless_sudoku_service \
      || ! nb_firewall_open_pairs "TCP|${PORT}"; then
     rm -f "$config_tmp" "$state_tmp" "$client_tmp"
@@ -16878,12 +17571,14 @@ remove_vless_sudoku_config() {
 }
 
 vless_sudoku_doctor() {
-  local failed=0 port mode host advertise_port uuid password cached_link current_link
+  local failed=0 port mode host advertise_port uuid password cached_link current_link enabled
   if ! vless_sudoku_state_exists; then
     nb_doctor_line INFO 'VLESS Sudoku 未安装'
     return 0
   fi
   port="$(vless_sudoku_state_field listen_port)"
+  enabled="$(vless_sudoku_state_field enabled 2>/dev/null || true)"
+  case "$enabled" in true|false) ;; *) return 1 ;; esac
   uuid="$(vless_sudoku_state_field uuid)"
   password="$(jq -r '.finalmask_json.tcp[0].settings.password // empty' "$NOBRAND_VLESS_STATE_FILE")"
   [ -x "$NOBRAND_XRAY_BIN" ] \
@@ -16905,9 +17600,16 @@ vless_sudoku_doctor() {
   vless_sudoku_client_config_matches \
     && nb_doctor_line PASS 'Xray 客户端 JSON' \
     || { nb_doctor_line FAIL 'Xray 客户端 JSON'; failed=1; }
-  vless_sudoku_running \
-    && nb_doctor_line PASS "服务与 TCP/${port} 监听正常" \
-    || { nb_doctor_line FAIL "服务 / 监听异常: TCP/${port}"; failed=1; }
+  if [ "$enabled" = true ]; then
+    vless_sudoku_running \
+      && nb_doctor_line PASS "服务与 TCP/${port} 监听正常" \
+      || { nb_doctor_line FAIL "服务 / 监听异常: TCP/${port}"; failed=1; }
+  elif nobrand_vless_sudoku_service_active || nb_port_is_listening TCP "$port"; then
+    nb_doctor_line FAIL "服务标记为已停止，但仍有服务或监听: TCP/${port}"
+    failed=1
+  else
+    nb_doctor_line PASS '服务按状态保持停止，且无残留监听'
+  fi
   nb_firewall_binding_owned TCP "$port" \
     && nb_doctor_line PASS "防火墙归属正常: TCP/${port}" \
     || nb_doctor_line INFO "防火墙规则不归 NoBrand 管理（预先存在 / 无本地防火墙）: TCP/${port}"
@@ -16964,7 +17666,13 @@ vless_sudoku_upgrade_runtime() {
 nobrand_run_vless_sudoku_action() {
   case "${VLESS_SUDOKU_ACTION:-menu}" in
     menu) vless_sudoku_menu_loop ;;
-    install) install_vless_sudoku ;;
+    install)
+      if [ "${NOBRAND_MANAGER_SESSION_ACTIVE:-0}" -eq 1 ]; then
+        nb_lifecycle_run_protocol_install vless-sudoku install_vless_sudoku
+      else
+        install_vless_sudoku
+      fi
+      ;;
     show) print_vless_sudoku_result show ;;
     set-endpoint) vless_sudoku_set_endpoint ;;
     remove) remove_vless_sudoku_config ;;
@@ -17378,43 +18086,67 @@ tuic_install_transaction_rollback() {
 
 install_tuic() {
   local collect_rc=0 id="" user_id uuid password users cert key config state config_tmp="" state_tmp=""
-  local mode runtime_version runtime_snapshot template_preexisting=0
+  local mode runtime_version runtime_snapshot template_preexisting=0 rollback_needed=1
   require_root
   require_linux
   nobrand_prepare_common
   tuic_collect_install_requests || collect_rc=$?
   [ "$collect_rc" -eq 0 ] || { [ "$collect_rc" -eq 2 ] && return 0; return "$collect_rc"; }
   runtime_snapshot="$(mktemp_dir)" || return 1
-  tuic_snapshot_runtime_files "$runtime_snapshot" || return 1
+  tuic_snapshot_runtime_files "$runtime_snapshot" \
+    || { rm -rf -- "$runtime_snapshot"; return 1; }
   [ ! -e "$NOBRAND_TUIC_SYSTEMD_TEMPLATE" ] || template_preexisting=1
   tuic_prepare_runtime_for_install "$TUIC_CHANNEL" "$TUIC_VERSION" \
     || { rm -rf -- "$runtime_snapshot"; die '官方 sing-box Runtime 准备失败'; }
+  if [ "${NOBRAND_LIFECYCLE_ACTIVE:-0}" -eq 1 ]; then
+    rollback_needed="$(nb_lifecycle_mutation_started)" || {
+      rm -rf -- "$runtime_snapshot"
+      return 1
+    }
+  fi
   runtime_version="$(tuic_runtime_version)" || {
-    tuic_restore_runtime_files "$runtime_snapshot" || true
+    [ "$rollback_needed" -eq 0 ] || tuic_restore_runtime_files "$runtime_snapshot" || true
     rm -rf -- "$runtime_snapshot"
     return 1
   }
   id="$(tuic_generate_instance_id)"
   user_id="$(tuic_generate_user_id)"
   uuid="$(tuic_generate_uuid)" || {
-    tuic_install_transaction_rollback "$id" "$PORT" "$runtime_snapshot" "$template_preexisting"
+    [ "$rollback_needed" -eq 0 ] \
+      || tuic_install_transaction_rollback "$id" "$PORT" "$runtime_snapshot" "$template_preexisting"
     rm -rf -- "$runtime_snapshot"
     return 1
   }
   password="$(tuic_generate_password)" || {
-    tuic_install_transaction_rollback "$id" "$PORT" "$runtime_snapshot" "$template_preexisting"
+    [ "$rollback_needed" -eq 0 ] \
+      || tuic_install_transaction_rollback "$id" "$PORT" "$runtime_snapshot" "$template_preexisting"
     rm -rf -- "$runtime_snapshot"
     return 1
   }
   users="[$(tuic_user_json "$user_id" "$TUIC_USER" "$uuid" "$password")]"
   cert="$(tuic_cert_file "$id")" key="$(tuic_key_file "$id")"
   config="$(tuic_config_file "$id")" state="$(tuic_state_file "$id")"
+  admin_lock_acquire || {
+    [ "$rollback_needed" -eq 0 ] \
+      || tuic_install_transaction_rollback "$id" "$PORT" "$runtime_snapshot" "$template_preexisting"
+    rm -rf -- "$runtime_snapshot"
+    return 1
+  }
+  nb_lifecycle_mark_protocol_mutation_started tuic || {
+    [ "$rollback_needed" -eq 0 ] \
+      || tuic_install_transaction_rollback "$id" "$PORT" "$runtime_snapshot" "$template_preexisting"
+    admin_lock_release
+    rm -rf -- "$runtime_snapshot"
+    return 1
+  }
+  rollback_needed=1
   mkdir -p "$(dirname "$state")" "$(dirname "$config")" \
     && chmod 0700 "$(dirname "$state")" "$(dirname "$config")" \
     && tuic_generate_certificate "$cert" "$key" "$TUIC_SNI" \
     && config_tmp="$(mktemp_file .tuic-config)" \
     && state_tmp="$(mktemp_file .tuic-state)" || {
       tuic_install_transaction_rollback "$id" "$PORT" "$runtime_snapshot" "$template_preexisting"
+      admin_lock_release
       rm -f "$config_tmp" "$state_tmp"
       rm -rf -- "$runtime_snapshot"
       return 1
@@ -17423,6 +18155,7 @@ install_tuic() {
     && tuic_validate_config "$config_tmp" \
     || {
       tuic_install_transaction_rollback "$id" "$PORT" "$runtime_snapshot" "$template_preexisting"
+      admin_lock_release
       rm -f "$config_tmp" "$state_tmp"
       rm -rf -- "$runtime_snapshot"
       return 1
@@ -17433,16 +18166,11 @@ install_tuic() {
     "$cert" "$key" "$users" "" "$INGRESS_PROFILE_ID" \
     && nb_ingress_stamp_state_file "$state_tmp" "$INGRESS_PROFILE_ID" native-bind || {
       tuic_install_transaction_rollback "$id" "$PORT" "$runtime_snapshot" "$template_preexisting"
+      admin_lock_release
       rm -f "$config_tmp" "$state_tmp"
       rm -rf -- "$runtime_snapshot"
       return 1
     }
-  admin_lock_acquire || {
-    tuic_install_transaction_rollback "$id" "$PORT" "$runtime_snapshot" "$template_preexisting"
-    rm -f "$config_tmp" "$state_tmp"
-    rm -rf -- "$runtime_snapshot"
-    return 1
-  }
   if ! nb_port_available_for_profile "$PORT" UDP "$INGRESS_PROFILE_ID" \
      || ! nb_atomic_install_file "$config_tmp" "$config" 0600 \
      || ! nb_atomic_install_file "$state_tmp" "$state" 0600 \
@@ -17618,8 +18346,10 @@ tuic_running() {
 }
 
 tuic_doctor_one() {
-  local id="$1" failed=0 port cert key runtime expected
+  local id="$1" failed=0 port cert key runtime expected enabled
   port="$(tuic_state_field "$id" listen_port)"
+  enabled="$(tuic_state_field "$id" enabled 2>/dev/null || true)"
+  case "$enabled" in true|false) ;; *) return 1 ;; esac
   cert="$(jq -r .tls.certificate_path "$(tuic_state_file "$id")")"
   key="$(jq -r .tls.key_path "$(tuic_state_file "$id")")"
   runtime="$(tuic_runtime_version 2>/dev/null || true)"
@@ -17629,11 +18359,18 @@ tuic_doctor_one() {
   tuic_config_matches_state "$id" && tuic_validate_config "$(tuic_config_file "$id")" \
     && nb_doctor_line PASS "TUIC v5 配置有效: $(tuic_state_field "$id" name)" \
     || { nb_doctor_line FAIL "TUIC 配置无效: $(tuic_state_field "$id" name)"; failed=1; }
-  tuic_service_active "$id" && nb_doctor_line PASS '服务运行中' \
-    || { nb_doctor_line FAIL '服务未运行'; failed=1; }
-  tuic_running "$id" \
-    && nb_doctor_line PASS "同进程 UDP/${port} 监听正常" \
-    || { nb_doctor_line FAIL "同进程 UDP/${port} 监听异常"; failed=1; }
+  if [ "$enabled" = true ]; then
+    tuic_service_active "$id" && nb_doctor_line PASS '服务运行中' \
+      || { nb_doctor_line FAIL '服务未运行'; failed=1; }
+    tuic_running "$id" \
+      && nb_doctor_line PASS "同进程 UDP/${port} 监听正常" \
+      || { nb_doctor_line FAIL "同进程 UDP/${port} 监听异常"; failed=1; }
+  elif tuic_service_active "$id" || nb_port_is_listening UDP "$port"; then
+    nb_doctor_line FAIL "服务标记为已停止，但仍有服务或监听: UDP/${port}"
+    failed=1
+  else
+    nb_doctor_line PASS '服务按状态保持停止，且无残留监听'
+  fi
   nb_firewall_binding_owned UDP "$port" && nb_doctor_line PASS "防火墙规则正常: UDP/${port}" \
     || { nb_doctor_line FAIL "防火墙规则异常: UDP/${port}"; failed=1; }
   [ -s "$cert" ] && openssl x509 -in "$cert" -checkend 2592000 -noout >/dev/null 2>&1 \
@@ -17812,8 +18549,12 @@ tuic_restore_runtime() {
   if [ "$current" != "$version" ] || ! tuic_runtime_metadata_valid "$version" ""; then
     tuic_install_runtime pinned "$version" || return 1
     metadata_tmp="$(mktemp_file .tuic-runtime-meta)" || return 1
-    jq --arg channel "$channel" '.channel=$channel' "$NOBRAND_SING_BOX_RUNTIME_META" >"$metadata_tmp" \
-      && nb_atomic_install_file "$metadata_tmp" "$NOBRAND_SING_BOX_RUNTIME_META" 0600 || return 1
+    if ! jq --arg channel "$channel" '.channel=$channel' \
+        "$NOBRAND_SING_BOX_RUNTIME_META" >"$metadata_tmp" \
+       || ! nb_atomic_install_file "$metadata_tmp" "$NOBRAND_SING_BOX_RUNTIME_META" 0600; then
+      rm -f "$metadata_tmp"
+      return 1
+    fi
     rm -f "$metadata_tmp"
   fi
   tuic_install_service_runtime
@@ -17822,7 +18563,13 @@ tuic_restore_runtime() {
 nobrand_run_tuic_action() {
   local id
   case "${TUIC_ACTION:-menu}" in
-    install) install_tuic ;;
+    install)
+      if [ "${NOBRAND_MANAGER_SESSION_ACTIVE:-0}" -eq 1 ]; then
+        nb_lifecycle_run_protocol_install tuic install_tuic
+      else
+        install_tuic
+      fi
+      ;;
     start|stop|restart) tuic_service_command "$TUIC_ACTION" ;;
     status) tuic_status ;;
     doctor) tuic_doctor_all ;;
@@ -18641,6 +19388,10 @@ install_vless_reality() {
     warn '没有可用且无冲突的 REALITY Defender 回环端口'
     return 1
   }
+  nb_lifecycle_mark_protocol_mutation_started vless-reality || {
+    admin_lock_release
+    return 1
+  }
   # Xray 26.3.27 infers the config format from the candidate filename.
   # Keep the transactional file JSON-suffixed just like the authoritative
   # config, otherwise `xray run -test -c` rejects it before parsing.
@@ -18914,8 +19665,12 @@ reality_doctor_one() {
     reality_running "$id" \
       && nb_doctor_line PASS "REALITY_LISTENERS public TCP/${port}; defender loopback same-process" \
       || { nb_doctor_line FAIL "REALITY_LISTENERS public TCP/${port}; defender loopback"; failed=1; }
+  elif reality_service_active "$id" || nb_port_is_listening TCP "$port" \
+       || nb_port_is_listening TCP "$defender_port"; then
+    nb_doctor_line FAIL 'REALITY_SERVICE marked stopped but service/listener remains'
+    failed=1
   else
-    nb_doctor_line INFO 'REALITY_SERVICE intentionally stopped'
+    nb_doctor_line PASS 'REALITY_SERVICE intentionally stopped; no residual listeners'
   fi
   owner="$(nb_registry_port_owner TCP "$port" 2>/dev/null || true)"
   [ "$owner" = "vless-reality:${id}" ] && nb_doctor_line PASS 'REALITY_PORT_OWNERSHIP' \
@@ -19012,7 +19767,13 @@ reality_restore_runtime() {
 nobrand_run_vless_reality_action() {
   local id
   case "${VLESS_REALITY_ACTION:-menu}" in
-    install) install_vless_reality ;;
+    install)
+      if [ "${NOBRAND_MANAGER_SESSION_ACTIVE:-0}" -eq 1 ]; then
+        nb_lifecycle_run_protocol_install vless-reality install_vless_reality
+      else
+        install_vless_reality
+      fi
+      ;;
     start|stop|restart) reality_service_command "$VLESS_REALITY_ACTION" ;;
     status) reality_status ;;
     doctor) reality_doctor_all ;;
@@ -19116,6 +19877,8 @@ firewall_apply_binding() {
       ufw_binding_exists "$spec" && return 0
       if run ufw allow "$spec"; then
         firewall_owned_add "$key"
+      else
+        return 1
       fi
       ;;
     ufw:del)
@@ -19133,6 +19896,8 @@ firewall_apply_binding() {
       firewall-cmd --permanent --query-port="${p}/${proto}" >/dev/null 2>&1 && return 0
       if run firewall-cmd --permanent --add-port="${p}/${proto}"; then
         firewall_owned_add "$key"
+      else
+        return 1
       fi
       ;;
     firewalld:del)
@@ -21530,6 +22295,7 @@ ssh_tunnel_install() {
     fi
   fi
   _has_group "$NOBRAND_SSH_GROUP" && group_preexisting=1
+  nb_lifecycle_mark_protocol_mutation_started ssh-tunnel || return 1
   ssh_tunnel_create_group || die '无法创建 SSH Tunnel 专用用户组'
   strategy="marker-block" managed_path="$NOBRAND_SSH_CONFIG_MAIN"
   ssh_tunnel_dropin_supported && { strategy=dropin; managed_path="$NOBRAND_SSH_CONFIG_DROPIN"; }
@@ -22192,7 +22958,13 @@ ssh_tunnel_uninstall() {
 
 nobrand_run_ssh_tunnel_action() {
   case "${SSH_TUNNEL_ACTION:-menu}" in
-    install) ssh_tunnel_install ;;
+    install)
+      if [ "${NOBRAND_MANAGER_SESSION_ACTIVE:-0}" -eq 1 ]; then
+        nb_lifecycle_run_protocol_install ssh-tunnel ssh_tunnel_install
+      else
+        ssh_tunnel_install
+      fi
+      ;;
     status) ssh_tunnel_status ;;
     doctor) ssh_tunnel_doctor ;;
     show) ssh_tunnel_show_user "${SSH_TUNNEL_USER:-}" ;;
@@ -23293,6 +24065,22 @@ forward_realm_apply_state() {
   return "$rc"
 }
 
+# Rebuild only effects described by a complete Forward state. Recovery never
+# guesses at or deletes effects from an interrupted, unpublished candidate.
+forward_reconcile_authoritative_state() {
+  local state="$NOBRAND_FORWARD_STATE_FILE" forward_pairs failed=0
+  [ -f "$state" ] && [ ! -L "$state" ] && forward_state_valid "$state" || return 1
+  forward_pairs="$(forward_firewall_pairs "$state")" || return 1
+  admin_lock_acquire || return 1
+  forward_apply_nft_state "$state" >/dev/null 2>&1 || failed=1
+  [ "$failed" -ne 0 ] \
+    || forward_realm_apply_state "$state" >/dev/null 2>&1 || failed=1
+  [ "$failed" -ne 0 ] || [ -z "$forward_pairs" ] \
+    || nb_firewall_open_pairs "$forward_pairs" >/dev/null 2>&1 || failed=1
+  admin_lock_release
+  return "$failed"
+}
+
 forward_transaction_commit() {
   local candidate="$1" operation="${2:-modify}" old_backend="${3:-}" new_backend="${4:-}"
   local snapshot old_state failed=0 rollback_failed=0
@@ -23513,6 +24301,7 @@ forward_add_rule() {
     ')" || return 1
   candidate="$(mktemp_file .forward-add)" || return 1
   jq --argjson rule "$rule" '.rules += [$rule]' "$NOBRAND_FORWARD_STATE_FILE" >"$candidate" \
+    && nb_lifecycle_mark_protocol_mutation_started forward \
     && forward_transaction_commit "$candidate" add '' "$FORWARD_BACKEND"
   local rc=$?
   rm -f "$candidate"
@@ -23984,6 +24773,71 @@ EOF
 }
 
 nobrand_run_forward_action() {
+  if [ "${FORWARD_ACTION:-menu}" = recover-add ]; then
+    nobrand_recover_forward_add
+  elif [ "${FORWARD_ACTION:-menu}" = add ] \
+     && [ "${NOBRAND_MANAGER_SESSION_ACTIVE:-0}" -eq 1 ]; then
+    nb_lifecycle_run_protocol_install forward nobrand_run_forward_action_unscoped
+  else
+    nobrand_run_forward_action_unscoped
+  fi
+}
+
+nobrand_recover_forward_add() {
+  local phase="" recovery_mode=retry rc=0 restore_errexit=0 saved_err_trap=""
+  require_root || return 1
+  require_linux || return 1
+  nb_lifecycle_lock_acquire || return 1
+  nb_lifecycle_tx_valid \
+    && [ "$(nb_lifecycle_field STATUS)" = in-progress ] \
+    && [ "$(nb_lifecycle_field OPERATION)" = install ] \
+    && [ "$(nb_lifecycle_scope)" = forward ] || {
+      nb_lifecycle_lock_release
+      return 1
+    }
+  if [ "$(nb_lifecycle_mutation_started)" = 0 ]; then
+    nb_lifecycle_clear || {
+      nb_lifecycle_lock_release
+      return 1
+    }
+    nb_lifecycle_lock_release
+    t 'Forward 新增操作在写入规则前中止；已清除临时恢复信息，请重新开始。' \
+      'Forward add stopped before a rule was written; temporary recovery metadata was cleared. Start again.'
+    return 0
+  fi
+  phase="$(nb_lifecycle_field LAST_COMPLETED_PHASE)"
+  recovery_mode="$(nb_lifecycle_protocol_recovery_mode forward "$phase")" || {
+    nb_lifecycle_lock_release
+    return 1
+  }
+  if [ "$recovery_mode" = retry ]; then
+    nb_lifecycle_lock_release
+    warn "$(t \
+      'Forward 权威状态未变化，但原始请求与系统前态未持久记录；自动清理或重放并不安全。恢复信息已原样保留，请人工检查后处理。' \
+      'Forward authoritative state is unchanged, but the original request and system pre-state were not durably recorded; automatic cleanup or replay is unsafe. Recovery metadata was preserved exactly; inspect the host and resolve it manually.')"
+    return 1
+  elif [ "$recovery_mode" != validate ]; then
+    nb_lifecycle_lock_release
+    return 1
+  fi
+  FORWARD_ACTION=add
+  case "$-" in *e*) restore_errexit=1 ;; esac
+  saved_err_trap="$(trap -p ERR || true)"
+  trap - ERR
+  set +e
+  nb_lifecycle_run_protocol_install forward nobrand_run_forward_action_unscoped
+  rc=$?
+  [ "$restore_errexit" -eq 0 ] || set -e
+  if [ -n "$saved_err_trap" ]; then
+    eval "$saved_err_trap"
+  else
+    trap - ERR
+  fi
+  nb_lifecycle_lock_release
+  return "$rc"
+}
+
+nobrand_run_forward_action_unscoped() {
   local lock_required=0 rc
   case "$FORWARD_ACTION" in
     add|delete|modify|enable|disable|set-endpoint|switch-backend|import|upgrade-runtime|uninstall)
@@ -24915,6 +25769,1022 @@ nb_lifecycle_validate_manager_repair() {
   [ "$installed" = "$SCRIPT_VERSION" ]
 }
 
+nobrand_manager_bootstrap() {
+  local state operation scope="" pm rc=0
+  local recovery_expected_scope="${NOBRAND_RECOVERY_EXPECTED_SCOPE:-}"
+  local recovery_expected_state="${NOBRAND_RECOVERY_EXPECTED_STATE:-}"
+  local recovery_expected_tx_present="${NOBRAND_RECOVERY_EXPECTED_TX_PRESENT:-0}"
+  local recovery_expected_tx_status="${NOBRAND_RECOVERY_EXPECTED_TX_STATUS:-}"
+  local recovery_expected_tx_id="${NOBRAND_RECOVERY_EXPECTED_TX_ID:-}"
+  local recovery_expected_tx_record="${NOBRAND_RECOVERY_EXPECTED_TX_RECORD:-}"
+  require_root || return 1
+  require_linux || return 1
+  pm="$(detect_pkg_manager)" || return 1
+  ensure_management_dependencies "$pm" || return 1
+  nb_lifecycle_lock_acquire || return 1
+  state="$(nb_classify_installation_state)" || {
+    nb_lifecycle_lock_release
+    return 1
+  }
+  if [ -n "$recovery_expected_scope" ] && [ "$recovery_expected_scope" != manager ]; then
+    nb_lifecycle_lock_release
+    warn "$(t '原恢复选择不属于管理器范围；拒绝作为新的管理器安装执行。' \
+      'The recovery choice is not manager-scoped; refusing to execute it as a new manager install.')"
+    return 1
+  fi
+  if [ -z "$recovery_expected_scope" ] \
+     && [ "$state" = CURRENT_COMPLETE ] \
+     && nobrand_manager_installation_valid; then
+    ensure_manager_state_layout 0 || {
+      nb_lifecycle_lock_release
+      return 1
+    }
+    nb_lifecycle_lock_release
+    return 0
+  fi
+  if [ -n "$recovery_expected_scope" ]; then
+    [ -n "$recovery_expected_state" ] \
+      && [ "$state" = "$recovery_expected_state" ] || {
+        nb_lifecycle_lock_release
+        warn "$(t '原管理器恢复状态已由其它进程改变；拒绝把旧选择作为新的管理器安装执行。' \
+          'The manager recovery state changed in another process; refusing to execute the stale choice as a new manager install.')"
+        return 1
+      }
+    case "$recovery_expected_tx_present" in
+      0)
+        if [ -e "$NOBRAND_LIFECYCLE_TX_FILE" ] \
+           || [ -L "$NOBRAND_LIFECYCLE_TX_FILE" ]; then
+          nb_lifecycle_lock_release
+          warn "$(t '原管理器残留恢复期间出现了新的生命周期事务；拒绝继续。' \
+            'A new lifecycle transaction appeared during manager-residue recovery; refusing to continue.')"
+          return 1
+        fi
+        case "$state" in
+          CURRENT_PARTIAL_INSTALL|CURRENT_PARTIAL_REPAIR) operation=repair ;;
+          *) nb_lifecycle_lock_release; return 1 ;;
+        esac
+        ;;
+      1)
+        nb_lifecycle_tx_valid \
+          && [ "$(nb_lifecycle_field STATUS)" = "$recovery_expected_tx_status" ] \
+          && [ "$(nb_lifecycle_field TRANSACTION_ID)" = "$recovery_expected_tx_id" ] \
+          && [ "$(<"$NOBRAND_LIFECYCLE_TX_FILE")" = "$recovery_expected_tx_record" ] || {
+            nb_lifecycle_lock_release
+            warn "$(t '原管理器恢复事务已由其它进程改变；拒绝把旧选择作为新的管理器安装执行。' \
+              'The manager recovery transaction changed in another process; refusing to execute the stale choice as a new manager install.')"
+            return 1
+          }
+        case "$recovery_expected_tx_status" in
+          in-progress)
+            [ "$(nb_lifecycle_scope)" = manager ] || {
+              nb_lifecycle_lock_release
+              return 1
+            }
+            operation="$(nb_lifecycle_field OPERATION)"
+            case "$operation:$state" in
+              install:CURRENT_PARTIAL_INSTALL|repair:CURRENT_PARTIAL_REPAIR) ;;
+              *) nb_lifecycle_lock_release; return 1 ;;
+            esac
+            ;;
+          complete)
+            case "$state" in
+              CURRENT_PARTIAL_INSTALL|CURRENT_PARTIAL_REPAIR) operation=repair ;;
+              *) nb_lifecycle_lock_release; return 1 ;;
+            esac
+            ;;
+          *) nb_lifecycle_lock_release; return 1 ;;
+        esac
+        ;;
+      *) nb_lifecycle_lock_release; return 1 ;;
+    esac
+  elif nb_lifecycle_tx_valid && [ "$(nb_lifecycle_field STATUS)" = in-progress ]; then
+    scope="$(nb_lifecycle_scope)" || {
+      nb_lifecycle_lock_release
+      return 1
+    }
+    [ "$scope" = manager ] || {
+      nb_lifecycle_lock_release
+      warn "$(t "未完成的 ${scope} 操作必须先按其组件范围恢复" \
+        "The unfinished ${scope} operation must be recovered within its component scope first")"
+      return 1
+    }
+    operation="$(nb_lifecycle_field OPERATION)"
+    case "$operation" in install|repair) ;; *) nb_lifecycle_lock_release; return 1 ;; esac
+  else
+    case "$state" in
+      CLEAN) operation=install ;;
+      CURRENT_COMPLETE|CURRENT_PARTIAL_INSTALL|CURRENT_PARTIAL_REPAIR|LEGACY_SUPPORTED)
+        operation=repair
+        ;;
+      *)
+        nb_lifecycle_lock_release
+        return 1
+        ;;
+    esac
+  fi
+  nb_lifecycle_pre_mutation_snapshot || {
+    nb_lifecycle_lock_release
+    return 1
+  }
+  nb_lifecycle_begin "$operation" prepare 0 0 0 0 0 0 manager || {
+    nb_lifecycle_pre_mutation_disarm
+    nb_lifecycle_lock_release
+    return 1
+  }
+  nb_lifecycle_mark_mutation_started || {
+    rc=$?
+    nb_lifecycle_restore_pre_mutation || rc=1
+  }
+  if [ "$rc" -eq 0 ]; then
+    ensure_manager_state_layout 1 || rc=$?
+  fi
+  if [ "$rc" -eq 0 ]; then
+    nb_lifecycle_checkpoint "$operation" state-layout 1 || rc=$?
+  fi
+  if [ "$rc" -eq 0 ]; then
+    nobrand_install_manager_script || rc=$?
+  fi
+  if [ "$rc" -eq 0 ]; then
+    nb_lifecycle_checkpoint "$operation" manager-ready || rc=$?
+  fi
+  if [ "$rc" -eq 0 ]; then
+    nobrand_manager_installation_valid || rc=$?
+  fi
+  if [ "$rc" -eq 0 ]; then
+    nb_lifecycle_checkpoint "$operation" ready-to-validate || rc=$?
+  fi
+  if [ "$rc" -eq 0 ]; then
+    nb_lifecycle_validate_manager_repair || rc=$?
+  fi
+  if [ "$rc" -eq 0 ]; then
+    nb_lifecycle_complete "$operation" || rc=$?
+  fi
+  nb_lifecycle_lock_release
+  return "$rc"
+}
+
+nobrand_recover_ingress_scope() {
+  local operation phase pm rc=0
+  require_root || return 1
+  require_linux || return 1
+  pm="$(detect_pkg_manager)" || return 1
+  ensure_management_dependencies "$pm" || return 1
+  nb_lifecycle_lock_acquire || return 1
+  nb_lifecycle_tx_valid \
+    && [ "$(nb_lifecycle_field STATUS)" = in-progress ] \
+    && [ "$(nb_lifecycle_scope)" = ingress ] || {
+      nb_lifecycle_lock_release
+      return 1
+    }
+  operation="$(nb_lifecycle_field OPERATION)"
+  [ "$operation" = configure ] || {
+    nb_lifecycle_lock_release
+    return 1
+  }
+  if [ "$(nb_lifecycle_field FORMAT)" = nobrand-lifecycle-v2 ] \
+     && [ "$(nb_lifecycle_mutation_started)" = 0 ]; then
+    nb_lifecycle_clear || {
+      nb_lifecycle_lock_release
+      return 1
+    }
+    nb_lifecycle_lock_release
+    t 'Ingress 操作在写入配置前中止；已清除临时恢复信息。' \
+      'Ingress stopped before configuration was written; temporary recovery metadata was cleared.'
+    return 0
+  fi
+  phase="$(nb_lifecycle_field LAST_COMPLETED_PHASE)"
+  nb_lifecycle_begin configure "$phase" 0 0 0 0 0 0 ingress || {
+    nb_lifecycle_lock_release
+    return 1
+  }
+  ensure_manager_state_layout 1 || rc=$?
+  if [ "$rc" -eq 0 ] && ! nobrand_manager_installation_valid; then
+    warn "$(t '协议操作前的管理器安装无效；请先修复管理器，未执行协议回调。' \
+      'The manager installation is invalid before the protocol action; repair the manager first. The protocol callback was not run.')"
+    rc=1
+  fi
+  if [ "$rc" -eq 0 ] && [ -e "$NOBRAND_INGRESS_STATE_FILE" ]; then
+    nb_ingress_state_valid || rc=$?
+  fi
+  if [ "$rc" -eq 0 ] && [ -e "$NOBRAND_INGRESS_FIREWALL_STATE_FILE" ]; then
+    nb_strict_firewall_state_valid || rc=$?
+  fi
+  if [ "$rc" -eq 0 ] && [ "$(nb_lifecycle_mutation_started)" = 1 ]; then
+    nobrand_reconcile_ingress_profiles || rc=$?
+  fi
+  if [ "$rc" -eq 0 ] && [ "$(nb_lifecycle_mutation_started)" = 1 ] \
+     && declare -F nb_strict_firewall_restore_authoritative >/dev/null 2>&1; then
+    nb_strict_firewall_restore_authoritative || rc=$?
+  fi
+  if [ "$rc" -eq 0 ]; then
+    nb_lifecycle_checkpoint configure ready-to-validate || rc=$?
+  fi
+  if [ "$rc" -eq 0 ]; then
+    nobrand_manager_installation_valid || rc=$?
+  fi
+  if [ "$rc" -eq 0 ]; then
+    nb_lifecycle_complete configure || rc=$?
+  fi
+  nb_lifecycle_lock_release
+  return "$rc"
+}
+
+nobrand_reconcile_ingress_profiles() {
+  local profile_id profile_ids failed=0
+  [ -e "$NOBRAND_INGRESS_STATE_FILE" ] || return 0
+  nb_ingress_state_valid || return 1
+  profile_ids="$(jq -r '.profiles[].profile_id' "$NOBRAND_INGRESS_STATE_FILE")" || return 1
+  while IFS= read -r profile_id; do
+    [ -n "$profile_id" ] || continue
+    nb_ingress_apply_profile "$profile_id" || failed=1
+  done <<<"$profile_ids"
+  return "$failed"
+}
+
+# Emit an unambiguous record for one authoritative state path.  This manifest
+# is hashed before a protocol install callback starts, allowing a later process
+# to tell an untouched pre-callback state from a callback that committed state
+# but died before the ordinary ready-to-validate checkpoint.
+nb_lifecycle_protocol_state_manifest_record() {
+  local label="$1" path="$2" size target kind
+  if [ -L "$path" ]; then
+    target="$(readlink -- "$path")" || return 1
+    printf 'L\0%s\0%s\0' "$label" "$target"
+  elif [ -f "$path" ]; then
+    size="$(wc -c <"$path" | tr -d '[:space:]')" || return 1
+    [[ "$size" =~ ^[0-9]+$ ]] || return 1
+    printf 'F\0%s\0%s\0' "$label" "$size" || return 1
+    command cat -- "$path" || return 1
+    printf '\0'
+  elif [ -e "$path" ]; then
+    kind="$(stat -c '%F' -- "$path" 2>/dev/null || printf other)"
+    printf 'O\0%s\0%s\0' "$label" "$kind"
+  else
+    printf 'A\0%s\0' "$label"
+  fi
+}
+
+nb_lifecycle_protocol_scope_state_manifest() (
+  local scope="$1" root path child name id rules
+  local -a paths=() children=()
+  LC_ALL=C
+  export LC_ALL
+  shopt -s nullglob dotglob
+  printf 'nobrand-protocol-callback-baseline-v1\0%s\0' "$scope" || return 1
+  case "$scope" in
+    snell)
+      root="$NOBRAND_SNELL_STATE_DIR"
+      if [ -L "$root" ] || { [ -e "$root" ] && [ ! -d "$root" ]; }; then
+        nb_lifecycle_protocol_state_manifest_record root "$root"
+        return
+      fi
+      paths=("$root"/*)
+      for path in "${paths[@]}"; do
+        name="${path##*/}"
+        nb_lifecycle_protocol_state_manifest_record "$name" "$path" || return 1
+      done
+      ;;
+    hy2)
+      nb_lifecycle_protocol_state_manifest_record state.json "$NOBRAND_HY2_STATE_FILE"
+      ;;
+    tuic|vless-reality)
+      if [ "$scope" = tuic ]; then
+        root="$NOBRAND_TUIC_STATE_DIR"
+      else
+        root="$NOBRAND_REALITY_STATE_DIR"
+      fi
+      if [ -L "$root" ] || { [ -e "$root" ] && [ ! -d "$root" ]; }; then
+        nb_lifecycle_protocol_state_manifest_record root "$root"
+        return
+      fi
+      paths=("$root"/*)
+      for path in "${paths[@]}"; do
+        name="${path##*/}"
+        if [ -L "$path" ] || { [ -e "$path" ] && [ ! -d "$path" ]; }; then
+          nb_lifecycle_protocol_state_manifest_record "$name" "$path" || return 1
+        else
+          children=("$path"/*)
+          if [ "${#children[@]}" -eq 0 ]; then
+            nb_lifecycle_protocol_state_manifest_record "$name" "$path" || return 1
+            continue
+          fi
+          for child in "${children[@]}"; do
+            nb_lifecycle_protocol_state_manifest_record \
+              "$name/${child##*/}" "$child" || return 1
+          done
+        fi
+      done
+      ;;
+    vless-sudoku)
+      nb_lifecycle_protocol_state_manifest_record state.json "$NOBRAND_VLESS_STATE_FILE"
+      ;;
+    ssh-tunnel)
+      nb_lifecycle_protocol_state_manifest_record state.json "$NOBRAND_SSH_STATE_FILE"
+      ;;
+    forward)
+      # Creating Forward's valid empty state is preparation, not an add
+      # commit. Normalize absent and empty to the same logical rule set.
+      if [ ! -e "$NOBRAND_FORWARD_STATE_FILE" ] && [ ! -L "$NOBRAND_FORWARD_STATE_FILE" ]; then
+        printf 'R\0[]\0'
+      elif [ -f "$NOBRAND_FORWARD_STATE_FILE" ] && [ ! -L "$NOBRAND_FORWARD_STATE_FILE" ] \
+           && rules="$(jq -cS '
+             if .schema_version==3 and .ownership=="nobrand-v3"
+                and .feature=="port-forward" and (.rules|type)=="array"
+             then .rules else error("invalid Forward state") end
+           ' "$NOBRAND_FORWARD_STATE_FILE" 2>/dev/null)"; then
+        printf 'R\0%s\0' "$rules"
+      else
+        nb_lifecycle_protocol_state_manifest_record state.json "$NOBRAND_FORWARD_STATE_FILE"
+      fi
+      ;;
+    *) return 1 ;;
+  esac
+)
+
+nb_lifecycle_protocol_scope_fingerprint() {
+  local scope="$1" digest
+  if command -v sha256sum >/dev/null 2>&1; then
+    digest="$(nb_lifecycle_protocol_scope_state_manifest "$scope" \
+      | sha256sum | awk 'NR==1 { print tolower($1) }')" || return 1
+  elif command -v openssl >/dev/null 2>&1; then
+    digest="$(nb_lifecycle_protocol_scope_state_manifest "$scope" \
+      | openssl dgst -sha256 2>/dev/null | awk 'NR==1 { print tolower($NF) }')" || return 1
+  else
+    return 1
+  fi
+  [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+  printf '%s' "$digest"
+}
+
+# Structural validity is deliberately separate from the runtime doctor.  A
+# changed but malformed authoritative state fails closed and is never fed back
+# through a potentially duplicating install callback.  Runtime validation runs
+# after the transaction advances to ready-to-validate and remains retryable.
+nb_lifecycle_protocol_scope_state_valid() (
+  local scope="$1" root path child name id found=0
+  local -a paths=() children=()
+  shopt -s nullglob dotglob
+  case "$scope" in
+    snell)
+      root="$NOBRAND_SNELL_STATE_DIR"
+      [ ! -L "$root" ] && { [ ! -e "$root" ] || [ -d "$root" ]; } || return 1
+      paths=("$root"/*)
+      for path in "${paths[@]}"; do
+        name="${path##*/}"
+        [[ "$name" =~ ^s[0-9a-f]{16}\.json$ ]] || return 1
+        found=1
+        id="${name%.json}"
+        [ -f "$path" ] && [ ! -L "$path" ] || return 1
+        snell_state_valid "$id" || return 1
+      done
+      [ "$found" -eq 1 ]
+      ;;
+    hy2)
+      [ -f "$NOBRAND_HY2_STATE_FILE" ] && [ ! -L "$NOBRAND_HY2_STATE_FILE" ] \
+        && hysteria2_state_exists
+      ;;
+    tuic|vless-reality)
+      if [ "$scope" = tuic ]; then
+        root="$NOBRAND_TUIC_STATE_DIR"
+      else
+        root="$NOBRAND_REALITY_STATE_DIR"
+      fi
+      [ ! -L "$root" ] && { [ ! -e "$root" ] || [ -d "$root" ]; } || return 1
+      paths=("$root"/*)
+      for path in "${paths[@]}"; do
+        name="${path##*/}"
+        if [ "$scope" = tuic ]; then
+          [[ "$name" =~ ^t[0-9a-f]{16}$ ]] || return 1
+        else
+          [[ "$name" =~ ^r[0-9a-f]{16}$ ]] || return 1
+        fi
+        [ -d "$path" ] && [ ! -L "$path" ] || return 1
+        children=("$path"/*)
+        [ "${#children[@]}" -eq 1 ] || return 1
+        child="${children[0]}"
+        [ "${child##*/}" = state.json ] || return 1
+        found=1
+        id="$name"
+        [ -f "$child" ] && [ ! -L "$child" ] || return 1
+        if [ "$scope" = tuic ]; then
+          tuic_state_exists "$id" || return 1
+        else
+          reality_state_exists "$id" || return 1
+        fi
+      done
+      [ "$found" -eq 1 ]
+      ;;
+    vless-sudoku)
+      [ -f "$NOBRAND_VLESS_STATE_FILE" ] && [ ! -L "$NOBRAND_VLESS_STATE_FILE" ] \
+        && vless_sudoku_state_exists && vless_sudoku_state_matches
+      ;;
+    ssh-tunnel)
+      [ -f "$NOBRAND_SSH_STATE_FILE" ] && [ ! -L "$NOBRAND_SSH_STATE_FILE" ] \
+        && ssh_tunnel_state_identity_valid \
+        && jq -e '
+          (.users|type)=="array" and (.users|length)>0
+          and .policy_applied==true
+          and (.pending_operation // "")==""
+          and (.pending_watchdog_token // "")==""
+          and (.pending_watchdog_pid // "")==""
+          and (.pending_origin_connection // "")==""
+        ' "$NOBRAND_SSH_STATE_FILE" >/dev/null
+      ;;
+    forward)
+      [ -f "$NOBRAND_FORWARD_STATE_FILE" ] && [ ! -L "$NOBRAND_FORWARD_STATE_FILE" ] \
+        && forward_state_valid "$NOBRAND_FORWARD_STATE_FILE" \
+        && jq -e '.rules | length > 0' "$NOBRAND_FORWARD_STATE_FILE" >/dev/null
+      ;;
+    *) return 1 ;;
+  esac
+)
+
+nb_lifecycle_ssh_initialization_only() {
+  [ -f "$NOBRAND_SSH_STATE_FILE" ] && [ ! -L "$NOBRAND_SSH_STATE_FILE" ] \
+    && ssh_tunnel_state_identity_valid \
+    && jq -e '
+      (.users|type)=="array" and (.users|length)==0
+      and .policy_applied==false
+      and (.pending_operation // "")==""
+      and (.pending_watchdog_token // "")==""
+      and (.pending_watchdog_pid // "")==""
+      and (.pending_origin_connection // "")==""
+    ' "$NOBRAND_SSH_STATE_FILE" >/dev/null \
+    && ssh_tunnel_policy_absent \
+    && ssh_tunnel_watchdog_directory_empty_valid
+}
+
+nb_lifecycle_protocol_recovery_mode() {
+  local scope="$1" phase="$2" baseline current
+  if [ "$phase" = ready-to-validate ]; then
+    [ "$(nb_lifecycle_mutation_started)" = 1 ] || return 1
+    printf 'validate'
+    return 0
+  fi
+  if [[ "$phase" =~ ^callback-([0-9a-f]{55})$ ]]; then
+    [ "$(nb_lifecycle_mutation_started)" = 1 ] || return 1
+    baseline="${BASH_REMATCH[1]}"
+    current="$(nb_lifecycle_protocol_scope_fingerprint "$scope")" || return 1
+    if [ "${current:0:55}" = "$baseline" ]; then
+      printf 'retry'
+      return 0
+    fi
+    if [ "$scope" = ssh-tunnel ] && nb_lifecycle_ssh_initialization_only; then
+      warn "$(t \
+        'SSH Tunnel 回调后的空状态不足以证明尚未创建系统账户；拒绝自动清理或重放，请保留范围信息并执行人工修复。' \
+        'Empty SSH Tunnel state after the callback does not prove that no system account was created; refusing automatic cleanup or replay and retaining scoped metadata for manual repair.')"
+      return 1
+    fi
+    if nb_lifecycle_protocol_scope_state_valid "$scope"; then
+      if [ "$scope" = forward ]; then
+        # Forward owns a dedicated add-recovery flow and its existing
+        # committed-state behavior remains validation-only.
+        printf 'validate'
+      else
+        printf 'validate-changed'
+      fi
+      return 0
+    fi
+    warn "$(t "${scope} 安装回调开始后权威状态已变化但无效；拒绝重放安装器，保留范围信息以便修复。" \
+      "${scope} authoritative state changed after the install callback began but is invalid; refusing installer replay and retaining scoped recovery metadata.")"
+    return 1
+  fi
+  printf 'retry'
+}
+
+nb_lifecycle_protocol_retry_authorized() {
+  local scope="$1"
+  [ -z "${NOBRAND_RECOVERY_EXPECTED_SCOPE:-}" ] \
+    && [ "${NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE:-}" = "$scope" ]
+}
+
+# Rebuild only the runtime effects that are deterministically described by the
+# recorded protocol state.  Recovery must never invoke an install callback: it
+# has neither the original request nor authority to generate replacement
+# credentials.  Structural validation intentionally precedes the admin lock
+# and every mutating service/firewall action.
+nb_lifecycle_reconcile_protocol_scope() {
+  local scope="$1" id ids enabled port pairs failed=0
+  nb_lifecycle_protocol_scope_state_valid "$scope" || return 1
+
+  case "$scope" in
+    forward)
+      forward_reconcile_authoritative_state
+      return $?
+      ;;
+    ssh-tunnel)
+      # A non-empty, fully committed SSH state can be checked without replaying
+      # account/key creation or rewriting administrator access. Earlier or
+      # pending states fail the structural gate above and remain fail-closed.
+      ssh_tunnel_watchdog_directory_empty_valid || return 1
+      ssh_tunnel_group_identity_valid || return 1
+      while IFS= read -r user_json; do
+        [ -n "$user_json" ] || return 1
+        ssh_tunnel_user_identity_valid "$user_json" \
+          && ssh_tunnel_user_key_material_valid "$user_json" || return 1
+      done < <(jq -c '.users[]' "$NOBRAND_SSH_STATE_FILE")
+      return 0
+      ;;
+    snell|hy2|tuic|vless-reality|vless-sudoku) ;;
+    *) return 1 ;;
+  esac
+
+  # Complete the read-only preflight for the whole scope before repairing even
+  # one unit.  Enumerators are intentionally forgiving for status displays, so
+  # recovery additionally requires every derived field/config it will consume.
+  case "$scope" in
+    snell)
+      ids="$(snell_instance_ids)" || return 1
+      [ -n "$ids" ] || return 1
+      while IFS= read -r id; do
+        [ -n "$id" ] || continue
+        enabled="$(snell_state_field "$id" enabled 2>/dev/null)" || return 1
+        case "$enabled" in true|false) ;; *) return 1 ;; esac
+        snell_config_matches_state "$id" || return 1
+        snell_firewall_pairs "$id" >/dev/null || return 1
+      done <<<"$ids"
+      ;;
+    hy2)
+      enabled="$(hysteria2_state_field enabled 2>/dev/null)" || return 1
+      case "$enabled" in true|false) ;; *) return 1 ;; esac
+      port="$(hysteria2_state_field listen_port 2>/dev/null)" || return 1
+      [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || return 1
+      nobrand_xray_test_config "$NOBRAND_HY2_CONFIG_FILE" || return 1
+      ;;
+    tuic)
+      ids="$(tuic_instance_ids)" || return 1
+      [ -n "$ids" ] || return 1
+      while IFS= read -r id; do
+        [ -n "$id" ] || continue
+        enabled="$(tuic_state_field "$id" enabled 2>/dev/null)" || return 1
+        case "$enabled" in true|false) ;; *) return 1 ;; esac
+        port="$(tuic_state_field "$id" listen_port 2>/dev/null)" || return 1
+        [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || return 1
+        tuic_config_matches_state "$id" || return 1
+      done <<<"$ids"
+      ;;
+    vless-reality)
+      ids="$(reality_instance_ids)" || return 1
+      [ -n "$ids" ] || return 1
+      while IFS= read -r id; do
+        [ -n "$id" ] || continue
+        enabled="$(reality_state_field "$id" enabled 2>/dev/null)" || return 1
+        case "$enabled" in true|false) ;; *) return 1 ;; esac
+        port="$(reality_state_field "$id" listen_port 2>/dev/null)" || return 1
+        [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || return 1
+        reality_config_matches_state "$id" \
+          && nobrand_xray_test_config "$(reality_config_file "$id")" || return 1
+      done <<<"$ids"
+      ;;
+    vless-sudoku)
+      enabled="$(vless_sudoku_state_field enabled 2>/dev/null)" || return 1
+      case "$enabled" in true|false) ;; *) return 1 ;; esac
+      port="$(vless_sudoku_state_field listen_port 2>/dev/null)" || return 1
+      [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || return 1
+      vless_sudoku_server_config_matches \
+        && vless_sudoku_client_config_matches \
+        && nobrand_xray_test_config "$NOBRAND_VLESS_CONFIG_FILE" || return 1
+      ;;
+  esac
+
+  admin_lock_acquire || return 1
+  case "$scope" in
+    snell)
+      ids="$(snell_instance_ids)" || failed=1
+      [ -n "$ids" ] || failed=1
+      [ "$failed" -ne 0 ] || snell_install_service_runtime || failed=1
+      while [ "$failed" -eq 0 ] && IFS= read -r id; do
+        [ -n "$id" ] || continue
+        enabled="$(snell_state_field "$id" enabled 2>/dev/null)" || { failed=1; break; }
+        case "$enabled" in true|false) ;; *) failed=1; break ;; esac
+        snell_ensure_openrc_service "$id" || { failed=1; break; }
+        if [ "$enabled" = true ]; then
+          pairs="$(snell_firewall_pairs "$id")" || { failed=1; break; }
+          nb_firewall_open_pairs "$pairs" >/dev/null 2>&1 \
+            && snell_service_action "$id" start >/dev/null 2>&1 \
+            && snell_wait_for_required_listeners "$id" 25 || failed=1
+        else
+          snell_service_action "$id" stop >/dev/null 2>&1 || failed=1
+        fi
+      done <<<"$ids"
+      ;;
+    hy2)
+      enabled="$(hysteria2_state_field enabled 2>/dev/null)" || failed=1
+      case "$enabled" in true|false) ;; *) failed=1 ;; esac
+      if [ "$failed" -eq 0 ]; then
+        nobrand_write_hy2_service || failed=1
+      fi
+      if [ "$failed" -eq 0 ] && [ "$enabled" = true ]; then
+        port="$(hysteria2_state_field listen_port)" || failed=1
+        [ "$failed" -ne 0 ] \
+          || nobrand_xray_test_config "$NOBRAND_HY2_CONFIG_FILE" || failed=1
+        [ "$failed" -ne 0 ] \
+          || nb_firewall_open_pairs "UDP|${port}" >/dev/null 2>&1 || failed=1
+        [ "$failed" -ne 0 ] \
+          || nobrand_hy2_service_action start >/dev/null 2>&1 || failed=1
+        [ "$failed" -ne 0 ] || hysteria2_running || failed=1
+      elif [ "$failed" -eq 0 ]; then
+        nobrand_hy2_service_action stop >/dev/null 2>&1 || failed=1
+      fi
+      ;;
+    tuic)
+      ids="$(tuic_instance_ids)" || failed=1
+      [ -n "$ids" ] || failed=1
+      [ "$failed" -ne 0 ] || tuic_restore_runtime >/dev/null 2>&1 || failed=1
+      while [ "$failed" -eq 0 ] && IFS= read -r id; do
+        [ -n "$id" ] || continue
+        enabled="$(tuic_state_field "$id" enabled 2>/dev/null)" || { failed=1; break; }
+        case "$enabled" in true|false) ;; *) failed=1; break ;; esac
+        tuic_ensure_openrc_service "$id" \
+          && tuic_validate_config "$(tuic_config_file "$id")" || { failed=1; break; }
+        if [ "$enabled" = true ]; then
+          port="$(tuic_state_field "$id" listen_port)" || { failed=1; break; }
+          nb_firewall_open_pairs "UDP|${port}" >/dev/null 2>&1 \
+            && tuic_service_action "$id" start >/dev/null 2>&1 \
+            && tuic_running "$id" || failed=1
+        else
+          tuic_service_action "$id" stop >/dev/null 2>&1 || failed=1
+        fi
+      done <<<"$ids"
+      ;;
+    vless-reality)
+      ids="$(reality_instance_ids)" || failed=1
+      [ -n "$ids" ] || failed=1
+      [ "$failed" -ne 0 ] || reality_install_service_runtime >/dev/null 2>&1 || failed=1
+      while [ "$failed" -eq 0 ] && IFS= read -r id; do
+        [ -n "$id" ] || continue
+        enabled="$(reality_state_field "$id" enabled 2>/dev/null)" || { failed=1; break; }
+        case "$enabled" in true|false) ;; *) failed=1; break ;; esac
+        reality_ensure_openrc_service "$id" || { failed=1; break; }
+        if [ "$enabled" = true ]; then
+          port="$(reality_state_field "$id" listen_port)" || { failed=1; break; }
+          nb_firewall_open_pairs "TCP|${port}" >/dev/null 2>&1 \
+            && reality_service_action "$id" start >/dev/null 2>&1 \
+            && reality_running "$id" || failed=1
+        else
+          reality_service_action "$id" stop >/dev/null 2>&1 || failed=1
+        fi
+      done <<<"$ids"
+      ;;
+    vless-sudoku)
+      enabled="$(vless_sudoku_state_field enabled 2>/dev/null)" || failed=1
+      case "$enabled" in true|false) ;; *) failed=1 ;; esac
+      if [ "$failed" -eq 0 ]; then
+        nobrand_write_vless_sudoku_service || failed=1
+      fi
+      if [ "$failed" -eq 0 ] && [ "$enabled" = true ]; then
+        port="$(vless_sudoku_state_field listen_port)" || failed=1
+        [ "$failed" -ne 0 ] \
+          || nb_firewall_open_pairs "TCP|${port}" >/dev/null 2>&1 || failed=1
+        [ "$failed" -ne 0 ] \
+          || nobrand_vless_sudoku_service_action start >/dev/null 2>&1 || failed=1
+        [ "$failed" -ne 0 ] || vless_sudoku_running || failed=1
+      elif [ "$failed" -eq 0 ]; then
+        nobrand_vless_sudoku_service_action stop >/dev/null 2>&1 || failed=1
+      fi
+      ;;
+  esac
+  admin_lock_release
+  return "$failed"
+}
+
+nb_lifecycle_validate_protocol_scope() {
+  local scope="$1"
+  # Doctors alone are insufficient for multi-instance scopes because their
+  # enumerators intentionally skip malformed entries. Validate every matching
+  # authoritative state object before any recovery transaction can complete.
+  nb_lifecycle_protocol_scope_state_valid "$scope" || return 1
+  case "$scope" in
+    snell)
+      [ -n "$(snell_instance_ids 2>/dev/null)" ] && snell_doctor_all
+      ;;
+    hy2)
+      hysteria2_state_exists && hysteria2_doctor
+      ;;
+    tuic)
+      [ -n "$(tuic_instance_ids 2>/dev/null)" ] && tuic_doctor_all
+      ;;
+    vless-reality)
+      [ -n "$(reality_instance_ids 2>/dev/null)" ] && reality_doctor_all
+      ;;
+    vless-sudoku)
+      vless_sudoku_state_exists && vless_sudoku_doctor
+      ;;
+    ssh-tunnel)
+      ssh_tunnel_state_exists && ssh_tunnel_doctor
+      ;;
+    forward)
+      forward_state_valid "$NOBRAND_FORWARD_STATE_FILE" \
+        && jq -e '.rules | length > 0' "$NOBRAND_FORWARD_STATE_FILE" >/dev/null \
+        && forward_doctor
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+nb_lifecycle_run_protocol_install() {
+  local scope="$1" callback="$2" rc=0 prior_phase="" begin_phase=prepare
+  local recovery_mode=retry callback_phase_active=0 fingerprint="" callback_phase=""
+  local recovering=0 validate_only=0 callback_rc=0 restore_errexit=0 saved_err_trap=""
+  local transaction_preexisting=0 mutation_started=0 recovery_validated=0
+  shift 2
+  if [ "${NOBRAND_MANAGER_SESSION_ACTIVE:-0}" -ne 1 ]; then
+    "$callback" "$@"
+    return $?
+  fi
+  require_root || return 1
+  require_linux || return 1
+  nb_lifecycle_lock_acquire || return 1
+  if [ -n "${NOBRAND_RECOVERY_EXPECTED_SCOPE:-}" ]; then
+    [ "$NOBRAND_RECOVERY_EXPECTED_SCOPE" = "$scope" ] \
+      && nb_lifecycle_tx_valid \
+      && [ "$(nb_lifecycle_field STATUS)" = in-progress ] \
+      && [ "$(nb_lifecycle_field OPERATION)" = install ] \
+      && [ "$(nb_lifecycle_scope)" = "$scope" ] || {
+        nb_lifecycle_lock_release
+        warn "$(t '原恢复事务已由其它进程改变；拒绝把旧选择作为新的协议安装执行。' \
+          'The recovery transaction changed in another process; refusing to execute the stale choice as a new protocol install.')"
+        return 1
+      }
+  fi
+  if nb_lifecycle_tx_valid \
+     && [ "$(nb_lifecycle_field STATUS)" = in-progress ] \
+     && [ "$(nb_lifecycle_field OPERATION)" = install ] \
+     && [ "$(nb_lifecycle_scope)" = "$scope" ]; then
+    recovering=1
+    transaction_preexisting=1
+    prior_phase="$(nb_lifecycle_field LAST_COMPLETED_PHASE)"
+    begin_phase="$prior_phase"
+    mutation_started="$(nb_lifecycle_mutation_started)" || {
+      nb_lifecycle_lock_release
+      return 1
+    }
+    if [ "$mutation_started" = 0 ]; then
+      nb_lifecycle_clear || {
+        nb_lifecycle_lock_release
+        return 1
+      }
+      if nb_lifecycle_protocol_retry_authorized "$scope"; then
+        # This invocation carries a new, explicit same-scope request. Discard
+        # the stale unmutated record and execute the current request as a fresh
+        # transaction now, rather than requiring a second invocation.
+        recovering=0
+        transaction_preexisting=0
+        prior_phase=""
+        begin_phase=prepare
+        mutation_started=0
+      else
+        # No component mutation happened, so there is no request to reconstruct.
+        # A no-arg recovery must never turn lost interactive choices into defaults
+        # or validate an unrelated pre-existing instance as the requested install.
+        nb_lifecycle_lock_release
+        t "${scope} 操作在写入协议变更前中止；已清除临时恢复信息，请从管理菜单重新开始。" \
+          "${scope} stopped before any protocol change; temporary recovery metadata was cleared. Start it again from the manager menu."
+        return 0
+      fi
+    else
+      recovery_mode="$(nb_lifecycle_protocol_recovery_mode "$scope" "$prior_phase")" || {
+        nb_lifecycle_lock_release
+        return 1
+      }
+      if [ "$recovery_mode" = retry ] && [ "$scope" = forward ]; then
+        nb_lifecycle_lock_release
+        warn "$(t \
+          'Forward 权威状态未变化，但原始请求与系统前态未持久记录；自动清理或重放并不安全。恢复信息已原样保留，请人工检查后处理。' \
+          'Forward authoritative state is unchanged, but the original request and system pre-state were not durably recorded; automatic cleanup or replay is unsafe. Recovery metadata was preserved exactly; inspect the host and resolve it manually.')"
+        return 1
+      fi
+      if [ "$recovery_mode" = retry ] \
+         && ! nb_lifecycle_protocol_retry_authorized "$scope"; then
+        nb_lifecycle_lock_release
+        warn "$(t \
+          "${scope} 的原安装参数未写入恢复记录。为避免使用默认值静默重放，请显式重新执行同一组件的安装命令。" \
+          "The original ${scope} install request was not stored. To avoid silently replaying defaults, explicitly run the same component install command again.")"
+        return 1
+      fi
+      case "$recovery_mode" in validate|validate-changed) validate_only=1 ;; esac
+      [[ "$prior_phase" != callback-* ]] || callback_phase_active=1
+    fi
+  fi
+  if [ "$transaction_preexisting" -eq 0 ]; then
+    nb_lifecycle_pre_mutation_snapshot || {
+      nb_lifecycle_lock_release
+      return 1
+    }
+  fi
+  if [ "$transaction_preexisting" -eq 1 ] && [ "$validate_only" -eq 1 ]; then
+    # Keep the durable callback/validation recovery point byte-for-byte until
+    # state-driven reconciliation and its doctor both succeed.
+    NOBRAND_LIFECYCLE_OPERATION=install
+    NOBRAND_LIFECYCLE_SCOPE="$scope"
+    NOBRAND_LIFECYCLE_ACTIVE=1
+    NOBRAND_LIFECYCLE_MUTATION_STARTED="$mutation_started"
+  else
+    nb_lifecycle_begin install "$begin_phase" 0 0 0 0 0 0 "$scope" || {
+      [ "$transaction_preexisting" -ne 0 ] || nb_lifecycle_pre_mutation_disarm
+      nb_lifecycle_lock_release
+      return 1
+    }
+  fi
+  if [ "$rc" -eq 0 ] && ! nobrand_manager_installation_valid; then
+    # Protocol recovery cannot repair the manager as a side effect. Besides
+    # being outside this scope, such a write would destroy the pre-mutation
+    # guarantee when the original protocol request is no longer available.
+    warn "$(t \
+      'NoBrand 管理器当前无效；请先修复管理器，再重试该协议操作。' \
+      'The NoBrand manager is invalid; repair the manager before retrying this protocol action.')"
+    rc=1
+  fi
+  if [ "$rc" -eq 0 ] && [ "$validate_only" -eq 1 ]; then
+    nb_lifecycle_reconcile_protocol_scope "$scope" || {
+      warn "$(t "${scope} 的 state 驱动恢复失败；保留原范围与恢复阶段以便重试。" \
+        "State-driven ${scope} reconciliation failed; the original scope and recovery phase were retained for retry.")"
+      rc=1
+    }
+  fi
+  if [ "$rc" -eq 0 ] && [ "$validate_only" -eq 1 ]; then
+    nb_lifecycle_validate_protocol_scope "$scope" || {
+      warn "$(t "${scope} 恢复后的状态或运行时验证失败；保留范围信息以便重试。" \
+        "${scope} state or runtime validation failed after recovery; scoped metadata was retained for retry.")"
+      rc=1
+    }
+    [ "$rc" -ne 0 ] || recovery_validated=1
+  fi
+  if [ "$rc" -eq 0 ] && [ "$validate_only" -eq 0 ] \
+     && [ "$callback_phase_active" -eq 0 ]; then
+    nb_lifecycle_checkpoint install state-layout || rc=$?
+  fi
+  if [ "$rc" -eq 0 ] && [ "$validate_only" -eq 0 ] \
+     && [ "$callback_phase_active" -eq 0 ]; then
+    fingerprint="$(nb_lifecycle_protocol_scope_fingerprint "$scope")" || rc=$?
+    if [ "$rc" -eq 0 ]; then
+      callback_phase="callback-${fingerprint:0:55}"
+      nb_lifecycle_checkpoint install "$callback_phase" || rc=$?
+    fi
+  fi
+  if [ "$rc" -eq 0 ] && [ "$validate_only" -eq 0 ]; then
+    # Calling a shell function on the left side of `||` disables errexit for
+    # every command in that function. Several established installers rely on
+    # the script's fail-fast mode, so run the callback in an isolated simple
+    # command while temporarily suppressing only this wrapper's ERR trap.
+    case "$-" in *e*) restore_errexit=1 ;; esac
+    saved_err_trap="$(trap -p ERR || true)"
+    trap - ERR
+    set +e
+    (
+      set -Eeuo pipefail
+      NOBRAND_LIFECYCLE_LOCK_FLOOR="${NOBRAND_LIFECYCLE_LOCK_HELD:-0}"
+      NOBRAND_LIFECYCLE_PREMUTATION_ARMED="${NOBRAND_LIFECYCLE_PREMUTATION_ARMED:-0}"
+      NOBRAND_LIFECYCLE_PREMUTATION_PRIOR_PRESENT="${NOBRAND_LIFECYCLE_PREMUTATION_PRIOR_PRESENT:-0}"
+      NOBRAND_LIFECYCLE_PREMUTATION_PRIOR_RECORD="${NOBRAND_LIFECYCLE_PREMUTATION_PRIOR_RECORD:-}"
+      NOBRAND_PROTOCOL_CALLBACK_ATTEMPT_MUTATION=0
+      nb_lifecycle_signal_handlers_install
+      trap 'callback_rc=$?; trap - ERR; exit "$callback_rc"' ERR
+      "$callback" "$@"
+      # Commit the lifecycle checkpoint in the callback process.  The parent
+      # cannot observe a successful callback return before this write is
+      # durable. A prior retry transaction may already carry MUTATION_STARTED,
+      # so require proof that this callback attempt crossed its own boundary.
+      if [ "$NOBRAND_PROTOCOL_CALLBACK_ATTEMPT_MUTATION" -eq 1 ]; then
+        nb_lifecycle_checkpoint install ready-to-validate
+      fi
+    )
+    callback_rc=$?
+    [ "$restore_errexit" -eq 0 ] || set -e
+    if [ -n "$saved_err_trap" ]; then
+      eval "$saved_err_trap"
+    else
+      trap - ERR
+    fi
+    [ "$callback_rc" -eq 0 ] || rc="$callback_rc"
+  fi
+  if nb_lifecycle_tx_valid \
+     && [ "$(nb_lifecycle_field STATUS)" = in-progress ] \
+     && [ "$(nb_lifecycle_field OPERATION)" = install ] \
+     && [ "$(nb_lifecycle_scope)" = "$scope" ] \
+     && [ "$(nb_lifecycle_mutation_started)" = 1 ]; then
+    nb_lifecycle_pre_mutation_disarm
+  fi
+  if [ "$rc" -ne 0 ] && nb_lifecycle_tx_valid \
+     && [ "$(nb_lifecycle_field OPERATION)" = install ] \
+     && [ "$(nb_lifecycle_scope)" = "$scope" ] \
+     && [ "$(nb_lifecycle_mutation_started)" = 0 ]; then
+    nb_lifecycle_restore_pre_mutation || rc=1
+  fi
+  if [ "$rc" -eq 0 ]; then
+    if [ "$validate_only" -eq 1 ]; then
+      nb_lifecycle_checkpoint install ready-to-validate || rc=$?
+    elif nb_lifecycle_tx_valid && [ "$(nb_lifecycle_mutation_started)" = 0 ]; then
+      # A duplicate/existing-instance callback can intentionally be a no-op.
+      # It must not complete a fresh transaction against unrelated state.
+      nb_lifecycle_restore_pre_mutation || rc=1
+    elif ! nb_lifecycle_tx_valid \
+         || [ "$(nb_lifecycle_field LAST_COMPLETED_PHASE)" != ready-to-validate ]; then
+      # In a recovering callback transaction MUTATION_STARTED may belong to an
+      # earlier attempt. Without this attempt's child checkpoint, keep the
+      # callback fingerprint and refuse to validate or complete unrelated state.
+      warn "$(t \
+        "${scope} 本次安装重试未提交新的协议变更；已保留原回调恢复点，未确认现有实例。" \
+        "This ${scope} install retry committed no new protocol change; the original callback recovery point was retained and existing instances were not acknowledged.")"
+      rc=1
+    fi
+  fi
+  if [ "$rc" -eq 0 ] && [ "${NOBRAND_LIFECYCLE_ACTIVE:-0}" -eq 1 ]; then
+    nobrand_manager_installation_valid || rc=$?
+  fi
+  if [ "$rc" -eq 0 ] && [ "${NOBRAND_LIFECYCLE_ACTIVE:-0}" -eq 1 ] \
+     && [ "$recovering" -eq 1 ] && [ "$recovery_validated" -eq 0 ]; then
+    nb_lifecycle_validate_protocol_scope "$scope" || {
+      warn "$(t "${scope} 恢复后的状态或运行时验证失败；保留范围信息以便重试。" \
+        "${scope} state or runtime validation failed after recovery; scoped metadata was retained for retry.")"
+      rc=1
+    }
+  fi
+  if [ "$rc" -eq 0 ] && [ "${NOBRAND_LIFECYCLE_ACTIVE:-0}" -eq 1 ]; then
+    nb_lifecycle_complete install || rc=$?
+  fi
+  nb_lifecycle_lock_release
+  return "$rc"
+}
+
+nb_lifecycle_run_ingress_action() {
+  local rc=0 lifecycle_format="" mutation_started=0
+  if [ "${NOBRAND_MANAGER_SESSION_ACTIVE:-0}" -ne 1 ]; then
+    nobrand_run_ingress_action_unscoped
+    return $?
+  fi
+  nb_lifecycle_lock_acquire || return 1
+  if nb_lifecycle_tx_valid \
+     && [ "$(nb_lifecycle_field STATUS)" = in-progress ]; then
+    if [ "$(nb_lifecycle_field OPERATION)" != configure ] \
+       || [ "$(nb_lifecycle_scope)" != ingress ]; then
+      nb_lifecycle_lock_release
+      return 1
+    fi
+    lifecycle_format="$(nb_lifecycle_field FORMAT)"
+    mutation_started="$(nb_lifecycle_mutation_started)" || {
+      nb_lifecycle_lock_release
+      return 1
+    }
+    if [ "$lifecycle_format" = nobrand-lifecycle-v2 ] \
+       && [ "$mutation_started" = 0 ] \
+       && nb_lifecycle_protocol_retry_authorized ingress; then
+      nb_lifecycle_clear || {
+        nb_lifecycle_lock_release
+        return 1
+      }
+    else
+      nb_lifecycle_lock_release
+      warn "$(t \
+        '现有 Ingress 配置事务不能由当前请求安全重放；已原样保留恢复信息。' \
+        'The existing Ingress configure transaction cannot be safely replayed by this request; recovery metadata was preserved exactly.')"
+      return 1
+    fi
+  fi
+  nb_lifecycle_pre_mutation_snapshot || {
+    nb_lifecycle_lock_release
+    return 1
+  }
+  nb_lifecycle_begin configure prepare 0 0 0 0 0 0 ingress || {
+    nb_lifecycle_pre_mutation_disarm
+    nb_lifecycle_lock_release
+    return 1
+  }
+  nobrand_run_ingress_action_unscoped || rc=$?
+  if [ "$rc" -ne 0 ] \
+     && nb_lifecycle_tx_valid \
+     && [ "$(nb_lifecycle_field OPERATION)" = configure ] \
+     && [ "$(nb_lifecycle_scope)" = ingress ] \
+     && [ "$(nb_lifecycle_mutation_started)" = 0 ]; then
+    nb_lifecycle_restore_pre_mutation || rc=1
+  fi
+  if [ "$rc" -eq 0 ] \
+     && nb_lifecycle_tx_valid \
+     && [ "$(nb_lifecycle_field OPERATION)" = configure ] \
+     && [ "$(nb_lifecycle_scope)" = ingress ] \
+     && [ "$(nb_lifecycle_mutation_started)" = 0 ]; then
+    # A mutating Ingress action that made no durable change is a successful
+    # no-op. Do not replace a prior completed lifecycle record with it.
+    nb_lifecycle_restore_pre_mutation || rc=1
+    nb_lifecycle_lock_release
+    return "$rc"
+  fi
+  if [ "$rc" -eq 0 ]; then
+    nb_lifecycle_checkpoint configure state-committed || rc=$?
+  fi
+  if [ "$rc" -eq 0 ] && [ -e "$NOBRAND_INGRESS_STATE_FILE" ]; then
+    nb_ingress_state_valid || rc=$?
+  fi
+  if [ "$rc" -eq 0 ]; then
+    nb_lifecycle_checkpoint configure ready-to-validate || rc=$?
+  fi
+  if [ "$rc" -eq 0 ]; then
+    nb_lifecycle_complete configure || rc=$?
+  fi
+  nb_lifecycle_lock_release
+  return "$rc"
+}
+
 nb_reconcile_partial_uninstall() {
   local ssh_pending="" ssh_policy="" ssh_token="" ssh_pid="" ssh_origin=""
   # A durable backup restore in `applying` state may have crashed between
@@ -25072,6 +26942,11 @@ do_install_impl() {
     "$MIERU_RUNTIME_RESOLVED_SHA256" \
     "$MIERU_RUNTIME_RESOLVED_CHECKSUM_URL"
   runtime_tx="$(mieru_runtime_snapshot)" || { rm -f "$tmp"; return 1; }
+  nb_lifecycle_mark_protocol_mutation_started mieru || {
+    rm -f "$tmp"
+    mieru_runtime_commit "$runtime_tx" >/dev/null 2>&1 || true
+    return 1
+  }
   if ! ( install_package "$tmp" "$pm" ) || ! mieru_assert_runtime_version "$ver"; then
     rm -f "$tmp"
     mieru_runtime_rollback "$runtime_tx" 2>/dev/null || true
@@ -25224,11 +27099,17 @@ do_reconfigure_impl() {
       print_summary current
       return 0
     fi
-    local state_only_auto_host=""
+    local state_only_auto_host="" state_only_mutation_marked=0
     admin_lock_acquire || return 1
     tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
     if [ "$ADVERTISE_HOST" != "$old_advertise_host" ] \
        || [ "$ADVERTISE_PORT" != "$old_advertise_port" ]; then
+      nb_lifecycle_mark_protocol_mutation_started mieru || {
+        users_tx_commit "$tx"
+        admin_lock_release
+        return 1
+      }
+      state_only_mutation_marked=1
       if ! users_set_advertise_endpoint "$old_user" "$ADVERTISE_HOST" "$ADVERTISE_PORT"; then
         users_tx_rollback "$tx" 0
         admin_lock_release
@@ -25243,6 +27124,13 @@ do_reconfigure_impl() {
         'Client display endpoint conflicts with another user')"
     fi
     users_sync_primary_globals
+    if [ "$state_only_mutation_marked" -eq 0 ]; then
+      nb_lifecycle_mark_protocol_mutation_started mieru || {
+        users_tx_commit "$tx"
+        admin_lock_release
+        return 1
+      }
+    fi
     if ! save_install_state; then
       users_tx_rollback "$tx" 0
       admin_lock_release
@@ -25285,6 +27173,11 @@ do_reconfigure_impl() {
   MULTI_USER_MODE=1
   admin_lock_acquire || return 1
   tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
+  nb_lifecycle_mark_protocol_mutation_started mieru || {
+    users_tx_commit "$tx"
+    admin_lock_release
+    return 1
+  }
   _U_NAME="$USERNAME" _U_PASS="$PASSWORD" _U_PORT="$PORT" _U_PROTO="$PROTOCOL"
   _U_ADVERTISE_HOST="$ADVERTISE_HOST" _U_ADVERTISE_PORT="$ADVERTISE_PORT"
   _U_PRIMARY="${old_user}"
@@ -25393,20 +27286,21 @@ json.dump(d, open(path, "w"), indent=2)
 }
 
 do_install() {
-  local operation state manager_only=0 partial_uninstall_repair=0 lifecycle_phase="" rc=0
-  local allow_transition=0 prior_tx_valid=0 prior_operation="" prior_status=""
-  local prior_txid="" prior_started="" prior_phase="" prior_mieru_owned=0
-  local prior_preserve_package=0 prior_preserve_user=0 prior_preserve_group=0
-  local prior_preserve_shared=0
+  local operation="" scope=mieru state manager_only=0 partial_uninstall_repair=0 lifecycle_phase="" rc=0
+  local recovery_matches=0 validate_only=0 lifecycle_format="" current_mutation=0
+  local allow_transition=0 transaction_preexisting=0
   NOBRAND_INSTALL_CANCELLED=0
   require_root
   require_linux
   require_cmd curl
   state="$(nb_classify_installation_state)" || return 1
   case "$state" in
-    CLEAN|CURRENT_PARTIAL_INSTALL) operation=install ;;
-    CURRENT_COMPLETE|CURRENT_PARTIAL_REPAIR|CURRENT_PARTIAL_UNINSTALL|LEGACY_SUPPORTED)
-      operation=repair
+    CLEAN|CURRENT_COMPLETE|CURRENT_PARTIAL_INSTALL|CURRENT_PARTIAL_REPAIR|\
+      CURRENT_PARTIAL_UNINSTALL|LEGACY_SUPPORTED) ;;
+    CURRENT_PARTIAL_CONFIGURE)
+      warn "$(t '未完成的组件配置必须先按其记录范围恢复，拒绝启动 Mieru。' \
+        'The incomplete component configuration must be recovered in its recorded scope; refusing to start Mieru.')"
+      return 1
       ;;
     LEGACY_UNSUPPORTED) nb_fail_legacy_state; return 1 ;;
     *) nb_fail_ambiguous_state; return 1 ;;
@@ -25418,10 +27312,156 @@ do_install() {
     nb_lifecycle_lock_release
     return 1
   }
+  if [ -n "${NOBRAND_RECOVERY_EXPECTED_SCOPE:-}" ]; then
+    case "$NOBRAND_RECOVERY_EXPECTED_SCOPE" in
+      mieru)
+        if nb_lifecycle_tx_valid \
+           && [ "$(nb_lifecycle_field STATUS)" = in-progress ] \
+           && [ "$(nb_lifecycle_scope)" = mieru ]; then
+          case "$(nb_lifecycle_field OPERATION)" in install|repair) recovery_matches=1 ;; esac
+        fi
+        ;;
+      global)
+        if nb_lifecycle_tx_valid \
+           && [ "$(nb_lifecycle_field STATUS)" = in-progress ] \
+           && [ "$(nb_lifecycle_scope)" = global ]; then
+          recovery_matches=1
+        elif [ "$state" = CURRENT_PARTIAL_UNINSTALL ]; then
+          recovery_matches=1
+        elif declare -F nobrand_backup_restore_transaction_present >/dev/null 2>&1 \
+             && nobrand_backup_restore_transaction_present \
+             && nobrand_backup_restore_transaction_valid; then
+          recovery_matches=1
+        fi
+        ;;
+    esac
+    if [ "$recovery_matches" -ne 1 ]; then
+      nb_lifecycle_lock_release
+      warn "$(t '原恢复事务已由其它进程改变；拒绝把旧选择作为新的 Mieru/全局操作执行。' \
+        'The recovery transaction changed in another process; refusing to execute the stale choice as a new Mieru/global operation.')"
+      return 1
+    fi
+  fi
   case "$state" in
-    CLEAN|CURRENT_PARTIAL_INSTALL) operation=install ;;
-    CURRENT_COMPLETE|CURRENT_PARTIAL_REPAIR|CURRENT_PARTIAL_UNINSTALL|LEGACY_SUPPORTED)
+    CLEAN) operation=install ;;
+    CURRENT_COMPLETE|LEGACY_SUPPORTED)
+      if mita_v3_install_state_valid 2>/dev/null || mita_installed 2>/dev/null; then
+        operation=repair
+      else
+        operation=install
+      fi
+      ;;
+    CURRENT_PARTIAL_UNINSTALL)
       operation=repair
+      scope=global
+      ;;
+    CURRENT_PARTIAL_INSTALL|CURRENT_PARTIAL_REPAIR)
+      if nb_lifecycle_tx_valid && [ "$(nb_lifecycle_field STATUS)" = in-progress ]; then
+        scope="$(nb_lifecycle_scope)" || {
+          nb_lifecycle_lock_release
+          return 1
+        }
+        case "$scope" in
+          mieru)
+            transaction_preexisting=1
+            operation="$(nb_lifecycle_field OPERATION)"
+            lifecycle_format="$(nb_lifecycle_field FORMAT)"
+            lifecycle_phase="$(nb_lifecycle_field LAST_COMPLETED_PHASE)"
+            current_mutation="$(nb_lifecycle_mutation_started)" || {
+              nb_lifecycle_lock_release
+              return 1
+            }
+            if [ "$lifecycle_format" = nobrand-lifecycle-v2 ] \
+               && [ "$current_mutation" = 0 ]; then
+              nb_lifecycle_clear || {
+                nb_lifecycle_lock_release
+                return 1
+              }
+              if [ -n "${NOBRAND_RECOVERY_EXPECTED_SCOPE:-}" ]; then
+                nb_lifecycle_lock_release
+                t 'Mieru 操作在写入协议变更前中止；已清除临时恢复信息，请从管理菜单重新开始。' \
+                  'Mieru stopped before any protocol change; temporary recovery metadata was cleared. Start it again from the manager menu.'
+                return 0
+              fi
+              [ "${NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE:-}" = mieru ] || {
+                nb_lifecycle_lock_release
+                return 1
+              }
+              # The current command carries a new explicit Mieru request. Run
+              # it now as a fresh invocation instead of making the user retry a
+              # second time after clearing stale pre-mutation metadata.
+              transaction_preexisting=0
+              lifecycle_format=""
+              lifecycle_phase=prepare
+              current_mutation=0
+              if mita_v3_install_state_valid 2>/dev/null || mita_installed 2>/dev/null; then
+                operation=repair
+              else
+                operation=install
+              fi
+            fi
+            if [ "$lifecycle_format" = nobrand-lifecycle-v2 ]; then
+              case "$lifecycle_phase" in
+                state-committed|ready-to-validate) validate_only=1 ;;
+                *)
+                  if [ -n "${NOBRAND_RECOVERY_EXPECTED_SCOPE:-}" ]; then
+                    nb_lifecycle_lock_release
+                    warn "$(t \
+                      '原 Mieru 请求未写入恢复记录。为避免使用默认值静默重放，请显式执行 nobrand mieru install；若原操作是重新配置，请执行 nobrand mieru reconfigure。' \
+                      'The original Mieru request was not stored. To avoid silently replaying defaults, explicitly run nobrand mieru install, or nobrand mieru reconfigure if that was the original action.')"
+                    return 1
+                  fi
+                  [ "${NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE:-}" = mieru ] || {
+                    nb_lifecycle_lock_release
+                    return 1
+                  }
+                  ;;
+              esac
+            elif [ "$lifecycle_format" = nobrand-lifecycle-v1 ]; then
+              # v1 has no mutation marker or reliable install-vs-reconfigure
+              # scope. Only phases that prove authoritative state was committed
+              # may recover unattended; earlier phases require the operator to
+              # choose install or reconfigure explicitly and recollect input.
+              case "$lifecycle_phase" in
+                state-committed|ready-to-validate) validate_only=1 ;;
+                *)
+                  if [ -n "${NOBRAND_RECOVERY_EXPECTED_SCOPE:-}" ]; then
+                    nb_lifecycle_lock_release
+                    warn "$(t \
+                      '旧版 Mieru 恢复记录无法证明原操作或参数。请显式执行 nobrand mieru install 或 nobrand mieru reconfigure。' \
+                      'The legacy Mieru recovery record cannot prove the original action or request. Explicitly run nobrand mieru install or nobrand mieru reconfigure.')"
+                    return 1
+                  fi
+                  [ "${NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE:-}" = mieru ] || {
+                    nb_lifecycle_lock_release
+                    return 1
+                  }
+                  ;;
+              esac
+            fi
+            ;;
+          global) operation=repair ;;
+          *)
+            nb_lifecycle_lock_release
+            warn "$(t "未完成的 ${scope} 操作不能由 Mieru 恢复" \
+              "The unfinished ${scope} operation cannot be recovered by Mieru")"
+            return 1
+            ;;
+        esac
+      elif declare -F nobrand_backup_restore_transaction_present >/dev/null 2>&1 \
+           && nobrand_backup_restore_transaction_present; then
+        operation=repair
+        scope=global
+      else
+        nb_lifecycle_lock_release
+        warn "$(t '检测到缺少组件范围的管理器残留；请先运行无参数安装器修复管理器。' \
+          'Manager residue without component scope was detected; run the installer without arguments to repair the manager first.')"
+        return 1
+      fi
+      ;;
+    CURRENT_PARTIAL_CONFIGURE)
+      nb_lifecycle_lock_release
+      return 1
       ;;
     LEGACY_UNSUPPORTED)
       nb_lifecycle_lock_release
@@ -25434,7 +27474,7 @@ do_install() {
       return 1
       ;;
   esac
-  if [ "$state" = CURRENT_PARTIAL_UNINSTALL ]; then
+  if [ "$state" = CURRENT_PARTIAL_UNINSTALL ] || [ "$scope" = global ]; then
     partial_uninstall_repair=1
   elif [ "$state" = CURRENT_PARTIAL_REPAIR ] \
        && declare -F nobrand_backup_restore_transaction_present >/dev/null 2>&1 \
@@ -25449,23 +27489,15 @@ do_install() {
   if [ "$partial_uninstall_repair" -eq 1 ]; then
     lifecycle_phase='partial-uninstall-prepare'
     [ "$state" != CURRENT_PARTIAL_UNINSTALL ] || allow_transition=1
-  else
+  elif [ -z "$lifecycle_phase" ]; then
     lifecycle_phase=prepare
   fi
-  if nb_lifecycle_tx_valid; then
-    prior_tx_valid=1
-    prior_operation="$(nb_lifecycle_field OPERATION)"
-    prior_status="$(nb_lifecycle_field STATUS)"
-    prior_txid="$(nb_lifecycle_field TRANSACTION_ID)"
-    prior_started="$(nb_lifecycle_field STARTED_AT)"
-    prior_phase="$(nb_lifecycle_field LAST_COMPLETED_PHASE)"
-    prior_mieru_owned="$(nb_lifecycle_field MIERU_OWNED)"
-    prior_preserve_package="$(nb_lifecycle_field MIERU_PRESERVE_PACKAGE)"
-    prior_preserve_user="$(nb_lifecycle_field MIERU_PRESERVE_USER)"
-    prior_preserve_group="$(nb_lifecycle_field MIERU_PRESERVE_GROUP)"
-    prior_preserve_shared="$(nb_lifecycle_field MIERU_PRESERVE_SHARED)"
-  fi
-  nb_lifecycle_begin "$operation" "$lifecycle_phase" 0 0 0 0 0 "$allow_transition" || {
+  nb_lifecycle_pre_mutation_snapshot || {
+    nb_lifecycle_lock_release
+    return 1
+  }
+  nb_lifecycle_begin "$operation" "$lifecycle_phase" 0 0 0 0 0 "$allow_transition" "$scope" || {
+    nb_lifecycle_pre_mutation_disarm
     nb_lifecycle_lock_release
     return 1
   }
@@ -25474,35 +27506,52 @@ do_install() {
     # Mieru node. State-backed protocols are reconciled individually; if no
     # authoritative node state survived, only manager/schema are repaired.
     manager_only=1
+    nb_lifecycle_mark_mutation_started || {
+      rc=$?
+      nb_lifecycle_restore_pre_mutation || rc=1
+      nb_lifecycle_lock_release
+      return "$rc"
+    }
     nb_reconcile_partial_uninstall
     rc=$?
-  else
+  elif [ "$validate_only" -eq 0 ]; then
+    NOBRAND_PROTOCOL_CALLBACK_ATTEMPT_MUTATION=0
     do_install_impl
     rc=$?
   fi
   if [ "${NOBRAND_INSTALL_CANCELLED:-0}" -eq 1 ]; then
-    if [ "$prior_tx_valid" -eq 1 ]; then
-      nb_lifecycle_write "$prior_operation" "$prior_status" "$prior_txid" \
-        "$prior_started" "$prior_phase" "$prior_mieru_owned" \
-        "$prior_preserve_package" "$prior_preserve_user" "$prior_preserve_group" \
-        "$prior_preserve_shared" || {
-          nb_lifecycle_lock_release
-          return 1
-        }
-      NOBRAND_LIFECYCLE_ACTIVE=0
-      NOBRAND_LIFECYCLE_OPERATION=""
-    else
-      nb_lifecycle_clear || {
-        nb_lifecycle_lock_release
-        return 1
-      }
-    fi
+    nb_lifecycle_restore_pre_mutation || {
+      nb_lifecycle_lock_release
+      return 1
+    }
     nb_lifecycle_lock_release
     return 0
   fi
   if [ "$rc" -ne 0 ]; then
+    if [ "$partial_uninstall_repair" -eq 0 ] \
+       && [ "$validate_only" -eq 0 ] \
+       && [ "${NOBRAND_PROTOCOL_CALLBACK_ATTEMPT_MUTATION:-0}" -eq 0 ]; then
+      nb_lifecycle_restore_pre_mutation || rc=1
+    elif nb_lifecycle_tx_valid && [ "$(nb_lifecycle_mutation_started)" = 0 ]; then
+      nb_lifecycle_restore_pre_mutation || rc=1
+    fi
     nb_lifecycle_lock_release
     return "$rc"
+  fi
+  if [ "$partial_uninstall_repair" -eq 0 ] \
+     && [ "$validate_only" -eq 0 ] \
+     && [ "${NOBRAND_PROTOCOL_CALLBACK_ATTEMPT_MUTATION:-0}" -eq 0 ]; then
+    nb_lifecycle_restore_pre_mutation || {
+      nb_lifecycle_lock_release
+      return 1
+    }
+    nb_lifecycle_lock_release
+    if [ "$transaction_preexisting" -eq 1 ]; then
+      warn "$(t \
+        'Mieru 本次安装重试未提交新的协议变更；已原样保留先前恢复事务。' \
+        'This Mieru install retry committed no new protocol change; the prior recovery transaction was preserved exactly.')"
+    fi
+    return 1
   fi
   if [ "$partial_uninstall_repair" -eq 1 ] \
      && declare -F ssh_tunnel_state_exists >/dev/null 2>&1 \
@@ -25558,42 +27607,106 @@ do_install() {
 }
 
 do_reconfigure() {
-  local rc=0
+  local rc=0 transaction_preexisting=0 validate_only=0
+  local lifecycle_format="" lifecycle_phase=prepare current_mutation=0
   require_root
   require_linux
   mita_installed || die "$(t 'mita 未安装，请先执行安装' 'mita is not installed; run install first')"
   nb_lifecycle_lock_acquire || return 1
-  nb_lifecycle_begin repair prepare || {
+  if nb_lifecycle_tx_valid \
+     && [ "$(nb_lifecycle_field STATUS)" = in-progress ] \
+     && [ "$(nb_lifecycle_field OPERATION)" = repair ] \
+     && [ "$(nb_lifecycle_scope)" = mieru ]; then
+    transaction_preexisting=1
+    lifecycle_format="$(nb_lifecycle_field FORMAT)"
+    lifecycle_phase="$(nb_lifecycle_field LAST_COMPLETED_PHASE)"
+    current_mutation="$(nb_lifecycle_mutation_started)" || {
+      nb_lifecycle_lock_release
+      return 1
+    }
+    if [ "$lifecycle_format" = nobrand-lifecycle-v2 ] \
+       && [ "$current_mutation" = 0 ]; then
+      nb_lifecycle_clear || {
+        nb_lifecycle_lock_release
+        return 1
+      }
+      if [ -n "${NOBRAND_RECOVERY_EXPECTED_SCOPE:-}" ]; then
+        nb_lifecycle_lock_release
+        t 'Mieru 重新配置在写入变更前中止；已清除临时恢复信息，请从管理菜单重新开始。' \
+          'Mieru reconfigure stopped before any change; temporary recovery metadata was cleared. Start it again from the manager menu.'
+        return 0
+      fi
+      [ "${NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE:-}" = mieru ] || {
+        nb_lifecycle_lock_release
+        return 1
+      }
+      transaction_preexisting=0
+      lifecycle_format=""
+      lifecycle_phase=prepare
+      current_mutation=0
+    fi
+    if [ "$lifecycle_format" = nobrand-lifecycle-v2 ]; then
+      case "$lifecycle_phase" in
+        ready-to-validate) validate_only=1 ;;
+        *)
+          if [ -n "${NOBRAND_RECOVERY_EXPECTED_SCOPE:-}" ]; then
+            nb_lifecycle_lock_release
+            warn "$(t \
+              '原 Mieru 重新配置参数未写入恢复记录。为避免使用默认值静默重放，请显式执行 nobrand mieru reconfigure。' \
+              'The original Mieru reconfigure request was not stored. To avoid silently replaying defaults, explicitly run nobrand mieru reconfigure.')"
+            return 1
+          fi
+          [ "${NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE:-}" = mieru ] || {
+            nb_lifecycle_lock_release
+            return 1
+          }
+          ;;
+      esac
+    fi
+  elif [ -n "${NOBRAND_RECOVERY_EXPECTED_SCOPE:-}" ]; then
+    nb_lifecycle_lock_release
+    warn "$(t '原恢复事务已由其它进程改变；拒绝执行过期的 Mieru 重新配置恢复。' \
+      'The recovery transaction changed in another process; refusing stale Mieru reconfigure recovery.')"
+    return 1
+  fi
+  nb_lifecycle_pre_mutation_snapshot || {
     nb_lifecycle_lock_release
     return 1
   }
-  ensure_manager_state_layout 1
-  rc=$?
+  nb_lifecycle_begin repair "$lifecycle_phase" 0 0 0 0 0 0 mieru || {
+    nb_lifecycle_pre_mutation_disarm
+    nb_lifecycle_lock_release
+    return 1
+  }
+  NOBRAND_PROTOCOL_CALLBACK_ATTEMPT_MUTATION=0
+  if [ "$validate_only" -eq 0 ]; then
+    do_reconfigure_impl
+    rc=$?
+  fi
   if [ "$rc" -ne 0 ]; then
+    if [ "$validate_only" -eq 0 ] \
+       && [ "$NOBRAND_PROTOCOL_CALLBACK_ATTEMPT_MUTATION" -eq 0 ]; then
+      nb_lifecycle_restore_pre_mutation || rc=1
+    fi
     nb_lifecycle_lock_release
     return "$rc"
   fi
-  nb_lifecycle_checkpoint repair state-layout || {
-    rc=$?
+  if [ "$validate_only" -eq 0 ] \
+     && [ "$NOBRAND_PROTOCOL_CALLBACK_ATTEMPT_MUTATION" -eq 0 ]; then
+    # A user can accept every existing value. That is a successful no-op, not a
+    # repair transaction against which unrelated current state may be completed.
+    nb_lifecycle_restore_pre_mutation || {
+      nb_lifecycle_lock_release
+      return 1
+    }
     nb_lifecycle_lock_release
-    return "$rc"
-  }
-  install_self_script
-  rc=$?
-  if [ "$rc" -ne 0 ]; then
-    nb_lifecycle_lock_release
-    return "$rc"
-  fi
-  nb_lifecycle_checkpoint repair manager-ready || {
-    rc=$?
-    nb_lifecycle_lock_release
-    return "$rc"
-  }
-  do_reconfigure_impl
-  rc=$?
-  if [ "$rc" -ne 0 ]; then
-    nb_lifecycle_lock_release
-    return "$rc"
+    if [ "$transaction_preexisting" -eq 1 ]; then
+      warn "$(t \
+        'Mieru 本次重新配置重试未提交新的协议变更；已原样保留先前恢复事务。' \
+        'This Mieru reconfigure retry committed no new protocol change; the prior recovery transaction was preserved exactly.')"
+      return 1
+    fi
+    return 0
   fi
   nb_lifecycle_checkpoint repair ready-to-validate || {
     rc=$?
@@ -25762,6 +27875,7 @@ mita_uninstall_ledger_active() {
   nb_lifecycle_tx_valid \
     && [ "$(nb_lifecycle_field STATUS)" = in-progress ] \
     && [ "$(nb_lifecycle_field OPERATION)" = uninstall ] \
+    && [ "$(nb_lifecycle_scope)" = global ] \
     && [ "$(nb_lifecycle_field MIERU_OWNED)" = 1 ]
 }
 
@@ -26025,8 +28139,10 @@ do_uninstall() {
     t 'NoBrand 3 管理的 Mieru runtime 与协议资源已卸载' \
       'The NoBrand-3-managed Mieru runtime and protocol resources were removed'
   fi
-  t 'Mieru 协议资源已卸载；nobrand/nb 管理命令仍保留。' \
-    'Mieru protocol resources were removed; nobrand/nb management commands remain.'
+  if [ "${UNINSTALL_CONTEXT:-protocol}" != global ]; then
+    t 'Mieru 协议资源已卸载；nobrand/nb 管理命令仍保留。' \
+      'Mieru protocol resources were removed; nobrand/nb management commands remain.'
+  fi
 }
 
 status_binding_text() {
@@ -26598,15 +28714,85 @@ show_menu() {
 # ---------- NoBrand unified interactive presentation ----------
 
 nobrand_menu_run() {
-  local rc=0
+  local rc=0 restore_errexit=0 callback="${1:-}"
+  local global_uninstall_callback=0 authenticated_exit_rc=125
+  local auth_path="" auth_read_fd="" auth_write_fd="" auth_proof=""
+  local auth_expected='nobrand-global-uninstall-confirmed-v1'
+  if [ "$#" -eq 1 ] && [ "$callback" = nobrand_uninstall ]; then
+    global_uninstall_callback=1
+    # Separate read/write descriptors keep an out-of-band proof visible to the
+    # parent. Unlink immediately so crashes cannot leave an authentication file.
+    auth_path="$(mktemp_file)" || {
+      warn "$(t '无法创建全局卸载完成验证通道；未执行卸载' \
+        'Could not create the global-uninstall completion channel; uninstall was not run')"
+      return 0
+    }
+    if ! exec {auth_read_fd}<"$auth_path"; then
+      rm -f -- "$auth_path"
+      warn "$(t '无法打开全局卸载完成验证通道；未执行卸载' \
+        'Could not open the global-uninstall completion channel; uninstall was not run')"
+      return 0
+    fi
+    if ! exec {auth_write_fd}>"$auth_path"; then
+      exec {auth_read_fd}<&-
+      rm -f -- "$auth_path"
+      warn "$(t '无法打开全局卸载完成验证通道；未执行卸载' \
+        'Could not open the global-uninstall completion channel; uninstall was not run')"
+      return 0
+    fi
+    if ! rm -f -- "$auth_path"; then
+      exec {auth_write_fd}>&-
+      exec {auth_read_fd}<&-
+      warn "$(t '无法保护全局卸载完成验证通道；未执行卸载' \
+        'Could not secure the global-uninstall completion channel; uninstall was not run')"
+      return 0
+    fi
+    auth_path=""
+  fi
+  case "$-" in *e*) restore_errexit=1 ;; esac
   set +e
   (
     set -Eeuo pipefail
-    trap 'rc=$?; on_error' ERR
+    NOBRAND_MENU_GLOBAL_UNINSTALL_CONFIRMED=0
+    NOBRAND_LIFECYCLE_LOCK_FLOOR="${NOBRAND_LIFECYCLE_LOCK_HELD:-0}"
+    NOBRAND_LIFECYCLE_ACTIVE=0
+    NOBRAND_LIFECYCLE_OPERATION=""
+    NOBRAND_LIFECYCLE_SCOPE=""
+    NOBRAND_LIFECYCLE_MUTATION_STARTED=0
+    nb_lifecycle_signal_handlers_install
+    # Translate the terminal marker into a private subprocess status and write
+    # proof through the unlinked channel. The parent requires both signals.
+    trap 'rc=$?; if [ "$rc" -eq "${NOBRAND_MENU_EXIT_SUCCESS:-4}" ] \
+      && [ "$global_uninstall_callback" -eq 1 ] \
+      && [ "${NOBRAND_MENU_GLOBAL_UNINSTALL_CONFIRMED:-0}" = 1 ]; then \
+        if ! printf "%s\n" "$auth_expected" >&"$auth_write_fd"; then \
+          on_error; exit 1; \
+        fi; \
+        exit "$authenticated_exit_rc"; \
+      fi; on_error; exit 1' ERR
     "$@"
   )
   rc=$?
-  set -e
+  if [ "$global_uninstall_callback" -eq 1 ]; then
+    exec {auth_write_fd}>&- 2>/dev/null || true
+    IFS= read -r auth_proof <&"$auth_read_fd" || auth_proof=""
+    exec {auth_read_fd}<&- 2>/dev/null || true
+  fi
+  [ "$restore_errexit" -eq 0 ] || set -e
+  if [ "$rc" -eq "$authenticated_exit_rc" ] \
+     && [ "$global_uninstall_callback" -eq 1 ] \
+     && [ "$auth_proof" = "$auth_expected" ]; then
+    return "$NOBRAND_MENU_EXIT_SUCCESS"
+  fi
+  if [ "$rc" -ne 0 ] \
+     && nb_lifecycle_tx_valid \
+     && [ "$(nb_lifecycle_field STATUS)" = in-progress ] \
+     && ! nobrand_ssh_confirmation_pending; then
+    warn "$(t '操作在写入变更后中断；已保留组件范围恢复信息，当前管理器将退出。' \
+      'The action stopped after mutation; scoped recovery metadata was preserved and this manager will exit.')"
+    nb_lifecycle_lock_release_all >/dev/null 2>&1 || true
+    exit 1
+  fi
   if [ "$rc" -ne 0 ]; then
     warn "$(t '操作未完成；请重试或运行 nobrand doctor' \
       'Action did not complete; retry or run nobrand doctor')"
@@ -27258,61 +29444,307 @@ ingress_menu_reset_requests() {
 }
 
 ingress_menu_select_profile() {
-  nb_ingress_list
+  nb_ingress_list || return 1
   read_tty INGRESS_PROFILE_SELECTOR "$(t '入口配置 ID 或名称: ' 'Ingress profile ID or name: ')" \
     || INGRESS_PROFILE_SELECTOR=""
   [ -n "$INGRESS_PROFILE_SELECTOR" ] || { warn '未选择入口配置'; return 1; }
 }
 
+ingress_menu_interface_row_count() {
+  local rows="${1:-}" iface _address _state _default count=0
+  while IFS='|' read -r iface _address _state _default; do
+    [ -n "$iface" ] || continue
+    count=$((count + 1))
+  done <<<"$rows"
+  printf '%s' "$count"
+}
+
+ingress_menu_print_interface_rows() {
+  local rows="${1:-}" iface address state is_default index=0
+  while IFS='|' read -r iface address state is_default; do
+    [ -n "$iface" ] || continue
+    index=$((index + 1))
+    printf '  %s) %s  %s  [%s]%s\n' "$index" "$iface" "$address" "$state" \
+      "$([ "$is_default" = 1 ] && printf ' [默认出口/default egress]' || true)"
+  done <<<"$rows"
+}
+
+ingress_menu_interface_in_rows() {
+  local rows="${1:-}" expected="${2:-}" iface _address _state _default
+  while IFS='|' read -r iface _address _state _default; do
+    [ "$iface" = "$expected" ] && return 0
+  done <<<"$rows"
+  return 1
+}
+
+ingress_menu_pair_in_rows() {
+  local rows="${1:-}" expected_iface="${2:-}" expected_address="${3:-}"
+  local iface address _state _default
+  while IFS='|' read -r iface address _state _default; do
+    [ "$iface" = "$expected_iface" ] && [ "$address" = "$expected_address" ] && return 0
+  done <<<"$rows"
+  return 1
+}
+
+ingress_menu_row_at() {
+  local rows="${1:-}" wanted="${2:-}" row iface _address _state _default index=0
+  while IFS= read -r row; do
+    IFS='|' read -r iface _address _state _default <<<"$row"
+    [ -n "$iface" ] || continue
+    index=$((index + 1))
+    if [ "$index" -eq "$wanted" ]; then
+      printf '%s' "$row"
+      return 0
+    fi
+  done <<<"$rows"
+  return 1
+}
+
+ingress_menu_collect_listener() {
+  local rows="$1" row_count="$2" selected="" choice="" value=""
+  local default_iface="" default_address="" _state _default
+  if [ "$row_count" -eq 1 ]; then
+    selected="$(ingress_menu_row_at "$rows" 1)" || return 1
+    IFS='|' read -r default_iface default_address _state _default <<<"$selected"
+    while true; do
+      if ! read_tty value "$(t "网络接口 / Interface [${default_iface}]: " "Interface [${default_iface}]: ")"; then
+        warn '已取消选择本地监听网络接口'
+        return 1
+      fi
+      [ -n "$value" ] || value="$default_iface"
+      if ingress_menu_interface_in_rows "$rows" "$value"; then
+        INGRESS_INTERFACE="$value"
+        break
+      fi
+      warn "网络接口不存在或没有可用的非回环 IPv4: ${value}"
+    done
+    while true; do
+      if ! read_tty value "$(t "本地监听 IPv4 [${default_address}]: " "Local listener IPv4 [${default_address}]: ")"; then
+        warn '已取消选择本地监听 IPv4'
+        return 1
+      fi
+      [ -n "$value" ] || value="$default_address"
+      if ingress_menu_pair_in_rows "$rows" "$INGRESS_INTERFACE" "$value"; then
+        INGRESS_ADDRESS="$value"
+        break
+      fi
+      warn "该 IPv4 未配置在所选网络接口 ${INGRESS_INTERFACE} 上: ${value}"
+    done
+  else
+    while true; do
+      if ! read_tty choice "$(t "选择本地监听接口/IPv4 [1-${row_count}，m=手动，0=返回]: " \
+        "Select local listener interface/IPv4 [1-${row_count}, m=manual, 0=back]: ")"; then
+        warn '已取消选择本地监听地址'
+        return 1
+      fi
+      case "$choice" in
+        0) return 1 ;;
+        m|M|manual|手动)
+          while true; do
+            if ! read_tty value "$(t '手动网络接口 / Interface（0=返回）: ' 'Manual interface (0=back): ')"; then
+              warn '已取消选择本地监听网络接口'
+              return 1
+            fi
+            [ "$value" != 0 ] || return 1
+            if ingress_menu_interface_in_rows "$rows" "$value"; then
+              INGRESS_INTERFACE="$value"
+              break
+            fi
+            warn "网络接口不存在或没有可用的非回环 IPv4: ${value}"
+          done
+          while true; do
+            if ! read_tty value "$(t '本地监听 IPv4（0=返回）: ' 'Local listener IPv4 (0=back): ')"; then
+              warn '已取消选择本地监听 IPv4'
+              return 1
+            fi
+            [ "$value" != 0 ] || return 1
+            if ingress_menu_pair_in_rows "$rows" "$INGRESS_INTERFACE" "$value"; then
+              INGRESS_ADDRESS="$value"
+              break
+            fi
+            warn "该 IPv4 未配置在所选网络接口 ${INGRESS_INTERFACE} 上: ${value}"
+          done
+          break
+          ;;
+        *)
+          if [[ "$choice" =~ ^[0-9]+$ ]] \
+             && [ "$choice" -ge 1 ] && [ "$choice" -le "$row_count" ]; then
+            selected="$(ingress_menu_row_at "$rows" "$choice")" || return 1
+            IFS='|' read -r INGRESS_INTERFACE INGRESS_ADDRESS _state _default <<<"$selected"
+            break
+          fi
+          warn '请选择列表编号、m 手动输入，或 0 返回'
+          ;;
+      esac
+    done
+  fi
+  INGRESS_INTERFACE_CLI=1
+  INGRESS_ADDRESS_CLI=1
+}
+
+ingress_menu_collect_custom_range() {
+  local range_start="" range_end="" normalized_start normalized_end
+  while true; do
+    if ! read_tty range_start "$(t '范围起始端口: ' 'Range start port: ')" \
+       || ! read_tty range_end "$(t '范围结束端口: ' 'Range end port: ')"; then
+      warn '已取消自定义端口范围'
+      return 1
+    fi
+    normalized_start="$(normalize_uint "$range_start" 2>/dev/null || true)"
+    normalized_end="$(normalize_uint "$range_end" 2>/dev/null || true)"
+    if nb_valid_port "$normalized_start" && nb_valid_port "$normalized_end" \
+       && [ "$normalized_start" -ge 1025 ] && [ "$normalized_start" -le "$normalized_end" ]; then
+      INGRESS_RANGE_START="$normalized_start"
+      INGRESS_RANGE_END="$normalized_end"
+      INGRESS_RANGE_START_CLI=1
+      INGRESS_RANGE_END_CLI=1
+      return 0
+    fi
+    warn '端口范围无效：起始端口必须不小于 1025，且不能大于结束端口'
+  done
+}
+
+ingress_menu_collect_port_policy() {
+  local choice="" fallback=""
+  while true; do
+    msg '  1) derived-tail（由所选本地 IPv4 尾号推导）'
+    msg '  2) custom-range（自定义范围）'
+    msg '  3) manual-only（仅手动指定）'
+    if ! read_tty choice "$(t '端口策略 [1-3，0=返回]: ' 'Port policy [1-3, 0=back]: ')"; then
+      warn '已取消端口策略选择'
+      return 1
+    fi
+    case "$choice" in
+      0) return 1 ;;
+      1|derived-tail)
+        if nb_port_base_for_ip "$INGRESS_ADDRESS" >/dev/null 2>&1; then
+          INGRESS_PORT_POLICY='derived-tail'
+          break
+        fi
+        warn '所选本地 IPv4 无法使用 derived-tail。请选择替代策略：'
+        msg '  1) custom-range（自定义范围）'
+        msg '  2) manual-only（仅手动指定）'
+        msg '  0) 返回 Ingress 菜单'
+        while true; do
+          if ! read_tty fallback "$(t '替代策略 [0-2]: ' 'Fallback policy [0-2]: ')"; then
+            warn '已取消端口策略选择'
+            return 1
+          fi
+          case "$fallback" in
+            0) return 1 ;;
+            1|custom-range)
+              INGRESS_PORT_POLICY='custom-range'
+              ingress_menu_collect_custom_range || return 1
+              break 2
+              ;;
+            2|manual-only)
+              INGRESS_PORT_POLICY='manual-only'
+              break 2
+              ;;
+            *) warn '无效替代策略；请输入 0、1 或 2' ;;
+          esac
+        done
+        ;;
+      2|custom-range)
+        INGRESS_PORT_POLICY='custom-range'
+        ingress_menu_collect_custom_range || return 1
+        break
+        ;;
+      3|manual-only)
+        INGRESS_PORT_POLICY='manual-only'
+        break
+        ;;
+      *) warn '无效端口策略；请输入 0-3' ;;
+    esac
+  done
+  INGRESS_PORT_POLICY_CLI=1
+}
+
 ingress_menu_collect_add() {
-  local choice="" value=""
+  local choice="" value="" rows="" row_count=0
+  rows="$(nb_ingress_interface_rows)"
+  row_count="$(ingress_menu_interface_row_count "$rows")"
+  if [ "$row_count" -eq 0 ]; then
+    t '[错误] 未检测到可用的非回环 IPv4；请先为网络接口配置本地 IPv4' \
+      '[error] No eligible non-loopback IPv4 was found; configure a local IPv4 first' >&2
+    return 1
+  fi
   ingress_menu_reset_requests
   msg ''
-  t '可用非回环 IPv4（[默认出口] 仅为只读提示，不决定 Ingress）:' \
-    'Available non-loopback IPv4 addresses ([default egress] is read-only and does not select Ingress):'
-  nb_ingress_interface_rows | while IFS='|' read -r iface address state is_default; do
-    printf '  %s  %s  [%s]%s\n' "$iface" "$address" "$state" "$([ "$is_default" = 1 ] && printf ' [默认出口/default egress]' || true)"
-  done
-  read_tty INGRESS_NAME "$(t '名称: ' 'Name: ')" || INGRESS_NAME=""
+  t '可用非回环 IPv4；网络接口 / Interface:（[默认出口] 仅为只读提示，不决定 Ingress）' \
+    'Available non-loopback IPv4 interfaces ([default egress] is read-only and does not select Ingress)'
+  ingress_menu_print_interface_rows "$rows"
+  if ! read_tty INGRESS_NAME "$(t '名称: ' 'Name: ')"; then
+    warn '已取消新增入口'
+    return 1
+  fi
   INGRESS_NAME_CLI=1
   msg '  1) public   2) mapped'
-  read_tty choice "$(t '类型 [1-2]: ' 'Type [1-2]: ')" || choice=""
+  if ! read_tty choice "$(t '类型 [1-2]: ' 'Type [1-2]: ')"; then
+    warn '已取消新增入口'
+    return 1
+  fi
   case "$choice" in 1|public) INGRESS_TYPE=public ;; 2|mapped) INGRESS_TYPE=mapped ;; *) warn '无效类型'; return 1 ;; esac
   INGRESS_TYPE_CLI=1
-  read_tty INGRESS_INTERFACE "$(t '网络接口 / Interface: ' 'Interface: ')" || INGRESS_INTERFACE=""
-  INGRESS_INTERFACE_CLI=1
-  read_tty INGRESS_ADDRESS "$(t '该网络接口的本地 IPv4: ' 'Local IPv4 on that interface: ')" || INGRESS_ADDRESS=""
-  INGRESS_ADDRESS_CLI=1
-  msg '  1) derived-tail（由所选本地 IPv4 尾号推导）'
-  msg '  2) custom-range（自定义范围）'
-  msg '  3) manual-only（仅手动指定）'
-  read_tty choice "$(t '端口策略 [1-3]: ' 'Port policy [1-3]: ')" || choice=""
-  case "$choice" in
-    1|derived-tail) INGRESS_PORT_POLICY='derived-tail' ;;
-    2|custom-range)
-      INGRESS_PORT_POLICY='custom-range'
-      read_tty INGRESS_RANGE_START '范围起始端口: ' || INGRESS_RANGE_START=""
-      read_tty INGRESS_RANGE_END '范围结束端口: ' || INGRESS_RANGE_END=""
-      INGRESS_RANGE_START_CLI=1 INGRESS_RANGE_END_CLI=1
-      ;;
-    3|manual-only) INGRESS_PORT_POLICY='manual-only' ;;
-    *) warn '无效端口策略'; return 1 ;;
-  esac
-  INGRESS_PORT_POLICY_CLI=1
-  read_tty value "$(t '额外保留端口（逗号分隔，可留空）: ' 'Additional reserved ports (comma-separated, optional): ')" || value=""
+  ingress_menu_collect_listener "$rows" "$row_count" || return 1
+  if [ "$INGRESS_TYPE" = public ] && nb_ingress_is_rfc1918 "$INGRESS_ADDRESS"; then
+    t '[提示] 所选本地 IPv4 为私网地址。' \
+      '[hint] The selected local IPv4 is an RFC1918 private address.'
+    t '如果客户端通过公网、IPLC、NAT 或端口映射进入，' \
+      'If clients enter through the public Internet, IPLC, NAT, or port mapping,'
+    t '通常应使用 mapped，并设置 Display Host；当前类型仍保持 public。' \
+      'mapped with an explicit Display Host is usually appropriate; the type remains public.'
+  fi
+  ingress_menu_collect_port_policy || return 1
+  if ! read_tty value "$(t '额外保留端口（逗号分隔，可留空）: ' 'Additional reserved ports (comma-separated, optional): ')"; then
+    warn '已取消新增入口'
+    return 1
+  fi
   if [ -n "$value" ]; then INGRESS_RESERVED_PORTS="$value"; INGRESS_RESERVED_CLI=1; fi
-  read_tty INGRESS_DISPLAY_HOST_DEFAULT "$(t '默认展示主机 / Display Host（mapped 必填；public 留空=本地地址）: ' 'Default Display Host (required for mapped; public blank=local address): ')" \
-    || INGRESS_DISPLAY_HOST_DEFAULT=""
-  [ -z "$INGRESS_DISPLAY_HOST_DEFAULT" ] || INGRESS_DISPLAY_HOST_CLI=1
+  if [ "$INGRESS_TYPE" = mapped ]; then
+    while true; do
+      if ! read_tty value "$(t '展示入口 / Display Host（mapped 必填；不同于本地监听 IPv4）: ' \
+        'Display entry / Display Host (required for mapped; distinct from local listener IPv4): ')"; then
+        warn '已取消新增入口'
+        return 1
+      fi
+      if [ -n "$value" ] && valid_advertise_host "$value"; then
+        INGRESS_DISPLAY_HOST_DEFAULT="$value"
+        INGRESS_DISPLAY_HOST_CLI=1
+        break
+      fi
+      warn 'mapped 入口必须显式填写有效的 Display Host'
+    done
+  else
+    while true; do
+      if ! read_tty value "$(t '展示入口 / Display Host（可留空；默认使用本地监听 IPv4）: ' \
+        'Display entry / Display Host (optional; defaults to local listener IPv4): ')"; then
+        warn '已取消新增入口'
+        return 1
+      fi
+      if [ -z "$value" ]; then
+        break
+      elif valid_advertise_host "$value"; then
+        INGRESS_DISPLAY_HOST_DEFAULT="$value"
+        INGRESS_DISPLAY_HOST_CLI=1
+        break
+      fi
+      warn 'Display Host 无效，请重新输入或留空'
+    done
+  fi
   INGRESS_DISPLAY_PORT_POLICY='follow-actual' INGRESS_DISPLAY_PORT_POLICY_CLI=1
   msg '  1) permissive（兼容 wildcard，默认）   2) strict（限制到 Profile 本地地址）'
-  read_tty choice "$(t '入口强制策略 [1-2，默认 1]: ' 'Ingress enforcement [1-2, default 1]: ')" || choice=""
+  if ! read_tty choice "$(t '入口强制策略 [1-2，默认 1]: ' 'Ingress enforcement [1-2, default 1]: ')"; then
+    warn '已取消新增入口'
+    return 1
+  fi
   case "$choice" in
     ''|1|permissive) INGRESS_ENFORCEMENT=permissive ;;
     2|strict) INGRESS_ENFORCEMENT=strict ;;
     *) warn '无效入口强制策略'; return 1 ;;
   esac
   INGRESS_ENFORCEMENT_CLI=1
+  nb_ingress_prepare_add_request "$rows" || return 1
 }
 
 ingress_menu_modify() {
@@ -27422,7 +29854,7 @@ ingress_menu_modify() {
     fi
   fi
   INGRESS_ACTION=modify
-  nobrand_run_ingress_action
+  nobrand_menu_run nobrand_run_ingress_action
 }
 
 ingress_menu_loop() {
@@ -27441,18 +29873,46 @@ ingress_menu_loop() {
     msg '  0) 返回'
     read_tty choice "$(t '请选择 [0-8]: ' 'Choose [0-8]: ')" || choice=""
     case "$choice" in
-      1) nb_ingress_list ;;
-      2) ingress_menu_collect_add && { INGRESS_ACTION=add; nobrand_run_ingress_action; } ;;
-      3) ingress_menu_modify ;;
-      4) ingress_menu_reset_requests; ingress_menu_select_profile \
-           && confirm '确认删除？[y/N]: ' 'Delete this profile? [y/N]: ' n \
-           && { INGRESS_ACTION=delete; nobrand_run_ingress_action; } ;;
-      5) ingress_menu_reset_requests; ingress_menu_select_profile \
-           && { INGRESS_ACTION=set-default; nobrand_run_ingress_action; } ;;
-      6) ingress_menu_reset_requests; INGRESS_ACTION=unset-default; nobrand_run_ingress_action ;;
-      7) ingress_menu_reset_requests; ingress_menu_select_profile \
-           && { INGRESS_ACTION=apply; nobrand_run_ingress_action; } ;;
-      8) nb_ingress_doctor ;;
+      1) nobrand_menu_run nb_ingress_list ;;
+      2)
+        if ingress_menu_collect_add; then
+          INGRESS_ACTION=add
+          nobrand_menu_run nobrand_run_ingress_action
+        fi
+        ;;
+      3)
+        if ingress_menu_modify; then
+          :
+        fi
+        ;;
+      4)
+        ingress_menu_reset_requests
+        if ingress_menu_select_profile \
+           && confirm '确认删除？[y/N]: ' 'Delete this profile? [y/N]: ' n; then
+          INGRESS_ACTION=delete
+          nobrand_menu_run nobrand_run_ingress_action
+        fi
+        ;;
+      5)
+        ingress_menu_reset_requests
+        if ingress_menu_select_profile; then
+          INGRESS_ACTION=set-default
+          nobrand_menu_run nobrand_run_ingress_action
+        fi
+        ;;
+      6)
+        ingress_menu_reset_requests
+        INGRESS_ACTION=unset-default
+        nobrand_menu_run nobrand_run_ingress_action
+        ;;
+      7)
+        ingress_menu_reset_requests
+        if ingress_menu_select_profile; then
+          INGRESS_ACTION=apply
+          nobrand_menu_run nobrand_run_ingress_action
+        fi
+        ;;
+      8) nobrand_menu_run nb_ingress_doctor ;;
       0) return 0 ;;
       *) warn '无效选择' ;;
     esac
@@ -27461,7 +29921,7 @@ ingress_menu_loop() {
 }
 
 nobrand_menu_loop() {
-  local choice=""
+  local choice="" uninstall_rc=0
   MENU_MODE=1
   trap - ERR
   while true; do
@@ -27503,7 +29963,13 @@ nobrand_menu_loop() {
       15) nobrand_usage; menu_pause ;;
       16)
         YES=0
+        set +e
         nobrand_menu_run nobrand_uninstall
+        uninstall_rc=$?
+        set -e
+        if [ "$uninstall_rc" -eq "${NOBRAND_MENU_EXIT_SUCCESS:-4}" ]; then
+          return 0
+        fi
         nobrand_ssh_confirmation_pending || menu_pause
         ;;
       0) return 0 ;;
@@ -27549,6 +30015,35 @@ nobrand_recovery_action_allowed() {
       return 0
       ;;
   esac
+  if [ "$state" = CURRENT_PARTIAL_INSTALL ] \
+     && [ -n "${NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE:-}" ] \
+     && nb_lifecycle_tx_valid \
+     && [ "$(nb_lifecycle_field STATUS)" = in-progress ] \
+     && [ "$(nb_lifecycle_scope)" = "$NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE" ]; then
+    if [ "$NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE" = forward ]; then
+      [ "$(nb_lifecycle_field FORMAT)" = nobrand-lifecycle-v2 ] \
+        && [ "$(nb_lifecycle_mutation_started)" = 0 ] || return 1
+    fi
+    return 0
+  fi
+  if [ "$state:$action" = CURRENT_PARTIAL_REPAIR:reconfigure ] \
+     && [ "${NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE:-}" = mieru ] \
+     && nb_lifecycle_tx_valid \
+     && [ "$(nb_lifecycle_field STATUS)" = in-progress ] \
+     && [ "$(nb_lifecycle_field OPERATION)" = repair ] \
+     && [ "$(nb_lifecycle_scope)" = mieru ]; then
+    return 0
+  fi
+  if [ "$state:$action" = CURRENT_PARTIAL_CONFIGURE:nobrand-ingress ] \
+     && [ "${NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE:-}" = ingress ] \
+     && nb_lifecycle_tx_valid \
+     && [ "$(nb_lifecycle_field FORMAT)" = nobrand-lifecycle-v2 ] \
+     && [ "$(nb_lifecycle_field STATUS)" = in-progress ] \
+     && [ "$(nb_lifecycle_field OPERATION)" = configure ] \
+     && [ "$(nb_lifecycle_scope)" = ingress ] \
+     && [ "$(nb_lifecycle_mutation_started)" = 0 ]; then
+    return 0
+  fi
   return 1
 }
 
@@ -27568,10 +30063,130 @@ nobrand_recovery_action_refused() {
   esac
 }
 
+nobrand_recovery_scope() {
+  local state="${1:-$NOBRAND_INSTALL_STATE}"
+  if nb_lifecycle_tx_valid \
+     && [ "$(nb_lifecycle_field STATUS)" = in-progress ]; then
+    nb_lifecycle_scope
+    return $?
+  fi
+  case "$state" in
+    CURRENT_PARTIAL_INSTALL) printf 'manager' ;;
+    CURRENT_PARTIAL_REPAIR)
+      if declare -F nobrand_backup_restore_transaction_present >/dev/null 2>&1 \
+         && nobrand_backup_restore_transaction_present; then
+        printf 'global'
+      else
+        printf 'manager'
+      fi
+      ;;
+    CURRENT_PARTIAL_UNINSTALL) printf 'global' ;;
+    *) return 1 ;;
+  esac
+}
+
+nobrand_set_scoped_recovery_action() {
+  local state="${1:-$NOBRAND_INSTALL_STATE}" scope format operation phase mutation_started
+  scope="$(nobrand_recovery_scope "$state")" || return 1
+  NOBRAND_RECOVERY_EXPECTED_SCOPE="$scope"
+  NOBRAND_RECOVERY_EXPECTED_STATE="$state"
+  NOBRAND_RECOVERY_EXPECTED_TX_PRESENT=0
+  NOBRAND_RECOVERY_EXPECTED_TX_STATUS=""
+  NOBRAND_RECOVERY_EXPECTED_TX_ID=""
+  NOBRAND_RECOVERY_EXPECTED_TX_RECORD=""
+  if [ "$scope" = manager ] && nb_lifecycle_tx_valid; then
+    NOBRAND_RECOVERY_EXPECTED_TX_PRESENT=1
+    NOBRAND_RECOVERY_EXPECTED_TX_STATUS="$(nb_lifecycle_field STATUS)"
+    NOBRAND_RECOVERY_EXPECTED_TX_ID="$(nb_lifecycle_field TRANSACTION_ID)"
+    NOBRAND_RECOVERY_EXPECTED_TX_RECORD="$(<"$NOBRAND_LIFECYCLE_TX_FILE")"
+  fi
+  case "$scope" in
+    manager) ACTION=nobrand-manager-bootstrap ;;
+    ingress) ACTION=nobrand-ingress-recover ;;
+    mieru)
+      format="$(nb_lifecycle_field FORMAT 2>/dev/null || true)"
+      operation="$(nb_lifecycle_field OPERATION 2>/dev/null || true)"
+      phase="$(nb_lifecycle_field LAST_COMPLETED_PHASE 2>/dev/null || true)"
+      mutation_started="$(nb_lifecycle_mutation_started 2>/dev/null || true)"
+      if [ "$format" = nobrand-lifecycle-v2 ] && [ "$mutation_started" = 0 ]; then
+        # Nothing changed, so the install dispatcher may safely clear this
+        # record without needing to infer whether the lost request was install
+        # or reconfigure.
+        ACTION=install
+      elif [ "$operation" = repair ]; then
+        case "$phase" in
+          runtime-ready|state-committed|ready-to-validate)
+            # These phases belong to repair-install or are validation-only; the
+            # install dispatcher will never recollect when state is committed.
+            ACTION=install
+            ;;
+          *)
+            warn "$(t \
+              'Mieru 修复记录无法区分重装与重新配置，且未保存原参数。请显式执行 nobrand mieru install 或 nobrand mieru reconfigure。' \
+              'The Mieru repair record cannot distinguish reinstall from reconfigure and did not store the original request. Explicitly run nobrand mieru install or nobrand mieru reconfigure.')"
+            return 1
+            ;;
+        esac
+      elif [ "$operation" = install ]; then
+        ACTION=install
+      else
+        [ "$format" != nobrand-lifecycle-v1 ] || ACTION=install
+        [ -n "${ACTION:-}" ] || return 1
+      fi
+      ;;
+    snell) ACTION=nobrand-snell; SNELL_ACTION=install ;;
+    hy2) ACTION=nobrand-hy2; HY2_ACTION=install ;;
+    tuic) ACTION=nobrand-tuic; TUIC_ACTION=install ;;
+    vless-reality) ACTION=nobrand-vless-reality; VLESS_REALITY_ACTION=install ;;
+    vless-sudoku) ACTION=nobrand-vless-sudoku; VLESS_SUDOKU_ACTION=install ;;
+    ssh-tunnel) ACTION=nobrand-ssh-tunnel; SSH_TUNNEL_ACTION=install ;;
+    forward)
+      # Forward add parameters are intentionally not copied into lifecycle
+      # metadata. Its dedicated route therefore validates committed state or
+      # fails closed; it never guesses, recollects, or replays an incomplete add.
+      ACTION=nobrand-forward
+      FORWARD_ACTION=recover-add
+      ;;
+    global) ACTION=install ;;
+    *) return 1 ;;
+  esac
+}
+
+nobrand_mark_explicit_protocol_retry() {
+  [ -z "${NOBRAND_RECOVERY_EXPECTED_SCOPE:-}" ] || return 0
+  case "${ACTION:-}" in
+    install) NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE=mieru ;;
+    reconfigure) NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE=mieru ;;
+    nobrand-snell) [ "${SNELL_ACTION:-}" = install ] && NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE=snell ;;
+    nobrand-hy2) [ "${HY2_ACTION:-}" = install ] && NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE=hy2 ;;
+    nobrand-tuic) [ "${TUIC_ACTION:-}" = install ] && NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE=tuic ;;
+    nobrand-vless-reality)
+      [ "${VLESS_REALITY_ACTION:-}" = install ] && NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE=vless-reality
+      ;;
+    nobrand-vless-sudoku)
+      [ "${VLESS_SUDOKU_ACTION:-}" = install ] && NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE=vless-sudoku
+      ;;
+    nobrand-ssh-tunnel)
+      [ "${SSH_TUNNEL_ACTION:-}" = install ] && NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE=ssh-tunnel
+      ;;
+    nobrand-forward)
+      [ "${FORWARD_ACTION:-}" = add ] && NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE=forward
+      ;;
+    nobrand-ingress)
+      case "${INGRESS_ACTION:-}" in
+        add|modify|delete|set-default|unset-default|apply)
+          NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE=ingress
+          ;;
+      esac
+      ;;
+  esac
+  return 0
+}
+
 nb_select_partial_recovery_action() {
   local state="${1:-$NOBRAND_INSTALL_STATE}" choice=""
   case "$state" in
-    CURRENT_PARTIAL_INSTALL|CURRENT_PARTIAL_REPAIR)
+    CURRENT_PARTIAL_INSTALL|CURRENT_PARTIAL_REPAIR|CURRENT_PARTIAL_CONFIGURE)
       t '检测到未完成的安装或修复。请选择恢复操作：' \
         'An incomplete install or repair was detected. Choose a recovery action:'
       t '  1) 继续安全修复（默认）' '  1) Continue safe repair (default)'
@@ -27586,7 +30201,7 @@ nb_select_partial_recovery_action() {
         }
       fi
       case "${choice:-1}" in
-        1) ACTION=install ;;
+        1) nobrand_set_scoped_recovery_action "$state" ;;
         0) return 2 ;;
         *) warn "$(t '无效恢复选择' 'Invalid recovery choice')"; return 1 ;;
       esac
@@ -27609,7 +30224,7 @@ nb_select_partial_recovery_action() {
         }
       fi
       case "${choice:-1}" in
-        1) ACTION=install ;;
+        1) nobrand_set_scoped_recovery_action "$state" ;;
         2)
           t '[提示] 将继续清理由 NoBrand 管理的剩余资源。' \
             '[Info] Cleanup of remaining NoBrand-managed resources will continue.'
@@ -27624,27 +30239,32 @@ nb_select_partial_recovery_action() {
 
 main() {
   local main_lifecycle_lock=0 main_rc=0 recovery_rc=0 dispatch_rc=0
+  local NOBRAND_MANAGER_SESSION_ACTIVE=1
+  local NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE=""
   nb_lifecycle_signal_handlers_install
+  nobrand_mark_explicit_protocol_retry
   # Help/version are intentionally state-independent. Every other root action
   # detects legacy/unknown state before it can read or mutate protocol data.
   case "${ACTION:-menu}" in
     nobrand-version) nobrand_version; return 0 ;;
     nobrand-help) nobrand_usage; return 0 ;;
   esac
-  # Protocol submenus dispatch their mutations directly, so the only common
-  # exclusion boundary is the lifetime of a real root manager process. An
-  # interactive root menu deliberately retains fd 7 while it is open; nested
-  # lifecycle actions use the lock's reference count and cannot drop it early.
-  # No transaction is created here, and dry-run/non-root read paths stay free
-  # of lock-file writes.
+  # Explicit protocol commands may dispatch mutations directly, so retain the
+  # process lock across their common state boundary and dispatcher. A no-arg
+  # manager launch is different: bootstrap must install dependencies (including
+  # flock) before acquiring its transaction lock. The full menu takes the outer
+  # guard only after that bootstrap succeeds.
   if [ "${DRY_RUN:-0}" -ne 1 ] \
+     && [ -n "${ACTION:-}" ] \
+     && [ "${ACTION:-}" != nobrand-manager-upgrade ] \
      && [ "$(id -u 2>/dev/null || echo 1)" -eq 0 ]; then
     nb_lifecycle_lock_acquire || return 1
     main_lifecycle_lock=1
   fi
   nb_validate_authoritative_state_boundary
   case "$NOBRAND_INSTALL_STATE" in
-    CURRENT_PARTIAL_INSTALL|CURRENT_PARTIAL_REPAIR|CURRENT_PARTIAL_UNINSTALL|LEGACY_SUPPORTED)
+    CURRENT_PARTIAL_INSTALL|CURRENT_PARTIAL_REPAIR|CURRENT_PARTIAL_CONFIGURE|\
+      CURRENT_PARTIAL_UNINSTALL|LEGACY_SUPPORTED)
       nb_install_state_notice "$NOBRAND_INSTALL_STATE"
       ;;
     CURRENT_COMPLETE)
@@ -27666,7 +30286,8 @@ main() {
     fi
   fi
   case "$NOBRAND_INSTALL_STATE" in
-    CURRENT_PARTIAL_INSTALL|CURRENT_PARTIAL_REPAIR|CURRENT_PARTIAL_UNINSTALL|LEGACY_SUPPORTED)
+    CURRENT_PARTIAL_INSTALL|CURRENT_PARTIAL_REPAIR|CURRENT_PARTIAL_CONFIGURE|\
+      CURRENT_PARTIAL_UNINSTALL|LEGACY_SUPPORTED)
       if ! nobrand_recovery_action_allowed "$NOBRAND_INSTALL_STATE" "$ACTION"; then
         nobrand_recovery_action_refused "$NOBRAND_INSTALL_STATE"
         [ "$main_lifecycle_lock" -eq 0 ] || nb_lifecycle_lock_release
@@ -27681,7 +30302,8 @@ main() {
   fi
   if [ -z "$ACTION" ]; then
     case "$NOBRAND_INSTALL_STATE" in
-      CURRENT_PARTIAL_INSTALL|CURRENT_PARTIAL_REPAIR|CURRENT_PARTIAL_UNINSTALL)
+      CURRENT_PARTIAL_INSTALL|CURRENT_PARTIAL_REPAIR|CURRENT_PARTIAL_CONFIGURE|\
+        CURRENT_PARTIAL_UNINSTALL)
         nb_select_partial_recovery_action "$NOBRAND_INSTALL_STATE" || {
           recovery_rc=$?
           [ "$main_lifecycle_lock" -eq 0 ] || nb_lifecycle_lock_release
@@ -27691,11 +30313,52 @@ main() {
         ;;
     esac
   fi
-  if [ "${DRY_RUN:-0}" -ne 1 ] \
+  if [ "$main_lifecycle_lock" -eq 1 ] \
+     && [ "${DRY_RUN:-0}" -ne 1 ] \
      && [ "$(id -u 2>/dev/null || echo 1)" -eq 0 ]; then
     ensure_manager_state_layout 0
   fi
+  case "$ACTION" in
+    nobrand-manager-bootstrap)
+      nobrand_manager_bootstrap || {
+        main_rc=$?
+        [ "$main_lifecycle_lock" -eq 0 ] || nb_lifecycle_lock_release
+        return "$main_rc"
+      }
+      ACTION=""
+      NOBRAND_RECOVERY_EXPECTED_SCOPE=""
+      ;;
+    nobrand-ingress-recover)
+      nobrand_recover_ingress_scope || {
+        main_rc=$?
+        [ "$main_lifecycle_lock" -eq 0 ] || nb_lifecycle_lock_release
+        return "$main_rc"
+      }
+      ACTION=""
+      NOBRAND_RECOVERY_EXPECTED_SCOPE=""
+      ;;
+  esac
   if [ -z "$ACTION" ]; then
+    nobrand_manager_bootstrap || {
+      main_rc=$?
+      [ "$main_lifecycle_lock" -eq 0 ] || nb_lifecycle_lock_release
+      return "$main_rc"
+    }
+    if [ "$main_lifecycle_lock" -eq 0 ] \
+       && [ "${DRY_RUN:-0}" -ne 1 ] \
+       && [ "$(id -u 2>/dev/null || echo 1)" -eq 0 ]; then
+      nb_lifecycle_lock_acquire || return 1
+      main_lifecycle_lock=1
+    fi
+    NOBRAND_INSTALL_STATE="$(nb_classify_installation_state)" || {
+      [ "$main_lifecycle_lock" -eq 0 ] || nb_lifecycle_lock_release
+      return 1
+    }
+    [ "$NOBRAND_INSTALL_STATE" = CURRENT_COMPLETE ] || {
+      nb_fail_ambiguous_state
+      [ "$main_lifecycle_lock" -eq 0 ] || nb_lifecycle_lock_release
+      return 1
+    }
     nobrand_menu_loop
     main_rc=$?
     [ "$main_lifecycle_lock" -eq 0 ] || nb_lifecycle_lock_release

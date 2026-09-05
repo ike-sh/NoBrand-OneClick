@@ -1,5 +1,19 @@
 # Changelog
 
+## 3.2.2 — 2026-09-05
+
+### Changed
+
+- Install and verify the canonical `nobrand` / `nb` manager commands before displaying the full management menu on first run.
+- Support manager-only installation so Ingress, Doctor, status, and other shared management features remain available before any proxy protocol is deployed.
+- Kept protocol behavior compatible with v3.2.1; Multi-Ingress, Strict Ingress, Forward, REALITY, and the Mieru latest-stable resolver retain their existing data-plane semantics.
+
+### Fixed
+
+- Fixed interactive Ingress creation leaking non-interactive CLI argument errors after empty or invalid input, and improved interface/IPv4 defaults and validation.
+- Scoped interrupted-operation recovery to the affected component so Manager or Ingress recovery cannot enter an unrelated protocol workflow.
+- Made a successful full uninstall exit the current manager process instead of returning to a menu loaded before removal.
+
 ## 3.2.1 — 2026-09-03
 
 ### Fixed

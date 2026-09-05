@@ -79,6 +79,48 @@ snell_valid_psk() {
   [[ "$value" =~ ^[A-Za-z0-9._~+/@:=,-]+$ ]]
 }
 
+snell_state_valid() {
+  local id="$1" path name psk listen_host listen_port mode host advertise_port
+  path="$(snell_state_path "$id")" || return 1
+  [ -f "$path" ] && [ ! -L "$path" ] && snell_state_exists "$id" || return 1
+  jq -e --arg id "$id" '
+    .protocol=="snell" and .instance_id==$id and (.version==4 or .version==5) and
+    (.name|type)=="string" and (.psk|type)=="string" and
+    (.listen_host|type)=="string" and
+    (.listen_port|type)=="number" and (.listen_port|floor)==.listen_port and
+    .listen_port>=1 and .listen_port<=65535 and .transport=="tcp" and
+    (.advertise_mode=="auto" or .advertise_mode=="custom") and
+    (.advertise_host|type)=="string" and
+    (.advertise_port=="" or ((.advertise_port|type)=="number" and
+      (.advertise_port|floor)==.advertise_port and .advertise_port>=1 and .advertise_port<=65535)) and
+    (.enabled|type)=="boolean" and
+    (.quic_proxy_enabled|type)=="boolean" and (.managed_udp|type)=="boolean" and
+    .quic_proxy_enabled==.managed_udp and
+    (.version==5 or (.quic_proxy_enabled==false and .managed_udp==false)) and
+    (.runtime_version|type)=="string" and (.runtime_version|length)>0 and
+    (.runtime_status|type)=="string" and (.runtime_status|length)>0 and
+    (.created_at|type)=="string" and (.created_at|length)>0 and
+    (.updated_at|type)=="string" and (.updated_at|length)>0 and
+    (has("ingress_profile_id")==false or
+      ((.ingress_profile_id|type)=="string" and (.ingress_profile_id|length)>0))
+  ' "$path" >/dev/null 2>&1 || return 1
+  name="$(snell_state_field "$id" name)" || return 1
+  psk="$(snell_state_field "$id" psk)" || return 1
+  listen_host="$(snell_state_field "$id" listen_host)" || return 1
+  listen_port="$(snell_state_field "$id" listen_port)" || return 1
+  mode="$(snell_state_field "$id" advertise_mode)" || return 1
+  host="$(snell_state_field "$id" advertise_host)" || return 1
+  advertise_port="$(snell_state_field "$id" advertise_port)" || return 1
+  snell_valid_name "$name" && snell_valid_psk "$psk" \
+    && nb_ingress_valid_ipv4 "$listen_host" && nb_valid_port "$listen_port" \
+    && nb_validate_advertise_endpoint "$host" "$advertise_port" TCP || return 1
+  case "$mode" in
+    auto) [ -z "$host" ] && [ -z "$advertise_port" ] ;;
+    custom) [ -n "$host" ] && [ -n "$advertise_port" ] ;;
+    *) return 1 ;;
+  esac
+}
+
 snell_generate_psk() {
   local value
   value="$(openssl rand -base64 24 2>/dev/null | tr -d '\r\n')"
@@ -401,6 +443,11 @@ install_snell() {
   fi
   nb_firewall_binding_owned TCP "$PORT" && tcp_was_owned=1
   nb_firewall_binding_owned UDP "$PORT" && udp_was_owned=1
+  nb_lifecycle_mark_protocol_mutation_started snell || {
+    rm -f "$config_tmp" "$state_tmp"
+    admin_lock_release
+    return 1
+  }
   if ! nb_atomic_install_file "$config_tmp" "$(snell_config_path "$id")" 0600 \
      || ! nb_atomic_install_file "$state_tmp" "$(snell_state_path "$id")" 0600 \
      || ! snell_install_service_runtime \
@@ -781,11 +828,12 @@ remove_snell_instance() {
 }
 
 snell_doctor_instance() {
-  local id="$1" failed=0 name major port endpoint host advertise_port mode runtime actual_runtime quic
-  snell_state_exists "$id" || return 1
-  case "$(snell_state_field "$id" version 2>/dev/null || true)" in 4|5) ;; *) return 1 ;; esac
+  local id="$1" failed=0 name major port endpoint host advertise_port mode runtime actual_runtime quic enabled
+  snell_state_valid "$id" || return 1
   name="$(snell_state_field "$id" name)"; major="$(snell_state_field "$id" version)"
   port="$(snell_state_field "$id" listen_port)"; runtime="$(snell_state_field "$id" runtime_version)"
+  enabled="$(snell_state_field "$id" enabled 2>/dev/null || true)"
+  case "$enabled" in true|false) ;; *) return 1 ;; esac
   printf '实例 %s（%s，v%s）\n' "$name" "$id" "$major"
   if [ -x "$(snell_runtime_path "$major")" ]; then
     actual_runtime="$(snell_runtime_reported_version "$(snell_runtime_path "$major")" 2>/dev/null || true)"
@@ -801,13 +849,23 @@ snell_doctor_instance() {
   snell_quic_state_consistent "$id" \
     && nb_doctor_line PASS 'QUIC 状态 / 受管 UDP 一致' \
     || { nb_doctor_line FAIL 'QUIC 状态 / 受管 UDP 不一致'; failed=1; }
-  snell_running "$id" && nb_doctor_line PASS "服务与 TCP/${port} 监听正常" \
-    || { nb_doctor_line FAIL "服务 / 监听异常: TCP/${port}"; failed=1; }
   quic=off; snell_quic_proxy_enabled "$id" && quic=on
+  if [ "$enabled" = true ]; then
+    snell_running "$id" && nb_doctor_line PASS "服务与 TCP/${port} 监听正常" \
+      || { nb_doctor_line FAIL "服务 / 监听异常: TCP/${port}"; failed=1; }
+  elif snell_service_active "$id" || nb_port_is_listening TCP "$port" \
+       || { [ "$quic" = on ] && nb_port_is_listening UDP "$port"; }; then
+    nb_doctor_line FAIL "服务标记为已停止，但仍有服务或监听: TCP/UDP ${port}"
+    failed=1
+  else
+    nb_doctor_line PASS '服务按状态保持停止，且无残留监听'
+  fi
   if [ "$major" = 5 ] && [ "$quic" = on ]; then
-    snell_v5_auxiliary_udp_same_process "$port" \
-      && nb_doctor_line PASS "QUIC Proxy 已启用；同进程 UDP/${port} 监听正常" \
-      || { nb_doctor_line FAIL "QUIC Proxy 已启用，但缺少同进程 UDP/${port} 监听"; failed=1; }
+    if [ "$enabled" = true ]; then
+      snell_v5_auxiliary_udp_same_process "$port" \
+        && nb_doctor_line PASS "QUIC Proxy 已启用；同进程 UDP/${port} 监听正常" \
+        || { nb_doctor_line FAIL "QUIC Proxy 已启用，但缺少同进程 UDP/${port} 监听"; failed=1; }
+    fi
     nb_firewall_binding_owned UDP "$port" \
       && nb_doctor_line PASS "QUIC 防火墙归属正常: UDP/${port}" \
       || { nb_doctor_line FAIL "QUIC Proxy 已启用，但缺少 UDP/${port} 防火墙归属"; failed=1; }
@@ -927,7 +985,13 @@ snell_refresh_runtime_metadata() {
 nobrand_run_snell_action() {
   case "${SNELL_ACTION:-menu}" in
     menu) snell_menu_loop ;;
-    install) install_snell ;;
+    install)
+      if [ "${NOBRAND_MANAGER_SESSION_ACTIVE:-0}" -eq 1 ]; then
+        nb_lifecycle_run_protocol_install snell install_snell
+      else
+        install_snell
+      fi
+      ;;
     show) snell_show ;;
     set-endpoint) snell_set_endpoint ;;
     set-quic) snell_set_quic ;;

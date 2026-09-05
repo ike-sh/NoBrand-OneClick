@@ -31,7 +31,21 @@ export MITA_USERS_CRON="$fixture/nobrand-oneclick/cron/nobrand-mieru-users"
 export MITA_LOGROTATE_CONF="$fixture/nobrand-oneclick/logrotate/nobrand-mieru"
 export MITA_USERS_LOG="$fixture/nobrand-oneclick/log/nobrand-mieru-users.log"
 export MITA_CLIENT_EXPORT_DIR="$fixture/nobrand-oneclick/exports/mieru"
+export NOBRAND_SNELL_SYSTEMD_TEMPLATE="$fixture/nobrand-oneclick/systemd/nobrand-snell@.service"
+export NOBRAND_TUIC_SYSTEMD_TEMPLATE="$fixture/nobrand-oneclick/systemd/nobrand-tuic@.service"
+export NOBRAND_REALITY_SYSTEMD_TEMPLATE="$fixture/nobrand-oneclick/systemd/nobrand-vless-reality@.service"
+export NOBRAND_REALM_SYSTEMD_SERVICE="$fixture/nobrand-oneclick/systemd/nobrand-realm.service"
+export NOBRAND_REALM_OPENRC_SERVICE="$fixture/nobrand-oneclick/openrc/nobrand-realm"
 source_installer
+# Exercise the maintained lifecycle/uninstall modules directly so this focused
+# test remains useful before the generated installer is rebuilt.
+# shellcheck disable=SC1091
+source "$TEST_ROOT/src/15-core-state.sh"
+# shellcheck disable=SC1091
+source "$TEST_ROOT/src/18-core-nodes.sh"
+# shellcheck disable=SC1091
+source "$TEST_ROOT/src/80-lifecycle.sh"
+trap - ERR
 
 nb_init_state_layout
 mkdir -p "$NOBRAND_CONFIG_DIR" "$NOBRAND_BIN_DIR" "$MITA_MANAGER_STATE_DIR" \
@@ -85,6 +99,7 @@ run() {
 require_root() { :; }
 service_manager() { printf none; }
 nb_service_manager() { printf none; }
+nft() { return 1; }
 detect_pkg_manager() { printf alpine; }
 isolated_stop_all() { printf 'isolated-stop-owned\n' >>"$op_log"; }
 tc_clear_owned_filters() { printf 'tc-clear-owned\n' >>"$op_log"; }
@@ -101,8 +116,27 @@ _has_group() { return 0; }
 # shellcheck disable=SC2034
 YES=1
 
+# Prove the global path enters Mieru cleanup while Mieru is still present and
+# suppresses the protocol-only manager-retention message. Preserve the complete
+# disposable fixture so the independent protocol-only assertions below still
+# start from the same authoritative state.
+global_context_snapshot="$fixture/global-context-snapshot"
+cp -a "$fixture/nobrand-oneclick" "$global_context_snapshot"
+global_with_mieru_output="$(nobrand_uninstall)"
+assert_contains "$global_with_mieru_output" '已完整删除' \
+  'Mieru-present global uninstall result'
+assert_not_contains "$global_with_mieru_output" 'nobrand/nb 管理命令仍保留' \
+  'Mieru-present global uninstall suppresses protocol-only retention message'
+assert_contains "$(<"$op_log")" 'isolated-stop-owned' \
+  'Mieru-present global uninstall exercised Mieru cleanup'
+rm -rf -- "${fixture:?}/nobrand-oneclick"
+cp -a "$global_context_snapshot" "$fixture/nobrand-oneclick"
+: >"$op_log"
+
 protocol_output="$(do_uninstall)"
 assert_contains "$protocol_output" 'Mieru 协议资源已卸载' 'protocol uninstall result'
+assert_contains "$protocol_output" 'nobrand/nb 管理命令仍保留' \
+  'protocol uninstall manager-retention message'
 [ ! -e "$MITA_MANAGER_STATE_DIR" ] || fail 'Mieru manager state must be removed'
 [ ! -e "$MITA_BIN" ] || fail 'NoBrand-managed Mita runtime must be removed'
 [ ! -e "$MITA_INSTANCES_DIR" ] || fail 'NoBrand-managed Mieru configs must be removed'
@@ -129,6 +163,9 @@ admin_lock_acquire() { :; }
 admin_lock_release() { :; }
 unified_output="$(nobrand_uninstall)"
 assert_contains "$unified_output" '已完整删除' 'unified uninstall result'
+assert_not_contains "$unified_output" 'nobrand/nb 管理命令仍保留' \
+  'unified uninstall suppresses protocol-only manager-retention message'
+assert_contains "$unified_output" 'hash -r' 'unified uninstall Bash command-cache note'
 [ ! -e "$NOBRAND_STATE_DIR" ] || fail 'unified uninstall must remove NoBrand state root'
 [ ! -e "$NOBRAND_CONFIG_DIR" ] || fail 'unified uninstall must remove NoBrand config root'
 [ ! -e "$NOBRAND_LIB_DIR" ] || fail 'unified uninstall must remove NoBrand lib root'

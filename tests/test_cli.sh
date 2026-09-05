@@ -167,20 +167,20 @@ if parse install-nobrand.sh manager upgrade extra >/dev/null 2>&1; then
 fi
 
 version="$(bash "$TEST_ROOT/install-nobrand.sh" --version)"
-assert_eq $'NoBrand-OneClick 3.2.1\n作者: ike' "$version" 'NoBrand Chinese-first version output'
+assert_eq $'NoBrand-OneClick 3.2.2\n作者: ike' "$version" 'NoBrand Chinese-first version output'
 english_version="$(bash -c '
   installer="$1"
   set --
   MITA_SOURCE_ONLY=1 source "$installer"
   LANG_ZH=0 nobrand_version
 ' test "$TEST_ROOT/install-nobrand.sh")"
-assert_eq $'NoBrand-OneClick 3.2.1\nAuthor: ike' "$english_version" \
+assert_eq $'NoBrand-OneClick 3.2.2\nAuthor: ike' "$english_version" \
   'NoBrand English version output'
 mieru_version="$(bash "$TEST_ROOT/install-nobrand.sh" mieru --version)"
-assert_eq $'NoBrand-OneClick Mieru 3.2.1\n作者: ike' "$mieru_version" \
+assert_eq $'NoBrand-OneClick Mieru 3.2.2\n作者: ike' "$mieru_version" \
   'Mieru Chinese-first version output'
 mieru_english_version="$(bash "$TEST_ROOT/install-nobrand.sh" mieru --lang en --version)"
-assert_eq $'NoBrand-OneClick Mieru 3.2.1\nAuthor: ike' "$mieru_english_version" \
+assert_eq $'NoBrand-OneClick Mieru 3.2.2\nAuthor: ike' "$mieru_english_version" \
   'Mieru English version output'
 cp "$TEST_ROOT/install-nobrand.sh" "$cli_fixture/nb"
 short_version="$(bash "$cli_fixture/nb" --version)"

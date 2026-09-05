@@ -767,6 +767,10 @@ install_vless_reality() {
     warn '没有可用且无冲突的 REALITY Defender 回环端口'
     return 1
   }
+  nb_lifecycle_mark_protocol_mutation_started vless-reality || {
+    admin_lock_release
+    return 1
+  }
   # Xray 26.3.27 infers the config format from the candidate filename.
   # Keep the transactional file JSON-suffixed just like the authoritative
   # config, otherwise `xray run -test -c` rejects it before parsing.
@@ -1040,8 +1044,12 @@ reality_doctor_one() {
     reality_running "$id" \
       && nb_doctor_line PASS "REALITY_LISTENERS public TCP/${port}; defender loopback same-process" \
       || { nb_doctor_line FAIL "REALITY_LISTENERS public TCP/${port}; defender loopback"; failed=1; }
+  elif reality_service_active "$id" || nb_port_is_listening TCP "$port" \
+       || nb_port_is_listening TCP "$defender_port"; then
+    nb_doctor_line FAIL 'REALITY_SERVICE marked stopped but service/listener remains'
+    failed=1
   else
-    nb_doctor_line INFO 'REALITY_SERVICE intentionally stopped'
+    nb_doctor_line PASS 'REALITY_SERVICE intentionally stopped; no residual listeners'
   fi
   owner="$(nb_registry_port_owner TCP "$port" 2>/dev/null || true)"
   [ "$owner" = "vless-reality:${id}" ] && nb_doctor_line PASS 'REALITY_PORT_OWNERSHIP' \
@@ -1138,7 +1146,13 @@ reality_restore_runtime() {
 nobrand_run_vless_reality_action() {
   local id
   case "${VLESS_REALITY_ACTION:-menu}" in
-    install) install_vless_reality ;;
+    install)
+      if [ "${NOBRAND_MANAGER_SESSION_ACTIVE:-0}" -eq 1 ]; then
+        nb_lifecycle_run_protocol_install vless-reality install_vless_reality
+      else
+        install_vless_reality
+      fi
+      ;;
     start|stop|restart) reality_service_command "$VLESS_REALITY_ACTION" ;;
     status) reality_status ;;
     doctor) reality_doctor_all ;;

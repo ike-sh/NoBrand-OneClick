@@ -66,6 +66,8 @@ firewall_apply_binding() {
       ufw_binding_exists "$spec" && return 0
       if run ufw allow "$spec"; then
         firewall_owned_add "$key"
+      else
+        return 1
       fi
       ;;
     ufw:del)
@@ -83,6 +85,8 @@ firewall_apply_binding() {
       firewall-cmd --permanent --query-port="${p}/${proto}" >/dev/null 2>&1 && return 0
       if run firewall-cmd --permanent --add-port="${p}/${proto}"; then
         firewall_owned_add "$key"
+      else
+        return 1
       fi
       ;;
     firewalld:del)

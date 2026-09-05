@@ -11,7 +11,7 @@ source_installer
 nb_init_state_layout
 
 assert_eq 3 "$NOBRAND_SCHEMA_VERSION" '3.1 keeps schema v3'
-assert_eq 3.2.1 "$SCRIPT_VERSION" '3.2 maintenance version'
+assert_eq 3.2.2 "$SCRIPT_VERSION" '3.2 maintenance version'
 
 mkdir -p "$(dirname "$MITA_USERS_STATE")" "$NOBRAND_SNELL_STATE_DIR" \
   "$NOBRAND_HY2_STATE_DIR" "$NOBRAND_VLESS_STATE_DIR"

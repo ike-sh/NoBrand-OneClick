@@ -303,6 +303,7 @@ install_hysteria2() {
   local was_active=0 binding_was_owned=0 binding_now_owned=0
   [ "${YES:-0}" -eq 1 ] || interactive=1
   nobrand_prepare_common
+  hysteria2_configure_requests "$interactive" || return 1
   admin_lock_acquire || return 1
   snapshot="$(mktemp_dir)" || { admin_lock_release; return 1; }
   hysteria2_snapshot_file "$NOBRAND_HY2_CONFIG_FILE" "$snapshot/config"
@@ -317,14 +318,20 @@ install_hysteria2() {
     old_port="$(hysteria2_state_field listen_port 2>/dev/null || true)"
     old_created="$(hysteria2_state_field created_at 2>/dev/null || true)"
   fi
-  if ! nobrand_install_xray_runtime 0 || ! hysteria2_configure_requests "$interactive"; then
-    hysteria2_install_rollback "$snapshot" "$was_active" 0
+  if ! nobrand_install_xray_runtime 0; then
+    if [ "${NOBRAND_LIFECYCLE_ACTIVE:-0}" -ne 1 ] \
+       || [ "$(nb_lifecycle_mutation_started 2>/dev/null || printf 1)" = 1 ]; then
+      hysteria2_install_rollback "$snapshot" "$was_active" 0
+    fi
     rm -rf -- "$snapshot"
     admin_lock_release
     return 1
   fi
   nb_firewall_binding_owned UDP "$PORT" && binding_was_owned=1
   if [ "$was_active" -eq 1 ]; then
+    nb_lifecycle_mark_protocol_mutation_started hy2 || {
+      rm -rf -- "$snapshot"; admin_lock_release; return 1
+    }
     nobrand_hy2_service_action stop || {
       hysteria2_install_rollback "$snapshot" "$was_active" 0
       rm -rf -- "$snapshot"; admin_lock_release; return 1;
@@ -334,8 +341,16 @@ install_hysteria2() {
   if ! nb_port_available_for_profile "$PORT" UDP "$INGRESS_PROFILE_ID" 'hy2:default'; then
     warn "提交前发现 UDP/${PORT} 已被其它进程占用"
     nb_describe_port_conflict UDP "$PORT"
-    hysteria2_install_rollback "$snapshot" "$was_active" 0
+    if [ "${NOBRAND_LIFECYCLE_ACTIVE:-0}" -ne 1 ] \
+       || [ "$(nb_lifecycle_mutation_started 2>/dev/null || printf 1)" = 1 ]; then
+      hysteria2_install_rollback "$snapshot" "$was_active" 0
+    fi
     rm -rf -- "$snapshot"; admin_lock_release; return 1
+  fi
+  if [ "$was_active" -eq 0 ]; then
+    nb_lifecycle_mark_protocol_mutation_started hy2 || {
+      rm -rf -- "$snapshot"; admin_lock_release; return 1
+    }
   fi
   if ! generate_hysteria2_cert; then
     hysteria2_install_rollback "$snapshot" "$was_active" 0
@@ -600,12 +615,14 @@ remove_hysteria2_config() {
 }
 
 hysteria2_doctor() {
-  local failed=0 port mode host advertise_port key_mode cert_cn expected_sni
+  local failed=0 port mode host advertise_port key_mode cert_cn expected_sni enabled
   if ! hysteria2_state_exists; then
     nb_doctor_line INFO 'Hysteria2 未安装'
     return 0
   fi
   port="$(hysteria2_state_field listen_port)"
+  enabled="$(hysteria2_state_field enabled 2>/dev/null || true)"
+  case "$enabled" in true|false) ;; *) return 1 ;; esac
   [ -x "$NOBRAND_XRAY_BIN" ] && nb_doctor_line PASS "Xray $(nobrand_xray_version 2>/dev/null || printf '未知版本')" \
     || { nb_doctor_line FAIL 'NoBrand Xray 可执行文件'; failed=1; }
   nobrand_xray_test_config "$NOBRAND_HY2_CONFIG_FILE" \
@@ -630,8 +647,15 @@ hysteria2_doctor() {
   else
     nb_doctor_line FAIL '证书'; failed=1
   fi
-  hysteria2_running && nb_doctor_line PASS "服务与 UDP/${port} 监听正常" \
-    || { nb_doctor_line FAIL "服务 / 监听异常: UDP/${port}"; failed=1; }
+  if [ "$enabled" = true ]; then
+    hysteria2_running && nb_doctor_line PASS "服务与 UDP/${port} 监听正常" \
+      || { nb_doctor_line FAIL "服务 / 监听异常: UDP/${port}"; failed=1; }
+  elif nobrand_hy2_service_active || nb_port_is_listening UDP "$port"; then
+    nb_doctor_line FAIL "服务标记为已停止，但仍有服务或监听: UDP/${port}"
+    failed=1
+  else
+    nb_doctor_line PASS '服务按状态保持停止，且无残留监听'
+  fi
   nb_firewall_binding_owned UDP "$port" && nb_doctor_line PASS "防火墙归属正常: UDP/${port}" \
     || nb_doctor_line INFO "防火墙规则不归 NoBrand 管理（预先存在 / 无本地防火墙）: UDP/${port}"
   mode="$(hysteria2_state_field advertise_mode)"; host="$(hysteria2_state_field advertise_host)"
@@ -664,7 +688,13 @@ hysteria2_upgrade_runtime() {
 nobrand_run_hy2_action() {
   case "${HY2_ACTION:-menu}" in
     menu) hysteria2_menu_loop ;;
-    install) install_hysteria2 ;;
+    install)
+      if [ "${NOBRAND_MANAGER_SESSION_ACTIVE:-0}" -eq 1 ]; then
+        nb_lifecycle_run_protocol_install hy2 install_hysteria2
+      else
+        install_hysteria2
+      fi
+      ;;
     show) print_hysteria2_result show ;;
     set-endpoint) hysteria2_set_endpoint ;;
     remove) remove_hysteria2_config ;;

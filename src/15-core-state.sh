@@ -215,18 +215,93 @@ nb_lifecycle_field() {
   awk -F= -v wanted="$key" '$1==wanted {print substr($0, length($1)+2); exit}' "$path" 2>/dev/null
 }
 
+nb_lifecycle_scope_valid() {
+  local operation="$1" scope="$2"
+  case "$operation:$scope" in
+    install:manager|install:mieru|install:snell|install:hy2|install:tuic|\
+      install:vless-reality|install:vless-sudoku|install:ssh-tunnel|install:forward|\
+      repair:manager|repair:mieru|repair:global|configure:ingress|uninstall:global)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+nb_lifecycle_default_scope() {
+  local operation="$1" phase="${2:-prepare}"
+  case "$operation" in
+    configure) printf 'ingress' ;;
+    uninstall) printf 'global' ;;
+    repair)
+      case "$phase" in partial-uninstall-*) printf 'global' ;; *) printf 'mieru' ;; esac
+      ;;
+    install) printf 'mieru' ;;
+    *) return 1 ;;
+  esac
+}
+
+# Public v3.2.1 wrote lifecycle-v1 records before component scope existed.
+# Its ordinary install/repair writer was Mieru-only; partial-uninstall repair
+# and uninstall were global. Keep that exact compatibility boundary rather
+# than guessing from protocol files or absence.
+nb_lifecycle_v1_scope() {
+  local operation="$1" phase="$2"
+  case "$operation" in
+    uninstall) printf 'global' ;;
+    repair)
+      case "$phase" in partial-uninstall-*) printf 'global' ;; *) printf 'mieru' ;; esac
+      ;;
+    install) printf 'mieru' ;;
+    *) return 1 ;;
+  esac
+}
+
+nb_lifecycle_scope() {
+  local path="${1:-$NOBRAND_LIFECYCLE_TX_FILE}" format operation phase
+  format="$(nb_lifecycle_field FORMAT "$path")"
+  case "$format" in
+    nobrand-lifecycle-v2) nb_lifecycle_field SCOPE "$path" ;;
+    nobrand-lifecycle-v1)
+      operation="$(nb_lifecycle_field OPERATION "$path")"
+      phase="$(nb_lifecycle_field LAST_COMPLETED_PHASE "$path")"
+      nb_lifecycle_v1_scope "$operation" "$phase"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+nb_lifecycle_mutation_started() {
+  local path="${1:-$NOBRAND_LIFECYCLE_TX_FILE}" format status
+  format="$(nb_lifecycle_field FORMAT "$path")"
+  case "$format" in
+    nobrand-lifecycle-v2) nb_lifecycle_field MUTATION_STARTED "$path" ;;
+    nobrand-lifecycle-v1)
+      status="$(nb_lifecycle_field STATUS "$path")"
+      [ "$status" = in-progress ] && printf '1' || printf '0'
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 nb_lifecycle_phase_valid() {
   local operation="$1" status="$2" phase="$3"
   if [ "$status" = complete ]; then
     case "$operation:$phase" in
-      install:complete|repair:complete) return 0 ;;
+      install:complete|repair:complete|configure:complete) return 0 ;;
       *) return 1 ;;
     esac
   fi
   [ "$status" = in-progress ] || return 1
+  # Protocol installs persist a truncated SHA-256 of their authoritative
+  # pre-callback state in this phase.  The 55 hex digits keep the phase within
+  # the existing 64-byte field limit while retaining 220 bits of identity.
+  if [ "$operation" = install ] \
+     && [[ "$phase" =~ ^callback-[0-9a-f]{55}$ ]]; then
+    return 0
+  fi
   case "$operation:$phase" in
-    install:prepare|install:state-layout|install:runtime-ready|install:state-committed|\
-      install:ready-to-validate)
+    install:prepare|install:state-layout|install:manager-ready|install:runtime-ready|\
+      install:state-committed|install:ready-to-validate)
       return 0
       ;;
     repair:prepare|repair:state-layout|repair:runtime-ready|repair:state-committed|\
@@ -237,6 +312,9 @@ nb_lifecycle_phase_valid() {
       repair:partial-uninstall-ssh-confirmation-pending|\
       repair:partial-uninstall-state-validated|\
       repair:partial-uninstall-ready-to-validate)
+      return 0
+      ;;
+    configure:prepare|configure:state-committed|configure:ready-to-validate)
       return 0
       ;;
     uninstall:prepare|uninstall:runtime-removed|uninstall:before-state-removal|\
@@ -251,7 +329,8 @@ nb_lifecycle_phase_valid() {
 }
 
 nb_lifecycle_tx_valid() {
-  local path="$NOBRAND_LIFECYCLE_TX_FILE" operation status manager schema txid started phase
+  local path="$NOBRAND_LIFECYCLE_TX_FILE" format operation scope mutation_started
+  local status manager schema txid started phase
   local mieru_owned preserve_package preserve_user preserve_group preserve_shared
   [ -f "$path" ] && [ ! -L "$path" ] || return 1
   nb_lifecycle_paths_valid || return 1
@@ -259,23 +338,48 @@ nb_lifecycle_tx_valid() {
     secure_stat_path "$NOBRAND_LIFECYCLE_DIR" dir || return 1
     secure_stat_path "$path" file || return 1
   fi
-  awk -F= '
-    BEGIN {
-      required["FORMAT"]=1; required["OPERATION"]=1; required["STATUS"]=1;
-      required["MANAGER_VERSION"]=1; required["SCHEMA_GENERATION"]=1;
-      required["TRANSACTION_ID"]=1; required["STARTED_AT"]=1;
-      required["LAST_COMPLETED_PHASE"]=1; required["MIERU_OWNED"]=1;
-      required["MIERU_PRESERVE_PACKAGE"]=1; required["MIERU_PRESERVE_USER"]=1;
-      required["MIERU_PRESERVE_GROUP"]=1; required["MIERU_PRESERVE_SHARED"]=1
-    }
-    NF != 2 || !($1 in required) || seen[$1]++ { bad=1 }
-    END {
-      for (key in required) if (seen[key] != 1) bad=1
-      exit bad ? 1 : 0
-    }
-  ' "$path" || return 1
-  [ "$(nb_lifecycle_field FORMAT "$path")" = nobrand-lifecycle-v1 ] || return 1
+  format="$(nb_lifecycle_field FORMAT "$path")"
+  case "$format" in
+    nobrand-lifecycle-v1)
+      awk -F= '
+        BEGIN {
+          required["FORMAT"]=1; required["OPERATION"]=1; required["STATUS"]=1;
+          required["MANAGER_VERSION"]=1; required["SCHEMA_GENERATION"]=1;
+          required["TRANSACTION_ID"]=1; required["STARTED_AT"]=1;
+          required["LAST_COMPLETED_PHASE"]=1; required["MIERU_OWNED"]=1;
+          required["MIERU_PRESERVE_PACKAGE"]=1; required["MIERU_PRESERVE_USER"]=1;
+          required["MIERU_PRESERVE_GROUP"]=1; required["MIERU_PRESERVE_SHARED"]=1
+        }
+        NF != 2 || !($1 in required) || seen[$1]++ { bad=1 }
+        END {
+          for (key in required) if (seen[key] != 1) bad=1
+          exit bad ? 1 : 0
+        }
+      ' "$path" || return 1
+      ;;
+    nobrand-lifecycle-v2)
+      awk -F= '
+        BEGIN {
+          required["FORMAT"]=1; required["OPERATION"]=1; required["SCOPE"]=1;
+          required["MUTATION_STARTED"]=1; required["STATUS"]=1;
+          required["MANAGER_VERSION"]=1; required["SCHEMA_GENERATION"]=1;
+          required["TRANSACTION_ID"]=1; required["STARTED_AT"]=1;
+          required["LAST_COMPLETED_PHASE"]=1; required["MIERU_OWNED"]=1;
+          required["MIERU_PRESERVE_PACKAGE"]=1; required["MIERU_PRESERVE_USER"]=1;
+          required["MIERU_PRESERVE_GROUP"]=1; required["MIERU_PRESERVE_SHARED"]=1
+        }
+        NF != 2 || !($1 in required) || seen[$1]++ { bad=1 }
+        END {
+          for (key in required) if (seen[key] != 1) bad=1
+          exit bad ? 1 : 0
+        }
+      ' "$path" || return 1
+      ;;
+    *) return 1 ;;
+  esac
   operation="$(nb_lifecycle_field OPERATION "$path")"
+  scope="$(nb_lifecycle_scope "$path")" || return 1
+  mutation_started="$(nb_lifecycle_mutation_started "$path")" || return 1
   status="$(nb_lifecycle_field STATUS "$path")"
   manager="$(nb_lifecycle_field MANAGER_VERSION "$path")"
   schema="$(nb_lifecycle_field SCHEMA_GENERATION "$path")"
@@ -287,7 +391,12 @@ nb_lifecycle_tx_valid() {
   preserve_user="$(nb_lifecycle_field MIERU_PRESERVE_USER "$path")"
   preserve_group="$(nb_lifecycle_field MIERU_PRESERVE_GROUP "$path")"
   preserve_shared="$(nb_lifecycle_field MIERU_PRESERVE_SHARED "$path")"
-  case "$operation" in install|repair|uninstall) ;; *) return 1 ;; esac
+  case "$operation" in install|repair|configure|uninstall) ;; *) return 1 ;; esac
+  [ "$format" != nobrand-lifecycle-v1 ] || {
+    case "$operation" in install|repair|uninstall) ;; *) return 1 ;; esac
+  }
+  nb_lifecycle_scope_valid "$operation" "$scope" || return 1
+  case "$mutation_started" in 0|1) ;; *) return 1 ;; esac
   case "$status" in in-progress|complete) ;; *) return 1 ;; esac
   [ "$operation:$status" != uninstall:complete ] || return 1
   case "$manager" in
@@ -303,7 +412,8 @@ nb_lifecycle_tx_valid() {
     0:0:0:0:0|1:[01]:[01]:[01]:[01]) ;;
     *) return 1 ;;
   esac
-  [ "$operation" = uninstall ] || [ "$mieru_owned:$preserve_package:$preserve_user:$preserve_group:$preserve_shared" = 0:0:0:0:0 ]
+  [ "$operation:$scope" = uninstall:global ] \
+    || [ "$mieru_owned:$preserve_package:$preserve_user:$preserve_group:$preserve_shared" = 0:0:0:0:0 ]
 }
 
 nb_lifecycle_prepare_dir() {
@@ -334,7 +444,11 @@ nb_lifecycle_write() {
   local operation="$1" status="$2" txid="$3" started="$4" phase="$5" tmp
   local mieru_owned="${6:-0}" preserve_package="${7:-0}" preserve_user="${8:-0}"
   local preserve_group="${9:-0}" preserve_shared="${10:-0}"
-  case "$operation" in install|repair|uninstall) ;; *) return 1 ;; esac
+  local scope="${11:-}" mutation_started="${12:-0}"
+  [ -n "$scope" ] || scope="$(nb_lifecycle_default_scope "$operation" "$phase")" || return 1
+  case "$operation" in install|repair|configure|uninstall) ;; *) return 1 ;; esac
+  nb_lifecycle_scope_valid "$operation" "$scope" || return 1
+  case "$mutation_started" in 0|1) ;; *) return 1 ;; esac
   case "$status" in in-progress|complete) ;; *) return 1 ;; esac
   [[ "$txid" =~ ^[A-Za-z0-9._-]{8,128}$ ]] || return 1
   [[ "$started" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || return 1
@@ -344,12 +458,16 @@ nb_lifecycle_write() {
     0:0:0:0:0|1:[01]:[01]:[01]:[01]) ;;
     *) return 1 ;;
   esac
-  [ "$operation" = uninstall ] || [ "$mieru_owned:$preserve_package:$preserve_user:$preserve_group:$preserve_shared" = 0:0:0:0:0 ] || return 1
+  [ "$operation:$scope" = uninstall:global ] \
+    || [ "$mieru_owned:$preserve_package:$preserve_user:$preserve_group:$preserve_shared" = 0:0:0:0:0 ] \
+    || return 1
   nb_lifecycle_prepare_dir || return 1
   tmp="$(mktemp "${NOBRAND_LIFECYCLE_DIR}/.transaction.XXXXXX")" || return 1
   if ! printf '%s\n' \
-      'FORMAT=nobrand-lifecycle-v1' \
+      'FORMAT=nobrand-lifecycle-v2' \
       "OPERATION=${operation}" \
+      "SCOPE=${scope}" \
+      "MUTATION_STARTED=${mutation_started}" \
       "STATUS=${status}" \
       "MANAGER_VERSION=${SCRIPT_VERSION}" \
       "SCHEMA_GENERATION=${NOBRAND_SCHEMA_VERSION}" \
@@ -376,10 +494,14 @@ nb_lifecycle_begin() {
   local operation="$1" phase="${2:-prepare}" txid="" started=""
   local mieru_owned="${3:-0}" preserve_package="${4:-0}" preserve_user="${5:-0}"
   local preserve_group="${6:-0}" preserve_shared="${7:-0}" allow_transition="${8:-0}"
-  local existing_operation=""
+  local scope="${9:-}" existing_operation="" existing_scope="" mutation_started=0
+  [ -n "$scope" ] || scope="$(nb_lifecycle_default_scope "$operation" "$phase")" || return 1
+  nb_lifecycle_scope_valid "$operation" "$scope" || return 1
   [ "${DRY_RUN:-0}" -eq 0 ] || {
     NOBRAND_LIFECYCLE_OPERATION="$operation"
+    NOBRAND_LIFECYCLE_SCOPE="$scope"
     NOBRAND_LIFECYCLE_ACTIVE=1
+    NOBRAND_LIFECYCLE_MUTATION_STARTED=0
     return 0
   }
   if ! nb_test_mode_enabled && [ "$(id -u 2>/dev/null || printf 1)" -ne 0 ]; then
@@ -387,8 +509,9 @@ nb_lifecycle_begin() {
   fi
   if nb_lifecycle_tx_valid && [ "$(nb_lifecycle_field STATUS)" = in-progress ]; then
     existing_operation="$(nb_lifecycle_field OPERATION)"
-    if [ "$existing_operation" != "$operation" ]; then
-      if [ "$allow_transition:$existing_operation:$operation" = 1:uninstall:repair ]; then
+    existing_scope="$(nb_lifecycle_scope)" || return 1
+    if [ "$existing_operation:$existing_scope" != "$operation:$scope" ]; then
+      if [ "$allow_transition:$existing_operation:$existing_scope:$operation:$scope" = 1:uninstall:global:repair:global ]; then
         txid="$(nb_lifecycle_random_id)"
         started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
         mieru_owned=0
@@ -397,8 +520,8 @@ nb_lifecycle_begin() {
         preserve_group=0
         preserve_shared=0
       else
-        warn "$(t "未完成的 ${existing_operation} 生命周期事务仍在进行，拒绝以 ${operation} 覆盖" \
-          "An unfinished ${existing_operation} lifecycle transaction is active; refusing to replace it with ${operation}")"
+        warn "$(t "未完成的 ${existing_operation}:${existing_scope} 生命周期事务仍在进行，拒绝以 ${operation}:${scope} 覆盖" \
+          "An unfinished ${existing_operation}:${existing_scope} lifecycle transaction is active; refusing to replace it with ${operation}:${scope}")"
         return 1
       fi
     else
@@ -409,21 +532,30 @@ nb_lifecycle_begin() {
       preserve_user="$(nb_lifecycle_field MIERU_PRESERVE_USER)"
       preserve_group="$(nb_lifecycle_field MIERU_PRESERVE_GROUP)"
       preserve_shared="$(nb_lifecycle_field MIERU_PRESERVE_SHARED)"
+      mutation_started="$(nb_lifecycle_mutation_started)" || return 1
     fi
   else
     txid="$(nb_lifecycle_random_id)"
     started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   fi
-  nb_lifecycle_write "$operation" in-progress "$txid" "$started" "$phase" \
-    "$mieru_owned" "$preserve_package" "$preserve_user" "$preserve_group" \
-    "$preserve_shared" || return 1
   NOBRAND_LIFECYCLE_OPERATION="$operation"
+  NOBRAND_LIFECYCLE_SCOPE="$scope"
   NOBRAND_LIFECYCLE_ACTIVE=1
+  NOBRAND_LIFECYCLE_MUTATION_STARTED="$mutation_started"
+  if ! nb_lifecycle_write "$operation" in-progress "$txid" "$started" "$phase" \
+      "$mieru_owned" "$preserve_package" "$preserve_user" "$preserve_group" \
+      "$preserve_shared" "$scope" "$mutation_started"; then
+    NOBRAND_LIFECYCLE_ACTIVE=0
+    NOBRAND_LIFECYCLE_OPERATION=""
+    NOBRAND_LIFECYCLE_SCOPE=""
+    NOBRAND_LIFECYCLE_MUTATION_STARTED=0
+    return 1
+  fi
 }
 
 nb_lifecycle_mark_phase() {
   local phase="$1" operation txid started status mieru_owned preserve_package
-  local preserve_user preserve_group preserve_shared
+  local preserve_user preserve_group preserve_shared scope mutation_started
   [ "${DRY_RUN:-0}" -eq 0 ] || return 0
   nb_lifecycle_tx_valid || return 1
   operation="$(nb_lifecycle_field OPERATION)"
@@ -435,18 +567,129 @@ nb_lifecycle_mark_phase() {
   preserve_user="$(nb_lifecycle_field MIERU_PRESERVE_USER)"
   preserve_group="$(nb_lifecycle_field MIERU_PRESERVE_GROUP)"
   preserve_shared="$(nb_lifecycle_field MIERU_PRESERVE_SHARED)"
+  scope="$(nb_lifecycle_scope)" || return 1
+  mutation_started="$(nb_lifecycle_mutation_started)" || return 1
   [ "$status" = in-progress ] || return 1
   nb_lifecycle_write "$operation" in-progress "$txid" "$started" "$phase" \
     "$mieru_owned" "$preserve_package" "$preserve_user" "$preserve_group" \
-    "$preserve_shared"
+    "$preserve_shared" "$scope" "$mutation_started"
+}
+
+# A fresh component action can temporarily replace a completed lifecycle
+# record before it reaches its first durable component mutation. Keep that
+# closed-schema record in memory only so validation failures, cancellation, or
+# a handled signal can restore it exactly. Lifecycle records contain no node
+# credentials; protocol request values are deliberately never captured here.
+nb_lifecycle_pre_mutation_snapshot() {
+  local record=""
+  NOBRAND_LIFECYCLE_PREMUTATION_ARMED=1
+  NOBRAND_LIFECYCLE_PREMUTATION_PRIOR_PRESENT=0
+  NOBRAND_LIFECYCLE_PREMUTATION_PRIOR_RECORD=""
+  [ "${DRY_RUN:-0}" -eq 0 ] || return 0
+  if nb_lifecycle_tx_valid; then
+    record="$(<"$NOBRAND_LIFECYCLE_TX_FILE")" || {
+      nb_lifecycle_pre_mutation_disarm
+      return 1
+    }
+    [ -n "$record" ] || {
+      nb_lifecycle_pre_mutation_disarm
+      return 1
+    }
+    NOBRAND_LIFECYCLE_PREMUTATION_PRIOR_PRESENT=1
+    NOBRAND_LIFECYCLE_PREMUTATION_PRIOR_RECORD="$record"
+  fi
+}
+
+nb_lifecycle_pre_mutation_disarm() {
+  NOBRAND_LIFECYCLE_PREMUTATION_ARMED=0
+  NOBRAND_LIFECYCLE_PREMUTATION_PRIOR_PRESENT=0
+  NOBRAND_LIFECYCLE_PREMUTATION_PRIOR_RECORD=""
+}
+
+nb_lifecycle_restore_pre_mutation() {
+  local tmp=""
+  if [ "${NOBRAND_LIFECYCLE_PREMUTATION_ARMED:-0}" -eq 1 ] \
+     && [ "${NOBRAND_LIFECYCLE_PREMUTATION_PRIOR_PRESENT:-0}" -eq 1 ]; then
+    nb_lifecycle_prepare_dir || return 1
+    tmp="$(mktemp "${NOBRAND_LIFECYCLE_DIR}/.transaction.XXXXXX")" || return 1
+    if ! printf '%s\n' "$NOBRAND_LIFECYCLE_PREMUTATION_PRIOR_RECORD" >"$tmp" \
+       || ! chmod 0600 "$tmp"; then
+      rm -f "$tmp"
+      return 1
+    fi
+    chown root:root "$tmp" 2>/dev/null || true
+    if ! mv -f "$tmp" "$NOBRAND_LIFECYCLE_TX_FILE"; then
+      rm -f "$tmp"
+      return 1
+    fi
+  else
+    nb_lifecycle_clear || return 1
+  fi
+  NOBRAND_LIFECYCLE_ACTIVE=0
+  NOBRAND_LIFECYCLE_OPERATION=""
+  NOBRAND_LIFECYCLE_SCOPE=""
+  NOBRAND_LIFECYCLE_MUTATION_STARTED=0
+  nb_lifecycle_pre_mutation_disarm
+}
+
+nb_lifecycle_mark_mutation_started() {
+  local operation txid started phase status mieru_owned preserve_package
+  local preserve_user preserve_group preserve_shared scope
+  [ "${DRY_RUN:-0}" -eq 0 ] || {
+    NOBRAND_LIFECYCLE_MUTATION_STARTED=1
+    return 0
+  }
+  nb_lifecycle_tx_valid || return 1
+  operation="$(nb_lifecycle_field OPERATION)"
+  status="$(nb_lifecycle_field STATUS)"
+  txid="$(nb_lifecycle_field TRANSACTION_ID)"
+  started="$(nb_lifecycle_field STARTED_AT)"
+  phase="$(nb_lifecycle_field LAST_COMPLETED_PHASE)"
+  mieru_owned="$(nb_lifecycle_field MIERU_OWNED)"
+  preserve_package="$(nb_lifecycle_field MIERU_PRESERVE_PACKAGE)"
+  preserve_user="$(nb_lifecycle_field MIERU_PRESERVE_USER)"
+  preserve_group="$(nb_lifecycle_field MIERU_PRESERVE_GROUP)"
+  preserve_shared="$(nb_lifecycle_field MIERU_PRESERVE_SHARED)"
+  scope="$(nb_lifecycle_scope)" || return 1
+  [ "$status" = in-progress ] || return 1
+  nb_lifecycle_write "$operation" in-progress "$txid" "$started" "$phase" \
+    "$mieru_owned" "$preserve_package" "$preserve_user" "$preserve_group" \
+    "$preserve_shared" "$scope" 1 || return 1
+  NOBRAND_LIFECYCLE_MUTATION_STARTED=1
+  nb_lifecycle_pre_mutation_disarm
+}
+
+# Protocol installers collect and validate their requests inside the callback
+# run by the lifecycle wrapper.  Marking in the wrapper is therefore too early:
+# an invalid answer or cancellation would be recorded as a partial install.
+# Installers call this immediately before their first durable protocol change.
+# Direct module invocations do not own a manager lifecycle and remain no-ops.
+nb_lifecycle_mark_protocol_mutation_started() {
+  local scope="$1"
+  # Module helpers can also be reached by non-lifecycle maintenance actions in
+  # or outside a manager process. Only an active scoped transaction turns this
+  # into a required lifecycle write; otherwise the hook is deliberately a no-op.
+  [ "${NOBRAND_LIFECYCLE_ACTIVE:-0}" -eq 1 ] || return 0
+  [ "${NOBRAND_LIFECYCLE_SCOPE:-}" = "$scope" ] || return 1
+  case "${NOBRAND_LIFECYCLE_OPERATION:-}" in install|repair) ;; *) return 1 ;; esac
+  nb_lifecycle_tx_valid \
+    && [ "$(nb_lifecycle_field STATUS)" = in-progress ] \
+    && [ "$(nb_lifecycle_scope)" = "$scope" ] || return 1
+  case "$(nb_lifecycle_field OPERATION)" in install|repair) ;; *) return 1 ;; esac
+  nb_lifecycle_mark_mutation_started || return 1
+  # This proof is intentionally process-local. A prior interrupted attempt may
+  # already have MUTATION_STARTED=1; recovery may advance past its callback
+  # fingerprint only when this invocation reached its own mutation boundary.
+  NOBRAND_PROTOCOL_CALLBACK_ATTEMPT_MUTATION=1
 }
 
 nb_lifecycle_complete() {
   local operation="$1" txid started mieru_owned preserve_package preserve_user
-  local preserve_group preserve_shared
+  local preserve_group preserve_shared scope mutation_started
   [ "${NOBRAND_LIFECYCLE_ACTIVE:-0}" -eq 1 ] || return 0
   if [ "${DRY_RUN:-0}" -eq 1 ]; then
     NOBRAND_LIFECYCLE_ACTIVE=0
+    NOBRAND_LIFECYCLE_MUTATION_STARTED=0
     return 0
   fi
   nb_lifecycle_tx_valid || return 1
@@ -458,10 +701,14 @@ nb_lifecycle_complete() {
   preserve_user="$(nb_lifecycle_field MIERU_PRESERVE_USER)"
   preserve_group="$(nb_lifecycle_field MIERU_PRESERVE_GROUP)"
   preserve_shared="$(nb_lifecycle_field MIERU_PRESERVE_SHARED)"
+  scope="$(nb_lifecycle_scope)" || return 1
+  mutation_started="$(nb_lifecycle_mutation_started)" || return 1
   nb_lifecycle_write "$operation" complete "$txid" "$started" complete \
     "$mieru_owned" "$preserve_package" "$preserve_user" "$preserve_group" \
-    "$preserve_shared" || return 1
+    "$preserve_shared" "$scope" "$mutation_started" || return 1
   NOBRAND_LIFECYCLE_ACTIVE=0
+  NOBRAND_LIFECYCLE_MUTATION_STARTED=0
+  nb_lifecycle_pre_mutation_disarm
 }
 
 nb_lifecycle_clear() {
@@ -471,6 +718,9 @@ nb_lifecycle_clear() {
   fi
   NOBRAND_LIFECYCLE_ACTIVE=0
   NOBRAND_LIFECYCLE_OPERATION=""
+  NOBRAND_LIFECYCLE_SCOPE=""
+  NOBRAND_LIFECYCLE_MUTATION_STARTED=0
+  nb_lifecycle_pre_mutation_disarm
 }
 
 nb_lifecycle_lock_acquire() {
@@ -537,8 +787,9 @@ nb_lifecycle_lock_release() {
 }
 
 nb_lifecycle_lock_release_all() {
-  local rc=0
-  while [ "${NOBRAND_LIFECYCLE_LOCK_HELD:-0}" -gt 0 ]; do
+  local floor="${1:-0}" rc=0
+  case "$floor" in ''|*[!0-9]*) floor=0 ;; esac
+  while [ "${NOBRAND_LIFECYCLE_LOCK_HELD:-0}" -gt "$floor" ]; do
     if ! nb_lifecycle_lock_release; then
       rc=1
       break
@@ -548,20 +799,33 @@ nb_lifecycle_lock_release_all() {
 }
 
 nb_lifecycle_signal_exit() {
-  local signal="$1" exit_status=1
+  local signal="$1" exit_status=1 lifecycle_in_progress=0 mutation_started=0
   # Never invoke the generic ERR handler or recursively re-enter this handler.
-  # The durable in-progress transaction is intentionally left byte-for-byte
-  # intact; interruption recovery reconciles it on the next invocation.
   trap - ERR HUP INT TERM
   case "$signal" in
     HUP) exit_status=129 ;;
     INT) exit_status=130 ;;
     TERM) exit_status=143 ;;
   esac
-  nb_lifecycle_lock_release_all >/dev/null 2>&1 || true
-  warn "$(t '生命周期操作被信号中断；恢复信息已保留，请重新运行以安全继续。' \
-    'The lifecycle operation was interrupted; recovery metadata was preserved. Run it again to continue safely.')" \
-    || true
+  if [ "${NOBRAND_LIFECYCLE_ACTIVE:-0}" -eq 1 ] && nb_lifecycle_tx_valid \
+     && [ "$(nb_lifecycle_field STATUS)" = in-progress ]; then
+    lifecycle_in_progress=1
+    mutation_started="$(nb_lifecycle_mutation_started 2>/dev/null || printf 1)"
+  fi
+  if [ "$lifecycle_in_progress" -eq 1 ] && [ "$mutation_started" = 0 ]; then
+    nb_lifecycle_restore_pre_mutation >/dev/null 2>&1 || true
+    warn "$(t '生命周期操作在写入变更前被中断；临时恢复信息已清除。' \
+      'The lifecycle operation was interrupted before mutation; temporary recovery metadata was cleared.')" \
+      || true
+  elif [ "$lifecycle_in_progress" -eq 1 ]; then
+    warn "$(t '生命周期操作被信号中断；已保留带组件范围的恢复信息，请重新运行以安全继续。' \
+      'The lifecycle operation was interrupted; scoped recovery metadata was preserved. Run it again to continue safely.')" \
+      || true
+  fi
+  # Menu callbacks run in a subshell that inherits the parent's fd 7 open-file
+  # description.  Releasing below the inherited count there would unlock the
+  # parent's guard as well, so child handlers set a floor before doing work.
+  nb_lifecycle_lock_release_all "${NOBRAND_LIFECYCLE_LOCK_FLOOR:-0}" >/dev/null 2>&1 || true
   exit "$exit_status"
 }
 
@@ -572,12 +836,16 @@ nb_lifecycle_signal_handlers_install() {
 }
 
 nb_lifecycle_checkpoint() {
-  local operation="$1" phase="$2" requested=""
+  local operation="$1" phase="$2" mutation_started="${3:-}" requested=""
   nb_lifecycle_mark_phase "$phase" || return 1
+  if [ "$mutation_started" = 1 ]; then
+    nb_lifecycle_mark_mutation_started || return 1
+  fi
   nb_test_mode_enabled || return 0
   case "$operation" in
     install) requested="${NOBRAND_TEST_INTERRUPT_INSTALL_AT:-}" ;;
     repair) requested="${NOBRAND_TEST_INTERRUPT_REPAIR_AT:-}" ;;
+    configure) requested="${NOBRAND_TEST_INTERRUPT_CONFIGURE_AT:-}" ;;
     uninstall) requested="${NOBRAND_TEST_INTERRUPT_UNINSTALL_AT:-}" ;;
     *) return 1 ;;
   esac
@@ -587,7 +855,7 @@ nb_lifecycle_checkpoint() {
 nb_classify_installation_state() {
   local operation manager_version="" canonical_manager_version="" command_version="" root
   local lifecycle_valid=0 schema_valid=0 current_evidence=0 backup_restore_valid=0
-  local command_path expected_target
+  local command_path expected_target manager_command_valid=0 short_command_valid=0
   if { [ -e "$NOBRAND_LIFECYCLE_TX_FILE" ] || [ -L "$NOBRAND_LIFECYCLE_TX_FILE" ]; } \
      && ! nb_lifecycle_tx_valid; then
     printf 'AMBIGUOUS_OR_FOREIGN'
@@ -650,6 +918,13 @@ nb_classify_installation_state() {
       fi
       manager_version="$command_version"
       current_evidence=1
+      if [ -L "$command_path" ]; then
+        if [ "$command_path" = "$NOBRAND_COMMAND_PATH" ]; then
+          manager_command_valid=1
+        else
+          short_command_valid=1
+        fi
+      fi
     fi
   done
   if [ "$lifecycle_valid" -eq 1 ]; then
@@ -694,6 +969,7 @@ nb_classify_installation_state() {
     case "$operation" in
       install) printf 'CURRENT_PARTIAL_INSTALL' ;;
       repair) printf 'CURRENT_PARTIAL_REPAIR' ;;
+      configure) printf 'CURRENT_PARTIAL_CONFIGURE' ;;
       uninstall) printf 'CURRENT_PARTIAL_UNINSTALL' ;;
     esac
     return 0
@@ -711,7 +987,9 @@ nb_classify_installation_state() {
     case "$manager_version" in
       3.0.*|3.1.*) printf 'LEGACY_SUPPORTED' ;;
       3.2.*)
-        if [ -n "$canonical_manager_version" ]; then
+        if [ -n "$canonical_manager_version" ] \
+           && [ "$manager_command_valid" -eq 1 ] \
+           && [ "$short_command_valid" -eq 1 ]; then
           printf 'CURRENT_COMPLETE'
         else
           printf 'CURRENT_PARTIAL_INSTALL'
@@ -774,6 +1052,10 @@ nb_install_state_notice() {
       t '[提示] 检测到上一次修复未完成，将根据当前状态继续检查和修复。' \
         '[Info] The previous repair was interrupted; checks and repair will continue from actual current state.'
       ;;
+    CURRENT_PARTIAL_CONFIGURE)
+      t '[提示] 检测到未完成的组件配置，将仅恢复记录的组件，不会启动其它协议安装。' \
+        '[Info] An incomplete component configuration was detected. Only its recorded component will be recovered; no other protocol installer will start.'
+      ;;
     CURRENT_PARTIAL_UNINSTALL)
       t '[提示] 检测到上一次 NoBrand-OneClick 卸载未完成。可重新运行安装器安全修复，或再次选择完整卸载继续清理剩余的 NoBrand 管理资源。' \
         '[Info] The previous NoBrand-OneClick uninstall was interrupted. Re-run the installer to repair safely, or choose full uninstall again to continue cleaning managed resources.'
@@ -791,7 +1073,7 @@ nb_validate_authoritative_state_boundary() {
     LEGACY_UNSUPPORTED) nb_fail_legacy_state; return 1 ;;
     AMBIGUOUS_OR_FOREIGN) nb_fail_ambiguous_state; return 1 ;;
     CLEAN|CURRENT_COMPLETE|CURRENT_PARTIAL_INSTALL|CURRENT_PARTIAL_REPAIR|\
-      CURRENT_PARTIAL_UNINSTALL|LEGACY_SUPPORTED) return 0 ;;
+      CURRENT_PARTIAL_CONFIGURE|CURRENT_PARTIAL_UNINSTALL|LEGACY_SUPPORTED) return 0 ;;
     *) nb_fail_ambiguous_state; return 1 ;;
   esac
 }

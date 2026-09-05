@@ -15,8 +15,9 @@ run_case debian:bookworm-slim \
 run_case ubuntu:24.04 \
   'apt-get update -qq >/dev/null && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq bash git python3 iproute2 jq openssl openssh-server openssh-client passwd procps >/dev/null'
 run_case rockylinux:9 \
-  'dnf install -y -q bash diffutils git python3 iproute jq openssl openssh-server openssh-clients shadow-utils procps-ng >/dev/null'
+  'dnf install -y -q --allowerasing bash diffutils git python3 iproute iproute-tc jq openssl openssh-server openssh-clients shadow-utils procps-ng >/dev/null'
 run_case alpine:3.20 \
   'apk add --no-cache bash git python3 iproute2 jq openssl openssh-server openssh-keygen shadow procps-ng >/dev/null'
 
+echo 'FOUR_PLATFORM_GATE=PASS'
 echo 'platform-smoke: PASS'

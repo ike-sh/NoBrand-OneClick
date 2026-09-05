@@ -3,14 +3,23 @@ if [ -z "${BASH_VERSION:-}" ]; then
   if [ -f /etc/alpine-release ]; then
     echo "Alpine 默认无 bash，请先安装后执行（root 无需 sudo）：" >&2
     echo "  apk add --no-cache bash curl" >&2
-    echo "  curl -fsSL https://github.com/ike-sh/NoBrand-OneClick/releases/latest/download/install-nobrand.sh | bash" >&2
+    echo "  curl -fsSLO https://github.com/ike-sh/NoBrand-OneClick/releases/latest/download/install-nobrand.sh" >&2
+    echo "  bash install-nobrand.sh" >&2
   else
-    echo "  curl -fsSL https://github.com/ike-sh/NoBrand-OneClick/releases/latest/download/install-nobrand.sh | sudo bash" >&2
+    echo "  curl -fsSLO https://github.com/ike-sh/NoBrand-OneClick/releases/latest/download/install-nobrand.sh" >&2
+    echo "  sudo bash install-nobrand.sh" >&2
   fi
   exit 1
 fi
 
 on_error() {
+  if declare -F nb_lifecycle_restore_pre_mutation >/dev/null 2>&1 \
+     && [ "${NOBRAND_LIFECYCLE_ACTIVE:-0}" -eq 1 ] \
+     && nb_lifecycle_tx_valid \
+     && [ "$(nb_lifecycle_field STATUS)" = in-progress ] \
+     && [ "$(nb_lifecycle_mutation_started)" = 0 ]; then
+    nb_lifecycle_restore_pre_mutation >/dev/null 2>&1 || true
+  fi
   msg "[错误] 步骤失败: ${STAGE}" >&2
   exit 1
 }
@@ -105,11 +114,13 @@ NoBrand-OneClick Mieru 管理 ${SCRIPT_VERSION}
   nobrand mieru restart            重启服务（start/stop 同理）
 
 一键安装（交互式，Debian/Ubuntu/CentOS 等）：
-  curl -fsSL ${NOBRAND_RELEASE_INSTALLER_URL} | sudo bash
+  curl -fsSLO ${NOBRAND_RELEASE_INSTALLER_URL}
+  sudo bash install-nobrand.sh
 
 Alpine Linux（无 sudo，需先装 bash）：
   apk add --no-cache bash curl
-  curl -fsSL ${NOBRAND_RELEASE_INSTALLER_URL} | bash
+  curl -fsSLO ${NOBRAND_RELEASE_INSTALLER_URL}
+  bash install-nobrand.sh
 
 非交互示例：
   nobrand mieru install -y --port 2088 --advertise-auto --user alice --password 'secret'
@@ -211,11 +222,27 @@ parse_nobrand_ingress_args() {
         [ -n "$INGRESS_PROFILE_SELECTOR" ] && [[ "$INGRESS_PROFILE_SELECTOR" != --* ]] || die "$1 需要入口配置 ID 或名称"
         shift 2
         ;;
-      --name) INGRESS_NAME="${2:-}"; INGRESS_NAME_CLI=1; [ -n "$INGRESS_NAME" ] || die '--name 需要名称'; shift 2 ;;
-      --type) INGRESS_TYPE="$(printf '%s' "${2:-}" | tr '[:upper:]' '[:lower:]')"; INGRESS_TYPE_CLI=1; shift 2 ;;
-      --interface) INGRESS_INTERFACE="${2:-}"; INGRESS_INTERFACE_CLI=1; [ -n "$INGRESS_INTERFACE" ] || die '--interface 需要网卡名'; shift 2 ;;
-      --address) INGRESS_ADDRESS="${2:-}"; INGRESS_ADDRESS_CLI=1; [ -n "$INGRESS_ADDRESS" ] || die '--address 需要本地 IPv4'; shift 2 ;;
-      --port-policy) INGRESS_PORT_POLICY="$(printf '%s' "${2:-}" | tr '_' '-' | tr '[:upper:]' '[:lower:]')"; INGRESS_PORT_POLICY_CLI=1; shift 2 ;;
+      --name)
+        [ -n "${2:-}" ] && [[ "${2:-}" != --* ]] || die '--name 需要名称' || return 1
+        INGRESS_NAME="$2"; INGRESS_NAME_CLI=1; shift 2
+        ;;
+      --type)
+        [ -n "${2:-}" ] && [[ "${2:-}" != --* ]] || die '--type 需要类型' || return 1
+        INGRESS_TYPE="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')"; INGRESS_TYPE_CLI=1; shift 2
+        ;;
+      --interface)
+        [ -n "${2:-}" ] && [[ "${2:-}" != --* ]] || die '--interface 需要网卡名' || return 1
+        INGRESS_INTERFACE="$2"; INGRESS_INTERFACE_CLI=1; shift 2
+        ;;
+      --address)
+        [ -n "${2:-}" ] && [[ "${2:-}" != --* ]] || die '--address 需要本地 IPv4' || return 1
+        INGRESS_ADDRESS="$2"; INGRESS_ADDRESS_CLI=1; shift 2
+        ;;
+      --port-policy)
+        [ -n "${2:-}" ] && [[ "${2:-}" != --* ]] || die '--port-policy 需要端口策略' || return 1
+        INGRESS_PORT_POLICY="$(printf '%s' "$2" | tr '_' '-' | tr '[:upper:]' '[:lower:]')"
+        INGRESS_PORT_POLICY_CLI=1; shift 2
+        ;;
       --range-start) INGRESS_RANGE_START="${2:-}"; INGRESS_RANGE_START_CLI=1; shift 2 ;;
       --range-end) INGRESS_RANGE_END="${2:-}"; INGRESS_RANGE_END_CLI=1; shift 2 ;;
       --reserve|--reserved)
@@ -250,6 +277,15 @@ parse_nobrand_ingress_args() {
   case "$INGRESS_ACTION" in
     show|modify|delete|set-default|apply) [ -n "$INGRESS_PROFILE_SELECTOR" ] || die "${INGRESS_ACTION} 需要入口配置 ID 或名称" ;;
   esac
+  if [ "$INGRESS_ACTION" = add ]; then
+    [ "$INGRESS_NAME_CLI" -eq 1 ] && [ -n "$INGRESS_NAME" ] \
+      && [ "$INGRESS_TYPE_CLI" -eq 1 ] && [ -n "$INGRESS_TYPE" ] \
+      && [ "$INGRESS_INTERFACE_CLI" -eq 1 ] && [ -n "$INGRESS_INTERFACE" ] \
+      && [ "$INGRESS_ADDRESS_CLI" -eq 1 ] && [ -n "$INGRESS_ADDRESS" ] \
+      && [ "$INGRESS_PORT_POLICY_CLI" -eq 1 ] && [ -n "$INGRESS_PORT_POLICY" ] \
+      || die 'ingress add 非交互模式需要 --name --type --interface --address --port-policy' \
+      || return 1
+  fi
   ACTION="nobrand-ingress"
   NOBRAND_ARGS_HANDLED=1
 }

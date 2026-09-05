@@ -396,8 +396,10 @@ vless_sudoku_install_rollback() {
 install_vless_sudoku() {
   local interactive=0 snapshot config_tmp state_tmp client_tmp advertise_mode
   local old_port="" old_created="" was_active=0 binding_was_owned=0 binding_now_owned=0
+  local rollback_needed=1
   [ "${YES:-0}" -eq 1 ] || interactive=1
   nobrand_prepare_common
+  vless_sudoku_configure_requests "$interactive" || return 1
   admin_lock_acquire || return 1
   snapshot="$(mktemp_dir)" || { admin_lock_release; return 1; }
   vless_sudoku_snapshot_file "$NOBRAND_VLESS_CONFIG_FILE" "$snapshot/config"
@@ -411,14 +413,26 @@ install_vless_sudoku() {
     old_port="$(vless_sudoku_state_field listen_port 2>/dev/null || true)"
     old_created="$(vless_sudoku_state_field created_at 2>/dev/null || true)"
   fi
-  if ! nobrand_install_xray_runtime 0 || ! vless_sudoku_configure_requests "$interactive"; then
-    vless_sudoku_install_rollback "$snapshot" "$was_active" 0
+  if ! nobrand_install_xray_runtime 0; then
+    if [ "${NOBRAND_LIFECYCLE_ACTIVE:-0}" -ne 1 ] \
+       || [ "$(nb_lifecycle_mutation_started 2>/dev/null || printf 1)" = 1 ]; then
+      vless_sudoku_install_rollback "$snapshot" "$was_active" 0
+    fi
     rm -rf -- "$snapshot"
     admin_lock_release
     return 1
   fi
+  if [ "${NOBRAND_LIFECYCLE_ACTIVE:-0}" -eq 1 ]; then
+    rollback_needed="$(nb_lifecycle_mutation_started)" || {
+      rm -rf -- "$snapshot"; admin_lock_release; return 1
+    }
+  fi
   nb_firewall_binding_owned TCP "$PORT" && binding_was_owned=1
   if [ "$was_active" -eq 1 ]; then
+    nb_lifecycle_mark_protocol_mutation_started vless-sudoku || {
+      rm -rf -- "$snapshot"; admin_lock_release; return 1
+    }
+    rollback_needed=1
     nobrand_vless_sudoku_service_action stop || {
       vless_sudoku_install_rollback "$snapshot" "$was_active" 0
       rm -rf -- "$snapshot"; admin_lock_release; return 1;
@@ -427,19 +441,25 @@ install_vless_sudoku() {
   if ! nb_port_available_for_profile "$PORT" TCP "$INGRESS_PROFILE_ID" 'vless-sudoku:default'; then
     warn "提交前发现 TCP/${PORT} 已被其它进程占用"
     nb_describe_port_conflict TCP "$PORT"
-    vless_sudoku_install_rollback "$snapshot" "$was_active" 0
+    [ "$rollback_needed" -eq 0 ] \
+      || vless_sudoku_install_rollback "$snapshot" "$was_active" 0
     rm -rf -- "$snapshot"; admin_lock_release; return 1
   fi
   config_tmp="$(mktemp_file .json)" || {
-    vless_sudoku_install_rollback "$snapshot" "$was_active" 0
+    [ "$rollback_needed" -eq 0 ] \
+      || vless_sudoku_install_rollback "$snapshot" "$was_active" 0
     rm -rf -- "$snapshot"; admin_lock_release; return 1;
   }
   state_tmp="$(mktemp_file .json)" || {
-    rm -f "$config_tmp"; vless_sudoku_install_rollback "$snapshot" "$was_active" 0
+    rm -f "$config_tmp"
+    [ "$rollback_needed" -eq 0 ] \
+      || vless_sudoku_install_rollback "$snapshot" "$was_active" 0
     rm -rf -- "$snapshot"; admin_lock_release; return 1;
   }
   client_tmp="$(mktemp_file .json)" || {
-    rm -f "$config_tmp" "$state_tmp"; vless_sudoku_install_rollback "$snapshot" "$was_active" 0
+    rm -f "$config_tmp" "$state_tmp"
+    [ "$rollback_needed" -eq 0 ] \
+      || vless_sudoku_install_rollback "$snapshot" "$was_active" 0
     rm -rf -- "$snapshot"; admin_lock_release; return 1;
   }
   advertise_mode="$(nb_endpoint_mode_from_values "$ADVERTISE_HOST")"
@@ -459,8 +479,22 @@ install_vless_sudoku() {
        "$VLESS_SUDOKU_UUID" "$VLESS_SUDOKU_PASSWORD" \
      || ! vless_sudoku_client_config_matches "$client_tmp" "$effective_host" "$effective_port" \
        "$VLESS_SUDOKU_UUID" "$VLESS_SUDOKU_PASSWORD" \
-     || ! vless_sudoku_state_matches "$state_tmp" \
-     || ! nb_atomic_install_file "$config_tmp" "$NOBRAND_VLESS_CONFIG_FILE" 0600 \
+     || ! vless_sudoku_state_matches "$state_tmp"; then
+    rm -f "$config_tmp" "$state_tmp" "$client_tmp"
+    [ "$rollback_needed" -eq 0 ] \
+      || vless_sudoku_install_rollback "$snapshot" "$was_active" 0
+    rm -rf -- "$snapshot"; admin_lock_release; return 1
+  fi
+  if [ "$was_active" -eq 0 ]; then
+    nb_lifecycle_mark_protocol_mutation_started vless-sudoku || {
+      rm -f "$config_tmp" "$state_tmp" "$client_tmp"
+      [ "$rollback_needed" -eq 0 ] \
+        || vless_sudoku_install_rollback "$snapshot" "$was_active" 0
+      rm -rf -- "$snapshot"; admin_lock_release; return 1
+    }
+    rollback_needed=1
+  fi
+  if ! nb_atomic_install_file "$config_tmp" "$NOBRAND_VLESS_CONFIG_FILE" 0600 \
      || ! nobrand_write_vless_sudoku_service \
      || ! nb_firewall_open_pairs "TCP|${PORT}"; then
     rm -f "$config_tmp" "$state_tmp" "$client_tmp"
@@ -740,12 +774,14 @@ remove_vless_sudoku_config() {
 }
 
 vless_sudoku_doctor() {
-  local failed=0 port mode host advertise_port uuid password cached_link current_link
+  local failed=0 port mode host advertise_port uuid password cached_link current_link enabled
   if ! vless_sudoku_state_exists; then
     nb_doctor_line INFO 'VLESS Sudoku 未安装'
     return 0
   fi
   port="$(vless_sudoku_state_field listen_port)"
+  enabled="$(vless_sudoku_state_field enabled 2>/dev/null || true)"
+  case "$enabled" in true|false) ;; *) return 1 ;; esac
   uuid="$(vless_sudoku_state_field uuid)"
   password="$(jq -r '.finalmask_json.tcp[0].settings.password // empty' "$NOBRAND_VLESS_STATE_FILE")"
   [ -x "$NOBRAND_XRAY_BIN" ] \
@@ -767,9 +803,16 @@ vless_sudoku_doctor() {
   vless_sudoku_client_config_matches \
     && nb_doctor_line PASS 'Xray 客户端 JSON' \
     || { nb_doctor_line FAIL 'Xray 客户端 JSON'; failed=1; }
-  vless_sudoku_running \
-    && nb_doctor_line PASS "服务与 TCP/${port} 监听正常" \
-    || { nb_doctor_line FAIL "服务 / 监听异常: TCP/${port}"; failed=1; }
+  if [ "$enabled" = true ]; then
+    vless_sudoku_running \
+      && nb_doctor_line PASS "服务与 TCP/${port} 监听正常" \
+      || { nb_doctor_line FAIL "服务 / 监听异常: TCP/${port}"; failed=1; }
+  elif nobrand_vless_sudoku_service_active || nb_port_is_listening TCP "$port"; then
+    nb_doctor_line FAIL "服务标记为已停止，但仍有服务或监听: TCP/${port}"
+    failed=1
+  else
+    nb_doctor_line PASS '服务按状态保持停止，且无残留监听'
+  fi
   nb_firewall_binding_owned TCP "$port" \
     && nb_doctor_line PASS "防火墙归属正常: TCP/${port}" \
     || nb_doctor_line INFO "防火墙规则不归 NoBrand 管理（预先存在 / 无本地防火墙）: TCP/${port}"
@@ -826,7 +869,13 @@ vless_sudoku_upgrade_runtime() {
 nobrand_run_vless_sudoku_action() {
   case "${VLESS_SUDOKU_ACTION:-menu}" in
     menu) vless_sudoku_menu_loop ;;
-    install) install_vless_sudoku ;;
+    install)
+      if [ "${NOBRAND_MANAGER_SESSION_ACTIVE:-0}" -eq 1 ]; then
+        nb_lifecycle_run_protocol_install vless-sudoku install_vless_sudoku
+      else
+        install_vless_sudoku
+      fi
+      ;;
     show) print_vless_sudoku_result show ;;
     set-endpoint) vless_sudoku_set_endpoint ;;
     remove) remove_vless_sudoku_config ;;

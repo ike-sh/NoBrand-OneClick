@@ -283,15 +283,85 @@ show_menu() {
 # ---------- NoBrand unified interactive presentation ----------
 
 nobrand_menu_run() {
-  local rc=0
+  local rc=0 restore_errexit=0 callback="${1:-}"
+  local global_uninstall_callback=0 authenticated_exit_rc=125
+  local auth_path="" auth_read_fd="" auth_write_fd="" auth_proof=""
+  local auth_expected='nobrand-global-uninstall-confirmed-v1'
+  if [ "$#" -eq 1 ] && [ "$callback" = nobrand_uninstall ]; then
+    global_uninstall_callback=1
+    # Separate read/write descriptors keep an out-of-band proof visible to the
+    # parent. Unlink immediately so crashes cannot leave an authentication file.
+    auth_path="$(mktemp_file)" || {
+      warn "$(t '无法创建全局卸载完成验证通道；未执行卸载' \
+        'Could not create the global-uninstall completion channel; uninstall was not run')"
+      return 0
+    }
+    if ! exec {auth_read_fd}<"$auth_path"; then
+      rm -f -- "$auth_path"
+      warn "$(t '无法打开全局卸载完成验证通道；未执行卸载' \
+        'Could not open the global-uninstall completion channel; uninstall was not run')"
+      return 0
+    fi
+    if ! exec {auth_write_fd}>"$auth_path"; then
+      exec {auth_read_fd}<&-
+      rm -f -- "$auth_path"
+      warn "$(t '无法打开全局卸载完成验证通道；未执行卸载' \
+        'Could not open the global-uninstall completion channel; uninstall was not run')"
+      return 0
+    fi
+    if ! rm -f -- "$auth_path"; then
+      exec {auth_write_fd}>&-
+      exec {auth_read_fd}<&-
+      warn "$(t '无法保护全局卸载完成验证通道；未执行卸载' \
+        'Could not secure the global-uninstall completion channel; uninstall was not run')"
+      return 0
+    fi
+    auth_path=""
+  fi
+  case "$-" in *e*) restore_errexit=1 ;; esac
   set +e
   (
     set -Eeuo pipefail
-    trap 'rc=$?; on_error' ERR
+    NOBRAND_MENU_GLOBAL_UNINSTALL_CONFIRMED=0
+    NOBRAND_LIFECYCLE_LOCK_FLOOR="${NOBRAND_LIFECYCLE_LOCK_HELD:-0}"
+    NOBRAND_LIFECYCLE_ACTIVE=0
+    NOBRAND_LIFECYCLE_OPERATION=""
+    NOBRAND_LIFECYCLE_SCOPE=""
+    NOBRAND_LIFECYCLE_MUTATION_STARTED=0
+    nb_lifecycle_signal_handlers_install
+    # Translate the terminal marker into a private subprocess status and write
+    # proof through the unlinked channel. The parent requires both signals.
+    trap 'rc=$?; if [ "$rc" -eq "${NOBRAND_MENU_EXIT_SUCCESS:-4}" ] \
+      && [ "$global_uninstall_callback" -eq 1 ] \
+      && [ "${NOBRAND_MENU_GLOBAL_UNINSTALL_CONFIRMED:-0}" = 1 ]; then \
+        if ! printf "%s\n" "$auth_expected" >&"$auth_write_fd"; then \
+          on_error; exit 1; \
+        fi; \
+        exit "$authenticated_exit_rc"; \
+      fi; on_error; exit 1' ERR
     "$@"
   )
   rc=$?
-  set -e
+  if [ "$global_uninstall_callback" -eq 1 ]; then
+    exec {auth_write_fd}>&- 2>/dev/null || true
+    IFS= read -r auth_proof <&"$auth_read_fd" || auth_proof=""
+    exec {auth_read_fd}<&- 2>/dev/null || true
+  fi
+  [ "$restore_errexit" -eq 0 ] || set -e
+  if [ "$rc" -eq "$authenticated_exit_rc" ] \
+     && [ "$global_uninstall_callback" -eq 1 ] \
+     && [ "$auth_proof" = "$auth_expected" ]; then
+    return "$NOBRAND_MENU_EXIT_SUCCESS"
+  fi
+  if [ "$rc" -ne 0 ] \
+     && nb_lifecycle_tx_valid \
+     && [ "$(nb_lifecycle_field STATUS)" = in-progress ] \
+     && ! nobrand_ssh_confirmation_pending; then
+    warn "$(t '操作在写入变更后中断；已保留组件范围恢复信息，当前管理器将退出。' \
+      'The action stopped after mutation; scoped recovery metadata was preserved and this manager will exit.')"
+    nb_lifecycle_lock_release_all >/dev/null 2>&1 || true
+    exit 1
+  fi
   if [ "$rc" -ne 0 ]; then
     warn "$(t '操作未完成；请重试或运行 nobrand doctor' \
       'Action did not complete; retry or run nobrand doctor')"
@@ -943,61 +1013,307 @@ ingress_menu_reset_requests() {
 }
 
 ingress_menu_select_profile() {
-  nb_ingress_list
+  nb_ingress_list || return 1
   read_tty INGRESS_PROFILE_SELECTOR "$(t '入口配置 ID 或名称: ' 'Ingress profile ID or name: ')" \
     || INGRESS_PROFILE_SELECTOR=""
   [ -n "$INGRESS_PROFILE_SELECTOR" ] || { warn '未选择入口配置'; return 1; }
 }
 
+ingress_menu_interface_row_count() {
+  local rows="${1:-}" iface _address _state _default count=0
+  while IFS='|' read -r iface _address _state _default; do
+    [ -n "$iface" ] || continue
+    count=$((count + 1))
+  done <<<"$rows"
+  printf '%s' "$count"
+}
+
+ingress_menu_print_interface_rows() {
+  local rows="${1:-}" iface address state is_default index=0
+  while IFS='|' read -r iface address state is_default; do
+    [ -n "$iface" ] || continue
+    index=$((index + 1))
+    printf '  %s) %s  %s  [%s]%s\n' "$index" "$iface" "$address" "$state" \
+      "$([ "$is_default" = 1 ] && printf ' [默认出口/default egress]' || true)"
+  done <<<"$rows"
+}
+
+ingress_menu_interface_in_rows() {
+  local rows="${1:-}" expected="${2:-}" iface _address _state _default
+  while IFS='|' read -r iface _address _state _default; do
+    [ "$iface" = "$expected" ] && return 0
+  done <<<"$rows"
+  return 1
+}
+
+ingress_menu_pair_in_rows() {
+  local rows="${1:-}" expected_iface="${2:-}" expected_address="${3:-}"
+  local iface address _state _default
+  while IFS='|' read -r iface address _state _default; do
+    [ "$iface" = "$expected_iface" ] && [ "$address" = "$expected_address" ] && return 0
+  done <<<"$rows"
+  return 1
+}
+
+ingress_menu_row_at() {
+  local rows="${1:-}" wanted="${2:-}" row iface _address _state _default index=0
+  while IFS= read -r row; do
+    IFS='|' read -r iface _address _state _default <<<"$row"
+    [ -n "$iface" ] || continue
+    index=$((index + 1))
+    if [ "$index" -eq "$wanted" ]; then
+      printf '%s' "$row"
+      return 0
+    fi
+  done <<<"$rows"
+  return 1
+}
+
+ingress_menu_collect_listener() {
+  local rows="$1" row_count="$2" selected="" choice="" value=""
+  local default_iface="" default_address="" _state _default
+  if [ "$row_count" -eq 1 ]; then
+    selected="$(ingress_menu_row_at "$rows" 1)" || return 1
+    IFS='|' read -r default_iface default_address _state _default <<<"$selected"
+    while true; do
+      if ! read_tty value "$(t "网络接口 / Interface [${default_iface}]: " "Interface [${default_iface}]: ")"; then
+        warn '已取消选择本地监听网络接口'
+        return 1
+      fi
+      [ -n "$value" ] || value="$default_iface"
+      if ingress_menu_interface_in_rows "$rows" "$value"; then
+        INGRESS_INTERFACE="$value"
+        break
+      fi
+      warn "网络接口不存在或没有可用的非回环 IPv4: ${value}"
+    done
+    while true; do
+      if ! read_tty value "$(t "本地监听 IPv4 [${default_address}]: " "Local listener IPv4 [${default_address}]: ")"; then
+        warn '已取消选择本地监听 IPv4'
+        return 1
+      fi
+      [ -n "$value" ] || value="$default_address"
+      if ingress_menu_pair_in_rows "$rows" "$INGRESS_INTERFACE" "$value"; then
+        INGRESS_ADDRESS="$value"
+        break
+      fi
+      warn "该 IPv4 未配置在所选网络接口 ${INGRESS_INTERFACE} 上: ${value}"
+    done
+  else
+    while true; do
+      if ! read_tty choice "$(t "选择本地监听接口/IPv4 [1-${row_count}，m=手动，0=返回]: " \
+        "Select local listener interface/IPv4 [1-${row_count}, m=manual, 0=back]: ")"; then
+        warn '已取消选择本地监听地址'
+        return 1
+      fi
+      case "$choice" in
+        0) return 1 ;;
+        m|M|manual|手动)
+          while true; do
+            if ! read_tty value "$(t '手动网络接口 / Interface（0=返回）: ' 'Manual interface (0=back): ')"; then
+              warn '已取消选择本地监听网络接口'
+              return 1
+            fi
+            [ "$value" != 0 ] || return 1
+            if ingress_menu_interface_in_rows "$rows" "$value"; then
+              INGRESS_INTERFACE="$value"
+              break
+            fi
+            warn "网络接口不存在或没有可用的非回环 IPv4: ${value}"
+          done
+          while true; do
+            if ! read_tty value "$(t '本地监听 IPv4（0=返回）: ' 'Local listener IPv4 (0=back): ')"; then
+              warn '已取消选择本地监听 IPv4'
+              return 1
+            fi
+            [ "$value" != 0 ] || return 1
+            if ingress_menu_pair_in_rows "$rows" "$INGRESS_INTERFACE" "$value"; then
+              INGRESS_ADDRESS="$value"
+              break
+            fi
+            warn "该 IPv4 未配置在所选网络接口 ${INGRESS_INTERFACE} 上: ${value}"
+          done
+          break
+          ;;
+        *)
+          if [[ "$choice" =~ ^[0-9]+$ ]] \
+             && [ "$choice" -ge 1 ] && [ "$choice" -le "$row_count" ]; then
+            selected="$(ingress_menu_row_at "$rows" "$choice")" || return 1
+            IFS='|' read -r INGRESS_INTERFACE INGRESS_ADDRESS _state _default <<<"$selected"
+            break
+          fi
+          warn '请选择列表编号、m 手动输入，或 0 返回'
+          ;;
+      esac
+    done
+  fi
+  INGRESS_INTERFACE_CLI=1
+  INGRESS_ADDRESS_CLI=1
+}
+
+ingress_menu_collect_custom_range() {
+  local range_start="" range_end="" normalized_start normalized_end
+  while true; do
+    if ! read_tty range_start "$(t '范围起始端口: ' 'Range start port: ')" \
+       || ! read_tty range_end "$(t '范围结束端口: ' 'Range end port: ')"; then
+      warn '已取消自定义端口范围'
+      return 1
+    fi
+    normalized_start="$(normalize_uint "$range_start" 2>/dev/null || true)"
+    normalized_end="$(normalize_uint "$range_end" 2>/dev/null || true)"
+    if nb_valid_port "$normalized_start" && nb_valid_port "$normalized_end" \
+       && [ "$normalized_start" -ge 1025 ] && [ "$normalized_start" -le "$normalized_end" ]; then
+      INGRESS_RANGE_START="$normalized_start"
+      INGRESS_RANGE_END="$normalized_end"
+      INGRESS_RANGE_START_CLI=1
+      INGRESS_RANGE_END_CLI=1
+      return 0
+    fi
+    warn '端口范围无效：起始端口必须不小于 1025，且不能大于结束端口'
+  done
+}
+
+ingress_menu_collect_port_policy() {
+  local choice="" fallback=""
+  while true; do
+    msg '  1) derived-tail（由所选本地 IPv4 尾号推导）'
+    msg '  2) custom-range（自定义范围）'
+    msg '  3) manual-only（仅手动指定）'
+    if ! read_tty choice "$(t '端口策略 [1-3，0=返回]: ' 'Port policy [1-3, 0=back]: ')"; then
+      warn '已取消端口策略选择'
+      return 1
+    fi
+    case "$choice" in
+      0) return 1 ;;
+      1|derived-tail)
+        if nb_port_base_for_ip "$INGRESS_ADDRESS" >/dev/null 2>&1; then
+          INGRESS_PORT_POLICY='derived-tail'
+          break
+        fi
+        warn '所选本地 IPv4 无法使用 derived-tail。请选择替代策略：'
+        msg '  1) custom-range（自定义范围）'
+        msg '  2) manual-only（仅手动指定）'
+        msg '  0) 返回 Ingress 菜单'
+        while true; do
+          if ! read_tty fallback "$(t '替代策略 [0-2]: ' 'Fallback policy [0-2]: ')"; then
+            warn '已取消端口策略选择'
+            return 1
+          fi
+          case "$fallback" in
+            0) return 1 ;;
+            1|custom-range)
+              INGRESS_PORT_POLICY='custom-range'
+              ingress_menu_collect_custom_range || return 1
+              break 2
+              ;;
+            2|manual-only)
+              INGRESS_PORT_POLICY='manual-only'
+              break 2
+              ;;
+            *) warn '无效替代策略；请输入 0、1 或 2' ;;
+          esac
+        done
+        ;;
+      2|custom-range)
+        INGRESS_PORT_POLICY='custom-range'
+        ingress_menu_collect_custom_range || return 1
+        break
+        ;;
+      3|manual-only)
+        INGRESS_PORT_POLICY='manual-only'
+        break
+        ;;
+      *) warn '无效端口策略；请输入 0-3' ;;
+    esac
+  done
+  INGRESS_PORT_POLICY_CLI=1
+}
+
 ingress_menu_collect_add() {
-  local choice="" value=""
+  local choice="" value="" rows="" row_count=0
+  rows="$(nb_ingress_interface_rows)"
+  row_count="$(ingress_menu_interface_row_count "$rows")"
+  if [ "$row_count" -eq 0 ]; then
+    t '[错误] 未检测到可用的非回环 IPv4；请先为网络接口配置本地 IPv4' \
+      '[error] No eligible non-loopback IPv4 was found; configure a local IPv4 first' >&2
+    return 1
+  fi
   ingress_menu_reset_requests
   msg ''
-  t '可用非回环 IPv4（[默认出口] 仅为只读提示，不决定 Ingress）:' \
-    'Available non-loopback IPv4 addresses ([default egress] is read-only and does not select Ingress):'
-  nb_ingress_interface_rows | while IFS='|' read -r iface address state is_default; do
-    printf '  %s  %s  [%s]%s\n' "$iface" "$address" "$state" "$([ "$is_default" = 1 ] && printf ' [默认出口/default egress]' || true)"
-  done
-  read_tty INGRESS_NAME "$(t '名称: ' 'Name: ')" || INGRESS_NAME=""
+  t '可用非回环 IPv4；网络接口 / Interface:（[默认出口] 仅为只读提示，不决定 Ingress）' \
+    'Available non-loopback IPv4 interfaces ([default egress] is read-only and does not select Ingress)'
+  ingress_menu_print_interface_rows "$rows"
+  if ! read_tty INGRESS_NAME "$(t '名称: ' 'Name: ')"; then
+    warn '已取消新增入口'
+    return 1
+  fi
   INGRESS_NAME_CLI=1
   msg '  1) public   2) mapped'
-  read_tty choice "$(t '类型 [1-2]: ' 'Type [1-2]: ')" || choice=""
+  if ! read_tty choice "$(t '类型 [1-2]: ' 'Type [1-2]: ')"; then
+    warn '已取消新增入口'
+    return 1
+  fi
   case "$choice" in 1|public) INGRESS_TYPE=public ;; 2|mapped) INGRESS_TYPE=mapped ;; *) warn '无效类型'; return 1 ;; esac
   INGRESS_TYPE_CLI=1
-  read_tty INGRESS_INTERFACE "$(t '网络接口 / Interface: ' 'Interface: ')" || INGRESS_INTERFACE=""
-  INGRESS_INTERFACE_CLI=1
-  read_tty INGRESS_ADDRESS "$(t '该网络接口的本地 IPv4: ' 'Local IPv4 on that interface: ')" || INGRESS_ADDRESS=""
-  INGRESS_ADDRESS_CLI=1
-  msg '  1) derived-tail（由所选本地 IPv4 尾号推导）'
-  msg '  2) custom-range（自定义范围）'
-  msg '  3) manual-only（仅手动指定）'
-  read_tty choice "$(t '端口策略 [1-3]: ' 'Port policy [1-3]: ')" || choice=""
-  case "$choice" in
-    1|derived-tail) INGRESS_PORT_POLICY='derived-tail' ;;
-    2|custom-range)
-      INGRESS_PORT_POLICY='custom-range'
-      read_tty INGRESS_RANGE_START '范围起始端口: ' || INGRESS_RANGE_START=""
-      read_tty INGRESS_RANGE_END '范围结束端口: ' || INGRESS_RANGE_END=""
-      INGRESS_RANGE_START_CLI=1 INGRESS_RANGE_END_CLI=1
-      ;;
-    3|manual-only) INGRESS_PORT_POLICY='manual-only' ;;
-    *) warn '无效端口策略'; return 1 ;;
-  esac
-  INGRESS_PORT_POLICY_CLI=1
-  read_tty value "$(t '额外保留端口（逗号分隔，可留空）: ' 'Additional reserved ports (comma-separated, optional): ')" || value=""
+  ingress_menu_collect_listener "$rows" "$row_count" || return 1
+  if [ "$INGRESS_TYPE" = public ] && nb_ingress_is_rfc1918 "$INGRESS_ADDRESS"; then
+    t '[提示] 所选本地 IPv4 为私网地址。' \
+      '[hint] The selected local IPv4 is an RFC1918 private address.'
+    t '如果客户端通过公网、IPLC、NAT 或端口映射进入，' \
+      'If clients enter through the public Internet, IPLC, NAT, or port mapping,'
+    t '通常应使用 mapped，并设置 Display Host；当前类型仍保持 public。' \
+      'mapped with an explicit Display Host is usually appropriate; the type remains public.'
+  fi
+  ingress_menu_collect_port_policy || return 1
+  if ! read_tty value "$(t '额外保留端口（逗号分隔，可留空）: ' 'Additional reserved ports (comma-separated, optional): ')"; then
+    warn '已取消新增入口'
+    return 1
+  fi
   if [ -n "$value" ]; then INGRESS_RESERVED_PORTS="$value"; INGRESS_RESERVED_CLI=1; fi
-  read_tty INGRESS_DISPLAY_HOST_DEFAULT "$(t '默认展示主机 / Display Host（mapped 必填；public 留空=本地地址）: ' 'Default Display Host (required for mapped; public blank=local address): ')" \
-    || INGRESS_DISPLAY_HOST_DEFAULT=""
-  [ -z "$INGRESS_DISPLAY_HOST_DEFAULT" ] || INGRESS_DISPLAY_HOST_CLI=1
+  if [ "$INGRESS_TYPE" = mapped ]; then
+    while true; do
+      if ! read_tty value "$(t '展示入口 / Display Host（mapped 必填；不同于本地监听 IPv4）: ' \
+        'Display entry / Display Host (required for mapped; distinct from local listener IPv4): ')"; then
+        warn '已取消新增入口'
+        return 1
+      fi
+      if [ -n "$value" ] && valid_advertise_host "$value"; then
+        INGRESS_DISPLAY_HOST_DEFAULT="$value"
+        INGRESS_DISPLAY_HOST_CLI=1
+        break
+      fi
+      warn 'mapped 入口必须显式填写有效的 Display Host'
+    done
+  else
+    while true; do
+      if ! read_tty value "$(t '展示入口 / Display Host（可留空；默认使用本地监听 IPv4）: ' \
+        'Display entry / Display Host (optional; defaults to local listener IPv4): ')"; then
+        warn '已取消新增入口'
+        return 1
+      fi
+      if [ -z "$value" ]; then
+        break
+      elif valid_advertise_host "$value"; then
+        INGRESS_DISPLAY_HOST_DEFAULT="$value"
+        INGRESS_DISPLAY_HOST_CLI=1
+        break
+      fi
+      warn 'Display Host 无效，请重新输入或留空'
+    done
+  fi
   INGRESS_DISPLAY_PORT_POLICY='follow-actual' INGRESS_DISPLAY_PORT_POLICY_CLI=1
   msg '  1) permissive（兼容 wildcard，默认）   2) strict（限制到 Profile 本地地址）'
-  read_tty choice "$(t '入口强制策略 [1-2，默认 1]: ' 'Ingress enforcement [1-2, default 1]: ')" || choice=""
+  if ! read_tty choice "$(t '入口强制策略 [1-2，默认 1]: ' 'Ingress enforcement [1-2, default 1]: ')"; then
+    warn '已取消新增入口'
+    return 1
+  fi
   case "$choice" in
     ''|1|permissive) INGRESS_ENFORCEMENT=permissive ;;
     2|strict) INGRESS_ENFORCEMENT=strict ;;
     *) warn '无效入口强制策略'; return 1 ;;
   esac
   INGRESS_ENFORCEMENT_CLI=1
+  nb_ingress_prepare_add_request "$rows" || return 1
 }
 
 ingress_menu_modify() {
@@ -1107,7 +1423,7 @@ ingress_menu_modify() {
     fi
   fi
   INGRESS_ACTION=modify
-  nobrand_run_ingress_action
+  nobrand_menu_run nobrand_run_ingress_action
 }
 
 ingress_menu_loop() {
@@ -1126,18 +1442,46 @@ ingress_menu_loop() {
     msg '  0) 返回'
     read_tty choice "$(t '请选择 [0-8]: ' 'Choose [0-8]: ')" || choice=""
     case "$choice" in
-      1) nb_ingress_list ;;
-      2) ingress_menu_collect_add && { INGRESS_ACTION=add; nobrand_run_ingress_action; } ;;
-      3) ingress_menu_modify ;;
-      4) ingress_menu_reset_requests; ingress_menu_select_profile \
-           && confirm '确认删除？[y/N]: ' 'Delete this profile? [y/N]: ' n \
-           && { INGRESS_ACTION=delete; nobrand_run_ingress_action; } ;;
-      5) ingress_menu_reset_requests; ingress_menu_select_profile \
-           && { INGRESS_ACTION=set-default; nobrand_run_ingress_action; } ;;
-      6) ingress_menu_reset_requests; INGRESS_ACTION=unset-default; nobrand_run_ingress_action ;;
-      7) ingress_menu_reset_requests; ingress_menu_select_profile \
-           && { INGRESS_ACTION=apply; nobrand_run_ingress_action; } ;;
-      8) nb_ingress_doctor ;;
+      1) nobrand_menu_run nb_ingress_list ;;
+      2)
+        if ingress_menu_collect_add; then
+          INGRESS_ACTION=add
+          nobrand_menu_run nobrand_run_ingress_action
+        fi
+        ;;
+      3)
+        if ingress_menu_modify; then
+          :
+        fi
+        ;;
+      4)
+        ingress_menu_reset_requests
+        if ingress_menu_select_profile \
+           && confirm '确认删除？[y/N]: ' 'Delete this profile? [y/N]: ' n; then
+          INGRESS_ACTION=delete
+          nobrand_menu_run nobrand_run_ingress_action
+        fi
+        ;;
+      5)
+        ingress_menu_reset_requests
+        if ingress_menu_select_profile; then
+          INGRESS_ACTION=set-default
+          nobrand_menu_run nobrand_run_ingress_action
+        fi
+        ;;
+      6)
+        ingress_menu_reset_requests
+        INGRESS_ACTION=unset-default
+        nobrand_menu_run nobrand_run_ingress_action
+        ;;
+      7)
+        ingress_menu_reset_requests
+        if ingress_menu_select_profile; then
+          INGRESS_ACTION=apply
+          nobrand_menu_run nobrand_run_ingress_action
+        fi
+        ;;
+      8) nobrand_menu_run nb_ingress_doctor ;;
       0) return 0 ;;
       *) warn '无效选择' ;;
     esac
@@ -1146,7 +1490,7 @@ ingress_menu_loop() {
 }
 
 nobrand_menu_loop() {
-  local choice=""
+  local choice="" uninstall_rc=0
   MENU_MODE=1
   trap - ERR
   while true; do
@@ -1188,7 +1532,13 @@ nobrand_menu_loop() {
       15) nobrand_usage; menu_pause ;;
       16)
         YES=0
+        set +e
         nobrand_menu_run nobrand_uninstall
+        uninstall_rc=$?
+        set -e
+        if [ "$uninstall_rc" -eq "${NOBRAND_MENU_EXIT_SUCCESS:-4}" ]; then
+          return 0
+        fi
         nobrand_ssh_confirmation_pending || menu_pause
         ;;
       0) return 0 ;;

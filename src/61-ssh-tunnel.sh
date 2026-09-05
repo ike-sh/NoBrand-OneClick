@@ -2071,6 +2071,7 @@ ssh_tunnel_install() {
     fi
   fi
   _has_group "$NOBRAND_SSH_GROUP" && group_preexisting=1
+  nb_lifecycle_mark_protocol_mutation_started ssh-tunnel || return 1
   ssh_tunnel_create_group || die '无法创建 SSH Tunnel 专用用户组'
   strategy="marker-block" managed_path="$NOBRAND_SSH_CONFIG_MAIN"
   ssh_tunnel_dropin_supported && { strategy=dropin; managed_path="$NOBRAND_SSH_CONFIG_DROPIN"; }
@@ -2733,7 +2734,13 @@ ssh_tunnel_uninstall() {
 
 nobrand_run_ssh_tunnel_action() {
   case "${SSH_TUNNEL_ACTION:-menu}" in
-    install) ssh_tunnel_install ;;
+    install)
+      if [ "${NOBRAND_MANAGER_SESSION_ACTIVE:-0}" -eq 1 ]; then
+        nb_lifecycle_run_protocol_install ssh-tunnel ssh_tunnel_install
+      else
+        ssh_tunnel_install
+      fi
+      ;;
     status) ssh_tunnel_status ;;
     doctor) ssh_tunnel_doctor ;;
     show) ssh_tunnel_show_user "${SSH_TUNNEL_USER:-}" ;;

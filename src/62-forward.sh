@@ -1073,6 +1073,22 @@ forward_realm_apply_state() {
   return "$rc"
 }
 
+# Rebuild only effects described by a complete Forward state. Recovery never
+# guesses at or deletes effects from an interrupted, unpublished candidate.
+forward_reconcile_authoritative_state() {
+  local state="$NOBRAND_FORWARD_STATE_FILE" forward_pairs failed=0
+  [ -f "$state" ] && [ ! -L "$state" ] && forward_state_valid "$state" || return 1
+  forward_pairs="$(forward_firewall_pairs "$state")" || return 1
+  admin_lock_acquire || return 1
+  forward_apply_nft_state "$state" >/dev/null 2>&1 || failed=1
+  [ "$failed" -ne 0 ] \
+    || forward_realm_apply_state "$state" >/dev/null 2>&1 || failed=1
+  [ "$failed" -ne 0 ] || [ -z "$forward_pairs" ] \
+    || nb_firewall_open_pairs "$forward_pairs" >/dev/null 2>&1 || failed=1
+  admin_lock_release
+  return "$failed"
+}
+
 forward_transaction_commit() {
   local candidate="$1" operation="${2:-modify}" old_backend="${3:-}" new_backend="${4:-}"
   local snapshot old_state failed=0 rollback_failed=0
@@ -1293,6 +1309,7 @@ forward_add_rule() {
     ')" || return 1
   candidate="$(mktemp_file .forward-add)" || return 1
   jq --argjson rule "$rule" '.rules += [$rule]' "$NOBRAND_FORWARD_STATE_FILE" >"$candidate" \
+    && nb_lifecycle_mark_protocol_mutation_started forward \
     && forward_transaction_commit "$candidate" add '' "$FORWARD_BACKEND"
   local rc=$?
   rm -f "$candidate"
@@ -1764,6 +1781,71 @@ EOF
 }
 
 nobrand_run_forward_action() {
+  if [ "${FORWARD_ACTION:-menu}" = recover-add ]; then
+    nobrand_recover_forward_add
+  elif [ "${FORWARD_ACTION:-menu}" = add ] \
+     && [ "${NOBRAND_MANAGER_SESSION_ACTIVE:-0}" -eq 1 ]; then
+    nb_lifecycle_run_protocol_install forward nobrand_run_forward_action_unscoped
+  else
+    nobrand_run_forward_action_unscoped
+  fi
+}
+
+nobrand_recover_forward_add() {
+  local phase="" recovery_mode=retry rc=0 restore_errexit=0 saved_err_trap=""
+  require_root || return 1
+  require_linux || return 1
+  nb_lifecycle_lock_acquire || return 1
+  nb_lifecycle_tx_valid \
+    && [ "$(nb_lifecycle_field STATUS)" = in-progress ] \
+    && [ "$(nb_lifecycle_field OPERATION)" = install ] \
+    && [ "$(nb_lifecycle_scope)" = forward ] || {
+      nb_lifecycle_lock_release
+      return 1
+    }
+  if [ "$(nb_lifecycle_mutation_started)" = 0 ]; then
+    nb_lifecycle_clear || {
+      nb_lifecycle_lock_release
+      return 1
+    }
+    nb_lifecycle_lock_release
+    t 'Forward 新增操作在写入规则前中止；已清除临时恢复信息，请重新开始。' \
+      'Forward add stopped before a rule was written; temporary recovery metadata was cleared. Start again.'
+    return 0
+  fi
+  phase="$(nb_lifecycle_field LAST_COMPLETED_PHASE)"
+  recovery_mode="$(nb_lifecycle_protocol_recovery_mode forward "$phase")" || {
+    nb_lifecycle_lock_release
+    return 1
+  }
+  if [ "$recovery_mode" = retry ]; then
+    nb_lifecycle_lock_release
+    warn "$(t \
+      'Forward 权威状态未变化，但原始请求与系统前态未持久记录；自动清理或重放并不安全。恢复信息已原样保留，请人工检查后处理。' \
+      'Forward authoritative state is unchanged, but the original request and system pre-state were not durably recorded; automatic cleanup or replay is unsafe. Recovery metadata was preserved exactly; inspect the host and resolve it manually.')"
+    return 1
+  elif [ "$recovery_mode" != validate ]; then
+    nb_lifecycle_lock_release
+    return 1
+  fi
+  FORWARD_ACTION=add
+  case "$-" in *e*) restore_errexit=1 ;; esac
+  saved_err_trap="$(trap -p ERR || true)"
+  trap - ERR
+  set +e
+  nb_lifecycle_run_protocol_install forward nobrand_run_forward_action_unscoped
+  rc=$?
+  [ "$restore_errexit" -eq 0 ] || set -e
+  if [ -n "$saved_err_trap" ]; then
+    eval "$saved_err_trap"
+  else
+    trap - ERR
+  fi
+  nb_lifecycle_lock_release
+  return "$rc"
+}
+
+nobrand_run_forward_action_unscoped() {
   local lock_required=0 rc
   case "$FORWARD_ACTION" in
     add|delete|modify|enable|disable|set-endpoint|switch-backend|import|upgrade-runtime|uninstall)

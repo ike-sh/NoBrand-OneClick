@@ -27,6 +27,20 @@ raise SystemExit(0 if value.version == 4 and not value.is_loopback and not value
 PY
 }
 
+nb_ingress_is_rfc1918() {
+  local value="${1:-}" first second third fourth
+  [[ "$value" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+  IFS=. read -r first second third fourth <<<"$value"
+  for value in "$first" "$second" "$third" "$fourth"; do
+    [[ "$value" =~ ^[0-9]+$ ]] && [ "$((10#$value))" -le 255 ] || return 1
+  done
+  first=$((10#$first))
+  second=$((10#$second))
+  [ "$first" -eq 10 ] \
+    || { [ "$first" -eq 172 ] && [ "$second" -ge 16 ] && [ "$second" -le 31 ]; } \
+    || { [ "$first" -eq 192 ] && [ "$second" -eq 168 ]; }
+}
+
 # interface|IPv4|state|default-route-marker. Tests may provide exact rows
 # through NOBRAND_TEST_INTERFACE_ROWS without changing the host network.
 nb_ingress_interface_rows() {
@@ -54,18 +68,30 @@ nb_ingress_interface_rows() {
 
 nb_ingress_interface_exists() {
   local expected="$1" iface _address _state _default
-  while IFS='|' read -r iface _address _state _default; do
-    [ "$iface" = "$expected" ] && return 0
-  done < <(nb_ingress_interface_rows)
+  if [ "$#" -ge 2 ]; then
+    while IFS='|' read -r iface _address _state _default; do
+      [ "$iface" = "$expected" ] && return 0
+    done <<<"${2-}"
+  else
+    while IFS='|' read -r iface _address _state _default; do
+      [ "$iface" = "$expected" ] && return 0
+    done < <(nb_ingress_interface_rows)
+  fi
   return 1
 }
 
 nb_ingress_address_on_interface() {
   local expected_iface="$1" expected_address="$2" iface address _state _default
   nb_ingress_valid_ipv4 "$expected_address" || return 1
-  while IFS='|' read -r iface address _state _default; do
-    [ "$iface" = "$expected_iface" ] && [ "$address" = "$expected_address" ] && return 0
-  done < <(nb_ingress_interface_rows)
+  if [ "$#" -ge 3 ]; then
+    while IFS='|' read -r iface address _state _default; do
+      [ "$iface" = "$expected_iface" ] && [ "$address" = "$expected_address" ] && return 0
+    done <<<"${3-}"
+  else
+    while IFS='|' read -r iface address _state _default; do
+      [ "$iface" = "$expected_iface" ] && [ "$address" = "$expected_address" ] && return 0
+    done < <(nb_ingress_interface_rows)
+  fi
   return 1
 }
 
@@ -145,7 +171,7 @@ nb_ingress_ensure_state() {
   local tmp
   nb_init_state_layout || return 1
   if [ -e "$NOBRAND_INGRESS_STATE_FILE" ]; then
-    nb_ingress_state_valid || die 'Ingress Profile 状态无效；为避免覆盖现有数据，操作已停止'
+    nb_ingress_state_valid || die 'Ingress Profile 状态无效；为避免覆盖现有数据，操作已停止' || return 1
     return 0
   fi
   tmp="$(mktemp_file .ingress.json)" || return 1
@@ -227,14 +253,14 @@ nb_resolve_ingress_profile() {
   local requested="${1:-}" resolved=""
   if [ -n "$requested" ]; then
     resolved="$(nb_ingress_profile_id "$requested" 2>/dev/null || true)"
-    [ -n "$resolved" ] || die "找不到 Ingress Profile，或选择结果不唯一: ${requested}"
+    [ -n "$resolved" ] || die "找不到 Ingress Profile，或选择结果不唯一: ${requested}" || return 1
   else
     resolved="$(nb_ingress_default_profile_id 2>/dev/null || true)"
     [ -n "$resolved" ] || resolved="$NOBRAND_LEGACY_INGRESS_PROFILE_ID"
   fi
   local profile
   profile="$(nb_ingress_profile_json "$resolved")" || return 1
-  [ "$(jq -r .enabled <<<"$profile")" = true ] || die "Ingress Profile 已禁用: ${resolved}"
+  [ "$(jq -r .enabled <<<"$profile")" = true ] || die "Ingress Profile 已禁用: ${resolved}" || return 1
   printf '%s' "$resolved"
 }
 
@@ -600,9 +626,16 @@ nb_ingress_reserved_json() {
 nb_ingress_validate_profile_values() {
   local type="$1" interface="$2" address="$3" policy="$4" range_start="$5" range_end="$6"
   local reserved="$7" display_host="$8" display_port_policy="$9" display_port="${10}" enforcement="${11:-permissive}" base item
+  local interface_rows="${12-}" interface_rows_supplied=0
+  [ "$#" -lt 12 ] || interface_rows_supplied=1
   case "$type" in public|mapped) ;; *) return 1 ;; esac
-  nb_ingress_interface_exists "$interface" || return 1
-  nb_ingress_address_on_interface "$interface" "$address" || return 1
+  if [ "$interface_rows_supplied" -eq 1 ]; then
+    nb_ingress_interface_exists "$interface" "$interface_rows" || return 1
+    nb_ingress_address_on_interface "$interface" "$address" "$interface_rows" || return 1
+  else
+    nb_ingress_interface_exists "$interface" || return 1
+    nb_ingress_address_on_interface "$interface" "$address" || return 1
+  fi
   case "$policy" in
     derived-tail)
       base="$(nb_port_base_for_ip "$address")" || return 1
@@ -639,43 +672,88 @@ nb_ingress_reserved_conflicts() {
   return 1
 }
 
-nb_ingress_add() {
-  local id now base reserved_json range_start_json=null range_end_json=null display_port_json=null tmp profile conflict enabled
-  require_root
-  [ -n "$INGRESS_NAME" ] && [ -n "$INGRESS_TYPE" ] && [ -n "$INGRESS_INTERFACE" ] \
-    && [ -n "$INGRESS_ADDRESS" ] && [ -n "$INGRESS_PORT_POLICY" ] \
-    || die 'ingress add 非交互模式需要 --name --type --interface --address --port-policy'
-  [ "${#INGRESS_NAME}" -le 64 ] && ! has_control_chars "$INGRESS_NAME" || die 'Ingress Profile 名称无效'
+nb_ingress_mark_lifecycle_mutation() {
+  if [ "${NOBRAND_LIFECYCLE_ACTIVE:-0}" -eq 1 ] \
+     && [ "${NOBRAND_LIFECYCLE_OPERATION:-}" = configure ] \
+     && [ "${NOBRAND_LIFECYCLE_SCOPE:-}" = ingress ] \
+     && [ "${NOBRAND_LIFECYCLE_MUTATION_STARTED:-0}" -ne 1 ]; then
+    nb_lifecycle_mark_mutation_started || return 1
+  fi
+}
+
+nb_ingress_prepare_add_request() {
+  local base="" conflict="" enabled normalized interface_rows=""
+  if [ "$#" -ge 1 ]; then
+    interface_rows="$1"
+  else
+    interface_rows="$(nb_ingress_interface_rows)"
+  fi
+  [ -n "${INGRESS_NAME:-}" ] && [ -n "${INGRESS_TYPE:-}" ] \
+    && [ -n "${INGRESS_INTERFACE:-}" ] && [ -n "${INGRESS_ADDRESS:-}" ] \
+    && [ -n "${INGRESS_PORT_POLICY:-}" ] \
+    || die 'Ingress Profile 需要名称、类型、网络接口、本地 IPv4 和端口策略' \
+    || return 1
+  [ "${#INGRESS_NAME}" -le 64 ] && ! has_control_chars "$INGRESS_NAME" \
+    || die 'Ingress Profile 名称无效' || return 1
   case "$INGRESS_NAME" in
     "$NOBRAND_LEGACY_INGRESS_PROFILE_ID"|'Legacy Default Route')
-      die 'Ingress Profile 名称与保留选择器冲突'
+      die 'Ingress Profile 名称与保留选择器冲突' || return 1
       ;;
   esac
   [[ ! "$INGRESS_NAME" =~ ^i[0-9a-f]{16}$ ]] \
-    || die 'Ingress Profile 名称与 Profile ID 命名空间冲突'
+    || die 'Ingress Profile 名称与 Profile ID 命名空间冲突' || return 1
+
   INGRESS_DISPLAY_PORT_POLICY="${INGRESS_DISPLAY_PORT_POLICY:-follow-actual}"
   INGRESS_ENFORCEMENT="${INGRESS_ENFORCEMENT:-permissive}"
   enabled="${INGRESS_ENABLED:-true}"
-  case "$enabled" in true|false) ;; *) die 'Ingress 启用状态无效' ;; esac
-  if [ "$INGRESS_TYPE" = public ] && [ -z "$INGRESS_DISPLAY_HOST_DEFAULT" ]; then
+  case "$enabled" in
+    true|false) INGRESS_ENABLED="$enabled" ;;
+    *) die 'Ingress 启用状态无效' || return 1 ;;
+  esac
+  if [ "$INGRESS_TYPE" = public ] && [ -z "${INGRESS_DISPLAY_HOST_DEFAULT:-}" ]; then
     INGRESS_DISPLAY_HOST_DEFAULT="$INGRESS_ADDRESS"
   fi
-  if [ "$INGRESS_PORT_POLICY" = derived-tail ] && [ "$INGRESS_RESERVED_CLI" -eq 0 ]; then
+
+  nb_ingress_interface_exists "$INGRESS_INTERFACE" "$interface_rows" \
+    || die "网络接口不存在或没有可用的非回环 IPv4: ${INGRESS_INTERFACE}" || return 1
+  nb_ingress_address_on_interface "$INGRESS_INTERFACE" "$INGRESS_ADDRESS" "$interface_rows" \
+    || die "所选本地 IPv4 未配置在网络接口 ${INGRESS_INTERFACE} 上: ${INGRESS_ADDRESS}" || return 1
+  if [ "$INGRESS_PORT_POLICY" = derived-tail ]; then
     base="$(nb_port_base_for_ip "$INGRESS_ADDRESS" 2>/dev/null || true)"
-    [ -n "$base" ] || die '此 IPv4 无法使用 derived-tail；请改用 custom-range 或 manual-only'
-    INGRESS_RESERVED_PORTS="$base"
+    [ -n "$base" ] \
+      || die '此 IPv4 无法使用 derived-tail；请改用 custom-range 或 manual-only' || return 1
+    if [ "${INGRESS_RESERVED_CLI:-0}" -eq 0 ]; then
+      INGRESS_RESERVED_PORTS="$base"
+    fi
   fi
+
   nb_ingress_validate_profile_values "$INGRESS_TYPE" "$INGRESS_INTERFACE" "$INGRESS_ADDRESS" \
-    "$INGRESS_PORT_POLICY" "$INGRESS_RANGE_START" "$INGRESS_RANGE_END" "$INGRESS_RESERVED_PORTS" \
-    "$INGRESS_DISPLAY_HOST_DEFAULT" "$INGRESS_DISPLAY_PORT_POLICY" "$INGRESS_DISPLAY_PORT" "$INGRESS_ENFORCEMENT" \
-    || die 'Ingress Profile 参数无效，或所选网络接口未配置该本地 IPv4'
-  INGRESS_RESERVED_PORTS="$(nb_ingress_normalize_reserved "$INGRESS_RESERVED_PORTS")"
+    "$INGRESS_PORT_POLICY" "${INGRESS_RANGE_START:-}" "${INGRESS_RANGE_END:-}" \
+    "${INGRESS_RESERVED_PORTS:-}" "${INGRESS_DISPLAY_HOST_DEFAULT:-}" \
+    "$INGRESS_DISPLAY_PORT_POLICY" "${INGRESS_DISPLAY_PORT:-}" "$INGRESS_ENFORCEMENT" "$interface_rows" \
+    || die 'Ingress Profile 参数无效' || return 1
+  normalized="$(nb_ingress_normalize_reserved "${INGRESS_RESERVED_PORTS:-}")" \
+    || die 'Ingress 保留端口列表无效' || return 1
+  INGRESS_RESERVED_PORTS="$normalized"
   if conflict="$(nb_ingress_reserved_conflicts "$INGRESS_RESERVED_PORTS" 2>/dev/null)"; then
-    die "保留端口与现有受管监听冲突: ${conflict}"
+    die "保留端口与现有受管监听冲突: ${conflict}" || return 1
   fi
-  nb_ingress_ensure_state || return 1
-  jq -e --arg name "$INGRESS_NAME" 'all(.profiles[];.name!=$name)' "$NOBRAND_INGRESS_STATE_FILE" >/dev/null \
-    || die "Ingress Profile 名称已存在: ${INGRESS_NAME}"
+  return 0
+}
+
+nb_ingress_add() {
+  local id now reserved_json range_start_json=null range_end_json=null display_port_json=null tmp profile enabled
+  require_root || return 1
+  nb_ingress_prepare_add_request || return 1
+  enabled="$INGRESS_ENABLED"
+  if [ -e "$NOBRAND_INGRESS_STATE_FILE" ]; then
+    nb_ingress_ensure_state || return 1
+    jq -e --arg name "$INGRESS_NAME" 'all(.profiles[];.name!=$name)' "$NOBRAND_INGRESS_STATE_FILE" >/dev/null \
+      || die "Ingress Profile 名称已存在: ${INGRESS_NAME}" || return 1
+  else
+    nb_ingress_mark_lifecycle_mutation || return 1
+    nb_ingress_ensure_state || return 1
+  fi
   id="$(nb_ingress_generate_id)" || return 1
   now="$(nb_ingress_now)"
   reserved_json="$(nb_ingress_reserved_json "$INGRESS_RESERVED_PORTS")" || return 1
@@ -698,8 +776,12 @@ nb_ingress_add() {
     ')" || return 1
   tmp="$(mktemp_file .ingress-add)" || return 1
   jq --argjson profile "$profile" '.profiles += [$profile]' "$NOBRAND_INGRESS_STATE_FILE" >"$tmp" \
-    && nb_ingress_state_valid "$tmp" && nb_atomic_install_file "$tmp" "$NOBRAND_INGRESS_STATE_FILE" 0600
+    && nb_ingress_state_valid "$tmp"
   local rc=$?
+  if [ "$rc" -eq 0 ]; then
+    nb_ingress_mark_lifecycle_mutation \
+      && nb_atomic_install_file "$tmp" "$NOBRAND_INGRESS_STATE_FILE" 0600 || rc=$?
+  fi
   rm -f "$tmp"
   [ "$rc" -ne 0 ] || printf '已创建 Ingress Profile: %s (%s)\n' "$id" "$INGRESS_NAME"
   return "$rc"
@@ -751,18 +833,22 @@ PY
 
 nb_ingress_delete() {
   local id refs tmp
-  require_root
+  require_root || return 1
   id="$(nb_ingress_profile_id "$INGRESS_PROFILE_SELECTOR" 2>/dev/null || true)"
-  [ -n "$id" ] && [ "$id" != "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ] || die '找不到 Ingress Profile，或内置 Profile 不允许删除'
+  [ -n "$id" ] && [ "$id" != "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ] \
+    || die '找不到 Ingress Profile，或内置 Profile 不允许删除' || return 1
   refs="$(nb_ingress_profile_reference_rows "$id")"
   [ -z "$refs" ] || { printf 'Ingress Profile 正被以下对象引用:\n%s\n' "$refs" >&2; return 1; }
   tmp="$(mktemp_file .ingress-delete)" || return 1
   jq --arg id "$id" '
     .profiles |= map(select(.profile_id!=$id)) |
     if .default_profile_id==$id then .default_profile_id=null else . end
-  ' "$NOBRAND_INGRESS_STATE_FILE" >"$tmp" \
-    && nb_ingress_state_valid "$tmp" && nb_atomic_install_file "$tmp" "$NOBRAND_INGRESS_STATE_FILE" 0600
+  ' "$NOBRAND_INGRESS_STATE_FILE" >"$tmp" && nb_ingress_state_valid "$tmp"
   local rc=$?
+  if [ "$rc" -eq 0 ]; then
+    nb_ingress_mark_lifecycle_mutation \
+      && nb_atomic_install_file "$tmp" "$NOBRAND_INGRESS_STATE_FILE" 0600 || rc=$?
+  fi
   rm -f "$tmp"
   return "$rc"
 }
@@ -771,9 +857,10 @@ nb_ingress_modify() {
   local id old name type interface address policy range_start range_end reserved display_host display_policy display_port enabled enforcement
   local old_enforcement old_interface old_address runtime_change=0 refs="" snapshot=""
   local base reserved_json range_start_json=null range_end_json=null display_port_json=null conflict tmp
-  require_root
+  require_root || return 1
   id="$(nb_ingress_profile_id "$INGRESS_PROFILE_SELECTOR" 2>/dev/null || true)"
-  [ -n "$id" ] && [ "$id" != "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ] || die '找不到 Ingress Profile，或内置 Profile 不允许修改'
+  [ -n "$id" ] && [ "$id" != "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ] \
+    || die '找不到 Ingress Profile，或内置 Profile 不允许修改' || return 1
   old="$(nb_ingress_profile_json "$id")"
   name="$(jq -r .name <<<"$old")"; type="$(jq -r .type <<<"$old")"
   interface="$(jq -r .interface <<<"$old")"; address="$(jq -r .local_address <<<"$old")"
@@ -803,31 +890,31 @@ nb_ingress_modify() {
   [ "$INGRESS_ENFORCEMENT_CLI" -eq 0 ] || enforcement="$INGRESS_ENFORCEMENT"
   case "$name" in
     "$NOBRAND_LEGACY_INGRESS_PROFILE_ID"|'Legacy Default Route')
-      die 'Ingress Profile 名称与保留选择器冲突'
+      die 'Ingress Profile 名称与保留选择器冲突' || return 1
       ;;
   esac
   [[ ! "$name" =~ ^i[0-9a-f]{16}$ ]] \
-    || die 'Ingress Profile 名称与 Profile ID 命名空间冲突'
+    || die 'Ingress Profile 名称与 Profile ID 命名空间冲突' || return 1
   if [ "$enabled" = false ] \
      && [ "$(nb_ingress_default_profile_id 2>/dev/null || true)" = "$id" ]; then
-    die '请先取消默认 Ingress Profile，再将其禁用'
+    die '请先取消默认 Ingress Profile，再将其禁用' || return 1
   fi
   if [ "$policy" = derived-tail ]; then
     base="$(nb_port_base_for_ip "$address" 2>/dev/null || true)"
-    [ -n "$base" ] || die '此 IPv4 无法使用 derived-tail；请改用 custom-range 或 manual-only'
+    [ -n "$base" ] || die '此 IPv4 无法使用 derived-tail；请改用 custom-range 或 manual-only' || return 1
     [ "$INGRESS_PORT_POLICY_CLI" -eq 0 ] || [ "$INGRESS_RESERVED_CLI" -eq 1 ] || reserved="$base"
   fi
   [ "$policy" = custom-range ] || { range_start=""; range_end=""; }
   [ "$display_policy" = custom ] || display_port=""
   nb_ingress_validate_profile_values "$type" "$interface" "$address" "$policy" "$range_start" "$range_end" \
     "$reserved" "$display_host" "$display_policy" "$display_port" "$enforcement" \
-    || die '修改后的 Ingress Profile 参数无效'
-  reserved="$(nb_ingress_normalize_reserved "$reserved")"
+    || die '修改后的 Ingress Profile 参数无效' || return 1
+  reserved="$(nb_ingress_normalize_reserved "$reserved")" || return 1
   if conflict="$(nb_ingress_reserved_conflicts "$reserved" 2>/dev/null)"; then
-    die "保留端口与现有受管监听冲突: ${conflict}"
+    die "保留端口与现有受管监听冲突: ${conflict}" || return 1
   fi
   jq -e --arg id "$id" --arg name "$name" 'all(.profiles[]; .profile_id==$id or .name!=$name)' \
-    "$NOBRAND_INGRESS_STATE_FILE" >/dev/null || die "Ingress Profile 名称已存在: ${name}"
+    "$NOBRAND_INGRESS_STATE_FILE" >/dev/null || die "Ingress Profile 名称已存在: ${name}" || return 1
   reserved_json="$(nb_ingress_reserved_json "$reserved")" || return 1
   if [ "$policy" = custom-range ]; then range_start_json="$range_start"; range_end_json="$range_end"; fi
   [ "$display_policy" != custom ] || display_port_json="$display_port"
@@ -840,7 +927,7 @@ nb_ingress_modify() {
     refs="$(nb_ingress_profile_reference_rows "$id" | grep -Ev '^ssh-tunnel:' || true)"
     if [ -n "$refs" ] && [ "${INGRESS_APPLY_EXISTING:-0}" -ne 1 ]; then
       printf 'Ingress 强制策略或监听身份变化会影响以下受管节点:\n%s\n' "$refs" >&2
-      die '请使用 --apply-existing 重新运行，以明确执行事务迁移'
+      die '请使用 --apply-existing 重新运行，以明确执行事务迁移' || return 1
     fi
   fi
   tmp="$(mktemp_file .ingress-modify)" || return 1
@@ -861,7 +948,10 @@ nb_ingress_modify() {
     snapshot="$(mktemp_file .ingress-profile-rollback)" || rc=1
   fi
   if [ "$rc" -eq 0 ]; then
-    cp -a "$NOBRAND_INGRESS_STATE_FILE" "$snapshot" \
+    cp -a "$NOBRAND_INGRESS_STATE_FILE" "$snapshot" || rc=1
+  fi
+  if [ "$rc" -eq 0 ]; then
+    nb_ingress_mark_lifecycle_mutation \
       && nb_atomic_install_file "$tmp" "$NOBRAND_INGRESS_STATE_FILE" 0600 || rc=1
   fi
   if [ "$rc" -eq 0 ] && [ "$runtime_change" -eq 1 ] && [ -n "$refs" ]; then
@@ -879,27 +969,42 @@ nb_ingress_modify() {
 
 nb_ingress_set_default() {
   local id tmp
-  require_root
+  require_root || return 1
   id="$(nb_ingress_profile_id "$INGRESS_PROFILE_SELECTOR" 2>/dev/null || true)"
-  [ -n "$id" ] && [ "$id" != "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ] || die '默认 Ingress 必须是显式创建且已启用的 Profile'
-  [ "$(nb_ingress_profile_json "$id" | jq -r .enabled)" = true ] || die '已禁用的 Ingress Profile 不能设为默认'
+  [ -n "$id" ] && [ "$id" != "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ] \
+    || die '默认 Ingress 必须是显式创建且已启用的 Profile' || return 1
+  [ "$(nb_ingress_profile_json "$id" | jq -r .enabled)" = true ] \
+    || die '已禁用的 Ingress Profile 不能设为默认' || return 1
   nb_ingress_ensure_state || return 1
   tmp="$(mktemp_file .ingress-default)" || return 1
   jq --arg id "$id" '.default_profile_id=$id' "$NOBRAND_INGRESS_STATE_FILE" >"$tmp" \
-    && nb_ingress_state_valid "$tmp" && nb_atomic_install_file "$tmp" "$NOBRAND_INGRESS_STATE_FILE" 0600
+    && nb_ingress_state_valid "$tmp"
   local rc=$?
+  if [ "$rc" -eq 0 ]; then
+    nb_ingress_mark_lifecycle_mutation \
+      && nb_atomic_install_file "$tmp" "$NOBRAND_INGRESS_STATE_FILE" 0600 || rc=$?
+  fi
   rm -f "$tmp"
   return "$rc"
 }
 
 nb_ingress_unset_default() {
   local tmp
-  require_root
-  nb_ingress_ensure_state || return 1
+  require_root || return 1
+  if [ -e "$NOBRAND_INGRESS_STATE_FILE" ]; then
+    nb_ingress_ensure_state || return 1
+  else
+    nb_ingress_mark_lifecycle_mutation || return 1
+    nb_ingress_ensure_state || return 1
+  fi
   tmp="$(mktemp_file .ingress-default)" || return 1
   jq '.default_profile_id=null' "$NOBRAND_INGRESS_STATE_FILE" >"$tmp" \
-    && nb_ingress_state_valid "$tmp" && nb_atomic_install_file "$tmp" "$NOBRAND_INGRESS_STATE_FILE" 0600
+    && nb_ingress_state_valid "$tmp"
   local rc=$?
+  if [ "$rc" -eq 0 ]; then
+    nb_ingress_mark_lifecycle_mutation \
+      && nb_atomic_install_file "$tmp" "$NOBRAND_INGRESS_STATE_FILE" 0600 || rc=$?
+  fi
   rm -f "$tmp"
   return "$rc"
 }
@@ -995,7 +1100,7 @@ nb_ingress_list() {
 
 nb_ingress_show() {
   local profile selector="${INGRESS_PROFILE_SELECTOR:-}" range type policy enforcement display_policy
-  profile="$(nb_ingress_profile_json "$selector")" || die "找不到 Ingress Profile: ${selector}"
+  profile="$(nb_ingress_profile_json "$selector")" || die "找不到 Ingress Profile: ${selector}" || return 1
   range="$(nb_ingress_profile_auto_range "$(jq -r .profile_id <<<"$profile")" 2>/dev/null | tr '|' '-' || printf '无')"
   type="$(nb_ingress_type_label "$(jq -r .type <<<"$profile")")"
   policy="$(nb_ingress_port_policy_label "$(jq -r .port_policy <<<"$profile")")"
@@ -1045,8 +1150,9 @@ nb_ingress_apply_owner() {
 }
 
 nb_ingress_apply_profile() {
-  local profile_id="$1" owner failed=0 seen='|'
+  local profile_id="$1" owner owners failed=0 seen='|'
   nb_ingress_profile_json "$profile_id" >/dev/null || return 1
+  owners="$(nb_ingress_profile_reference_rows "$profile_id")" || return 1
   while IFS= read -r owner; do
     [ -n "$owner" ] || continue
     case "$seen" in *"|${owner}|"*) continue ;; esac
@@ -1057,16 +1163,17 @@ nb_ingress_apply_profile() {
       failed=1
       break
     fi
-  done < <(nb_ingress_profile_reference_rows "$profile_id")
+  done <<<"$owners"
   return "$failed"
 }
 
 nb_ingress_apply() {
   local id
-  require_root
+  require_root || return 1
   id="$(nb_ingress_profile_id "$INGRESS_PROFILE_SELECTOR" 2>/dev/null || true)"
   [ -n "$id" ] && [ "$id" != "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ] \
-    || die '找不到 Ingress Profile，或内置 Profile 不允许应用'
+    || die '找不到 Ingress Profile，或内置 Profile 不允许应用' || return 1
+  nb_ingress_mark_lifecycle_mutation || return 1
   nb_ingress_apply_profile "$id" || return 1
   printf '已应用 Ingress 强制策略: %s (%s)\n' "$id" "$(nb_ingress_profile_name "$id")"
 }
@@ -1214,12 +1321,27 @@ nb_ingress_doctor() {
 }
 
 nobrand_run_ingress_action() {
+  if [ "${INGRESS_ACTION:-list}" = add ]; then
+    nb_ingress_prepare_add_request || return 1
+  fi
+  case "${INGRESS_ACTION:-list}" in
+    add|modify|delete|set-default|unset-default|apply)
+      if [ "${NOBRAND_MANAGER_SESSION_ACTIVE:-0}" -eq 1 ]; then
+        nb_lifecycle_run_ingress_action
+      else
+        nobrand_run_ingress_action_unscoped
+      fi
+      ;;
+    *) nobrand_run_ingress_action_unscoped ;;
+  esac
+}
+
+nobrand_run_ingress_action_unscoped() {
   local lock_required=0 rc=0
   case "${INGRESS_ACTION:-list}" in
     add|modify|delete|set-default|unset-default|apply)
       lock_required=1
       require_root || return 1
-      nb_init_state_layout || return 1
       admin_lock_acquire || return 1
       ;;
   esac

@@ -6,7 +6,7 @@ ROOT="$(cd "$(dirname "$0")/.." && { pwd -W 2>/dev/null || pwd; })"
 docker run --rm -i --cap-add=NET_ADMIN -v "$ROOT:/work:ro" debian:bookworm-slim bash -s <<'DOCKER_TEST'
 set -Eeuo pipefail
 apt-get update -qq >/dev/null
-apt-get install -y -qq python3 bash curl git jq util-linux iproute2 passwd >/dev/null
+apt-get install -y -qq python3 bash curl git jq util-linux iproute2 passwd procps >/dev/null
 bash -n /work/install-nobrand.sh
 
 # Keep the exhaustive fault-injection harness, then run a separate container
@@ -104,16 +104,87 @@ docker_lifecycle_matrix() (
     chmod 0700 "$matrix_root" "$matrix_root/bin" "$matrix_root/run"
     NOBRAND_LIFECYCLE_ACTIVE=0
     NOBRAND_LIFECYCLE_OPERATION=''
+    NOBRAND_LIFECYCLE_SCOPE=''
+    NOBRAND_LIFECYCLE_MUTATION_STARTED=0
     NOBRAND_LIFECYCLE_LOCK_HELD=0
+    NOBRAND_MANAGER_SESSION_ACTIVE=0
     NOBRAND_INSTALL_CANCELLED=0
+    MENU_MODE=0
+    ACTION=''
+    YES=1
     unset NOBRAND_TEST_INTERRUPT_INSTALL_AT NOBRAND_TEST_INTERRUPT_REPAIR_AT \
-      NOBRAND_TEST_INTERRUPT_UNINSTALL_AT
+      NOBRAND_TEST_INTERRUPT_CONFIGURE_AT NOBRAND_TEST_INTERRUPT_UNINSTALL_AT
+  }
+
+  matrix_menu_inputs() {
+    : >"$matrix_root/menu-inputs"
+    printf '%s\n' "$@" >"$matrix_root/menu-inputs"
+    printf '0\n' >"$matrix_root/menu-input-index"
+    rm -f -- "$matrix_root/unexpected-menu-read"
+  }
+
+  matrix_menu_input_count() {
+    cat "$matrix_root/menu-input-index"
+  }
+
+  read_tty() {
+    local destination="$1" index next input_value
+    index="$(cat "$matrix_root/menu-input-index" 2>/dev/null || printf 0)"
+    next=$((index + 1))
+    input_value="$(sed -n "${next}p" "$matrix_root/menu-inputs" 2>/dev/null || true)"
+    [ -n "$input_value" ] || {
+      : >"$matrix_root/unexpected-menu-read"
+      return 1
+    }
+    printf '%s\n' "$next" >"$matrix_root/menu-input-index"
+    printf -v "$destination" '%s' "$input_value"
+  }
+
+  nobrand_print_banner() {
+    local count
+    nobrand_manager_installation_valid \
+      || matrix_fail 'full manager UI became visible before manager validation'
+    count="$(cat "$matrix_root/menu-banner-count" 2>/dev/null || printf 0)"
+    printf '%s\n' "$((count + 1))" >"$matrix_root/menu-banner-count"
+    msg 'NoBrand-OneClick docker manager menu'
+  }
+
+  matrix_assert_manager_only() {
+    MITA_SOURCE_ONLY=0 nobrand_manager_installation_valid \
+      || matrix_fail 'persistent manager validation failed'
+    matrix_assert_eq "$NOBRAND_INSTALL_SCRIPT_PATH" \
+      "$(readlink "$NOBRAND_COMMAND_PATH")" 'nobrand command target'
+    matrix_assert_eq "$NOBRAND_COMMAND_PATH" \
+      "$(readlink "$NOBRAND_SHORT_COMMAND_PATH")" 'nb command target'
+    cmp -s /work/install-nobrand.sh "$NOBRAND_INSTALL_SCRIPT_PATH" \
+      || matrix_fail 'canonical manager is not the exact running installer'
+    hash -r
+    matrix_assert_eq "${SCRIPT_NAME} ${SCRIPT_VERSION}" \
+      "$(PATH="$matrix_root/bin:$PATH" MITA_SOURCE_ONLY=0 nobrand --version | sed -n '1p')" \
+      'nobrand PATH version'
+    matrix_assert_eq "${SCRIPT_NAME} ${SCRIPT_VERSION}" \
+      "$(PATH="$matrix_root/bin:$PATH" MITA_SOURCE_ONLY=0 nb --version | sed -n '1p')" \
+      'nb PATH version'
+    if nb_authoritative_protocol_state_exists; then
+      matrix_fail 'manager-only bootstrap fabricated protocol state'
+    fi
+    matrix_expect_state CURRENT_COMPLETE 'manager-only state is not complete'
   }
 
   # Container boundary replacements. These model only effects unavailable in a
   # daemon-free image; the real install/reinstall branches still consume and
   # preserve the state written by users_initialize_primary/save_install_state.
-  ensure_management_dependencies() { return 0; }
+  # Package installation is the only bootstrap boundary replaced here. The
+  # first call materializes a durable fixture marker; later calls must observe
+  # it instead of representing another package installation.
+  ensure_management_dependencies() {
+    local count
+    if [ ! -e "$matrix_root/dependencies.ready" ]; then
+      count="$(cat "$matrix_root/dependency-install-count" 2>/dev/null || printf 0)"
+      printf '%s\n' "$((count + 1))" >"$matrix_root/dependency-install-count"
+      : >"$matrix_root/dependencies.ready"
+    fi
+  }
   mita_installed() { [ -f "$runtime_marker" ]; }
   installed_version() { mita_installed && printf '3.35.0'; }
   ensure_install_port_available() { return 0; }
@@ -180,6 +251,169 @@ docker_lifecycle_matrix() (
   nb_strict_firewall_clear_all() { return 0; }
   nft() { return 1; }
 
+  # Fresh no-argument execution must install and validate the persistent
+  # manager before the first banner, without manufacturing a protocol. A
+  # second launch reuses both manager state and the dependency boundary.
+  matrix_reset
+  matrix_menu_inputs 0
+  MITA_SOURCE_ONLY=0 main >/dev/null
+  matrix_assert_eq 1 "$(cat "$matrix_root/menu-banner-count")" \
+    'fresh bootstrap menu count'
+  matrix_assert_eq 1 "$(matrix_menu_input_count)" 'fresh bootstrap menu exit'
+  matrix_assert_eq manager "$(nb_lifecycle_scope)" 'fresh bootstrap scope'
+  matrix_assert_eq install "$(nb_lifecycle_field OPERATION)" 'fresh bootstrap operation'
+  matrix_assert_eq complete "$(nb_lifecycle_field STATUS)" 'fresh bootstrap status'
+  matrix_assert_manager_only
+  manager_hash="$(sha256sum "$NOBRAND_INSTALL_SCRIPT_PATH")"
+  registry_hash="$(sha256sum "$NOBRAND_REGISTRY_FILE")"
+  matrix_menu_inputs 0
+  ACTION=''
+  MITA_SOURCE_ONLY=0 main >/dev/null
+  matrix_assert_eq 2 "$(cat "$matrix_root/menu-banner-count")" \
+    'second launch menu count'
+  matrix_assert_eq 1 "$(cat "$matrix_root/dependency-install-count")" \
+    'second launch represented another dependency installation'
+  matrix_assert_eq "$manager_hash" "$(sha256sum "$NOBRAND_INSTALL_SCRIPT_PATH")" \
+    'second launch changed the exact manager'
+  matrix_assert_eq "$registry_hash" "$(sha256sum "$NOBRAND_REGISTRY_FILE")" \
+    'second launch changed manager-only registry state'
+  matrix_assert_manager_only
+
+  # A recoverable interactive validation failure must leave the already
+  # bootstrapped commands usable. Exercise the real nested menu flow, including
+  # invalid interface/address re-prompts and a controlled cancel before any
+  # Ingress mutation, then launch the installed nb command in a fresh process.
+  export NOBRAND_TEST_INTERFACE_ROWS='eth0|192.0.2.40|UP|1'
+  export NOBRAND_TEST_DEFAULT_EGRESS='eth0|192.0.2.40'
+  matrix_menu_inputs 9 2 Failed-Ingress 1 missing0 eth0 \
+    198.51.100.99 192.0.2.40 0 continue 0 0
+  ACTION=''
+  MITA_SOURCE_ONLY=0 main >"$matrix_root/failed-ingress.out" 2>&1
+  matrix_assert_eq 4 "$(cat "$matrix_root/menu-banner-count")" \
+    'failed Ingress action did not return to the manager menu'
+  matrix_assert_eq 12 "$(matrix_menu_input_count)" \
+    'failed Ingress action consumed an unexpected menu path'
+  grep -Fq '网络接口不存在或没有可用的非回环 IPv4: missing0' \
+    "$matrix_root/failed-ingress.out" \
+    || matrix_fail 'invalid interactive interface was not handled in place'
+  grep -Fq '该 IPv4 未配置在所选网络接口 eth0 上: 198.51.100.99' \
+    "$matrix_root/failed-ingress.out" \
+    || matrix_fail 'invalid interactive address was not handled in place'
+  ! grep -Fq '非交互模式需要' "$matrix_root/failed-ingress.out" \
+    || matrix_fail 'interactive Ingress leaked the noninteractive CLI error'
+  if [ -e "$NOBRAND_INGRESS_STATE_FILE" ]; then
+    matrix_assert_eq 0 \
+      "$(jq '[.profiles[] | select(.name == "Failed-Ingress")] | length' \
+        "$NOBRAND_INGRESS_STATE_FILE")" \
+      'cancelled interactive Ingress unexpectedly mutated state'
+  fi
+  matrix_assert_manager_only
+
+  printf '0\n' | env PATH="$matrix_root/bin:$PATH" MITA_SOURCE_ONLY=0 \
+    script -qec "$NOBRAND_SHORT_COMMAND_PATH" /dev/null \
+    >"$matrix_root/installed-nb.out" 2>&1
+  grep -Fq '网络入口 / Ingress' "$matrix_root/installed-nb.out" \
+    || matrix_fail 'installed nb did not reopen the no-argument manager menu'
+  matrix_assert_manager_only
+  printf 'FAILED_UI_ACTION_MANAGER_PERSISTS=PASS\n'
+  printf 'INSTALLED_NB_NOARG_REOPEN_GATE=PASS\n'
+
+  # Ingress is manager state, not a protocol prerequisite. Create one valid
+  # Profile through the manager-session dispatcher, exit the menu again, and
+  # prove the persistent manager remains complete with zero protocols.
+  export NOBRAND_TEST_INTERFACE_ROWS='eth0|192.0.2.40|UP|1'
+  export NOBRAND_TEST_DEFAULT_EGRESS='eth0|192.0.2.40'
+  ingress_menu_reset_requests
+  parse_nobrand_ingress_args add --name Bootstrap-Ingress --type public \
+    --interface eth0 --address 192.0.2.40 --port-policy manual-only \
+    --enforcement permissive --yes
+  NOBRAND_MANAGER_SESSION_ACTIVE=1 nobrand_run_ingress_action >/dev/null
+  matrix_assert_eq 1 \
+    "$(jq '[.profiles[] | select(.name == "Bootstrap-Ingress")] | length' \
+      "$NOBRAND_INGRESS_STATE_FILE")" 'Ingress-only Profile persistence'
+  matrix_assert_manager_only
+  matrix_menu_inputs 0
+  ACTION=''
+  MITA_SOURCE_ONLY=0 main >/dev/null
+  matrix_assert_eq 5 "$(cat "$matrix_root/menu-banner-count")" \
+    'Ingress-only manager reopen count'
+  matrix_assert_manager_only
+  unset NOBRAND_TEST_INTERFACE_ROWS NOBRAND_TEST_DEFAULT_EGRESS
+  printf 'FRESH_BOOTSTRAP_MANAGER_GATE=PASS\n'
+  printf 'MANAGER_INSTALLED_BEFORE_MAIN_MENU=PASS\n'
+  printf 'MANAGER_ONLY_INSTALL_SUPPORTED=PASS\n'
+  printf 'ZERO_PROTOCOL_CURRENT_COMPLETE=PASS\n'
+  printf 'FRESH_INSTALL_EXIT_MANAGER_PERSISTS=PASS\n'
+  printf 'INGRESS_ONLY_MANAGER_PERSISTS=PASS\n'
+  printf 'INGRESS_BEFORE_PROTOCOL_SUPPORTED=PASS\n'
+  printf 'MANAGER_SECOND_LAUNCH_NO_DEP_REINSTALL=PASS\n'
+  printf 'DOCKER_BOOTSTRAP_GATE=PASS\n'
+
+  # Recovery selection must retain manager and Ingress scope. With these
+  # fixtures, any accidental Mieru dispatch would create authoritative Mieru
+  # state and fail the manager-only assertion below.
+  matrix_reset
+  nb_lifecycle_begin install prepare 0 0 0 0 0 0 manager
+  nb_lifecycle_mark_mutation_started
+  matrix_expect_state CURRENT_PARTIAL_INSTALL 'manager recovery fixture classification'
+  matrix_menu_inputs 0
+  ACTION=''
+  YES=1
+  MITA_SOURCE_ONLY=0 main >/dev/null
+  matrix_assert_eq manager "$(nb_lifecycle_scope)" 'manager recovery completion scope'
+  matrix_assert_eq complete "$(nb_lifecycle_field STATUS)" 'manager recovery status'
+  matrix_assert_manager_only
+  printf 'MANAGER_RECOVERY_SCOPE_GATE=PASS\n'
+
+  matrix_reset
+  MITA_SOURCE_ONLY=0 nobrand_manager_bootstrap
+  nb_lifecycle_begin configure prepare 0 0 0 0 0 0 ingress
+  matrix_expect_state CURRENT_PARTIAL_CONFIGURE 'Ingress recovery fixture classification'
+  matrix_menu_inputs 0
+  ACTION=''
+  YES=1
+  MITA_SOURCE_ONLY=0 main >/dev/null
+  [ ! -e "$NOBRAND_LIFECYCLE_TX_FILE" ] \
+    || matrix_fail 'unmutated Ingress recovery retained lifecycle metadata'
+  matrix_expect_state CURRENT_COMPLETE \
+    'unmutated Ingress recovery did not return to manager-only complete state'
+  matrix_assert_manager_only
+  printf 'INGRESS_RECOVERY_SCOPE_GATE=PASS\n'
+  printf 'DOCKER_SCOPED_RECOVERY_GATE=PASS\n'
+
+  # A successful global uninstall selected from the loaded unified menu must
+  # consume only the menu choice and confirmation, then return from main. A
+  # third read would prove that the stale in-memory menu was rendered again.
+  matrix_reset
+  matrix_menu_inputs 0
+  MITA_SOURCE_ONLY=0 main >/dev/null
+  matrix_assert_manager_only
+  matrix_menu_inputs 16 y
+  ACTION=''
+  set +e
+  MITA_SOURCE_ONLY=0 main >"$matrix_root/global-uninstall.out" 2>&1
+  rc=$?
+  set -e
+  matrix_assert_eq 0 "$rc" 'global uninstall menu process status'
+  matrix_assert_eq 2 "$(matrix_menu_input_count)" \
+    'global uninstall returned to the stale menu'
+  [ ! -e "$matrix_root/unexpected-menu-read" ] \
+    || matrix_fail 'global uninstall exposed another menu action'
+  matrix_expect_state CLEAN 'global uninstall did not converge clean'
+  [ ! -e "$NOBRAND_INSTALL_SCRIPT_PATH" ] \
+    && [ ! -e "$NOBRAND_COMMAND_PATH" ] \
+    && [ ! -e "$NOBRAND_SHORT_COMMAND_PATH" ] \
+    || matrix_fail 'global uninstall retained manager commands'
+  printf 'FULL_UNINSTALL_PROCESS_EXIT_GATE=PASS\n'
+  printf 'DOCKER_FULL_UNINSTALL_EXIT_GATE=PASS\n'
+
+  matrix_menu_inputs 0
+  ACTION=''
+  YES=1
+  MITA_SOURCE_ONLY=0 main >/dev/null
+  matrix_assert_manager_only
+  printf 'FULL_UNINSTALL_FRESH_REINSTALL_GATE=PASS\n'
+
   matrix_reset
   do_install >/dev/null
   matrix_expect_state CURRENT_COMPLETE 'fresh install did not converge'
@@ -197,7 +431,7 @@ docker_lifecycle_matrix() (
   matrix_assert_eq runtime-ready "$(nb_lifecycle_field LAST_COMPLETED_PHASE)" \
     'interrupted install durable phase'
   unset NOBRAND_TEST_INTERRUPT_INSTALL_AT
-  do_install >/dev/null
+  NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE=mieru do_install >/dev/null
   matrix_expect_state CURRENT_COMPLETE 'interrupted install rerun did not converge'
   mita_v3_install_state_valid || matrix_fail 'install rerun did not restore install state'
   printf 'DOCKER_LIFECYCLE_INTERRUPTED_INSTALL_RERUN=PASS\n'
@@ -319,7 +553,7 @@ getent group mita >/dev/null || groupadd --system mita
 id mita >/dev/null 2>&1 || useradd --system -g mita -s /usr/sbin/nologin -d /tmp/metrics mita
 
 source /work/install-nobrand.sh
-test "$SCRIPT_VERSION" = 3.2.1
+test "$SCRIPT_VERSION" = 3.2.2
 test "$SCRIPT_NAME|$SCRIPT_REPO" = 'NoBrand-OneClick|ike-sh/NoBrand-OneClick'
 trap - ERR
 MITA_STATE=/tmp/manager-state/install-state.env
@@ -1344,7 +1578,7 @@ setup_reconfigure_fixture(){
   apply_users_config(){ touch /tmp/reconfigure-noop-unexpected-apply; }
   print_summary(){ :; }
   rm -f /tmp/reconfigure-noop-unexpected-apply
-  reconfigure_output="$(do_reconfigure)"
+  reconfigure_output="$(do_reconfigure_impl)"
   grep -q '未检测到配置变化' <<<"$reconfigure_output"
   test ! -e /tmp/reconfigure-noop-unexpected-apply
 )
@@ -1358,7 +1592,7 @@ setup_reconfigure_fixture(){
   apply_users_config(){ touch /tmp/reconfigure-client-unexpected-apply; }
   print_summary(){ :; }
   rm -f /tmp/reconfigure-client-unexpected-apply
-  reconfigure_output="$(do_reconfigure)"
+  reconfigure_output="$(do_reconfigure_impl)"
   grep -q '仅客户端参数已更新' <<<"$reconfigure_output"
   grep -qx 'MULTIPLEXING=MULTIPLEXING_LOW' "$MITA_STATE"
   test -z "$(find "$(client_current_dir)" -maxdepth 1 -type f -name '*.json' -print -quit)"
@@ -1373,7 +1607,7 @@ setup_reconfigure_fixture(){
   HANDSHAKE_CLI=1 TRAFFIC_CLI=1 LOW_ENTROPY_CLI=1
   MTU_REQUEST=1400 YES=1
   print_summary(){ :; }
-  do_reconfigure >/dev/null
+  do_reconfigure_impl >/dev/null
   grep -qx 'PROFILE=iplc' "$MITA_STATE"
   grep -qx 'PROTOCOL=TCP' "$MITA_STATE"
   grep -qx 'MTU=1400' "$MITA_STATE"
@@ -1391,7 +1625,7 @@ setup_reconfigure_fixture(){
   collect_reconfigure_interactive(){ USERNAME=alice-renamed; }
   apply_users_config(){ :; }
   print_summary(){ :; }
-  reconfigure_output="$(do_reconfigure)"
+  reconfigure_output="$(do_reconfigure_impl)"
   grep -q '重新配置完成' <<<"$reconfigure_output"
   users_name_exists alice-renamed
   test ! -e "$(client_current_dir)/alice_tcp.json"
@@ -2012,13 +2246,32 @@ test "$uninstall_menu_rc" -eq 2
   ! grep -Eq 'dpkg -P mita|rpm -e mita|userdel mita|groupdel mita' <<<"$preserved_uninstall_output"
 )
 
-rm -f /tmp/dry-run-mutated
-do_install(){ touch /tmp/dry-run-mutated; }
-repair_mita_binary_paths(){ touch /tmp/dry-run-mutated; }
-ACTION=install DRY_RUN=1
-main >/tmp/dry-run.out
-test ! -e /tmp/dry-run-mutated
-grep -q DRY-RUN /tmp/dry-run.out
+(
+  dry_run_root=/tmp/dry-run-nobrand
+  rm -rf -- "$dry_run_root"
+  NOBRAND_STATE_DIR="$dry_run_root/state"
+  NOBRAND_CONFIG_DIR="$dry_run_root/config"
+  NOBRAND_LIB_DIR="$dry_run_root/lib"
+  NOBRAND_LIFECYCLE_DIR="$dry_run_root/lifecycle"
+  NOBRAND_LIFECYCLE_TX_FILE="$NOBRAND_LIFECYCLE_DIR/transaction.env"
+  NOBRAND_BACKUP_RESTORE_TX_DIR="$NOBRAND_LIFECYCLE_DIR/backup-restore"
+  NOBRAND_BACKUP_RESTORE_META_FILE="$NOBRAND_BACKUP_RESTORE_TX_DIR/transaction.env"
+  NOBRAND_BACKUP_RESTORE_SNAPSHOT_DIR="$NOBRAND_BACKUP_RESTORE_TX_DIR/snapshot"
+  NOBRAND_BACKUP_RESTORE_ROOTS_MANIFEST="$NOBRAND_BACKUP_RESTORE_TX_DIR/snapshot-roots.manifest"
+  NOBRAND_LIFECYCLE_LOCK_FILE="$dry_run_root/run/lifecycle.lock"
+  NOBRAND_REGISTRY_FILE="$NOBRAND_STATE_DIR/state.json"
+  NOBRAND_INSTALL_SCRIPT_PATH="$dry_run_root/bin/install-nobrand"
+  NOBRAND_COMMAND_PATH="$dry_run_root/bin/nobrand"
+  NOBRAND_SHORT_COMMAND_PATH="$dry_run_root/bin/nb"
+  NOBRAND_LEGACY_MIERU_STATE_DIR="$dry_run_root/legacy-mieru"
+  rm -f /tmp/dry-run-mutated
+  do_install(){ touch /tmp/dry-run-mutated; }
+  repair_mita_binary_paths(){ touch /tmp/dry-run-mutated; }
+  ACTION=install DRY_RUN=1
+  main >/tmp/dry-run.out
+  test ! -e /tmp/dry-run-mutated
+  grep -q DRY-RUN /tmp/dry-run.out
+)
 
 # 在无软件包、只有 schema-v3 Mieru ownership 残留的半安装状态下，
 # 协议卸载必须清理 Mieru，同时保留统一管理器和 nb alias。

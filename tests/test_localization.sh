@@ -9,6 +9,13 @@ export NOBRAND_CONFIG_DIR="$fixture/nobrand-oneclick/config"
 export NOBRAND_LIB_DIR="$fixture/nobrand-oneclick/lib"
 export LANG_ZH=1
 source_installer
+# Keep this focused test tied to the maintained source modules even before the
+# generated installer is rebuilt by the full suite.
+# shellcheck disable=SC1091
+source "$TEST_ROOT/src/16-core-ingress.sh"
+# shellcheck disable=SC1091
+source "$TEST_ROOT/src/90-ui.sh"
+trap - ERR
 
 input_index=0
 inputs=()
@@ -120,7 +127,8 @@ ingress_nested="$({
   ingress_menu_collect_add
 })"
 assert_contains "$ingress_nested" '可用非回环 IPv4' 'Ingress interface guidance'
-assert_contains "$ingress_nested" '网络接口 / Interface:' 'Ingress interface prompt'
+assert_contains "$ingress_nested" '网络接口 / Interface [eth0]:' 'Ingress interface prompt'
+assert_contains "$ingress_nested" '本地监听 IPv4 [192.0.2.10]:' 'Ingress local-address prompt'
 assert_contains "$ingress_nested" '范围起始端口:' 'Ingress range-start prompt'
 assert_contains "$ingress_nested" '入口强制策略' 'Ingress enforcement prompt'
 
@@ -181,4 +189,31 @@ localized_status_source="$(
 assert_contains "$localized_status_source" '运行中' 'localized running status'
 assert_contains "$localized_status_source" '已停止' 'localized stopped status'
 
-pass 'Chinese-first menus, nested prompts, Forward legacy-label removal, and status localization'
+# Keep the maintenance-facing bootstrap/recovery/uninstall wording Chinese-first
+# and protect the unreleased documentation boundary.
+maintenance_ui_source="$(
+  cat "$TEST_ROOT/src/18-core-nodes.sh" "$TEST_ROOT/src/80-lifecycle.sh" \
+    "$TEST_ROOT/src/99-main.sh"
+)"
+assert_contains "$maintenance_ui_source" \
+  '未完成的 ${scope} 操作必须先按其组件范围恢复' \
+  'Chinese-first scoped bootstrap recovery error'
+assert_contains "$maintenance_ui_source" '检测到未完成的完整卸载。请选择恢复操作' \
+  'Chinese-first global-uninstall recovery prompt'
+assert_contains "$maintenance_ui_source" '资源与 nobrand/nb 已完整删除；外部资源未触碰' \
+  'Chinese-first global-uninstall completion message'
+assert_contains "$maintenance_ui_source" '可执行 `hash -r` 清除命令缓存' \
+  'Chinese-first Bash command-cache guidance'
+
+readme_source="$(<"$TEST_ROOT/README.md")"
+assert_contains "$readme_source" '当前稳定版本：[v3.2.2]' \
+  'README current stable release boundary'
+assert_not_contains "$readme_source" '当前稳定版本：[v3.2.1]' \
+  'README must not retain the previous stable release boundary'
+assert_contains "$readme_source" \
+  '安装器会先原子安装并验证当前管理器及 `nobrand`/`nb` 命令，再打开统一交互菜单' \
+  'README install-before-menu contract'
+assert_contains "$readme_source" 'NoBrand 支持仅安装管理器而暂不安装任何协议' \
+  'README manager-only capability'
+
+pass 'Chinese-first menus, maintenance text, README boundary, nested prompts, and status localization'

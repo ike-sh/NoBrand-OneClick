@@ -194,35 +194,59 @@ tuic_restore_side_effect_snapshot() {
 tuic_install_runtime() {
   local channel="${1:-stable}" requested_version="${2:-}" candidate snapshot metadata_tmp version
   candidate="$(mktemp_file .sing-box)" || return 1
-  tuic_download_runtime_candidate "$candidate" "$channel" "$requested_version" || return 1
-  snapshot="$(mktemp_dir)" || return 1
-  tuic_snapshot_runtime_files "$snapshot" || return 1
+  tuic_download_runtime_candidate "$candidate" "$channel" "$requested_version" || {
+    rm -f "$candidate"
+    return 1
+  }
+  snapshot="$(mktemp_dir)" || { rm -f "$candidate"; return 1; }
+  tuic_snapshot_runtime_files "$snapshot" || {
+    rm -f "$candidate"
+    rm -rf -- "$snapshot"
+    return 1
+  }
+  nb_lifecycle_mark_protocol_mutation_started "${NOBRAND_LIFECYCLE_SCOPE:-tuic}" || {
+    rm -f "$candidate"
+    rm -rf -- "$snapshot"
+    return 1
+  }
   mkdir -p "$NOBRAND_BIN_DIR" "$(dirname "$NOBRAND_SING_BOX_RUNTIME_META")" || {
     tuic_restore_runtime_files "$snapshot" || true
+    rm -f "$candidate"
+    rm -rf -- "$snapshot"
     return 1
   }
   chmod 0755 "$NOBRAND_BIN_DIR" || {
     tuic_restore_runtime_files "$snapshot" || true
+    rm -f "$candidate"
+    rm -rf -- "$snapshot"
     return 1
   }
   if ! nb_atomic_install_file "$candidate" "$NOBRAND_SING_BOX_BIN" 0755; then
     tuic_restore_runtime_files "$snapshot" || true
+    rm -f "$candidate"
+    rm -rf -- "$snapshot"
     return 1
   fi
   version="$(tuic_runtime_version)" || {
     tuic_restore_runtime_files "$snapshot" || true
+    rm -f "$candidate"
+    rm -rf -- "$snapshot"
     return 1
   }
   metadata_tmp="$(mktemp_file .tuic-runtime-meta)" || {
     tuic_restore_runtime_files "$snapshot" || true
+    rm -f "$candidate"
+    rm -rf -- "$snapshot"
     return 1
   }
   tuic_generate_runtime_metadata "$metadata_tmp" "$channel" "$version" \
     && nb_atomic_install_file "$metadata_tmp" "$NOBRAND_SING_BOX_RUNTIME_META" 0600 \
-    || {
-      tuic_restore_runtime_files "$snapshot" || true
-      return 1
-    }
+     || {
+       tuic_restore_runtime_files "$snapshot" || true
+       rm -f "$candidate" "$metadata_tmp"
+       rm -rf -- "$snapshot"
+       return 1
+     }
   rm -f "$candidate" "$metadata_tmp"
   rm -rf -- "$snapshot"
 }

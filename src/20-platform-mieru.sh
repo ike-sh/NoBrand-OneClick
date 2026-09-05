@@ -505,7 +505,8 @@ ensure_management_dependencies() {
         && command -v tar >/dev/null 2>&1 && command -v sha256sum >/dev/null 2>&1 \
         && command -v python3 >/dev/null 2>&1 && command -v tc >/dev/null 2>&1 \
         && command -v sysctl >/dev/null 2>&1 && command -v unshare >/dev/null 2>&1 \
-        && command -v setpriv >/dev/null 2>&1 && return 0
+        && command -v setpriv >/dev/null 2>&1 && command -v flock >/dev/null 2>&1 \
+        && return 0
       run apt-get update
       run apt-get install -y curl ca-certificates jq tar coreutils python3 iproute2 procps util-linux
       ;;
@@ -514,14 +515,23 @@ ensure_management_dependencies() {
         && command -v tar >/dev/null 2>&1 && command -v sha256sum >/dev/null 2>&1 \
         && command -v python3 >/dev/null 2>&1 && command -v tc >/dev/null 2>&1 \
         && command -v sysctl >/dev/null 2>&1 && command -v unshare >/dev/null 2>&1 \
-        && command -v setpriv >/dev/null 2>&1 && return 0
+        && command -v setpriv >/dev/null 2>&1 && command -v flock >/dev/null 2>&1 \
+        && return 0
       if command -v dnf >/dev/null 2>&1; then
         run dnf install -y curl ca-certificates jq tar coreutils python3 iproute procps-ng util-linux
       else
         run yum install -y curl ca-certificates jq tar coreutils python3 iproute procps-ng util-linux
       fi
       ;;
-    alpine) install_alpine_deps ;;
+    alpine)
+      command -v curl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 \
+        && command -v tar >/dev/null 2>&1 && command -v sha256sum >/dev/null 2>&1 \
+        && command -v python3 >/dev/null 2>&1 && command -v tc >/dev/null 2>&1 \
+        && command -v sysctl >/dev/null 2>&1 && command -v unshare >/dev/null 2>&1 \
+        && command -v setpriv >/dev/null 2>&1 && command -v flock >/dev/null 2>&1 \
+        && return 0
+      install_alpine_deps
+      ;;
   esac
 }
 

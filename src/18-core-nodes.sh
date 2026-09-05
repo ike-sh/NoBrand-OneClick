@@ -15,7 +15,7 @@ nobrand_version() {
 
 nobrand_usage() {
   cat <<EOF
-NoBrand-OneClick 3.2.1 — Multi-Ingress / Mieru / Snell v4-v5 / Hysteria2 / TUIC v5 / VLESS REALITY / VLESS + FinalMask + Sudoku / SSH Tunnel / Port Forward
+NoBrand-OneClick 3.2.2 — Multi-Ingress / Mieru / Snell v4-v5 / Hysteria2 / TUIC v5 / VLESS REALITY / VLESS + FinalMask + Sudoku / SSH Tunnel / Port Forward
 
 用法:
   nobrand                         打开统一菜单
@@ -119,22 +119,35 @@ NoBrand-OneClick 3.2.1 — Multi-Ingress / Mieru / Snell v4-v5 / Hysteria2 / TUI
 EOF
 }
 
+nobrand_manager_source_valid() {
+  local path="$1"
+  [ -r "$path" ] && [ -f "$path" ] || return 1
+  grep -qxF 'SCRIPT_NAME="NoBrand-OneClick"' "$path" 2>/dev/null \
+    && grep -qxF 'SCRIPT_REPO="ike-sh/NoBrand-OneClick"' "$path" 2>/dev/null \
+    && grep -qxF "SCRIPT_VERSION=\"${SCRIPT_VERSION}\"" "$path" 2>/dev/null
+}
+
+nobrand_manager_source_path() {
+  if [ -n "${BASH_SOURCE[0]:-}" ] \
+     && nobrand_manager_source_valid "${BASH_SOURCE[0]}"; then
+    printf '%s' "${BASH_SOURCE[0]}"
+  elif nobrand_manager_source_valid "$INSTALL_SCRIPT_PATH"; then
+    printf '%s' "$INSTALL_SCRIPT_PATH"
+  elif nobrand_manager_source_valid "$NOBRAND_INSTALL_SCRIPT_PATH"; then
+    printf '%s' "$NOBRAND_INSTALL_SCRIPT_PATH"
+  else
+    return 1
+  fi
+}
+
 nobrand_install_manager_script() {
-  local source_path="" source_real="" destination_real=""
+  local source_path="" source_real="" destination_real="" link_tmp=""
   if [ "${DRY_RUN:-0}" -eq 1 ]; then
     t '[演练] 安装 NoBrand 管理器与 nobrand/nb 命令' \
       '[dry-run] install NoBrand manager and nobrand/nb commands'
     return 0
   fi
-  if [ -n "${BASH_SOURCE[0]:-}" ] && [ -r "${BASH_SOURCE[0]}" ] \
-     && grep -qxF "SCRIPT_NAME=\"NoBrand-OneClick\"" "${BASH_SOURCE[0]}" 2>/dev/null; then
-    source_path="${BASH_SOURCE[0]}"
-  elif [ -r "$INSTALL_SCRIPT_PATH" ] \
-       && grep -qxF "SCRIPT_NAME=\"NoBrand-OneClick\"" "$INSTALL_SCRIPT_PATH" 2>/dev/null; then
-    source_path="$INSTALL_SCRIPT_PATH"
-  elif [ -r "$NOBRAND_INSTALL_SCRIPT_PATH" ]; then
-    source_path="$NOBRAND_INSTALL_SCRIPT_PATH"
-  fi
+  source_path="$(nobrand_manager_source_path 2>/dev/null || true)"
   [ -n "$source_path" ] || {
     warn "$(t '找不到当前 NoBrand 单文件安装器，未安装统一快捷命令' \
       'Current NoBrand single-file installer not found; unified shortcuts were not installed')"
@@ -144,21 +157,57 @@ nobrand_install_manager_script() {
   destination_real="$(readlink -f "$NOBRAND_INSTALL_SCRIPT_PATH" 2>/dev/null \
     || realpath "$NOBRAND_INSTALL_SCRIPT_PATH" 2>/dev/null || printf '%s' "$NOBRAND_INSTALL_SCRIPT_PATH")"
   if [ "$source_real" != "$destination_real" ]; then
-    install -m 0755 "$source_path" "$NOBRAND_INSTALL_SCRIPT_PATH" || return 1
+    nb_atomic_install_file "$source_path" "$NOBRAND_INSTALL_SCRIPT_PATH" 0755 || return 1
   else
     chmod 0755 "$NOBRAND_INSTALL_SCRIPT_PATH" || return 1
   fi
-  ln -sfn "$NOBRAND_INSTALL_SCRIPT_PATH" "$NOBRAND_COMMAND_PATH" || return 1
-  ln -sfn "$NOBRAND_COMMAND_PATH" "$NOBRAND_SHORT_COMMAND_PATH" || return 1
+  mkdir -p "$(dirname "$NOBRAND_COMMAND_PATH")" "$(dirname "$NOBRAND_SHORT_COMMAND_PATH")" \
+    || return 1
+  link_tmp="$(mktemp "${NOBRAND_COMMAND_PATH}.tmp.XXXXXX")" || return 1
+  rm -f "$link_tmp"
+  if ! ln -s "$NOBRAND_INSTALL_SCRIPT_PATH" "$link_tmp" \
+     || ! mv -f "$link_tmp" "$NOBRAND_COMMAND_PATH"; then
+    rm -f "$link_tmp"
+    return 1
+  fi
+  link_tmp="$(mktemp "${NOBRAND_SHORT_COMMAND_PATH}.tmp.XXXXXX")" || return 1
+  rm -f "$link_tmp"
+  if ! ln -s "$NOBRAND_COMMAND_PATH" "$link_tmp" \
+     || ! mv -f "$link_tmp" "$NOBRAND_SHORT_COMMAND_PATH"; then
+    rm -f "$link_tmp"
+    return 1
+  fi
   cmp -s "$source_path" "$NOBRAND_INSTALL_SCRIPT_PATH" || return 1
   [ "$(readlink "$NOBRAND_COMMAND_PATH" 2>/dev/null || true)" = "$NOBRAND_INSTALL_SCRIPT_PATH" ] || return 1
   [ "$(readlink "$NOBRAND_SHORT_COMMAND_PATH" 2>/dev/null || true)" = "$NOBRAND_COMMAND_PATH" ] || return 1
 }
 
+nobrand_manager_installation_valid() {
+  local installed="" version_line="" source_path="" source_real="" destination_real=""
+  [ -x "$NOBRAND_INSTALL_SCRIPT_PATH" ] \
+    && [ -L "$NOBRAND_COMMAND_PATH" ] && [ -L "$NOBRAND_SHORT_COMMAND_PATH" ] \
+    || return 1
+  [ "$(readlink "$NOBRAND_COMMAND_PATH" 2>/dev/null || true)" = "$NOBRAND_INSTALL_SCRIPT_PATH" ] \
+    || return 1
+  [ "$(readlink "$NOBRAND_SHORT_COMMAND_PATH" 2>/dev/null || true)" = "$NOBRAND_COMMAND_PATH" ] \
+    || return 1
+  installed="$(nb_installed_manager_version 2>/dev/null || true)"
+  [ "$installed" = "$SCRIPT_VERSION" ] || return 1
+  version_line="$("$NOBRAND_COMMAND_PATH" --version 2>/dev/null | sed -n '1p')" || return 1
+  [ "$version_line" = "${SCRIPT_NAME} ${SCRIPT_VERSION}" ] || return 1
+  source_path="$(nobrand_manager_source_path 2>/dev/null || true)"
+  [ -n "$source_path" ] || return 1
+  source_real="$(readlink -f "$source_path" 2>/dev/null \
+    || realpath "$source_path" 2>/dev/null || printf '%s' "$source_path")"
+  destination_real="$(readlink -f "$NOBRAND_INSTALL_SCRIPT_PATH" 2>/dev/null \
+    || realpath "$NOBRAND_INSTALL_SCRIPT_PATH" 2>/dev/null \
+    || printf '%s' "$NOBRAND_INSTALL_SCRIPT_PATH")"
+  [ "$source_real" = "$destination_real" ] \
+    || cmp -s "$source_path" "$NOBRAND_INSTALL_SCRIPT_PATH"
+}
+
 nobrand_manager_upgrade() {
-  require_root
-  require_linux
-  nobrand_install_manager_script \
+  nobrand_manager_bootstrap \
     || die "$(t 'NoBrand 管理器安装/升级失败；协议状态未修改' \
       'NoBrand manager install/upgrade failed; protocol state was not modified')"
   t "NoBrand 统一管理器已从当前精确安装器安装/升级至 v${SCRIPT_VERSION}" \
@@ -1822,7 +1871,7 @@ nobrand_uninstall_impl() {
   if [ "$had_mieru" -eq 1 ]; then
     saved_yes="$YES"
     YES=1
-    do_uninstall || { YES="$saved_yes"; return 1; }
+    UNINSTALL_CONTEXT=global do_uninstall || { YES="$saved_yes"; return 1; }
     YES="$saved_yes"
   fi
   nb_strict_firewall_clear_all || return 1
@@ -1850,7 +1899,7 @@ nobrand_uninstall_impl() {
 nobrand_uninstall() {
   local state rc=0 mieru_ledger="" mieru_owned=0
   local preserve_package=0 preserve_user=0 preserve_group=0 preserve_shared=0
-  require_root
+  require_root || return 1
   if nobrand_backup_restore_transaction_present; then
     die "$(t '备份恢复事务尚未完成；请先通过修复流程完成 SSH 验收，拒绝卸载恢复证据' \
       'A backup-restore transaction is unfinished; complete SSH acceptance through repair before uninstalling recovery evidence')"
@@ -1863,7 +1912,8 @@ nobrand_uninstall() {
         'NoBrand-managed resources are already absent; nothing remains to uninstall.'
       return 0
       ;;
-    CURRENT_COMPLETE|CURRENT_PARTIAL_INSTALL|CURRENT_PARTIAL_REPAIR|LEGACY_SUPPORTED)
+    CURRENT_COMPLETE|CURRENT_PARTIAL_INSTALL|CURRENT_PARTIAL_REPAIR|\
+      CURRENT_PARTIAL_CONFIGURE|LEGACY_SUPPORTED)
       nb_schema_v3_file_valid \
         || die '未检测到有效的 NoBrand schema v3 state，拒绝卸载未知资源'
       ;;
@@ -1887,7 +1937,8 @@ nobrand_uninstall() {
       nb_lifecycle_lock_release
       return 0
       ;;
-    CURRENT_COMPLETE|CURRENT_PARTIAL_INSTALL|CURRENT_PARTIAL_REPAIR|LEGACY_SUPPORTED)
+    CURRENT_COMPLETE|CURRENT_PARTIAL_INSTALL|CURRENT_PARTIAL_REPAIR|\
+      CURRENT_PARTIAL_CONFIGURE|LEGACY_SUPPORTED)
       if ! nb_schema_v3_file_valid; then
         nb_lifecycle_lock_release
         return 1
@@ -1921,10 +1972,21 @@ nobrand_uninstall() {
       return 1
       ;;
   esac
-  nb_lifecycle_begin uninstall prepare "$mieru_owned" "$preserve_package" \
-    "$preserve_user" "$preserve_group" "$preserve_shared" || {
+  nb_lifecycle_pre_mutation_snapshot || {
     nb_lifecycle_lock_release
     return 1
+  }
+  nb_lifecycle_begin uninstall prepare "$mieru_owned" "$preserve_package" \
+    "$preserve_user" "$preserve_group" "$preserve_shared" 0 global || {
+    nb_lifecycle_pre_mutation_disarm
+    nb_lifecycle_lock_release
+    return 1
+  }
+  nb_lifecycle_mark_mutation_started || {
+    rc=$?
+    nb_lifecycle_restore_pre_mutation || rc=1
+    nb_lifecycle_lock_release
+    return "$rc"
   }
   nobrand_uninstall_impl
   rc=$?
@@ -1958,6 +2020,15 @@ nobrand_uninstall() {
   nb_lifecycle_lock_release
   t 'NoBrand 3 的 Mieru/Snell/HY2/TUIC/VLESS REALITY/VLESS Sudoku/SSH Tunnel/Forward/Common 资源与 nobrand/nb 已完整删除；外部资源未触碰' \
     'NoBrand 3 Mieru/Snell/HY2/TUIC/VLESS REALITY/VLESS Sudoku/SSH Tunnel/Forward/Common resources and nobrand/nb were removed; external resources were untouched'
+  t '如当前 Bash 会话仍缓存 nb/nobrand 路径，可执行 `hash -r` 清除命令缓存。' \
+    'If the current Bash session still caches the nb/nobrand path, run `hash -r` to clear its command cache.'
+  if [ "${MENU_MODE:-0}" -eq 1 ]; then
+    # Status 4 is an ordinary shell status and cannot authenticate this path
+    # by itself. The menu wrapper resets and checks this completion marker in
+    # the same subprocess, after every global-uninstall postcondition above.
+    NOBRAND_MENU_GLOBAL_UNINSTALL_CONFIRMED=1
+    return "$NOBRAND_MENU_EXIT_SUCCESS"
+  fi
 }
 
 nobrand_stop_all_services() {

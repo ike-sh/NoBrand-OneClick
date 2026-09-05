@@ -269,6 +269,10 @@ snell_install_runtime() {
       "Snell v${major} official runtime validation failed")"
     return 1
   fi
+  nb_lifecycle_mark_protocol_mutation_started "${NOBRAND_LIFECYCLE_SCOPE:-snell}" || {
+    rm -f "$candidate"
+    return 1
+  }
   mkdir -p "$NOBRAND_SNELL_RUNTIME_DIR" || { rm -f "$candidate"; return 1; }
   if [ -e "$destination" ]; then
     backup="$(mktemp "${destination}.rollback.XXXXXX")" || { rm -f "$candidate"; return 1; }

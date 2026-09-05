@@ -28,7 +28,7 @@ export MITA_SOURCE_ONLY=1
 source /work/install-nobrand.sh
 trap - ERR
 
-test "$SCRIPT_VERSION" = 3.2.1
+test "$SCRIPT_VERSION" = 3.2.2
 test "$SCRIPT_NAME|$SCRIPT_REPO" = 'NoBrand-OneClick|ike-sh/NoBrand-OneClick'
 case "$(detect_pkg_manager)" in
   deb|rpm|alpine) ;;
@@ -49,7 +49,15 @@ platform_lifecycle_case() (
     mkdir -p "$case_root/bin" "$case_root/run"
     export NOBRAND_LIFECYCLE_ACTIVE=0
     export NOBRAND_LIFECYCLE_OPERATION=""
+    export NOBRAND_LIFECYCLE_SCOPE=""
+    export NOBRAND_LIFECYCLE_MUTATION_STARTED=0
     export NOBRAND_LIFECYCLE_LOCK_HELD=0
+    export NOBRAND_MANAGER_SESSION_ACTIVE=0
+    export MENU_MODE=0
+    export ACTION=""
+    export YES=1
+    unset NOBRAND_TEST_INTERRUPT_INSTALL_AT NOBRAND_TEST_INTERRUPT_REPAIR_AT \
+      NOBRAND_TEST_INTERRUPT_CONFIGURE_AT NOBRAND_TEST_INTERRUPT_UNINSTALL_AT
   }
 
   platform_expect_install_state() {
@@ -60,6 +68,52 @@ platform_lifecycle_case() (
         "$label" "$expected" "$actual_state" >&2
       return 1
     }
+  }
+
+  platform_menu_inputs() {
+    printf '%s\n' "$@" >"$case_root/menu-inputs"
+    printf '0\n' >"$case_root/menu-input-index"
+    rm -f -- "$case_root/unexpected-menu-read"
+  }
+
+  platform_menu_input_count() {
+    cat "$case_root/menu-input-index"
+  }
+
+  read_tty() {
+    local destination="$1" index next input_value
+    index="$(cat "$case_root/menu-input-index" 2>/dev/null || printf 0)"
+    next=$((index + 1))
+    input_value="$(sed -n "${next}p" "$case_root/menu-inputs" 2>/dev/null || true)"
+    [ -n "$input_value" ] || {
+      : >"$case_root/unexpected-menu-read"
+      return 1
+    }
+    printf '%s\n' "$next" >"$case_root/menu-input-index"
+    printf -v "$destination" '%s' "$input_value"
+  }
+
+  nobrand_print_banner() {
+    local count
+    nobrand_manager_installation_valid \
+      || { printf '%s\n' 'platform menu rendered before manager validation' >&2; return 1; }
+    count="$(cat "$case_root/menu-banner-count" 2>/dev/null || printf 0)"
+    printf '%s\n' "$((count + 1))" >"$case_root/menu-banner-count"
+    msg 'NoBrand-OneClick platform manager menu'
+  }
+
+  platform_assert_manager_only() {
+    MITA_SOURCE_ONLY=0 nobrand_manager_installation_valid
+    test "$(readlink "$NOBRAND_COMMAND_PATH")" = "$NOBRAND_INSTALL_SCRIPT_PATH"
+    test "$(readlink "$NOBRAND_SHORT_COMMAND_PATH")" = "$NOBRAND_COMMAND_PATH"
+    cmp -s /work/install-nobrand.sh "$NOBRAND_INSTALL_SCRIPT_PATH"
+    hash -r
+    test "$(PATH="$case_root/bin:$PATH" MITA_SOURCE_ONLY=0 nobrand --version | sed -n '1p')" = \
+      "${SCRIPT_NAME} ${SCRIPT_VERSION}"
+    test "$(PATH="$case_root/bin:$PATH" MITA_SOURCE_ONLY=0 nb --version | sed -n '1p')" = \
+      "${SCRIPT_NAME} ${SCRIPT_VERSION}"
+    ! nb_authoritative_protocol_state_exists
+    platform_expect_install_state CURRENT_COMPLETE manager-only
   }
 
   # No actual lifecycle lock, package manager, network, or service may be used
@@ -84,9 +138,120 @@ platform_lifecycle_case() (
   }
   do_install_impl() {
     [ "$NOBRAND_LIFECYCLE_OPERATION" = "$expected_operation" ] || return 96
+    nb_lifecycle_mark_protocol_mutation_started mieru || return 1
     ensure_manager_state_layout 1
     install_self_script
   }
+
+  # Exercise the production no-argument bootstrap and manager writers before
+  # any protocol fixture. Platform package installation remains real on the
+  # first launch. The second launch installs nothing: replacing run() afterward
+  # turns any attempted apt/dnf/yum/apk invocation into a hard failure marker.
+  platform_lifecycle_reset
+  platform_menu_inputs 0
+  MITA_SOURCE_ONLY=0 main >/dev/null
+  test "$(cat "$case_root/menu-banner-count")" = 1
+  test "$(platform_menu_input_count)" = 1
+  test "$(nb_lifecycle_scope)" = manager
+  test "$(nb_lifecycle_field OPERATION)" = install
+  test "$(nb_lifecycle_field STATUS)" = complete
+  platform_assert_manager_only
+  run() {
+    case "${1:-}" in
+      apt-get|dnf|yum|apk)
+        : >"$case_root/unexpected-dependency-reinstall"
+        return 98
+        ;;
+      *) command "$@" ;;
+    esac
+  }
+  platform_menu_inputs 0
+  ACTION=""
+  MITA_SOURCE_ONLY=0 main >/dev/null
+  test "$(cat "$case_root/menu-banner-count")" = 2
+  test ! -e "$case_root/unexpected-dependency-reinstall"
+  platform_assert_manager_only
+
+  export NOBRAND_TEST_INTERFACE_ROWS='eth0|192.0.2.40|UP|1'
+  export NOBRAND_TEST_DEFAULT_EGRESS='eth0|192.0.2.40'
+  ingress_menu_reset_requests
+  parse_nobrand_ingress_args add --name Bootstrap-Ingress --type public \
+    --interface eth0 --address 192.0.2.40 --port-policy manual-only \
+    --enforcement permissive --yes
+  NOBRAND_MANAGER_SESSION_ACTIVE=1 nobrand_run_ingress_action >/dev/null
+  test "$(jq '[.profiles[] | select(.name == "Bootstrap-Ingress")] | length' \
+    "$NOBRAND_INGRESS_STATE_FILE")" = 1
+  platform_assert_manager_only
+  platform_menu_inputs 0
+  ACTION=""
+  MITA_SOURCE_ONLY=0 main >/dev/null
+  test "$(cat "$case_root/menu-banner-count")" = 3
+  platform_assert_manager_only
+  unset NOBRAND_TEST_INTERFACE_ROWS NOBRAND_TEST_DEFAULT_EGRESS
+  printf 'FRESH_BOOTSTRAP_MANAGER_GATE=PASS\n'
+  printf 'MANAGER_INSTALLED_BEFORE_MAIN_MENU=PASS\n'
+  printf 'MANAGER_ONLY_INSTALL_SUPPORTED=PASS\n'
+  printf 'ZERO_PROTOCOL_CURRENT_COMPLETE=PASS\n'
+  printf 'INGRESS_ONLY_MANAGER_PERSISTS=PASS\n'
+  printf 'INGRESS_BEFORE_PROTOCOL_SUPPORTED=PASS\n'
+  printf 'MANAGER_SECOND_LAUNCH_NO_DEP_REINSTALL=PASS\n'
+
+  # Scoped recovery records must return to the unified manager without
+  # manufacturing Mieru state or credentials.
+  platform_lifecycle_reset
+  nb_lifecycle_begin install prepare 0 0 0 0 0 0 manager
+  nb_lifecycle_mark_mutation_started
+  platform_expect_install_state CURRENT_PARTIAL_INSTALL manager-recovery-fixture
+  platform_menu_inputs 0
+  ACTION=""
+  YES=1
+  MITA_SOURCE_ONLY=0 main >/dev/null
+  test "$(nb_lifecycle_scope)" = manager
+  test "$(nb_lifecycle_field STATUS)" = complete
+  platform_assert_manager_only
+  printf 'MANAGER_RECOVERY_SCOPE_GATE=PASS\n'
+
+  platform_lifecycle_reset
+  MITA_SOURCE_ONLY=0 nobrand_manager_bootstrap
+  nb_lifecycle_begin configure prepare 0 0 0 0 0 0 ingress
+  platform_expect_install_state CURRENT_PARTIAL_CONFIGURE ingress-recovery-fixture
+  platform_menu_inputs 0
+  ACTION=""
+  YES=1
+  MITA_SOURCE_ONLY=0 main >/dev/null
+  test ! -e "$NOBRAND_LIFECYCLE_TX_FILE"
+  platform_expect_install_state CURRENT_COMPLETE ingress-unmutated-recovery
+  platform_assert_manager_only
+  printf 'INGRESS_RECOVERY_SCOPE_GATE=PASS\n'
+
+  # The loaded global menu process must stop immediately after successful full
+  # uninstall. The shared input counter exposes any stale-menu third read.
+  platform_lifecycle_reset
+  platform_menu_inputs 0
+  MITA_SOURCE_ONLY=0 main >/dev/null
+  platform_assert_manager_only
+  platform_menu_inputs 16 y
+  ACTION=""
+  set +e
+  MITA_SOURCE_ONLY=0 main >"$case_root/global-uninstall.out" 2>&1
+  uninstall_rc=$?
+  set -e
+  test "$uninstall_rc" -eq 0
+  test "$(platform_menu_input_count)" = 2
+  test ! -e "$case_root/unexpected-menu-read"
+  platform_expect_install_state CLEAN global-uninstall
+  test ! -e "$NOBRAND_INSTALL_SCRIPT_PATH"
+  test ! -e "$NOBRAND_COMMAND_PATH"
+  test ! -e "$NOBRAND_SHORT_COMMAND_PATH"
+  printf 'FULL_UNINSTALL_PROCESS_EXIT_GATE=PASS\n'
+
+  platform_menu_inputs 0
+  ACTION=""
+  YES=1
+  MITA_SOURCE_ONLY=0 main >/dev/null
+  platform_assert_manager_only
+  printf 'FULL_UNINSTALL_FRESH_REINSTALL_GATE=PASS\n'
+  printf 'PLATFORM_MANAGER_BOOTSTRAP_GATE=PASS\n'
 
   platform_lifecycle_reset
   platform_expect_install_state CLEAN clean-host
@@ -103,11 +268,13 @@ platform_lifecycle_case() (
   printf '%s\n' 'preserve-current-state-across-rerun' >"$NOBRAND_STATE_DIR/platform-preserve"
   preserve_hash="$(sha256sum "$NOBRAND_STATE_DIR/platform-preserve")"
   rm -f "$NOBRAND_SHORT_COMMAND_PATH"
-  expected_operation=repair
-  do_install
+  # A missing manager command is manager-scope residue. Repair it through the
+  # manager bootstrap instead of routing the partial state into Mieru.
+  MITA_SOURCE_ONLY=0 nobrand_manager_bootstrap
   test "$preserve_hash" = "$(sha256sum "$NOBRAND_STATE_DIR/platform-preserve")"
   test "$(readlink "$NOBRAND_SHORT_COMMAND_PATH")" = "$NOBRAND_COMMAND_PATH"
   test "$(nb_lifecycle_field OPERATION)" = repair
+  test "$(nb_lifecycle_scope)" = manager
   test "$(nb_lifecycle_field STATUS)" = complete
   platform_expect_install_state CURRENT_COMPLETE completed-rerun
   [ ! -e "$case_root/unexpected-network" ]
@@ -200,6 +367,7 @@ client_endpoint_is_independent 203.0.113.173
 # every supported distribution without touching container addresses or routes.
 export NOBRAND_TEST_INTERFACE_ROWS=$'eth0|192.0.2.110|UP|1\neth1|198.51.100.40|UP|0\neth2|203.0.113.20|DOWN|0'
 export NOBRAND_TEST_DEFAULT_EGRESS='eth0|192.0.2.110'
+nb_init_state_layout
 [ ! -e "$NOBRAND_INGRESS_STATE_FILE" ]
 nb_ingress_list >/dev/null
 nb_ingress_doctor >/dev/null
@@ -402,4 +570,13 @@ ssh_tunnel_delete_group
 printf 'platform-ssh: PASS (sshd=%s, config=%s, reload=sighup, account=system-user)\n' \
   "$NOBRAND_SSHD_BIN" "$native_strategy"
 
+platform_id="$(. /etc/os-release && printf '%s' "$ID")"
+case "$platform_id" in
+  debian) printf 'DEBIAN_PLATFORM_GATE=PASS\n' ;;
+  ubuntu) printf 'UBUNTU_PLATFORM_GATE=PASS\n' ;;
+  rocky) printf 'ROCKY_PLATFORM_GATE=PASS\n' ;;
+  alpine) printf 'ALPINE_PLATFORM_GATE=PASS\n' ;;
+  *) printf 'unrecognized platform id after successful case: %s\n' "$platform_id" >&2; exit 1 ;;
+esac
+printf 'PLATFORM_CASE_GATE=PASS (%s)\n' "$platform_id"
 echo "platform-case: PASS ($(detect_pkg_manager))"

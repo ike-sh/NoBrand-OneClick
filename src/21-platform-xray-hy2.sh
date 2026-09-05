@@ -197,6 +197,11 @@ nobrand_install_xray_runtime() {
   fi
   new_assets="${NOBRAND_XRAY_ASSET_DIR}.new.$$"
   if [ "$rc" -eq 0 ]; then
+    nb_lifecycle_mark_protocol_mutation_started "${NOBRAND_LIFECYCLE_SCOPE:-}" || {
+      rm -f "$candidate"
+      rm -rf -- "$candidate_assets" "$snapshot"
+      return 1
+    }
     mkdir -p "$(dirname "$NOBRAND_XRAY_BIN")" "$(dirname "$NOBRAND_XRAY_ASSET_DIR")" \
       && rm -rf -- "$new_assets" \
       && mkdir -p "$new_assets" \

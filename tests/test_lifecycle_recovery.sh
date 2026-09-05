@@ -55,6 +55,8 @@ source "$TEST_ROOT/src/61-ssh-tunnel.sh"
 # shellcheck disable=SC1091
 source "$TEST_ROOT/src/80-lifecycle.sh"
 # shellcheck disable=SC1091
+source "$TEST_ROOT/src/90-ui.sh"
+# shellcheck disable=SC1091
 source "$TEST_ROOT/src/99-main.sh"
 
 BASE_SCRIPT_VERSION="$SCRIPT_VERSION"
@@ -74,11 +76,18 @@ reset_fixture() {
   SCRIPT_VERSION="$BASE_SCRIPT_VERSION"
   export NOBRAND_LIFECYCLE_ACTIVE=0
   NOBRAND_LIFECYCLE_OPERATION=""
+  NOBRAND_LIFECYCLE_SCOPE=""
+  NOBRAND_LIFECYCLE_MUTATION_STARTED=0
   NOBRAND_LIFECYCLE_LOCK_HELD=0
   ACTION=""
   YES=0
   unset NOBRAND_TEST_INTERRUPT_INSTALL_AT NOBRAND_TEST_INTERRUPT_REPAIR_AT \
-    NOBRAND_TEST_INTERRUPT_UNINSTALL_AT
+    NOBRAND_TEST_INTERRUPT_CONFIGURE_AT NOBRAND_TEST_INTERRUPT_UNINSTALL_AT \
+    NOBRAND_RECOVERY_EXPECTED_SCOPE NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE \
+    NOBRAND_PROTOCOL_CALLBACK_ATTEMPT_MUTATION \
+    NOBRAND_RECOVERY_EXPECTED_STATE NOBRAND_RECOVERY_EXPECTED_TX_PRESENT \
+    NOBRAND_RECOVERY_EXPECTED_TX_STATUS NOBRAND_RECOVERY_EXPECTED_TX_ID \
+    NOBRAND_RECOVERY_EXPECTED_TX_RECORD
 }
 
 write_manager() {
@@ -90,6 +99,19 @@ write_manager() {
     "SCRIPT_VERSION=\"${version}\"" \
     >"$NOBRAND_INSTALL_SCRIPT_PATH"
   chmod 0755 "$NOBRAND_INSTALL_SCRIPT_PATH"
+}
+
+write_manager_command_chain() {
+  mkdir -p "$(dirname "$NOBRAND_COMMAND_PATH")" \
+    "$(dirname "$NOBRAND_SHORT_COMMAND_PATH")"
+  rm -f -- "$NOBRAND_COMMAND_PATH" "$NOBRAND_SHORT_COMMAND_PATH"
+  ln -s "$NOBRAND_INSTALL_SCRIPT_PATH" "$NOBRAND_COMMAND_PATH"
+  ln -s "$NOBRAND_COMMAND_PATH" "$NOBRAND_SHORT_COMMAND_PATH"
+}
+
+write_complete_manager() {
+  write_manager "$1"
+  write_manager_command_chain
 }
 
 write_v320_release_manager() {
@@ -358,6 +380,37 @@ assert_state() {
 fake_lifecycle_lock_acquire() { NOBRAND_LIFECYCLE_LOCK_HELD=1; }
 fake_lifecycle_lock_release() { NOBRAND_LIFECYCLE_LOCK_HELD=0; }
 
+write_lifecycle_v1_fixture() {
+  local operation="${1:-install}" phase="${2:-ready-to-validate}"
+  local status="${3:-in-progress}"
+  mkdir -p "$NOBRAND_LIFECYCLE_DIR"
+  chmod 0700 "$NOBRAND_LIFECYCLE_DIR"
+  printf '%s\n' \
+    'FORMAT=nobrand-lifecycle-v1' \
+    "OPERATION=${operation}" \
+    "STATUS=${status}" \
+    'MANAGER_VERSION=3.2.1' \
+    'SCHEMA_GENERATION=3' \
+    'TRANSACTION_ID=12345678' \
+    'STARTED_AT=2026-01-01T00:00:00Z' \
+    "LAST_COMPLETED_PHASE=${phase}" \
+    'MIERU_OWNED=0' \
+    'MIERU_PRESERVE_PACKAGE=0' \
+    'MIERU_PRESERVE_USER=0' \
+    'MIERU_PRESERVE_GROUP=0' \
+    'MIERU_PRESERVE_SHARED=0' \
+    >"$NOBRAND_LIFECYCLE_TX_FILE"
+  chmod 0600 "$NOBRAND_LIFECYCLE_TX_FILE"
+}
+
+assert_lifecycle_record_rejected() {
+  local label="$1"
+  if nb_lifecycle_tx_valid; then
+    fail "$label was accepted as valid lifecycle metadata"
+  fi
+  assert_state AMBIGUOUS_OR_FOREIGN "$label fails closed during classification"
+}
+
 # Failed path utilities must never leak their partial stdout into a destructive
 # root. This models BusyBox realpath's unsupported -m/-- behavior directly.
 (
@@ -395,8 +448,8 @@ assert_state CLEAN 'foreign mita alone is not NoBrand evidence'
 
 reset_fixture
 write_schema
-write_manager 3.2.0
-assert_state CURRENT_COMPLETE 'schema v3 plus compatible 3.2 manager'
+write_complete_manager 3.2.0
+assert_state CURRENT_COMPLETE 'schema v3 plus compatible 3.2 manager command chain'
 
 for unsafe_root in "$NOBRAND_CONFIG_DIR" "$NOBRAND_LIB_DIR"; do
   reset_fixture
@@ -736,6 +789,215 @@ assert_state CURRENT_PARTIAL_INSTALL \
   'foreign mita install path retains a resumable current transaction'
 printf 'FOREIGN_MITA_CLASSIFICATION=PASS\n'
 
+# Public v3.2.1 lifecycle-v1 metadata is a fixed 13-field compatibility
+# format. Scope and mutation state are inferred only for that exact format;
+# extending, truncating, or duplicating it must fail closed.
+reset_fixture
+write_lifecycle_v1_fixture install ready-to-validate
+assert_eq 13 "$(wc -l <"$NOBRAND_LIFECYCLE_TX_FILE" | tr -d '[:space:]')" \
+  'lifecycle-v1 exact field count'
+nb_lifecycle_tx_valid || fail 'exact public lifecycle-v1 fixture was rejected'
+assert_eq '' "$(nb_lifecycle_field SCOPE)" 'lifecycle-v1 stores no scope field'
+assert_eq '' "$(nb_lifecycle_field MUTATION_STARTED)" \
+  'lifecycle-v1 stores no mutation field'
+assert_eq mieru "$(nb_lifecycle_scope)" 'lifecycle-v1 install infers Mieru scope'
+assert_eq 1 "$(nb_lifecycle_mutation_started)" \
+  'in-progress lifecycle-v1 conservatively infers mutation'
+assert_state CURRENT_PARTIAL_INSTALL 'exact lifecycle-v1 install remains recoverable'
+v1_valid_record="$fixture/lifecycle-v1-valid.env"
+cp "$NOBRAND_LIFECYCLE_TX_FILE" "$v1_valid_record"
+
+cp "$v1_valid_record" "$NOBRAND_LIFECYCLE_TX_FILE"
+printf '%s\n' 'SCOPE=mieru' >>"$NOBRAND_LIFECYCLE_TX_FILE"
+assert_lifecycle_record_rejected 'lifecycle-v1 record with a v2 scope extension'
+
+cp "$v1_valid_record" "$NOBRAND_LIFECYCLE_TX_FILE"
+printf '%s\n' 'STATUS=in-progress' >>"$NOBRAND_LIFECYCLE_TX_FILE"
+assert_lifecycle_record_rejected 'lifecycle-v1 record with a duplicate field'
+
+awk -F= '$1 != "MIERU_PRESERVE_SHARED"' "$v1_valid_record" \
+  >"$NOBRAND_LIFECYCLE_TX_FILE"
+assert_lifecycle_record_rejected 'lifecycle-v1 record with a missing field'
+
+awk -F= 'BEGIN { OFS="=" } $1 == "OPERATION" { $2="configure" } { print }' \
+  "$v1_valid_record" >"$NOBRAND_LIFECYCLE_TX_FILE"
+assert_lifecycle_record_rejected 'lifecycle-v1 record with a v2-only operation'
+
+reset_fixture
+write_lifecycle_v1_fixture repair partial-uninstall-ready-to-validate
+nb_lifecycle_tx_valid || fail 'lifecycle-v1 partial-uninstall repair fixture was rejected'
+assert_eq global "$(nb_lifecycle_scope)" \
+  'lifecycle-v1 partial-uninstall repair infers global scope'
+assert_eq 1 "$(nb_lifecycle_mutation_started)" \
+  'lifecycle-v1 partial-uninstall repair conservatively infers mutation'
+assert_state CURRENT_PARTIAL_REPAIR \
+  'lifecycle-v1 partial-uninstall repair remains globally recoverable'
+printf 'LIFECYCLE_V1_COMPATIBILITY=PASS\n'
+
+# Protocol mutation hooks are keyed to an active exact-scope transaction, not
+# to the presence of a manager-session flag. Outside a transaction they remain
+# no-ops so shared runtime upgrade helpers cannot fail.
+reset_fixture
+unset NOBRAND_MANAGER_SESSION_ACTIVE NOBRAND_PROTOCOL_CALLBACK_ATTEMPT_MUTATION
+nb_lifecycle_mark_protocol_mutation_started tuic \
+  || fail 'inactive protocol mutation hook was not a no-op'
+[ ! -e "$NOBRAND_LIFECYCLE_TX_FILE" ] \
+  || fail 'inactive protocol mutation hook created lifecycle metadata'
+[ -z "${NOBRAND_PROTOCOL_CALLBACK_ATTEMPT_MUTATION:-}" ] \
+  || fail 'inactive protocol mutation hook fabricated attempt proof'
+nb_lifecycle_begin install prepare 0 0 0 0 0 0 tuic
+nb_lifecycle_mark_protocol_mutation_started tuic \
+  || fail 'active direct-wrapper mutation hook failed without manager-session flag'
+assert_eq 1 "$(nb_lifecycle_mutation_started)" \
+  'active direct-wrapper mutation hook records durable boundary'
+assert_eq 1 "$NOBRAND_PROTOCOL_CALLBACK_ATTEMPT_MUTATION" \
+  'active direct-wrapper mutation hook records attempt-local proof'
+
+# Shared runtime helpers use the currently active lifecycle scope. During
+# global repair they must mark repair:global rather than rejecting the helper
+# because its ordinary component owner is TUIC/Snell/Xray.
+reset_fixture
+nb_lifecycle_begin repair prepare 0 0 0 0 0 0 global
+nb_lifecycle_mark_protocol_mutation_started "${NOBRAND_LIFECYCLE_SCOPE:-tuic}" \
+  || fail 'shared-runtime mutation hook rejected active repair:global scope'
+assert_eq 1 "$(nb_lifecycle_mutation_started)" \
+  'shared-runtime mutation hook records repair:global durable boundary'
+assert_eq global "$(nb_lifecycle_scope)" \
+  'shared-runtime mutation hook preserves repair:global scope'
+printf 'PROTOCOL_MUTATION_HOOK_CONTEXT=PASS\n'
+
+# TUIC owns an outer runtime snapshot before entering its instance lock. Every
+# post-lock preparation failure must release the lock and remove both that
+# snapshot and any candidate config/state files.
+run_tuic_install_precommit_failure() {
+  local failure_case="$1" failure_rc
+  reset_fixture
+  (
+    # shellcheck disable=SC1091
+    source "$TEST_ROOT/src/59-tuic.sh"
+    tuic_admin_lock_depth=0
+    tuic_rollback_calls=0
+    tuic_runtime_snapshot="$fixture/tuic-${failure_case}-runtime-snapshot"
+
+    require_root() { return 0; }
+    require_linux() { return 0; }
+    nobrand_prepare_common() { return 0; }
+    # Consumed indirectly by install_tuic() from the sourced module.
+    # shellcheck disable=SC2034,SC2100
+    tuic_collect_install_requests() {
+      PORT=24443
+      TUIC_CHANNEL=stable
+      TUIC_VERSION=''
+      TUIC_USER=fixture-user
+      TUIC_NAME=fixture-instance
+      TUIC_SNI=fixture.invalid
+      INGRESS_LISTEN_HOST=127.0.0.1
+      ADVERTISE_HOST=198.51.100.10
+      ADVERTISE_PORT=24443
+      INGRESS_PROFILE_ID=fixture-profile
+    }
+    mktemp_dir() {
+      mkdir -p "$tuic_runtime_snapshot"
+      printf '%s' "$tuic_runtime_snapshot"
+    }
+    mktemp_file() {
+      local suffix="${1:-}" temporary output
+      temporary="$(mktemp "$fixture/tuic-${failure_case}.XXXXXX")" || return 1
+      if [ -n "$suffix" ]; then
+        output="${temporary}${suffix}"
+        mv "$temporary" "$output" || return 1
+      else
+        output="$temporary"
+      fi
+      printf '%s' "$output"
+    }
+    tuic_snapshot_runtime_files() {
+      mkdir -p "$1"
+      : >"$1/runtime-marker"
+    }
+    tuic_prepare_runtime_for_install() { return 0; }
+    tuic_runtime_version() { printf '1.11.15'; }
+    tuic_generate_instance_id() { printf 't1111111111111111'; }
+    tuic_generate_user_id() { printf 'u1111111111111111'; }
+    tuic_generate_uuid() { printf '11111111-1111-4111-8111-111111111111'; }
+    tuic_generate_password() { printf 'fixture-password'; }
+    tuic_user_json() { printf '%s' '{}'; }
+    admin_lock_acquire() {
+      tuic_admin_lock_depth=$((tuic_admin_lock_depth + 1))
+    }
+    admin_lock_release() {
+      tuic_admin_lock_depth=$((tuic_admin_lock_depth - 1))
+      [ "$tuic_admin_lock_depth" -ge 0 ]
+    }
+    tuic_generate_certificate() {
+      [ "$failure_case" != certificate ] || return 1
+      printf '%s\n' certificate >"$1"
+      printf '%s\n' private-key >"$2"
+    }
+    tuic_generate_server_config() {
+      printf '%s\n' '{}' >"$1"
+    }
+    tuic_validate_config() { [ "$failure_case" != config-validation ]; }
+    nb_endpoint_mode_from_values() { printf custom; }
+    tuic_generate_state() {
+      printf '%s\n' '{}' >"$1"
+    }
+    nb_ingress_stamp_state_file() { [ "$failure_case" != state-stamp ]; }
+    tuic_install_transaction_rollback() {
+      tuic_rollback_calls=$((tuic_rollback_calls + 1))
+      # Both roots are fixture-bound above; the instance ID is generated by
+      # this fixture and is intentionally passed through the production call.
+      # shellcheck disable=SC2115
+      rm -rf -- "$NOBRAND_TUIC_STATE_DIR/$1" "$NOBRAND_TUIC_CONFIG_DIR/$1"
+    }
+
+    set +e
+    install_tuic
+    failure_rc=$?
+    set -e
+    [ "$failure_rc" -ne 0 ] \
+      || fail "TUIC ${failure_case} failure fixture unexpectedly succeeded"
+    assert_eq 0 "$tuic_admin_lock_depth" \
+      "TUIC ${failure_case} failure releases admin lock"
+    assert_eq 1 "$tuic_rollback_calls" \
+      "TUIC ${failure_case} failure invokes rollback exactly once"
+    [ ! -e "$tuic_runtime_snapshot" ] \
+      || fail "TUIC ${failure_case} failure retained runtime snapshot"
+    [ -z "$(find "$fixture" -maxdepth 1 -name "tuic-${failure_case}.*" -print -quit)" ] \
+      || fail "TUIC ${failure_case} failure retained candidate temp files"
+  )
+}
+
+run_tuic_install_precommit_failure certificate
+run_tuic_install_precommit_failure config-validation
+run_tuic_install_precommit_failure state-stamp
+printf 'TUIC_INSTALL_PRECOMMIT_CLEANUP=PASS\n'
+
+# lifecycle-v2 is likewise a closed 15-field schema. These corruptions cover
+# unknown, duplicate, missing, and invalid-valued fields independently.
+reset_fixture
+nb_lifecycle_begin install prepare 0 0 0 0 0 0 snell
+nb_lifecycle_tx_valid || fail 'valid lifecycle-v2 fixture was rejected'
+v2_valid_record="$fixture/lifecycle-v2-valid.env"
+cp "$NOBRAND_LIFECYCLE_TX_FILE" "$v2_valid_record"
+
+cp "$v2_valid_record" "$NOBRAND_LIFECYCLE_TX_FILE"
+printf '%s\n' 'UNKNOWN_FIELD=1' >>"$NOBRAND_LIFECYCLE_TX_FILE"
+assert_lifecycle_record_rejected 'lifecycle-v2 record with an unknown field'
+
+cp "$v2_valid_record" "$NOBRAND_LIFECYCLE_TX_FILE"
+printf '%s\n' 'SCOPE=snell' >>"$NOBRAND_LIFECYCLE_TX_FILE"
+assert_lifecycle_record_rejected 'lifecycle-v2 record with a duplicate field'
+
+awk -F= '$1 != "MUTATION_STARTED"' "$v2_valid_record" \
+  >"$NOBRAND_LIFECYCLE_TX_FILE"
+assert_lifecycle_record_rejected 'lifecycle-v2 record with a missing field'
+
+awk -F= 'BEGIN { OFS="=" } $1 == "MUTATION_STARTED" { $2="maybe" } { print }' \
+  "$v2_valid_record" >"$NOBRAND_LIFECYCLE_TX_FILE"
+assert_lifecycle_record_rejected 'lifecycle-v2 record with invalid mutation state'
+printf 'LIFECYCLE_MALFORMED_FAIL_CLOSED=PASS\n'
+
 reset_fixture
 nb_lifecycle_begin install prepare
 case "$(uname -s)" in
@@ -747,8 +1009,11 @@ case "$(uname -s)" in
     assert_file_mode 600 "$NOBRAND_LIFECYCLE_TX_FILE"
     ;;
 esac
-assert_eq 13 "$(wc -l <"$NOBRAND_LIFECYCLE_TX_FILE" | tr -d '[:space:]')" \
+assert_eq 15 "$(wc -l <"$NOBRAND_LIFECYCLE_TX_FILE" | tr -d '[:space:]')" \
   'transaction field count'
+assert_eq nobrand-lifecycle-v2 "$(nb_lifecycle_field FORMAT)" 'transaction format'
+assert_eq mieru "$(nb_lifecycle_scope)" 'default v2 transaction scope'
+assert_eq 0 "$(nb_lifecycle_mutation_started)" 'transaction starts before mutation'
 assert_not_contains "$(cat "$NOBRAND_LIFECYCLE_TX_FILE")" 'PASSWORD=' 'transaction secrets'
 assert_not_contains "$(cat "$NOBRAND_LIFECYCLE_TX_FILE")" 'PRIVATE_KEY=' 'transaction private key'
 nb_lifecycle_checkpoint install state-layout
@@ -804,7 +1069,10 @@ reset_fixture
   require_cmd() { return 0; }
   nb_lifecycle_lock_acquire() { fake_lifecycle_lock_acquire; }
   nb_lifecycle_lock_release() { fake_lifecycle_lock_release; }
-  do_install_impl() { return 41; }
+  do_install_impl() {
+    nb_lifecycle_mark_protocol_mutation_started mieru
+    return 41
+  }
   set +e
   do_install
   rc=$?
@@ -867,7 +1135,7 @@ stub_standard_lifecycle_install_dependencies() {
   warn_low_entropy_unsupported() { return 0; }
   install_fresh_isolated() {
     write_schema
-    write_manager "$SCRIPT_VERSION"
+    write_complete_manager "$SCRIPT_VERSION"
   }
   offer_bbr_fq() { return 0; }
   print_summary() { return 0; }
@@ -919,6 +1187,41 @@ run_standard_install_interrupt_phase() {
     set -e
     [ "$rc" -ne 0 ] || fail "install checkpoint did not interrupt: $phase"
   )
+  if [ "$phase" = state-layout ]; then
+    [ ! -e "$NOBRAND_LIFECYCLE_TX_FILE" ] \
+      || fail 'pre-mutation state-layout interruption retained lifecycle metadata'
+    assert_state CURRENT_PARTIAL_INSTALL \
+      'pre-mutation state-layout interruption leaves manager-layout evidence only'
+    (
+      stub_standard_lifecycle_install_dependencies
+      nobrand_install_manager_script() { write_complete_manager "$SCRIPT_VERSION"; }
+      nobrand_manager_installation_valid() { return 0; }
+      nobrand_manager_bootstrap >/dev/null
+    )
+    assert_state CURRENT_COMPLETE \
+      'manager bootstrap reconciles pre-mutation state-layout residue'
+    (
+      stub_standard_lifecycle_install_dependencies
+      fresh_mieru_state_ready=0
+      mita_v3_install_state_valid() { [ "$fresh_mieru_state_ready" -eq 1 ]; }
+      install_fresh_isolated() {
+        fresh_mieru_state_ready=1
+        write_schema
+        write_complete_manager "$SCRIPT_VERSION"
+      }
+      YES=1
+      unset NOBRAND_TEST_INTERRUPT_INSTALL_AT
+      do_install >/dev/null
+    )
+    assert_eq install "$(nb_lifecycle_field OPERATION)" \
+      'explicit install after manager recovery uses install scope'
+    assert_eq complete "$(nb_lifecycle_field STATUS)" \
+      'explicit install after manager recovery completes'
+    assert_state CURRENT_COMPLETE \
+      'explicit install after pre-mutation interruption converges'
+    INSTALL_INTERRUPT_EXERCISED_COUNT=$((INSTALL_INTERRUPT_EXERCISED_COUNT + 1))
+    return 0
+  fi
   assert_eq install "$(nb_lifecycle_field OPERATION)" \
     "interrupted install operation: $phase"
   assert_eq in-progress "$(nb_lifecycle_field STATUS)" \
@@ -930,6 +1233,9 @@ run_standard_install_interrupt_phase() {
     stub_standard_lifecycle_install_dependencies
     YES=1
     unset NOBRAND_TEST_INTERRUPT_INSTALL_AT
+    if [ "$phase" = runtime-ready ]; then
+      NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE=mieru
+    fi
     do_install >/dev/null
   )
   assert_eq install "$(nb_lifecycle_field OPERATION)" \
@@ -944,7 +1250,7 @@ run_standard_repair_interrupt_phase() {
   local phase="$1" rc=0 repair_state_hash=''
   reset_fixture
   write_schema
-  write_manager "$SCRIPT_VERSION"
+  write_complete_manager "$SCRIPT_VERSION"
   printf '%s\n' 'preserved-repair-state' >"$NOBRAND_STATE_DIR/repair-preserve"
   repair_state_hash="$(sha256sum "$NOBRAND_STATE_DIR/repair-preserve")"
   assert_state CURRENT_COMPLETE "repair starts complete: $phase"
@@ -958,6 +1264,30 @@ run_standard_repair_interrupt_phase() {
     set -e
     [ "$rc" -ne 0 ] || fail "repair checkpoint did not interrupt: $phase"
   )
+  if [ "$phase" = state-layout ]; then
+    [ ! -e "$NOBRAND_LIFECYCLE_TX_FILE" ] \
+      || fail 'pre-mutation repair state-layout interruption retained lifecycle metadata'
+    assert_eq "$repair_state_hash" "$(sha256sum "$NOBRAND_STATE_DIR/repair-preserve")" \
+      'pre-mutation repair state-layout interruption preserves state'
+    assert_state CURRENT_COMPLETE \
+      'pre-mutation repair state-layout interruption restores complete state'
+    (
+      stub_standard_lifecycle_install_dependencies
+      YES=1
+      unset NOBRAND_TEST_INTERRUPT_REPAIR_AT
+      do_install >/dev/null
+    )
+    assert_eq repair "$(nb_lifecycle_field OPERATION)" \
+      'explicit repair after pre-mutation interruption uses repair operation'
+    assert_eq complete "$(nb_lifecycle_field STATUS)" \
+      'explicit repair after pre-mutation interruption completes'
+    assert_eq "$repair_state_hash" "$(sha256sum "$NOBRAND_STATE_DIR/repair-preserve")" \
+      'explicit repair after pre-mutation interruption preserves state'
+    assert_state CURRENT_COMPLETE \
+      'explicit repair after pre-mutation interruption converges'
+    REPAIR_INTERRUPT_EXERCISED_COUNT=$((REPAIR_INTERRUPT_EXERCISED_COUNT + 1))
+    return 0
+  fi
   assert_eq repair "$(nb_lifecycle_field OPERATION)" \
     "interrupted repair operation: $phase"
   assert_eq in-progress "$(nb_lifecycle_field STATUS)" \
@@ -969,6 +1299,9 @@ run_standard_repair_interrupt_phase() {
     stub_standard_lifecycle_install_dependencies
     YES=1
     unset NOBRAND_TEST_INTERRUPT_REPAIR_AT
+    if [ "$phase" = runtime-ready ]; then
+      NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE=mieru
+    fi
     do_install >/dev/null
   )
   assert_eq repair "$(nb_lifecycle_field OPERATION)" \
@@ -995,7 +1328,7 @@ stub_partial_uninstall_repair_dependencies() {
   nb_lifecycle_lock_acquire() { fake_lifecycle_lock_acquire; }
   nb_lifecycle_lock_release() { fake_lifecycle_lock_release; }
   ensure_manager_state_layout() { return 0; }
-  install_self_script() { write_manager "$SCRIPT_VERSION"; }
+  install_self_script() { write_complete_manager "$SCRIPT_VERSION"; }
   do_install_impl() {
     : >"$NOBRAND_STATE_DIR/unexpected-fresh-install"
     return 99
@@ -1004,6 +1337,52 @@ stub_partial_uninstall_repair_dependencies() {
   nobrand_start_enabled_services() { return 0; }
   nobrand_doctor() { return 0; }
 }
+
+# Reclassifying a partial global uninstall as repair is reversible until the
+# repair mutation marker is durable. A failed marker must restore the original
+# uninstall transaction byte-for-byte and must not enter either repair path.
+reset_fixture
+write_schema
+write_manager "$SCRIPT_VERSION"
+mkdir -p "$(dirname "$NOBRAND_FORWARD_STATE_FILE")"
+printf '%s\n' '{"format":"partial-uninstall-marker-fixture"}' \
+  >"$NOBRAND_FORWARD_STATE_FILE"
+cp "$NOBRAND_FORWARD_STATE_FILE" \
+  "$fixture/partial-uninstall-marker-failure.state.expected"
+nb_lifecycle_begin uninstall prepare
+cp "$NOBRAND_LIFECYCLE_TX_FILE" \
+  "$fixture/partial-uninstall-marker-failure.transaction.expected"
+(
+  stub_partial_uninstall_repair_dependencies
+  nb_lifecycle_mark_mutation_started() { return 73; }
+  nb_reconcile_partial_uninstall() {
+    : >"$fixture/partial-uninstall-marker-failure.unexpected-reconcile"
+    return 98
+  }
+  NOBRAND_LIFECYCLE_LOCK_HELD=0
+  YES=1
+  set +e
+  do_install >/dev/null 2>&1
+  partial_uninstall_marker_failure_rc=$?
+  set -e
+  assert_eq 73 "$partial_uninstall_marker_failure_rc" \
+    'partial-uninstall repair mutation-marker failure propagates'
+  assert_eq 0 "$NOBRAND_LIFECYCLE_LOCK_HELD" \
+    'partial-uninstall repair mutation-marker failure balances lifecycle lock'
+)
+cmp -s "$fixture/partial-uninstall-marker-failure.transaction.expected" \
+  "$NOBRAND_LIFECYCLE_TX_FILE" \
+  || fail 'partial-uninstall repair mutation-marker failure changed original transaction bytes'
+cmp -s "$fixture/partial-uninstall-marker-failure.state.expected" \
+  "$NOBRAND_FORWARD_STATE_FILE" \
+  || fail 'partial-uninstall repair mutation-marker failure changed authoritative state bytes'
+[ ! -e "$fixture/partial-uninstall-marker-failure.unexpected-reconcile" ] \
+  || fail 'partial-uninstall repair mutation-marker failure ran reconciliation'
+[ ! -e "$NOBRAND_STATE_DIR/unexpected-fresh-install" ] \
+  || fail 'partial-uninstall repair mutation-marker failure ran fresh install callback'
+assert_state CURRENT_PARTIAL_UNINSTALL \
+  'partial-uninstall repair mutation-marker failure restores original classification'
+printf 'PARTIAL_UNINSTALL_PREMUTATION_RESTORE=PASS\n'
 
 run_partial_uninstall_repair_interrupt_phase() {
   local phase="$1" rc=0 preserved_state_hash=''
@@ -1077,6 +1456,7 @@ reset_fixture
   assert_state CURRENT_PARTIAL_INSTALL 'first successive install interruption classification'
   first_txid="$(nb_lifecycle_field TRANSACTION_ID)"
 
+  NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE=mieru
   export NOBRAND_TEST_INTERRUPT_INSTALL_AT=state-committed
   set +e
   do_install >/dev/null 2>&1
@@ -1102,7 +1482,7 @@ completed_rerun_log="$fixture/completed-install-reruns.log"
   install_fresh_isolated() {
     printf '%s\n' "$NOBRAND_LIFECYCLE_OPERATION" >>"$completed_rerun_log"
     write_schema
-    write_manager "$SCRIPT_VERSION"
+    write_complete_manager "$SCRIPT_VERSION"
   }
   YES=1
   do_install >/dev/null
@@ -1136,7 +1516,7 @@ assert_state CURRENT_COMPLETE 'third completed installer rerun remains complete'
 # existing-install branch, user-state readers, and install-state writer.
 reset_fixture
 write_schema
-write_manager "$SCRIPT_VERSION"
+write_complete_manager "$SCRIPT_VERSION"
 mkdir -p "$(dirname "$MITA_STATE")" "$(dirname "$NOBRAND_INGRESS_STATE_FILE")" \
   "$NOBRAND_BACKUP_DIR" "$NOBRAND_CONFIG_DIR"
 (
@@ -1308,7 +1688,7 @@ original_mita_v3_validator="$(declare -f mita_v3_install_state_valid)"
       && [ "$(users_count)" -gt 0 ]
   }
   confirm() { return 0; }
-  install_self_script() { write_manager "$SCRIPT_VERSION"; }
+  install_self_script() { write_complete_manager "$SCRIPT_VERSION"; }
   admin_lock_acquire() { return 0; }
   admin_lock_release() { return 0; }
   isolated_stop_all() { return 0; }
@@ -1384,6 +1764,247 @@ printf 'RERUN_PROFILE_PRESERVATION=PASS\n'
 printf 'RERUN_BACKUP_PRESERVATION=PASS\n'
 printf 'INSTALL_RERUN_STATE_PRESERVATION=PASS\n'
 
+# Recovery selection must be driven by the durable operation scope. Exercise
+# manager, Ingress, Mieru, a second protocol, Forward, and global recovery
+# independently so no route can silently fall back to the historical Mieru
+# installer default.
+reset_fixture
+nb_lifecycle_begin install prepare 0 0 0 0 0 0 manager
+manager_route_hash="$(sha256sum "$NOBRAND_LIFECYCLE_TX_FILE")"
+nobrand_set_scoped_recovery_action CURRENT_PARTIAL_INSTALL
+assert_eq manager "$(nobrand_recovery_scope CURRENT_PARTIAL_INSTALL)" \
+  'manager recovery reads durable manager scope'
+assert_eq nobrand-manager-bootstrap "$ACTION" 'manager recovery action'
+assert_eq "$manager_route_hash" "$(sha256sum "$NOBRAND_LIFECYCLE_TX_FILE")" \
+  'manager route selection does not rewrite lifecycle metadata'
+printf 'MANAGER_RECOVERY_SCOPE_GATE=PASS\n'
+
+# Manager residue does not necessarily retain an active manager transaction.
+# Bind either exact absence or an exact completed lifecycle record at selection,
+# repair only that same partial state under lock, and reach the ordinary menu.
+for manager_residue_tx in absent complete; do
+  reset_fixture
+  write_schema
+  if [ "$manager_residue_tx" = complete ]; then
+    nb_lifecycle_begin install prepare 0 0 0 0 0 0 snell
+    nb_lifecycle_mark_mutation_started
+    nb_lifecycle_complete install
+  fi
+  assert_state CURRENT_PARTIAL_INSTALL \
+    "${manager_residue_tx} manager residue starts partial"
+  (
+    id() { [ "${1:-}" = -u ] && printf 0; }
+    require_root() { return 0; }
+    require_linux() { return 0; }
+    detect_pkg_manager() { printf deb; }
+    ensure_management_dependencies() { return 0; }
+    nb_lifecycle_lock_acquire() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD + 1)); }
+    nb_lifecycle_lock_release() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD - 1)); }
+    read_tty() { printf -v "$1" 1; }
+    ensure_manager_state_layout() { return 0; }
+    nobrand_install_manager_script() {
+      printf 'install\n' >>"$fixture/manager-residue-${manager_residue_tx}.install"
+      write_complete_manager "$SCRIPT_VERSION"
+    }
+    nobrand_manager_installation_valid() { return 0; }
+    nb_lifecycle_validate_manager_repair() { return 0; }
+    nobrand_menu_loop() { : >"$fixture/manager-residue-${manager_residue_tx}.menu"; }
+    ACTION=""
+    NOBRAND_LIFECYCLE_LOCK_HELD=0
+    main >/dev/null
+    assert_eq 0 "$NOBRAND_LIFECYCLE_LOCK_HELD" \
+      "${manager_residue_tx} manager recovery balances lifecycle lock"
+  )
+  assert_eq 1 "$(wc -l <"$fixture/manager-residue-${manager_residue_tx}.install" | tr -d '[:space:]')" \
+    "${manager_residue_tx} manager residue installs manager exactly once"
+  [ -e "$fixture/manager-residue-${manager_residue_tx}.menu" ] \
+    || fail "${manager_residue_tx} manager residue did not reach menu"
+  assert_state CURRENT_COMPLETE \
+    "${manager_residue_tx} manager residue converges to current complete"
+  assert_eq repair "$(nb_lifecycle_field OPERATION)" \
+    "${manager_residue_tx} manager residue records repair"
+  assert_eq manager "$(nb_lifecycle_scope)" \
+    "${manager_residue_tx} manager residue records manager scope"
+done
+printf 'MANAGER_RESIDUE_MAIN_RECOVERY=PASS\n'
+
+# The no-argument recovery prompt is intentionally outside the manager lock.
+# Reauthenticate its selected manager transaction after acquiring that lock so
+# a concurrent CLEAN transition or new component transaction cannot turn the
+# stale choice into a fresh manager install.
+for manager_race_mode in clean changed-scope; do
+  reset_fixture
+  nb_lifecycle_begin install prepare 0 0 0 0 0 0 manager
+  nobrand_set_scoped_recovery_action CURRENT_PARTIAL_INSTALL
+  manager_race_log="$fixture/manager-race-${manager_race_mode}.log"
+  manager_race_expected="$fixture/manager-race-${manager_race_mode}.expected"
+  (
+    require_root() { return 0; }
+    require_linux() { return 0; }
+    detect_pkg_manager() { printf deb; }
+    ensure_management_dependencies() { return 0; }
+    manager_race_applied=0
+    nb_lifecycle_lock_acquire() {
+      fake_lifecycle_lock_acquire
+      if [ "$manager_race_applied" -eq 0 ]; then
+        manager_race_applied=1
+        nb_lifecycle_clear
+        if [ "$manager_race_mode" = changed-scope ]; then
+          nb_lifecycle_begin configure prepare 0 0 0 0 0 0 ingress
+          cp "$NOBRAND_LIFECYCLE_TX_FILE" "$manager_race_expected"
+        fi
+      fi
+    }
+    nb_lifecycle_lock_release() { fake_lifecycle_lock_release; }
+    ensure_manager_state_layout() { printf 'layout\n' >>"$manager_race_log"; }
+    nobrand_install_manager_script() { printf 'install\n' >>"$manager_race_log"; }
+    nobrand_manager_installation_valid() { return 1; }
+    set +e
+    nobrand_manager_bootstrap >/dev/null 2>&1
+    manager_race_rc=$?
+    set -e
+    [ "$manager_race_rc" -ne 0 ] \
+      || fail "stale manager recovery accepted ${manager_race_mode} state"
+    assert_eq 0 "$NOBRAND_LIFECYCLE_LOCK_HELD" \
+      "stale manager ${manager_race_mode} refusal balances lifecycle lock"
+  )
+  [ ! -e "$manager_race_log" ] \
+    || fail "stale manager ${manager_race_mode} recovery installed manager resources"
+  if [ "$manager_race_mode" = clean ]; then
+    [ ! -e "$NOBRAND_LIFECYCLE_TX_FILE" ] \
+      || fail 'stale manager CLEAN recovery created replacement metadata'
+  else
+    cmp -s "$manager_race_expected" "$NOBRAND_LIFECYCLE_TX_FILE" \
+      || fail 'stale manager recovery changed the concurrent Ingress transaction bytes'
+  fi
+done
+printf 'MANAGER_RECOVERY_TOCTOU_GUARD=PASS\n'
+
+# A manager-residue choice made with no lifecycle file must also reject newly
+# ambiguous metadata that appears before the bootstrap acquires its lock.
+reset_fixture
+write_schema
+nobrand_set_scoped_recovery_action CURRENT_PARTIAL_INSTALL
+manager_residue_schema_hash="$(sha256sum "$NOBRAND_REGISTRY_FILE")"
+manager_residue_ambiguous_expected="$fixture/manager-residue-ambiguous.expected"
+printf '%s\n' 'FOREIGN=manager-race' >"$manager_residue_ambiguous_expected"
+(
+  require_root() { return 0; }
+  require_linux() { return 0; }
+  detect_pkg_manager() { printf deb; }
+  ensure_management_dependencies() { return 0; }
+  nb_lifecycle_lock_acquire() {
+    fake_lifecycle_lock_acquire
+    mkdir -p "$NOBRAND_LIFECYCLE_DIR"
+    cp "$manager_residue_ambiguous_expected" "$NOBRAND_LIFECYCLE_TX_FILE"
+  }
+  nb_lifecycle_lock_release() { fake_lifecycle_lock_release; }
+  ensure_manager_state_layout() { : >"$fixture/manager-residue-ambiguous.layout"; }
+  nobrand_install_manager_script() { : >"$fixture/manager-residue-ambiguous.install"; }
+  NOBRAND_LIFECYCLE_LOCK_HELD=0
+  set +e
+  nobrand_manager_bootstrap >/dev/null 2>&1
+  manager_residue_ambiguous_rc=$?
+  set -e
+  [ "$manager_residue_ambiguous_rc" -ne 0 ] \
+    || fail 'stale manager-residue recovery accepted newly ambiguous metadata'
+  assert_eq 0 "$NOBRAND_LIFECYCLE_LOCK_HELD" \
+    'ambiguous manager-residue race balances lifecycle lock'
+)
+cmp -s "$manager_residue_ambiguous_expected" "$NOBRAND_LIFECYCLE_TX_FILE" \
+  || fail 'ambiguous manager-residue race changed foreign metadata'
+assert_eq "$manager_residue_schema_hash" "$(sha256sum "$NOBRAND_REGISTRY_FILE")" \
+  'ambiguous manager-residue race preserves schema bytes'
+[ ! -e "$fixture/manager-residue-ambiguous.layout" ] \
+  && [ ! -e "$fixture/manager-residue-ambiguous.install" ] \
+  || fail 'ambiguous manager-residue race mutated manager layout'
+printf 'MANAGER_RESIDUE_TOCTOU_GUARD=PASS\n'
+
+# Beginning manager repair over a completed protocol record is reversible until
+# the manager mutation marker itself is durable.
+reset_fixture
+write_schema
+nb_lifecycle_begin install prepare 0 0 0 0 0 0 snell
+nb_lifecycle_mark_mutation_started
+nb_lifecycle_complete install
+cp "$NOBRAND_LIFECYCLE_TX_FILE" "$fixture/manager-marker-failure.expected"
+nobrand_set_scoped_recovery_action CURRENT_PARTIAL_INSTALL
+(
+  require_root() { return 0; }
+  require_linux() { return 0; }
+  detect_pkg_manager() { printf deb; }
+  ensure_management_dependencies() { return 0; }
+  nb_lifecycle_lock_acquire() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD + 1)); }
+  nb_lifecycle_lock_release() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD - 1)); }
+  nb_lifecycle_mark_mutation_started() { return 72; }
+  ensure_manager_state_layout() { : >"$fixture/manager-marker-failure.unexpected-layout"; }
+  nobrand_install_manager_script() { : >"$fixture/manager-marker-failure.unexpected-install"; }
+  NOBRAND_LIFECYCLE_LOCK_HELD=0
+  set +e
+  nobrand_manager_bootstrap >/dev/null 2>&1
+  manager_marker_failure_rc=$?
+  set -e
+  assert_eq 72 "$manager_marker_failure_rc" \
+    'manager mutation-marker failure propagates'
+  assert_eq 0 "$NOBRAND_LIFECYCLE_LOCK_HELD" \
+    'manager mutation-marker failure balances lifecycle lock'
+)
+cmp -s "$fixture/manager-marker-failure.expected" "$NOBRAND_LIFECYCLE_TX_FILE" \
+  || fail 'manager mutation-marker failure changed prior completed metadata'
+[ ! -e "$fixture/manager-marker-failure.unexpected-layout" ] \
+  && [ ! -e "$fixture/manager-marker-failure.unexpected-install" ] \
+  || fail 'manager mutation-marker failure changed manager resources'
+printf 'MANAGER_PREMUTATION_RESTORE=PASS\n'
+
+reset_fixture
+nb_lifecycle_begin configure prepare 0 0 0 0 0 0 ingress
+ingress_route_hash="$(sha256sum "$NOBRAND_LIFECYCLE_TX_FILE")"
+nobrand_set_scoped_recovery_action CURRENT_PARTIAL_CONFIGURE
+assert_eq ingress "$(nobrand_recovery_scope CURRENT_PARTIAL_CONFIGURE)" \
+  'Ingress recovery reads durable Ingress scope'
+assert_eq nobrand-ingress-recover "$ACTION" 'Ingress recovery action'
+assert_eq "$ingress_route_hash" "$(sha256sum "$NOBRAND_LIFECYCLE_TX_FILE")" \
+  'Ingress route selection does not rewrite lifecycle metadata'
+printf 'INGRESS_RECOVERY_SCOPE_GATE=PASS\n'
+
+reset_fixture
+nb_lifecycle_begin install prepare 0 0 0 0 0 0 mieru
+nobrand_set_scoped_recovery_action CURRENT_PARTIAL_INSTALL
+assert_eq mieru "$(nobrand_recovery_scope CURRENT_PARTIAL_INSTALL)" \
+  'Mieru recovery reads durable Mieru scope'
+assert_eq install "$ACTION" 'Mieru recovery action'
+printf 'MIERU_RECOVERY_SCOPE_GATE=PASS\n'
+
+reset_fixture
+unset TUIC_ACTION
+nb_lifecycle_begin install prepare 0 0 0 0 0 0 tuic
+nobrand_set_scoped_recovery_action CURRENT_PARTIAL_INSTALL
+assert_eq tuic "$(nobrand_recovery_scope CURRENT_PARTIAL_INSTALL)" \
+  'TUIC recovery reads durable TUIC scope'
+assert_eq nobrand-tuic "$ACTION" 'TUIC recovery action'
+assert_eq install "${TUIC_ACTION:-}" 'TUIC recovery resumes TUIC install'
+printf 'SECOND_PROTOCOL_RECOVERY_SCOPE_GATE=PASS\n'
+
+reset_fixture
+unset FORWARD_ACTION
+nb_lifecycle_begin install prepare 0 0 0 0 0 0 forward
+nobrand_set_scoped_recovery_action CURRENT_PARTIAL_INSTALL
+assert_eq forward "$(nobrand_recovery_scope CURRENT_PARTIAL_INSTALL)" \
+  'Forward recovery reads durable Forward scope'
+assert_eq nobrand-forward "$ACTION" 'Forward recovery action'
+assert_eq recover-add "${FORWARD_ACTION:-}" \
+  'Forward recovery selects the dedicated recover-add action'
+[ "${FORWARD_ACTION:-}" != menu ] \
+  || fail 'Forward recovery selected the broad interactive menu'
+
+reset_fixture
+nb_lifecycle_begin uninstall prepare 0 0 0 0 0 0 global
+nobrand_set_scoped_recovery_action CURRENT_PARTIAL_UNINSTALL
+assert_eq global "$(nobrand_recovery_scope CURRENT_PARTIAL_UNINSTALL)" \
+  'partial uninstall recovery remains global'
+assert_eq install "$ACTION" 'global partial-uninstall safe-repair action'
+printf 'SCOPED_RECOVERY_ROUTING=PASS\n'
+
 # A no-argument manager invocation must expose the dedicated recovery route
 # before common preparation. In particular, choice 0 must not create the
 # managed state/layout that the user explicitly declined to change.
@@ -1410,6 +2031,7 @@ nb_lifecycle_begin install prepare
   nb_lifecycle_lock_release() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD - 1)); }
   read_tty() { printf -v "$1" 1; }
   print_banner() { :; }
+  is_mita_elf_binary() { return 1; }
   dry_run_should_preview() { return 1; }
   is_mita_elf_binary() { return 1; }
   do_install() { : >"$fixture/noarg-partial-install"; }
@@ -1422,7 +2044,8 @@ nb_lifecycle_begin install prepare
 reset_fixture
 write_schema
 write_manager "$SCRIPT_VERSION"
-nb_lifecycle_begin repair prepare
+nb_lifecycle_begin repair state-committed 0 0 0 0 0 0 mieru
+nb_lifecycle_mark_mutation_started
 (
   id() { [ "${1:-}" = -u ] && printf 0; }
   nb_lifecycle_lock_acquire() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD + 1)); }
@@ -1458,12 +2081,15 @@ nb_lifecycle_begin uninstall prepare
 
 reset_fixture
 write_schema
-write_manager "$SCRIPT_VERSION"
+write_complete_manager "$SCRIPT_VERSION"
 (
   id() { [ "${1:-}" = -u ] && printf 0; }
   nb_lifecycle_lock_acquire() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD + 1)); }
   nb_lifecycle_lock_release() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD - 1)); }
+  detect_pkg_manager() { printf deb; }
+  ensure_management_dependencies() { return 0; }
   ensure_manager_state_layout() { return 0; }
+  nobrand_manager_installation_valid() { return 0; }
   nb_select_partial_recovery_action() { : >"$fixture/unexpected-complete-recovery"; return 1; }
   nobrand_menu_loop() {
     (
@@ -1558,7 +2184,7 @@ assert_eq "$pending_explicit_hash" "$(sha256sum "$NOBRAND_LIFECYCLE_TX_FILE")" \
 # previous complete transaction byte-for-byte instead of fabricating a repair.
 reset_fixture
 write_schema
-write_manager "$SCRIPT_VERSION"
+write_complete_manager "$SCRIPT_VERSION"
 nb_lifecycle_begin install prepare
 nb_lifecycle_complete install
 complete_before_decline_hash="$(sha256sum "$NOBRAND_LIFECYCLE_TX_FILE")"
@@ -1588,6 +2214,370 @@ assert_eq "$complete_before_decline_hash" "$(sha256sum "$NOBRAND_LIFECYCLE_TX_FI
   'declined complete reinstall preserves complete lifecycle bytes'
 assert_state CURRENT_COMPLETE 'declined complete reinstall remains complete'
 
+# Fresh Mieru reconfigure is armed before request collection but marks only at
+# its actual state boundary. Accepting every current value is a no-op and must
+# restore the exact prior completed lifecycle record.
+reset_fixture
+write_schema
+write_complete_manager "$SCRIPT_VERSION"
+nb_lifecycle_begin install prepare 0 0 0 0 0 0 manager
+nb_lifecycle_mark_mutation_started
+nb_lifecycle_complete install
+mieru_reconfigure_noop_prior="$fixture/mieru-reconfigure-noop.prior"
+cp "$NOBRAND_LIFECYCLE_TX_FILE" "$mieru_reconfigure_noop_prior"
+(
+  require_root() { return 0; }
+  require_linux() { return 0; }
+  mita_installed() { return 0; }
+  nb_lifecycle_lock_acquire() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD + 1)); }
+  nb_lifecycle_lock_release() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD - 1)); }
+  do_reconfigure_impl() { : >"$fixture/mieru-reconfigure-noop.called"; }
+  nb_lifecycle_validate_manager_repair() { : >"$fixture/mieru-reconfigure-noop.unexpected-validation"; }
+  NOBRAND_LIFECYCLE_LOCK_HELD=0
+  do_reconfigure
+  assert_eq 0 "$NOBRAND_LIFECYCLE_LOCK_HELD" \
+    'no-op Mieru reconfigure balances lifecycle lock'
+)
+[ -e "$fixture/mieru-reconfigure-noop.called" ] \
+  || fail 'no-op Mieru reconfigure fixture did not run'
+[ ! -e "$fixture/mieru-reconfigure-noop.unexpected-validation" ] \
+  || fail 'no-op Mieru reconfigure validated a fabricated repair transaction'
+cmp -s "$mieru_reconfigure_noop_prior" "$NOBRAND_LIFECYCLE_TX_FILE" \
+  || fail 'no-op Mieru reconfigure changed prior lifecycle metadata'
+
+reset_fixture
+write_schema
+write_complete_manager "$SCRIPT_VERSION"
+nb_lifecycle_begin repair prepare 0 0 0 0 0 0 mieru
+(
+  require_root() { return 0; }
+  require_linux() { return 0; }
+  mita_installed() { return 0; }
+  nb_lifecycle_lock_acquire() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD + 1)); }
+  nb_lifecycle_lock_release() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD - 1)); }
+  do_reconfigure_impl() { : >"$fixture/mieru-unmutated-unexpected-reconfigure"; }
+  NOBRAND_RECOVERY_EXPECTED_SCOPE=mieru
+  NOBRAND_LIFECYCLE_ACTIVE=0
+  NOBRAND_LIFECYCLE_OPERATION=""
+  NOBRAND_LIFECYCLE_SCOPE=""
+  # Consumed by the sourced recovery function.
+  # shellcheck disable=SC2034
+  NOBRAND_LIFECYCLE_MUTATION_STARTED=0
+  NOBRAND_LIFECYCLE_LOCK_HELD=0
+  do_reconfigure >/dev/null
+  assert_eq 0 "$NOBRAND_LIFECYCLE_LOCK_HELD" \
+    'unmutated Mieru reconfigure recovery balances lifecycle lock'
+)
+[ ! -e "$fixture/mieru-unmutated-unexpected-reconfigure" ] \
+  || fail 'unmutated Mieru recovery invoked reconfigure implementation'
+[ ! -e "$NOBRAND_LIFECYCLE_TX_FILE" ] \
+  || fail 'unmutated Mieru reconfigure recovery retained lifecycle metadata'
+
+# An explicit Mieru command is a new same-scope request. It clears a stale v2
+# mutation-zero transaction and continues immediately as one fresh invocation.
+reset_fixture
+write_schema
+write_complete_manager "$SCRIPT_VERSION"
+nb_lifecycle_begin install prepare 0 0 0 0 0 0 mieru
+mieru_install_zero_txid="$(nb_lifecycle_field TRANSACTION_ID)"
+(
+  require_root() { return 0; }
+  require_linux() { return 0; }
+  require_cmd() { return 0; }
+  nb_lifecycle_lock_acquire() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD + 1)); }
+  nb_lifecycle_lock_release() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD - 1)); }
+  mieru_install_zero_ready=0
+  mita_v3_install_state_valid() { [ "$mieru_install_zero_ready" -eq 1 ]; }
+  mita_installed() { return 1; }
+  do_install_impl() {
+    assert_eq prepare "$(nb_lifecycle_field LAST_COMPLETED_PHASE)" \
+      'explicit mutation-zero Mieru install restarts at prepare'
+    [ "$(nb_lifecycle_field TRANSACTION_ID)" != "$mieru_install_zero_txid" ] \
+      || fail 'explicit mutation-zero Mieru install reused stale transaction identity'
+    nb_lifecycle_mark_protocol_mutation_started mieru
+    mieru_install_zero_ready=1
+    : >"$fixture/mieru-install-zero.called"
+  }
+  nb_lifecycle_validate_manager_repair() { return 0; }
+  users_state_exists() { return 0; }
+  users_count() { printf 1; }
+  verify_mita_running() { return 0; }
+  NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE=mieru
+  NOBRAND_LIFECYCLE_LOCK_HELD=0
+  do_install
+  assert_eq 0 "$NOBRAND_LIFECYCLE_LOCK_HELD" \
+    'explicit mutation-zero Mieru install balances lifecycle lock'
+)
+[ -e "$fixture/mieru-install-zero.called" ] \
+  || fail 'explicit mutation-zero Mieru install did not run fresh request'
+assert_eq complete "$(nb_lifecycle_field STATUS)" \
+  'explicit mutation-zero Mieru install completes fresh transaction'
+
+reset_fixture
+write_schema
+write_complete_manager "$SCRIPT_VERSION"
+nb_lifecycle_begin repair prepare 0 0 0 0 0 0 mieru
+mieru_reconfigure_zero_txid="$(nb_lifecycle_field TRANSACTION_ID)"
+(
+  require_root() { return 0; }
+  require_linux() { return 0; }
+  mita_installed() { return 0; }
+  nb_lifecycle_lock_acquire() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD + 1)); }
+  nb_lifecycle_lock_release() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD - 1)); }
+  do_reconfigure_impl() {
+    assert_eq prepare "$(nb_lifecycle_field LAST_COMPLETED_PHASE)" \
+      'explicit mutation-zero Mieru reconfigure restarts at prepare'
+    [ "$(nb_lifecycle_field TRANSACTION_ID)" != "$mieru_reconfigure_zero_txid" ] \
+      || fail 'explicit mutation-zero Mieru reconfigure reused stale transaction identity'
+    nb_lifecycle_mark_protocol_mutation_started mieru
+    : >"$fixture/mieru-reconfigure-zero.called"
+  }
+  nb_lifecycle_validate_manager_repair() { return 0; }
+  mita_v3_install_state_valid() { return 0; }
+  verify_mita_running() { return 0; }
+  NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE=mieru
+  NOBRAND_LIFECYCLE_LOCK_HELD=0
+  do_reconfigure
+  assert_eq 0 "$NOBRAND_LIFECYCLE_LOCK_HELD" \
+    'explicit mutation-zero Mieru reconfigure balances lifecycle lock'
+)
+[ -e "$fixture/mieru-reconfigure-zero.called" ] \
+  || fail 'explicit mutation-zero Mieru reconfigure did not run fresh request'
+assert_eq complete "$(nb_lifecycle_field STATUS)" \
+  'explicit mutation-zero Mieru reconfigure completes fresh transaction'
+printf 'MIERU_EXPLICIT_MUTATION_ZERO_RETRY=PASS\n'
+
+# No-argument repair:mieru recovery has no request to reconstruct. Route it
+# through main, clear only the zero-mutation record, and run no protocol callback.
+reset_fixture
+write_schema
+write_complete_manager "$SCRIPT_VERSION"
+nb_lifecycle_begin repair prepare 0 0 0 0 0 0 mieru
+(
+  id() { [ "${1:-}" = -u ] && printf 0; }
+  require_root() { return 0; }
+  require_linux() { return 0; }
+  require_cmd() { return 0; }
+  nb_lifecycle_lock_acquire() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD + 1)); }
+  nb_lifecycle_lock_release() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD - 1)); }
+  read_tty() { printf -v "$1" 1; }
+  print_banner() { :; }
+  is_mita_elf_binary() { return 1; }
+  do_install_impl() { : >"$fixture/mieru-zero-noarg.unexpected-install"; }
+  do_reconfigure_impl() { : >"$fixture/mieru-zero-noarg.unexpected-reconfigure"; }
+  nobrand_menu_loop() { : >"$fixture/mieru-zero-noarg.unexpected-menu"; }
+  NOBRAND_LIFECYCLE_LOCK_HELD=0
+  ACTION=""
+  main >/dev/null
+  assert_eq 0 "$NOBRAND_LIFECYCLE_LOCK_HELD" \
+    'no-argument mutation-zero repair:mieru balances lifecycle lock'
+)
+[ ! -e "$NOBRAND_LIFECYCLE_TX_FILE" ] \
+  || fail 'no-argument mutation-zero repair:mieru retained transaction'
+[ ! -e "$fixture/mieru-zero-noarg.unexpected-install" ] \
+  && [ ! -e "$fixture/mieru-zero-noarg.unexpected-reconfigure" ] \
+  && [ ! -e "$fixture/mieru-zero-noarg.unexpected-menu" ] \
+  || fail 'no-argument mutation-zero repair:mieru dispatched unrelated work'
+printf 'MIERU_NOARG_MUTATION_ZERO_CLEAR=PASS\n'
+
+# An ambiguous interrupted repair:mieru cannot be routed to a fresh install or
+# silently rerun reconfigure defaults. No-argument recovery fails closed; an
+# explicit reconfigure may recollect, mutate, validate, and complete its scope.
+reset_fixture
+write_schema
+write_complete_manager "$SCRIPT_VERSION"
+nb_lifecycle_begin repair prepare 0 0 0 0 0 0 mieru
+nb_lifecycle_mark_mutation_started
+cp "$NOBRAND_LIFECYCLE_TX_FILE" "$fixture/mieru-reconfigure-ambiguous.prior"
+(
+  ACTION=""
+  NOBRAND_RECOVERY_EXPECTED_SCOPE=""
+  set +e
+  nobrand_set_scoped_recovery_action CURRENT_PARTIAL_REPAIR >/dev/null 2>&1
+  mieru_ambiguous_route_rc=$?
+  set -e
+  [ "$mieru_ambiguous_route_rc" -ne 0 ] \
+    || fail 'ambiguous repair:mieru was silently routed to an action'
+  [ -z "$ACTION" ] || fail 'ambiguous repair:mieru selected a fresh install/reconfigure action'
+)
+cmp -s "$fixture/mieru-reconfigure-ambiguous.prior" "$NOBRAND_LIFECYCLE_TX_FILE" \
+  || fail 'ambiguous Mieru route modified recovery metadata'
+(
+  require_root() { return 0; }
+  require_linux() { return 0; }
+  mita_installed() { return 0; }
+  nb_lifecycle_lock_acquire() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD + 1)); }
+  nb_lifecycle_lock_release() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD - 1)); }
+  do_reconfigure_impl() { : >"$fixture/mieru-reconfigure-unexpected-noarg"; }
+  NOBRAND_RECOVERY_EXPECTED_SCOPE=mieru
+  set +e
+  do_reconfigure >/dev/null 2>&1
+  mieru_reconfigure_noarg_rc=$?
+  set -e
+  [ "$mieru_reconfigure_noarg_rc" -ne 0 ] \
+    || fail 'no-argument Mieru reconfigure replayed an ambiguous request'
+)
+[ ! -e "$fixture/mieru-reconfigure-unexpected-noarg" ] \
+  || fail 'no-argument Mieru recovery invoked reconfigure implementation'
+cmp -s "$fixture/mieru-reconfigure-ambiguous.prior" "$NOBRAND_LIFECYCLE_TX_FILE" \
+  || fail 'no-argument Mieru reconfigure refusal changed transaction bytes'
+(
+  require_root() { return 0; }
+  require_linux() { return 0; }
+  mita_installed() { return 0; }
+  nb_lifecycle_lock_acquire() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD + 1)); }
+  nb_lifecycle_lock_release() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD - 1)); }
+  do_reconfigure_impl() {
+    nb_lifecycle_mark_protocol_mutation_started mieru
+    : >"$fixture/mieru-reconfigure-explicit.called"
+  }
+  nb_lifecycle_validate_manager_repair() { return 0; }
+  mita_v3_install_state_valid() { return 0; }
+  verify_mita_running() { return 0; }
+  NOBRAND_RECOVERY_EXPECTED_SCOPE=""
+  NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE=mieru
+  NOBRAND_LIFECYCLE_LOCK_HELD=0
+  do_reconfigure
+  assert_eq 0 "$NOBRAND_LIFECYCLE_LOCK_HELD" \
+    'explicit Mieru reconfigure recovery balances lifecycle lock'
+)
+[ -e "$fixture/mieru-reconfigure-explicit.called" ] \
+  || fail 'explicit Mieru reconfigure did not recollect/run its scoped action'
+assert_eq complete "$(nb_lifecycle_field STATUS)" \
+  'explicit Mieru reconfigure recovery completes transaction'
+assert_eq repair "$(nb_lifecycle_field OPERATION)" \
+  'explicit Mieru reconfigure recovery preserves repair operation'
+assert_eq mieru "$(nb_lifecycle_scope)" \
+  'explicit Mieru reconfigure recovery preserves Mieru scope'
+printf 'MIERU_RECONFIGURE_RECOVERY_BOUNDARY=PASS\n'
+
+# A mutation bit from an earlier attempt is not proof that this invocation made
+# progress. A successful callback with no new marker must retain exact metadata.
+for mieru_attempt_action in install reconfigure; do
+  reset_fixture
+  write_schema
+  write_complete_manager "$SCRIPT_VERSION"
+  nb_lifecycle_begin "$([ "$mieru_attempt_action" = install ] && printf install || printf repair)" \
+    prepare 0 0 0 0 0 0 mieru
+  nb_lifecycle_mark_mutation_started
+  cp "$NOBRAND_LIFECYCLE_TX_FILE" "$fixture/mieru-${mieru_attempt_action}-attempt.expected"
+  (
+    require_root() { return 0; }
+    require_linux() { return 0; }
+    require_cmd() { return 0; }
+    mita_installed() { return 0; }
+    nb_lifecycle_lock_acquire() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD + 1)); }
+    nb_lifecycle_lock_release() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD - 1)); }
+    do_install_impl() { : >"$fixture/mieru-install-attempt.called"; }
+    do_reconfigure_impl() { : >"$fixture/mieru-reconfigure-attempt.called"; }
+    nb_lifecycle_validate_manager_repair() { : >"$fixture/mieru-${mieru_attempt_action}-attempt.unexpected-validation"; }
+    NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE=mieru
+    NOBRAND_LIFECYCLE_LOCK_HELD=0
+    set +e
+    "do_${mieru_attempt_action}" >/dev/null 2>&1
+    mieru_attempt_rc=$?
+    set -e
+    [ "$mieru_attempt_rc" -ne 0 ] \
+      || fail "Mieru ${mieru_attempt_action} retry accepted an old mutation bit"
+    assert_eq 0 "$NOBRAND_LIFECYCLE_LOCK_HELD" \
+      "Mieru ${mieru_attempt_action} no-progress retry balances lock"
+  )
+  [ -e "$fixture/mieru-${mieru_attempt_action}-attempt.called" ] \
+    || fail "Mieru ${mieru_attempt_action} attempt-proof fixture did not run callback"
+  [ ! -e "$fixture/mieru-${mieru_attempt_action}-attempt.unexpected-validation" ] \
+    || fail "Mieru ${mieru_attempt_action} no-progress retry ran validation"
+  cmp -s "$fixture/mieru-${mieru_attempt_action}-attempt.expected" \
+    "$NOBRAND_LIFECYCLE_TX_FILE" \
+    || fail "Mieru ${mieru_attempt_action} no-progress retry changed transaction bytes"
+done
+
+# Validation-only repair recovery intentionally needs no marker from this
+# invocation: authoritative state is already committed and is only verified.
+reset_fixture
+write_schema
+write_complete_manager "$SCRIPT_VERSION"
+nb_lifecycle_begin repair ready-to-validate 0 0 0 0 0 0 mieru
+nb_lifecycle_mark_mutation_started
+(
+  require_root() { return 0; }
+  require_linux() { return 0; }
+  mita_installed() { return 0; }
+  nb_lifecycle_lock_acquire() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD + 1)); }
+  nb_lifecycle_lock_release() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD - 1)); }
+  do_reconfigure_impl() { : >"$fixture/mieru-ready-unexpected-reconfigure"; }
+  nb_lifecycle_validate_manager_repair() { return 0; }
+  mita_v3_install_state_valid() { return 0; }
+  verify_mita_running() { return 0; }
+  NOBRAND_RECOVERY_EXPECTED_SCOPE=mieru
+  NOBRAND_LIFECYCLE_LOCK_HELD=0
+  do_reconfigure
+  assert_eq 0 "$NOBRAND_LIFECYCLE_LOCK_HELD" \
+    'validation-only Mieru reconfigure balances lifecycle lock'
+)
+[ ! -e "$fixture/mieru-ready-unexpected-reconfigure" ] \
+  || fail 'validation-only Mieru reconfigure replayed callback'
+assert_eq complete "$(nb_lifecycle_field STATUS)" \
+  'validation-only Mieru reconfigure completes after verification'
+printf 'MIERU_CALLBACK_ATTEMPT_PROOF=PASS\n'
+
+# Legacy v1 has no mutation bit and repair did not distinguish reinstall from
+# reconfigure. Pre-commit records therefore require an explicit action, while a
+# ready record is validation-only and never calls the installer implementation.
+reset_fixture
+write_schema
+write_complete_manager "$SCRIPT_VERSION"
+write_lifecycle_v1_fixture repair prepare
+cp "$NOBRAND_LIFECYCLE_TX_FILE" "$fixture/mieru-v1-ambiguous.prior"
+(
+  require_root() { return 0; }
+  require_linux() { return 0; }
+  require_cmd() { return 0; }
+  nb_lifecycle_lock_acquire() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD + 1)); }
+  nb_lifecycle_lock_release() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD - 1)); }
+  do_install_impl() { : >"$fixture/mieru-v1-unexpected-replay"; }
+  NOBRAND_RECOVERY_EXPECTED_SCOPE=mieru
+  set +e
+  do_install >/dev/null 2>&1
+  mieru_v1_ambiguous_rc=$?
+  set -e
+  [ "$mieru_v1_ambiguous_rc" -ne 0 ] \
+    || fail 'legacy ambiguous Mieru record replayed without an explicit action'
+)
+[ ! -e "$fixture/mieru-v1-unexpected-replay" ] \
+  || fail 'legacy ambiguous Mieru recovery called install implementation'
+cmp -s "$fixture/mieru-v1-ambiguous.prior" "$NOBRAND_LIFECYCLE_TX_FILE" \
+  || fail 'legacy ambiguous Mieru refusal changed transaction bytes'
+
+reset_fixture
+write_schema
+write_complete_manager "$SCRIPT_VERSION"
+write_lifecycle_v1_fixture install ready-to-validate
+(
+  require_root() { return 0; }
+  require_linux() { return 0; }
+  require_cmd() { return 0; }
+  nb_lifecycle_lock_acquire() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD + 1)); }
+  nb_lifecycle_lock_release() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD - 1)); }
+  do_install_impl() { : >"$fixture/mieru-v1-ready-unexpected-replay"; }
+  nb_lifecycle_validate_manager_repair() { return 0; }
+  mita_v3_install_state_valid() { return 0; }
+  users_state_exists() { return 0; }
+  users_count() { printf 1; }
+  verify_mita_running() { return 0; }
+  NOBRAND_RECOVERY_EXPECTED_SCOPE=mieru
+  NOBRAND_LIFECYCLE_LOCK_HELD=0
+  do_install
+  assert_eq 0 "$NOBRAND_LIFECYCLE_LOCK_HELD" \
+    'legacy ready Mieru validation balances lifecycle lock'
+)
+[ ! -e "$fixture/mieru-v1-ready-unexpected-replay" ] \
+  || fail 'legacy ready Mieru recovery replayed installer'
+assert_eq complete "$(nb_lifecycle_field STATUS)" \
+  'legacy ready Mieru recovery completes after validation only'
+assert_eq mieru "$(nb_lifecycle_scope)" \
+  'legacy ready Mieru validation preserves inferred scope'
+printf 'MIERU_V1_FAIL_CLOSED_COMPATIBILITY=PASS\n'
+
 # Representative protocol dispatch and a nested native lifecycle action both
 # retain the main process guard. Locking alone must not create transaction
 # metadata for unrelated protocol work.
@@ -1610,6 +2600,1594 @@ reset_fixture
 )
 [ -e "$fixture/protocol-dispatched" ] || fail 'representative protocol mutation was not dispatched'
 [ ! -e "$NOBRAND_LIFECYCLE_TX_FILE" ] || fail 'protocol guard created lifecycle transaction metadata'
+
+# Ingress validation/callback failures before authoritative mutation must not
+# manufacture a partial configure state. Once the callback marks mutation, the
+# exact configure:ingress transaction must remain available for reconciliation.
+reset_fixture
+(
+  NOBRAND_MANAGER_SESSION_ACTIVE=1
+  nb_lifecycle_lock_acquire() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD + 1)); }
+  nb_lifecycle_lock_release() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD - 1)); }
+  nobrand_run_ingress_action_unscoped() { return 61; }
+  set +e
+  nb_lifecycle_run_ingress_action
+  ingress_pre_mutation_rc=$?
+  set -e
+  assert_eq 61 "$ingress_pre_mutation_rc" \
+    'pre-mutation Ingress callback failure propagates'
+  assert_eq 0 "$NOBRAND_LIFECYCLE_LOCK_HELD" \
+    'pre-mutation Ingress callback failure releases the lock'
+)
+[ ! -e "$NOBRAND_LIFECYCLE_TX_FILE" ] \
+  || fail 'pre-mutation Ingress callback failure retained a transaction'
+assert_state CLEAN 'pre-mutation Ingress callback failure remains clean'
+
+reset_fixture
+(
+  NOBRAND_MANAGER_SESSION_ACTIVE=1
+  nb_lifecycle_lock_acquire() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD + 1)); }
+  nb_lifecycle_lock_release() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD - 1)); }
+  nobrand_run_ingress_action_unscoped() {
+    nb_lifecycle_mark_mutation_started
+    return 62
+  }
+  set +e
+  nb_lifecycle_run_ingress_action
+  ingress_post_mutation_rc=$?
+  set -e
+  assert_eq 62 "$ingress_post_mutation_rc" \
+    'post-mutation Ingress callback failure propagates'
+  assert_eq 0 "$NOBRAND_LIFECYCLE_LOCK_HELD" \
+    'post-mutation Ingress callback failure releases the lock'
+)
+nb_lifecycle_tx_valid || fail 'post-mutation Ingress callback failure corrupted recovery metadata'
+assert_eq configure "$(nb_lifecycle_field OPERATION)" \
+  'post-mutation Ingress callback preserves configure operation'
+assert_eq ingress "$(nb_lifecycle_scope)" \
+  'post-mutation Ingress callback preserves Ingress scope'
+assert_eq 1 "$(nb_lifecycle_mutation_started)" \
+  'post-mutation Ingress callback preserves mutation marker'
+assert_state CURRENT_PARTIAL_CONFIGURE \
+  'post-mutation Ingress callback remains scoped and recoverable'
+printf 'INGRESS_CALLBACK_MUTATION_BOUNDARY=PASS\n'
+
+# Fresh Ingress actions snapshot a prior completed lifecycle record. A callback
+# failure or successful no-op before its mutation marker restores those bytes.
+for ingress_pre_mutation_result in failure noop; do
+  reset_fixture
+  write_schema
+  write_complete_manager "$SCRIPT_VERSION"
+  nb_lifecycle_begin install prepare 0 0 0 0 0 0 manager
+  nb_lifecycle_mark_mutation_started
+  nb_lifecycle_complete install
+  cp "$NOBRAND_LIFECYCLE_TX_FILE" \
+    "$fixture/ingress-${ingress_pre_mutation_result}.expected"
+  (
+    NOBRAND_MANAGER_SESSION_ACTIVE=1
+    nb_lifecycle_lock_acquire() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD + 1)); }
+    nb_lifecycle_lock_release() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD - 1)); }
+    if [ "$ingress_pre_mutation_result" = failure ]; then
+      nobrand_run_ingress_action_unscoped() { return 61; }
+    else
+      nobrand_run_ingress_action_unscoped() { return 0; }
+    fi
+    NOBRAND_LIFECYCLE_LOCK_HELD=0
+    set +e
+    nb_lifecycle_run_ingress_action
+    ingress_pre_mutation_result_rc=$?
+    set -e
+    if [ "$ingress_pre_mutation_result" = failure ]; then
+      assert_eq 61 "$ingress_pre_mutation_result_rc" \
+        'Ingress pre-mutation failure preserves callback status'
+    else
+      assert_eq 0 "$ingress_pre_mutation_result_rc" \
+        'Ingress successful no-op remains successful'
+    fi
+    assert_eq 0 "$NOBRAND_LIFECYCLE_LOCK_HELD" \
+      "Ingress ${ingress_pre_mutation_result} balances lifecycle lock"
+  )
+  cmp -s "$fixture/ingress-${ingress_pre_mutation_result}.expected" \
+    "$NOBRAND_LIFECYCLE_TX_FILE" \
+    || fail "Ingress ${ingress_pre_mutation_result} changed prior completed metadata"
+done
+printf 'INGRESS_PREMUTATION_RESTORE=PASS\n'
+
+# Explicit Ingress intent may replace only a v2 mutation-zero configure record.
+# A mutated record is rejected by main before the callback and remains exact.
+reset_fixture
+write_schema
+write_complete_manager "$SCRIPT_VERSION"
+nb_lifecycle_begin configure prepare 0 0 0 0 0 0 ingress
+ingress_explicit_zero_txid="$(nb_lifecycle_field TRANSACTION_ID)"
+(
+  # shellcheck disable=SC1091
+  source "$TEST_ROOT/src/16-core-ingress.sh"
+  id() { [ "${1:-}" = -u ] && printf 0; }
+  nb_lifecycle_lock_acquire() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD + 1)); }
+  nb_lifecycle_lock_release() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD - 1)); }
+  ensure_manager_state_layout() { return 0; }
+  dry_run_should_preview() { return 1; }
+  is_mita_elf_binary() { return 1; }
+  nobrand_run_ingress_action_unscoped() {
+    [ "$(nb_lifecycle_field TRANSACTION_ID)" != "$ingress_explicit_zero_txid" ] \
+      || fail 'explicit Ingress retry reused stale transaction identity'
+    nb_lifecycle_mark_mutation_started
+    printf 'callback\n' >>"$fixture/ingress-explicit-zero.callback"
+  }
+  ACTION=nobrand-ingress
+  INGRESS_ACTION=modify
+  NOBRAND_LIFECYCLE_LOCK_HELD=0
+  main
+  assert_eq 0 "$NOBRAND_LIFECYCLE_LOCK_HELD" \
+    'explicit mutation-zero Ingress retry balances lifecycle lock'
+)
+assert_eq 1 "$(wc -l <"$fixture/ingress-explicit-zero.callback" | tr -d '[:space:]')" \
+  'explicit mutation-zero Ingress retry runs callback once'
+assert_eq complete "$(nb_lifecycle_field STATUS)" \
+  'explicit mutation-zero Ingress retry completes fresh transaction'
+
+reset_fixture
+write_schema
+write_complete_manager "$SCRIPT_VERSION"
+nb_lifecycle_begin configure prepare 0 0 0 0 0 0 ingress
+nb_lifecycle_mark_mutation_started
+cp "$NOBRAND_LIFECYCLE_TX_FILE" "$fixture/ingress-explicit-mutated.expected"
+(
+  id() { [ "${1:-}" = -u ] && printf 0; }
+  nb_lifecycle_lock_acquire() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD + 1)); }
+  nb_lifecycle_lock_release() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD - 1)); }
+  nobrand_run_ingress_action() { : >"$fixture/ingress-explicit-mutated.unexpected"; }
+  ACTION=nobrand-ingress
+  # Consumed by the main dispatcher when the recovery gate permits dispatch.
+  # shellcheck disable=SC2034
+  INGRESS_ACTION=modify
+  NOBRAND_LIFECYCLE_LOCK_HELD=0
+  set +e
+  main >/dev/null 2>&1
+  ingress_explicit_mutated_rc=$?
+  set -e
+  [ "$ingress_explicit_mutated_rc" -ne 0 ] \
+    || fail 'explicit Ingress action accepted a mutated recovery transaction'
+  assert_eq 0 "$NOBRAND_LIFECYCLE_LOCK_HELD" \
+    'mutated explicit Ingress refusal balances lifecycle lock'
+)
+[ ! -e "$fixture/ingress-explicit-mutated.unexpected" ] \
+  || fail 'mutated explicit Ingress transaction invoked callback'
+cmp -s "$fixture/ingress-explicit-mutated.expected" "$NOBRAND_LIFECYCLE_TX_FILE" \
+  || fail 'mutated explicit Ingress refusal changed transaction bytes'
+printf 'INGRESS_EXPLICIT_RETRY_GATE=PASS\n'
+
+# A transaction recovered in a fresh process with no committed Ingress mutation
+# is temporary intent only. Clear it without reconciliation or validation writes.
+reset_fixture
+nb_lifecycle_begin configure prepare 0 0 0 0 0 0 ingress
+ingress_unmutated_unexpected="$fixture/ingress-unmutated-unexpected"
+(
+  require_root() { return 0; }
+  require_linux() { return 0; }
+  detect_pkg_manager() { printf deb; }
+  ensure_management_dependencies() { return 0; }
+  nb_lifecycle_lock_acquire() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD + 1)); }
+  nb_lifecycle_lock_release() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD - 1)); }
+  ensure_manager_state_layout() { : >"$ingress_unmutated_unexpected"; }
+  nobrand_reconcile_ingress_profiles() { : >"$ingress_unmutated_unexpected"; }
+  NOBRAND_LIFECYCLE_ACTIVE=0
+  NOBRAND_LIFECYCLE_OPERATION=""
+  NOBRAND_LIFECYCLE_SCOPE=""
+  NOBRAND_LIFECYCLE_MUTATION_STARTED=0
+  NOBRAND_LIFECYCLE_LOCK_HELD=0
+  nobrand_recover_ingress_scope >/dev/null
+  assert_eq 0 "$NOBRAND_LIFECYCLE_LOCK_HELD" \
+    'unmutated Ingress recovery balances lifecycle lock'
+)
+[ ! -e "$ingress_unmutated_unexpected" ] \
+  || fail 'unmutated Ingress recovery reconciled or initialized manager state'
+[ ! -e "$NOBRAND_LIFECYCLE_TX_FILE" ] \
+  || fail 'unmutated Ingress recovery retained lifecycle metadata'
+printf 'INGRESS_UNMUTATED_RECOVERY_CLEAR=PASS\n'
+
+# A fresh process recovering a mutated Ingress transaction must reactivate the
+# existing transaction before completion and reconcile every explicit Profile,
+# not merely validate metadata or restore one implicit/default Profile.
+reset_fixture
+mkdir -p "$(dirname "$NOBRAND_INGRESS_STATE_FILE")"
+cat >"$NOBRAND_INGRESS_STATE_FILE" <<'JSON'
+{
+  "profiles": [
+    {"profile_id": "i1111111111111111"},
+    {"profile_id": "i2222222222222222"}
+  ]
+}
+JSON
+nb_lifecycle_begin configure state-committed 0 0 0 0 0 0 ingress
+nb_lifecycle_mark_mutation_started
+ingress_recovery_apply_log="$fixture/ingress-recovery-profile-apply.log"
+(
+  require_root() { return 0; }
+  require_linux() { return 0; }
+  detect_pkg_manager() { printf deb; }
+  ensure_management_dependencies() { return 0; }
+  nb_lifecycle_lock_acquire() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD + 1)); }
+  nb_lifecycle_lock_release() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD - 1)); }
+  ensure_manager_state_layout() { return 0; }
+  nobrand_manager_installation_valid() { return 0; }
+  nb_ingress_state_valid() { return 0; }
+  nb_ingress_apply_profile() { printf '%s\n' "$1" >>"$ingress_recovery_apply_log"; }
+  nb_strict_firewall_restore_authoritative() { return 0; }
+  NOBRAND_LIFECYCLE_ACTIVE=0
+  NOBRAND_LIFECYCLE_OPERATION=""
+  # Consumed by the sourced Ingress recovery wrapper.
+  # shellcheck disable=SC2034
+  NOBRAND_LIFECYCLE_SCOPE=""
+  # shellcheck disable=SC2034
+  NOBRAND_LIFECYCLE_MUTATION_STARTED=0
+  NOBRAND_LIFECYCLE_LOCK_HELD=0
+  nobrand_recover_ingress_scope
+  assert_eq 0 "$NOBRAND_LIFECYCLE_LOCK_HELD" \
+    'Ingress recovery releases its lifecycle lock'
+)
+assert_eq $'i1111111111111111\ni2222222222222222' \
+  "$(cat "$ingress_recovery_apply_log")" \
+  'Ingress recovery reapplies every explicit Profile exactly once'
+assert_eq configure "$(nb_lifecycle_field OPERATION)" \
+  'Ingress recovery preserves configure operation'
+assert_eq ingress "$(nb_lifecycle_scope)" \
+  'Ingress recovery preserves Ingress scope'
+assert_eq complete "$(nb_lifecycle_field STATUS)" \
+  'fresh-process Ingress recovery activates and completes the transaction'
+assert_eq complete "$(nb_lifecycle_field LAST_COMPLETED_PHASE)" \
+  'Ingress recovery records final completion'
+printf 'INGRESS_RECOVERY_RECONCILIATION=PASS\n'
+
+# Recovery must observe producer failures before it can checkpoint or complete
+# a mutated Ingress transaction. A failed Profile-ID enumeration may not look
+# like an empty Profile set, and a failed reference-row producer may not look
+# like an unreferenced Profile.
+reset_fixture
+mkdir -p "$(dirname "$NOBRAND_INGRESS_STATE_FILE")"
+cat >"$NOBRAND_INGRESS_STATE_FILE" <<'JSON'
+{"profiles":[{"profile_id":"i1111111111111111"}]}
+JSON
+nb_lifecycle_begin configure state-committed 0 0 0 0 0 0 ingress
+nb_lifecycle_mark_mutation_started
+ingress_profile_list_producer_marker="$fixture/ingress-profile-list-producer-failed"
+ingress_profile_list_unexpected_apply="$fixture/ingress-profile-list-unexpected-apply"
+(
+  require_root() { return 0; }
+  require_linux() { return 0; }
+  detect_pkg_manager() { printf deb; }
+  ensure_management_dependencies() { return 0; }
+  nb_lifecycle_lock_acquire() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD + 1)); }
+  nb_lifecycle_lock_release() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD - 1)); }
+  ensure_manager_state_layout() { return 0; }
+  nobrand_manager_installation_valid() { return 0; }
+  nb_ingress_state_valid() { return 0; }
+  nb_ingress_apply_profile() { : >"$ingress_profile_list_unexpected_apply"; }
+  jq() {
+    if [ "${1:-}" = -r ] && [ "${2:-}" = '.profiles[].profile_id' ] \
+       && [ "${3:-}" = "$NOBRAND_INGRESS_STATE_FILE" ]; then
+      printf '%s\n' i1111111111111111
+      : >"$ingress_profile_list_producer_marker"
+      return 76
+    fi
+    command jq "$@"
+  }
+  NOBRAND_LIFECYCLE_ACTIVE=0
+  NOBRAND_LIFECYCLE_OPERATION=""
+  # Consumed by the sourced Ingress recovery wrapper.
+  # shellcheck disable=SC2034
+  NOBRAND_LIFECYCLE_SCOPE=""
+  # shellcheck disable=SC2034
+  NOBRAND_LIFECYCLE_MUTATION_STARTED=0
+  NOBRAND_LIFECYCLE_LOCK_HELD=0
+  set +e
+  nobrand_recover_ingress_scope
+  ingress_profile_list_recovery_rc=$?
+  set -e
+  [ "$ingress_profile_list_recovery_rc" -ne 0 ] \
+    || fail 'Ingress Profile-list producer failure was treated as success'
+  assert_eq 0 "$NOBRAND_LIFECYCLE_LOCK_HELD" \
+    'Ingress Profile-list producer failure releases lifecycle lock'
+)
+[ -e "$ingress_profile_list_producer_marker" ] \
+  || fail 'Ingress recovery did not exercise the Profile-list producer failure'
+[ ! -e "$ingress_profile_list_unexpected_apply" ] \
+  || fail 'Ingress recovery applied a Profile after Profile-list producer failure'
+assert_eq in-progress "$(nb_lifecycle_field STATUS)" \
+  'Profile-list producer failure preserves in-progress transaction'
+assert_eq state-committed "$(nb_lifecycle_field LAST_COMPLETED_PHASE)" \
+  'Profile-list producer failure does not advance lifecycle phase'
+assert_eq configure "$(nb_lifecycle_field OPERATION)" \
+  'Profile-list producer failure preserves configure operation'
+assert_eq ingress "$(nb_lifecycle_scope)" \
+  'Profile-list producer failure preserves Ingress scope'
+assert_eq 1 "$(nb_lifecycle_mutation_started)" \
+  'Profile-list producer failure preserves mutation marker'
+assert_state CURRENT_PARTIAL_CONFIGURE \
+  'Profile-list producer failure remains recoverable'
+
+reset_fixture
+mkdir -p "$(dirname "$NOBRAND_INGRESS_STATE_FILE")"
+cat >"$NOBRAND_INGRESS_STATE_FILE" <<'JSON'
+{"profiles":[{"profile_id":"i2222222222222222"}]}
+JSON
+nb_lifecycle_begin configure state-committed 0 0 0 0 0 0 ingress
+nb_lifecycle_mark_mutation_started
+ingress_reference_producer_marker="$fixture/ingress-reference-producer-failed"
+ingress_reference_unexpected_owner="$fixture/ingress-reference-unexpected-owner"
+(
+  # shellcheck disable=SC1091
+  source "$TEST_ROOT/src/16-core-ingress.sh"
+  require_root() { return 0; }
+  require_linux() { return 0; }
+  detect_pkg_manager() { printf deb; }
+  ensure_management_dependencies() { return 0; }
+  nb_lifecycle_lock_acquire() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD + 1)); }
+  nb_lifecycle_lock_release() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD - 1)); }
+  ensure_manager_state_layout() { return 0; }
+  nobrand_manager_installation_valid() { return 0; }
+  nb_ingress_state_valid() { return 0; }
+  nb_ingress_profile_json() { return 0; }
+  nb_ingress_profile_reference_rows() {
+    printf '%s\n' snell:s1111111111111111
+    : >"$ingress_reference_producer_marker"
+    return 77
+  }
+  nb_ingress_apply_owner() { : >"$ingress_reference_unexpected_owner"; }
+  NOBRAND_LIFECYCLE_ACTIVE=0
+  NOBRAND_LIFECYCLE_OPERATION=""
+  # Consumed by the sourced Ingress recovery wrapper.
+  # shellcheck disable=SC2034
+  NOBRAND_LIFECYCLE_SCOPE=""
+  # shellcheck disable=SC2034
+  NOBRAND_LIFECYCLE_MUTATION_STARTED=0
+  NOBRAND_LIFECYCLE_LOCK_HELD=0
+  set +e
+  nobrand_recover_ingress_scope
+  ingress_reference_recovery_rc=$?
+  set -e
+  [ "$ingress_reference_recovery_rc" -ne 0 ] \
+    || fail 'Ingress reference-row producer failure was treated as success'
+  assert_eq 0 "$NOBRAND_LIFECYCLE_LOCK_HELD" \
+    'Ingress reference-row producer failure releases lifecycle lock'
+)
+[ -e "$ingress_reference_producer_marker" ] \
+  || fail 'Ingress recovery did not exercise the reference-row producer failure'
+[ ! -e "$ingress_reference_unexpected_owner" ] \
+  || fail 'Ingress recovery applied an owner after reference-row producer failure'
+assert_eq in-progress "$(nb_lifecycle_field STATUS)" \
+  'reference-row producer failure preserves in-progress transaction'
+assert_eq state-committed "$(nb_lifecycle_field LAST_COMPLETED_PHASE)" \
+  'reference-row producer failure does not advance lifecycle phase'
+assert_eq configure "$(nb_lifecycle_field OPERATION)" \
+  'reference-row producer failure preserves configure operation'
+assert_eq ingress "$(nb_lifecycle_scope)" \
+  'reference-row producer failure preserves Ingress scope'
+assert_eq 1 "$(nb_lifecycle_mutation_started)" \
+  'reference-row producer failure preserves mutation marker'
+assert_state CURRENT_PARTIAL_CONFIGURE \
+  'reference-row producer failure remains recoverable'
+printf 'INGRESS_PRODUCER_STATUS_PROPAGATION=PASS\n'
+
+# Protocol wrappers may validate the manager but must never repair it before
+# the component mutation boundary. On failure, the exact prior lifecycle record
+# is restored and the callback is not reached.
+reset_fixture
+write_schema
+write_complete_manager "$SCRIPT_VERSION"
+nb_lifecycle_begin install prepare 0 0 0 0 0 0 manager
+nb_lifecycle_mark_mutation_started
+nb_lifecycle_complete install
+protocol_invalid_manager_prior="$fixture/protocol-invalid-manager.prior"
+cp "$NOBRAND_LIFECYCLE_TX_FILE" "$protocol_invalid_manager_prior"
+(
+  require_root() { return 0; }
+  require_linux() { return 0; }
+  nb_lifecycle_lock_acquire() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD + 1)); }
+  nb_lifecycle_lock_release() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD - 1)); }
+  ensure_manager_state_layout() { : >"$fixture/unexpected-protocol-manager-layout"; }
+  nobrand_manager_installation_valid() { return 1; }
+  nobrand_install_manager_script() { : >"$fixture/unexpected-protocol-manager-repair"; }
+  invalid_manager_callback() { : >"$fixture/unexpected-invalid-manager-callback"; }
+  NOBRAND_MANAGER_SESSION_ACTIVE=1
+  set +e
+  nb_lifecycle_run_protocol_install tuic invalid_manager_callback
+  protocol_invalid_manager_rc=$?
+  set -e
+  [ "$protocol_invalid_manager_rc" -ne 0 ] \
+    || fail 'protocol wrapper accepted an invalid manager installation'
+  assert_eq 0 "$NOBRAND_LIFECYCLE_LOCK_HELD" \
+    'invalid-manager protocol refusal balances lifecycle lock'
+)
+[ ! -e "$fixture/unexpected-protocol-manager-layout" ] \
+  || fail 'protocol wrapper mutated manager layout before callback'
+[ ! -e "$fixture/unexpected-protocol-manager-repair" ] \
+  || fail 'protocol wrapper repaired manager before callback'
+[ ! -e "$fixture/unexpected-invalid-manager-callback" ] \
+  || fail 'protocol wrapper ran callback with an invalid manager'
+cmp -s "$protocol_invalid_manager_prior" "$NOBRAND_LIFECYCLE_TX_FILE" \
+  || fail 'invalid-manager protocol refusal did not restore prior lifecycle metadata'
+printf 'PROTOCOL_MANAGER_SCOPE_ISOLATION=PASS\n'
+
+# An unmutated dispatcher recovery has no request to reconstruct and clears
+# without invoking the callback. An explicit same-scope command carries fresh
+# intent, so it clears the stale record and runs that request immediately.
+reset_fixture
+write_schema
+write_complete_manager "$SCRIPT_VERSION"
+nb_lifecycle_begin install prepare 0 0 0 0 0 0 tuic
+protocol_unmutated_callback_log="$fixture/protocol-unmutated-callback.log"
+(
+  require_root() { return 0; }
+  require_linux() { return 0; }
+  nb_lifecycle_lock_acquire() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD + 1)); }
+  nb_lifecycle_lock_release() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD - 1)); }
+  nobrand_manager_installation_valid() { return 0; }
+  protocol_unmutated_callback() {
+    printf 'called\n' >>"$protocol_unmutated_callback_log"
+    nb_lifecycle_mark_protocol_mutation_started tuic
+  }
+  NOBRAND_MANAGER_SESSION_ACTIVE=1
+  NOBRAND_RECOVERY_EXPECTED_SCOPE=tuic
+  nb_lifecycle_run_protocol_install tuic protocol_unmutated_callback >/dev/null
+  assert_eq 0 "$NOBRAND_LIFECYCLE_LOCK_HELD" \
+    'unmutated no-argument protocol recovery balances lifecycle lock'
+)
+[ ! -e "$protocol_unmutated_callback_log" ] \
+  || fail 'unmutated no-argument protocol recovery invoked callback'
+[ ! -e "$NOBRAND_LIFECYCLE_TX_FILE" ] \
+  || fail 'unmutated no-argument protocol recovery retained metadata'
+
+nb_lifecycle_begin install prepare 0 0 0 0 0 0 tuic
+(
+  require_root() { return 0; }
+  require_linux() { return 0; }
+  nb_lifecycle_lock_acquire() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD + 1)); }
+  nb_lifecycle_lock_release() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD - 1)); }
+  nobrand_manager_installation_valid() { return 0; }
+  protocol_unmutated_callback() {
+    printf 'called\n' >>"$protocol_unmutated_callback_log"
+    nb_lifecycle_mark_protocol_mutation_started tuic
+  }
+  NOBRAND_MANAGER_SESSION_ACTIVE=1
+  NOBRAND_RECOVERY_EXPECTED_SCOPE=""
+  NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE=tuic
+  nb_lifecycle_run_protocol_install tuic protocol_unmutated_callback
+  assert_eq 0 "$NOBRAND_LIFECYCLE_LOCK_HELD" \
+    'explicit unmutated protocol retry balances lifecycle lock'
+)
+assert_eq 1 "$(wc -l <"$protocol_unmutated_callback_log" | tr -d '[:space:]')" \
+  'explicit same-scope retry invokes callback in its first invocation'
+assert_eq complete "$(nb_lifecycle_field STATUS)" \
+  'explicit same-scope retry completes its fresh transaction'
+assert_eq tuic "$(nb_lifecycle_scope)" \
+  'explicit same-scope retry remains in TUIC scope'
+printf 'PROTOCOL_UNMUTATED_EXPLICIT_RETRY=PASS\n'
+
+# Use the production protocol lifecycle wrapper: once an install has reached
+# ready-to-validate, neither an interrupted validation retry nor a failed
+# validation retry may call the install callback again or regress the phase.
+reset_fixture
+protocol_callback_log="$fixture/protocol-ready-validation-callback.log"
+(
+  require_root() { return 0; }
+  require_linux() { return 0; }
+  nb_lifecycle_lock_acquire() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD + 1)); }
+  nb_lifecycle_lock_release() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD - 1)); }
+  ensure_manager_state_layout() { return 0; }
+  nobrand_manager_installation_valid() { return 0; }
+  protocol_scope_reconcile_call_count=0
+  protocol_scope_reconcile_fail=1
+  protocol_scope_validation_call_count=0
+  protocol_scope_validation_log="$fixture/protocol-scope-validation.log"
+  nb_lifecycle_reconcile_protocol_scope() {
+    protocol_scope_reconcile_call_count=$((protocol_scope_reconcile_call_count + 1))
+    printf 'reconcile:%s\n' "$1" >>"$protocol_scope_validation_log"
+    [ "$protocol_scope_reconcile_fail" -eq 0 ]
+  }
+  nb_lifecycle_validate_protocol_scope() {
+    protocol_scope_validation_call_count=$((protocol_scope_validation_call_count + 1))
+    printf 'doctor:%s\n' "$1" >>"$protocol_scope_validation_log"
+    [ "$protocol_scope_validation_call_count" -ne 1 ]
+  }
+  nobrand_install_manager_script() {
+    : >"$fixture/unexpected-protocol-manager-reinstall"
+    return 0
+  }
+  protocol_ready_validation_callback() {
+    nb_lifecycle_mark_protocol_mutation_started tuic
+    printf 'called\n' >>"$protocol_callback_log"
+  }
+  # Consumed by the sourced protocol lifecycle wrapper.
+  # shellcheck disable=SC2034
+  NOBRAND_MANAGER_SESSION_ACTIVE=1
+  export NOBRAND_TEST_INTERRUPT_INSTALL_AT=ready-to-validate
+
+  set +e
+  nb_lifecycle_run_protocol_install tuic protocol_ready_validation_callback
+  protocol_initial_interrupt_rc=$?
+  set -e
+  assert_eq 75 "$protocol_initial_interrupt_rc" \
+    'protocol install interrupts after reaching ready-to-validate'
+  assert_eq 1 "$(wc -l <"$protocol_callback_log" | tr -d '[:space:]')" \
+    'protocol install callback runs exactly once before validation'
+  assert_eq ready-to-validate "$(nb_lifecycle_field LAST_COMPLETED_PHASE)" \
+    'initial protocol interruption persists ready-to-validate'
+  assert_eq 1 "$(nb_lifecycle_mutation_started)" \
+    'protocol callback path remains marked as mutating'
+
+  unset NOBRAND_TEST_INTERRUPT_INSTALL_AT
+  cp "$NOBRAND_LIFECYCLE_TX_FILE" "$fixture/protocol-ready-before-reconcile.env"
+  set +e
+  nb_lifecycle_run_protocol_install tuic protocol_ready_validation_callback
+  protocol_reconcile_failure_rc=$?
+  set -e
+  assert_eq 1 "$protocol_reconcile_failure_rc" \
+    'validate-only protocol retry propagates reconciliation failure'
+  assert_eq 1 "$(wc -l <"$protocol_callback_log" | tr -d '[:space:]')" \
+    'failed reconciliation does not rerun callback'
+  assert_eq ready-to-validate "$(nb_lifecycle_field LAST_COMPLETED_PHASE)" \
+    'failed reconciliation retains ready-to-validate phase'
+  assert_eq 0 "$protocol_scope_validation_call_count" \
+    'failed reconciliation stops before protocol-scope doctor'
+  assert_eq 1 "$protocol_scope_reconcile_call_count" \
+    'validate-only retry invokes scoped reconciliation once'
+  cmp -s "$fixture/protocol-ready-before-reconcile.env" "$NOBRAND_LIFECYCLE_TX_FILE" \
+    || fail 'failed reconciliation modified ready-to-validate metadata'
+  assert_eq 0 "$NOBRAND_LIFECYCLE_LOCK_HELD" \
+    'failed scoped reconciliation balances lifecycle lock'
+
+  protocol_scope_reconcile_fail=0
+  cp "$NOBRAND_LIFECYCLE_TX_FILE" "$fixture/protocol-ready-before-doctor.env"
+  set +e
+  nb_lifecycle_run_protocol_install tuic protocol_ready_validation_callback
+  protocol_validation_failure_rc=$?
+  set -e
+  assert_eq 1 "$protocol_validation_failure_rc" \
+    'validate-only protocol retry propagates validation failure'
+  assert_eq 1 "$(wc -l <"$protocol_callback_log" | tr -d '[:space:]')" \
+    'failed validate-only retry does not rerun callback'
+  assert_eq ready-to-validate "$(nb_lifecycle_field LAST_COMPLETED_PHASE)" \
+    'failed validate-only retry does not regress phase'
+  assert_eq in-progress "$(nb_lifecycle_field STATUS)" \
+    'failed validate-only retry leaves recovery in progress'
+  assert_eq 1 "$protocol_scope_validation_call_count" \
+    'failed validate-only retry invokes protocol-scope validator once'
+  cmp -s "$fixture/protocol-ready-before-doctor.env" "$NOBRAND_LIFECYCLE_TX_FILE" \
+    || fail 'failed protocol doctor modified ready-to-validate metadata'
+  assert_eq 0 "$NOBRAND_LIFECYCLE_LOCK_HELD" \
+    'failed post-reconciliation doctor balances lifecycle lock'
+
+  nb_lifecycle_run_protocol_install tuic protocol_ready_validation_callback
+  assert_eq 1 "$(wc -l <"$protocol_callback_log" | tr -d '[:space:]')" \
+    'successful later validation still does not rerun callback'
+  assert_eq 2 "$protocol_scope_validation_call_count" \
+    'successful later retry invokes protocol-scope validator again'
+  assert_eq 3 "$protocol_scope_reconcile_call_count" \
+    'every validate-only retry reconciles only its recorded scope'
+  assert_eq $'reconcile:tuic\nreconcile:tuic\ndoctor:tuic\nreconcile:tuic\ndoctor:tuic' \
+    "$(cat "$protocol_scope_validation_log")" \
+    'validate-only retries reconcile before doctor in the recorded protocol scope'
+  assert_eq complete "$(nb_lifecycle_field STATUS)" \
+    'successful validate-only retry completes protocol transaction'
+  assert_eq complete "$(nb_lifecycle_field LAST_COMPLETED_PHASE)" \
+    'successful validate-only retry records completion'
+  assert_eq tuic "$(nb_lifecycle_scope)" \
+    'successful validate-only retry preserves protocol scope'
+  assert_eq 0 "$NOBRAND_LIFECYCLE_LOCK_HELD" \
+    'protocol validation retries leave lock depth balanced'
+)
+[ ! -e "$fixture/unexpected-protocol-manager-reinstall" ] \
+  || fail 'protocol validation retry unexpectedly reinstalled the manager'
+nb_lifecycle_tx_valid || fail 'completed validate-only protocol transaction is invalid'
+printf 'PROTOCOL_READY_TO_VALIDATE_RETRY=PASS\n'
+
+# A callback may durably commit authoritative state and then fail before its
+# ready-to-validate checkpoint. Recovery must recognize the changed valid state,
+# validate every committed instance, and never replay the mutating callback.
+reset_fixture
+tuic_committed_callback_log="$fixture/tuic-committed-callback.log"
+tuic_committed_validation_log="$fixture/tuic-committed-validation.log"
+(
+  require_root() { return 0; }
+  require_linux() { return 0; }
+  nb_lifecycle_lock_acquire() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD + 1)); }
+  nb_lifecycle_lock_release() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD - 1)); }
+  ensure_manager_state_layout() { return 0; }
+  nobrand_manager_installation_valid() { return 0; }
+  tuic_state_exists() {
+    local instance_id="$1"
+    printf 'state:%s\n' "$instance_id" >>"$tuic_committed_validation_log"
+    jq -e --arg instance_id "$instance_id" \
+      '.instance_id==$instance_id and .fixture_valid==true' \
+      "$NOBRAND_TUIC_STATE_DIR/$instance_id/state.json" >/dev/null
+  }
+  tuic_instance_ids() {
+    printf '%s\n' t1111111111111111 t2222222222222222
+  }
+  tuic_doctor_all() {
+    jq -e '.instance_id=="t1111111111111111" and .fixture_valid==true' \
+      "$NOBRAND_TUIC_STATE_DIR/t1111111111111111/state.json" >/dev/null
+    jq -e '.instance_id=="t2222222222222222" and .fixture_valid==true' \
+      "$NOBRAND_TUIC_STATE_DIR/t2222222222222222/state.json" >/dev/null
+    printf 'doctor\n' >>"$tuic_committed_validation_log"
+  }
+  nb_lifecycle_reconcile_protocol_scope() {
+    assert_eq tuic "$1" 'changed-state reconciliation remains in TUIC scope'
+    printf 'reconcile:%s\n' "$1" >>"$tuic_committed_validation_log"
+  }
+  tuic_commit_then_fail_callback() {
+    local instance_id
+    printf 'called\n' >>"$tuic_committed_callback_log"
+    nb_lifecycle_mark_protocol_mutation_started tuic
+    for instance_id in t1111111111111111 t2222222222222222; do
+      mkdir -p "$NOBRAND_TUIC_STATE_DIR/$instance_id"
+      printf '{"instance_id":"%s","fixture_valid":true}\n' "$instance_id" \
+        >"$NOBRAND_TUIC_STATE_DIR/$instance_id/state.json"
+    done
+    return 71
+  }
+  # Consumed by the sourced protocol lifecycle wrapper.
+  # shellcheck disable=SC2034
+  NOBRAND_MANAGER_SESSION_ACTIVE=1
+  set +e
+  nb_lifecycle_run_protocol_install tuic tuic_commit_then_fail_callback
+  tuic_committed_initial_rc=$?
+  set -e
+  assert_eq 71 "$tuic_committed_initial_rc" \
+    'TUIC callback failure after committed multi-instance state propagates'
+  tuic_committed_phase="$(nb_lifecycle_field LAST_COMPLETED_PHASE)"
+  [[ "$tuic_committed_phase" =~ ^callback-[0-9a-f]{55}$ ]] \
+    || fail 'TUIC committed callback did not retain an exact callback fingerprint phase'
+  assert_eq 64 "${#tuic_committed_phase}" \
+    'TUIC committed callback phase length'
+  assert_eq 1 "$(wc -l <"$tuic_committed_callback_log" | tr -d '[:space:]')" \
+    'TUIC committed callback runs once before recovery'
+
+  : >"$tuic_committed_validation_log"
+  NOBRAND_RECOVERY_EXPECTED_SCOPE=tuic
+  nb_lifecycle_run_protocol_install tuic tuic_commit_then_fail_callback
+  assert_eq 1 "$(wc -l <"$tuic_committed_callback_log" | tr -d '[:space:]')" \
+    'TUIC changed-state recovery does not replay callback'
+  assert_eq $'state:t1111111111111111\nstate:t2222222222222222\nreconcile:tuic\nstate:t1111111111111111\nstate:t2222222222222222\ndoctor' \
+    "$(cat "$tuic_committed_validation_log")" \
+    'TUIC no-argument recovery reconciles its valid scope before doctor'
+  [ -f "$NOBRAND_TUIC_STATE_DIR/t1111111111111111/state.json" ] \
+    && [ -f "$NOBRAND_TUIC_STATE_DIR/t2222222222222222/state.json" ] \
+    || fail 'TUIC recovery removed committed multi-instance state'
+  assert_eq complete "$(nb_lifecycle_field STATUS)" \
+    'TUIC changed-state recovery completes transaction'
+  assert_eq complete "$(nb_lifecycle_field LAST_COMPLETED_PHASE)" \
+    'TUIC changed-state recovery records completion'
+  assert_eq tuic "$(nb_lifecycle_scope)" \
+    'TUIC changed-state recovery preserves scope'
+  assert_eq 0 "$NOBRAND_LIFECYCLE_LOCK_HELD" \
+    'TUIC changed-state recovery balances lifecycle lock'
+)
+
+# Changed malformed state is not an unchanged callback baseline and is not safe
+# to validate. It must fail closed before either callback replay or phase writes.
+reset_fixture
+tuic_malformed_callback_log="$fixture/tuic-malformed-callback.log"
+tuic_malformed_unexpected_doctor="$fixture/tuic-malformed-unexpected-doctor"
+tuic_malformed_expected_tx="$fixture/tuic-malformed-transaction.expected"
+(
+  require_root() { return 0; }
+  require_linux() { return 0; }
+  nb_lifecycle_lock_acquire() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD + 1)); }
+  nb_lifecycle_lock_release() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD - 1)); }
+  ensure_manager_state_layout() { return 0; }
+  nobrand_manager_installation_valid() { return 0; }
+  tuic_state_exists() {
+    jq -e . "$NOBRAND_TUIC_STATE_DIR/$1/state.json" >/dev/null 2>&1
+  }
+  tuic_instance_ids() { printf '%s\n' t3333333333333333; }
+  tuic_doctor_all() { : >"$tuic_malformed_unexpected_doctor"; }
+  tuic_malformed_callback() {
+    printf 'called\n' >>"$tuic_malformed_callback_log"
+    nb_lifecycle_mark_protocol_mutation_started tuic
+    mkdir -p "$NOBRAND_TUIC_STATE_DIR/t3333333333333333"
+    printf '%s\n' '{malformed-json' \
+      >"$NOBRAND_TUIC_STATE_DIR/t3333333333333333/state.json"
+    return 72
+  }
+  # Consumed by the sourced protocol lifecycle wrapper.
+  # shellcheck disable=SC2034
+  NOBRAND_MANAGER_SESSION_ACTIVE=1
+  set +e
+  nb_lifecycle_run_protocol_install tuic tuic_malformed_callback
+  tuic_malformed_initial_rc=$?
+  set -e
+  assert_eq 72 "$tuic_malformed_initial_rc" \
+    'TUIC malformed-state callback failure propagates'
+  tuic_malformed_phase="$(nb_lifecycle_field LAST_COMPLETED_PHASE)"
+  [[ "$tuic_malformed_phase" =~ ^callback-[0-9a-f]{55}$ ]] \
+    || fail 'TUIC malformed-state callback did not retain callback fingerprint phase'
+  cp "$NOBRAND_LIFECYCLE_TX_FILE" "$tuic_malformed_expected_tx"
+
+  set +e
+  nb_lifecycle_run_protocol_install tuic tuic_malformed_callback
+  tuic_malformed_recovery_rc=$?
+  set -e
+  [ "$tuic_malformed_recovery_rc" -ne 0 ] \
+    || fail 'changed malformed TUIC state did not fail closed'
+  assert_eq 1 "$(wc -l <"$tuic_malformed_callback_log" | tr -d '[:space:]')" \
+    'changed malformed TUIC state does not replay callback'
+  [ ! -e "$tuic_malformed_unexpected_doctor" ] \
+    || fail 'changed malformed TUIC state reached runtime validation'
+  cmp -s "$tuic_malformed_expected_tx" "$NOBRAND_LIFECYCLE_TX_FILE" \
+    || fail 'changed malformed TUIC state modified transaction bytes'
+  assert_eq "$tuic_malformed_phase" "$(nb_lifecycle_field LAST_COMPLETED_PHASE)" \
+    'changed malformed TUIC state preserves callback phase'
+  assert_eq in-progress "$(nb_lifecycle_field STATUS)" \
+    'changed malformed TUIC state remains in progress'
+  assert_eq install "$(nb_lifecycle_field OPERATION)" \
+    'changed malformed TUIC state preserves install operation'
+  assert_eq tuic "$(nb_lifecycle_scope)" \
+    'changed malformed TUIC state preserves scope'
+  assert_eq 1 "$(nb_lifecycle_mutation_started)" \
+    'changed malformed TUIC state preserves mutation marker'
+  nb_lifecycle_tx_valid \
+    || fail 'changed malformed TUIC state corrupted transaction metadata'
+  assert_eq 0 "$NOBRAND_LIFECYCLE_LOCK_HELD" \
+    'changed malformed TUIC recovery balances lifecycle lock'
+)
+printf 'CALLBACK_COMMIT_REPLAY_GUARD=PASS\n'
+
+# Callback return values are not mutation proof. Both failure and success before
+# the callback-owned marker must restore the exact completed lifecycle record.
+for callback_no_marker_result in failure success; do
+  reset_fixture
+  write_schema
+  write_complete_manager "$SCRIPT_VERSION"
+  nb_lifecycle_begin install prepare 0 0 0 0 0 0 manager
+  nb_lifecycle_mark_mutation_started
+  nb_lifecycle_complete install
+  callback_no_marker_prior="$fixture/callback-no-marker-${callback_no_marker_result}.prior"
+  cp "$NOBRAND_LIFECYCLE_TX_FILE" "$callback_no_marker_prior"
+  (
+    require_root() { return 0; }
+    require_linux() { return 0; }
+    nb_lifecycle_lock_acquire() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD + 1)); }
+    nb_lifecycle_lock_release() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD - 1)); }
+    ensure_manager_state_layout() { return 0; }
+    nobrand_manager_installation_valid() { return 0; }
+    callback_without_marker() {
+      : >"$fixture/callback-no-marker-${callback_no_marker_result}.called"
+      [ "$callback_no_marker_result" = success ] || return 78
+    }
+    NOBRAND_MANAGER_SESSION_ACTIVE=1
+    set +e
+    nb_lifecycle_run_protocol_install tuic callback_without_marker
+    callback_no_marker_rc=$?
+    set -e
+    if [ "$callback_no_marker_result" = failure ]; then
+      assert_eq 78 "$callback_no_marker_rc" \
+        'pre-mutation protocol callback failure propagates'
+    else
+      assert_eq 0 "$callback_no_marker_rc" \
+        'successful callback without a mutation marker remains a successful no-op'
+    fi
+    assert_eq 0 "$NOBRAND_LIFECYCLE_LOCK_HELD" \
+      'callback without marker balances lifecycle lock'
+  )
+  [ -e "$fixture/callback-no-marker-${callback_no_marker_result}.called" ] \
+    || fail "${callback_no_marker_result} callback-without-marker fixture did not run"
+  cmp -s "$callback_no_marker_prior" "$NOBRAND_LIFECYCLE_TX_FILE" \
+    || fail "${callback_no_marker_result} callback without marker changed prior lifecycle metadata"
+done
+printf 'PROTOCOL_CALLBACK_PREMUTATION_RESTORE=PASS\n'
+
+# MUTATION_STARTED can belong to a previous failed attempt. A successful
+# explicit retry that never reaches this attempt's marker must retain the exact
+# callback fingerprint and may not validate or complete against baseline state.
+reset_fixture
+callback_retry_noop_log="$fixture/callback-retry-noop.log"
+callback_retry_unexpected_validation="$fixture/callback-retry-unexpected-validation"
+(
+  require_root() { return 0; }
+  require_linux() { return 0; }
+  nb_lifecycle_lock_acquire() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD + 1)); }
+  nb_lifecycle_lock_release() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD - 1)); }
+  ensure_manager_state_layout() { return 0; }
+  nobrand_manager_installation_valid() { return 0; }
+  nb_lifecycle_validate_protocol_scope() { : >"$callback_retry_unexpected_validation"; }
+  callback_retry_then_noop() {
+    local call_count
+    printf 'called\n' >>"$callback_retry_noop_log"
+    call_count="$(wc -l <"$callback_retry_noop_log" | tr -d '[:space:]')"
+    if [ "$call_count" -eq 1 ]; then
+      nb_lifecycle_mark_protocol_mutation_started tuic
+      return 79
+    fi
+    return 0
+  }
+  NOBRAND_MANAGER_SESSION_ACTIVE=1
+  set +e
+  nb_lifecycle_run_protocol_install tuic callback_retry_then_noop
+  callback_retry_initial_rc=$?
+  set -e
+  assert_eq 79 "$callback_retry_initial_rc" \
+    'initial marked callback failure propagates'
+  callback_retry_phase="$(nb_lifecycle_field LAST_COMPLETED_PHASE)"
+  [[ "$callback_retry_phase" =~ ^callback-[0-9a-f]{55}$ ]] \
+    || fail 'marked callback failure did not retain callback fingerprint'
+  cp "$NOBRAND_LIFECYCLE_TX_FILE" "$fixture/callback-retry-noop.prior"
+
+  NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE=tuic
+  set +e
+  nb_lifecycle_run_protocol_install tuic callback_retry_then_noop
+  callback_retry_noop_rc=$?
+  set -e
+  [ "$callback_retry_noop_rc" -ne 0 ] \
+    || fail 'no-op explicit retry falsely completed a prior mutation'
+  assert_eq 2 "$(wc -l <"$callback_retry_noop_log" | tr -d '[:space:]')" \
+    'explicit retry invokes the callback once'
+  [ ! -e "$callback_retry_unexpected_validation" ] \
+    || fail 'no-op explicit retry reached protocol validation'
+  cmp -s "$fixture/callback-retry-noop.prior" "$NOBRAND_LIFECYCLE_TX_FILE" \
+    || fail 'no-op explicit retry modified the callback recovery point'
+  assert_eq "$callback_retry_phase" "$(nb_lifecycle_field LAST_COMPLETED_PHASE)" \
+    'no-op explicit retry preserves callback phase'
+  assert_eq in-progress "$(nb_lifecycle_field STATUS)" \
+    'no-op explicit retry remains recoverable'
+)
+printf 'PROTOCOL_CALLBACK_ATTEMPT_PROOF=PASS\n'
+
+# A ready-to-validate transaction still needs whole-scope structural validity.
+# A doctor that enumerates only the old valid instance may not hide a malformed
+# new matching instance and cause recovery completion.
+reset_fixture
+mkdir -p "$NOBRAND_TUIC_STATE_DIR/t1111111111111111" \
+  "$NOBRAND_TUIC_STATE_DIR/t9999999999999999"
+printf '%s\n' '{"instance_id":"t1111111111111111","fixture_valid":true}' \
+  >"$NOBRAND_TUIC_STATE_DIR/t1111111111111111/state.json"
+printf '%s\n' '{malformed-json' \
+  >"$NOBRAND_TUIC_STATE_DIR/t9999999999999999/state.json"
+nb_lifecycle_begin install ready-to-validate 0 0 0 0 0 0 tuic
+nb_lifecycle_mark_mutation_started
+(
+  require_root() { return 0; }
+  require_linux() { return 0; }
+  nb_lifecycle_lock_acquire() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD + 1)); }
+  nb_lifecycle_lock_release() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD - 1)); }
+  ensure_manager_state_layout() { return 0; }
+  nobrand_manager_installation_valid() { return 0; }
+  tuic_state_exists() {
+    jq -e --arg instance_id "$1" \
+      '.instance_id==$instance_id and .fixture_valid==true' \
+      "$NOBRAND_TUIC_STATE_DIR/$1/state.json" >/dev/null 2>&1
+  }
+  tuic_instance_ids() { printf '%s\n' t1111111111111111; }
+  tuic_doctor_all() { : >"$fixture/ready-malformed-unexpected-doctor"; }
+  ready_malformed_callback() { : >"$fixture/ready-malformed-unexpected-callback"; }
+  NOBRAND_MANAGER_SESSION_ACTIVE=1
+  set +e
+  nb_lifecycle_run_protocol_install tuic ready_malformed_callback
+  ready_malformed_rc=$?
+  set -e
+  [ "$ready_malformed_rc" -ne 0 ] \
+    || fail 'ready-to-validate recovery ignored malformed scoped state'
+)
+[ ! -e "$fixture/ready-malformed-unexpected-callback" ] \
+  || fail 'ready-to-validate malformed recovery replayed callback'
+[ ! -e "$fixture/ready-malformed-unexpected-doctor" ] \
+  || fail 'ready-to-validate malformed recovery reached doctor'
+assert_eq ready-to-validate "$(nb_lifecycle_field LAST_COMPLETED_PHASE)" \
+  'structurally invalid ready recovery retains phase'
+assert_eq in-progress "$(nb_lifecycle_field STATUS)" \
+  'structurally invalid ready recovery remains in progress'
+printf 'PROTOCOL_READY_STRUCTURAL_GATE=PASS\n'
+
+# Snell's status enumerator deliberately skips an identity-invalid JSON object.
+# Whole-scope recovery must still reject a mixed valid+malformed directory.
+reset_fixture
+mkdir -p "$NOBRAND_SNELL_STATE_DIR"
+printf '%s\n' \
+  '{"protocol":"snell","instance_id":"s1111111111111111","name":"fixture-snell","version":4,"psk":"fixture-psk","listen_host":"0.0.0.0","listen_port":31001,"transport":"tcp","advertise_mode":"auto","advertise_host":"","advertise_port":"","enabled":true,"quic_proxy_enabled":false,"managed_udp":false,"runtime_version":"4.1.1","runtime_status":"Stable","created_at":"2026-09-04T00:00:00Z","updated_at":"2026-09-04T00:00:00Z"}' \
+  >"$NOBRAND_SNELL_STATE_DIR/s1111111111111111.json"
+printf '%s\n' '{}' >"$NOBRAND_SNELL_STATE_DIR/s2222222222222222.json"
+nb_lifecycle_begin install ready-to-validate 0 0 0 0 0 0 snell
+nb_lifecycle_mark_mutation_started
+cp "$NOBRAND_LIFECYCLE_TX_FILE" "$fixture/snell-mixed-structural.expected"
+(
+  # shellcheck disable=SC1091
+  source "$TEST_ROOT/src/16-core-ingress.sh"
+  # shellcheck disable=SC1091
+  source "$TEST_ROOT/src/25-network-mtu.sh"
+  # shellcheck disable=SC1091
+  source "$TEST_ROOT/src/16-core-port.sh"
+  # shellcheck disable=SC1091
+  source "$TEST_ROOT/src/17-core-endpoint.sh"
+  # shellcheck disable=SC1091
+  source "$TEST_ROOT/src/56-snell.sh"
+  require_root() { return 0; }
+  require_linux() { return 0; }
+  nb_lifecycle_lock_acquire() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD + 1)); }
+  nb_lifecycle_lock_release() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD - 1)); }
+  ensure_manager_state_layout() { return 0; }
+  nobrand_manager_installation_valid() { return 0; }
+  snell_state_valid s1111111111111111 \
+    || fail 'mixed Snell fixture valid sibling failed production validation'
+  snell_doctor_all() { : >"$fixture/snell-mixed-unexpected-doctor"; }
+  snell_mixed_callback() { : >"$fixture/snell-mixed-unexpected-callback"; }
+  NOBRAND_MANAGER_SESSION_ACTIVE=1
+  set +e
+  nb_lifecycle_run_protocol_install snell snell_mixed_callback
+  snell_mixed_rc=$?
+  set -e
+  [ "$snell_mixed_rc" -ne 0 ] \
+    || fail 'mixed valid+malformed Snell recovery completed'
+)
+[ ! -e "$fixture/snell-mixed-unexpected-callback" ] \
+  || fail 'mixed malformed Snell recovery replayed callback'
+[ ! -e "$fixture/snell-mixed-unexpected-doctor" ] \
+  || fail 'mixed malformed Snell recovery reached forgiving doctor enumeration'
+cmp -s "$fixture/snell-mixed-structural.expected" "$NOBRAND_LIFECYCLE_TX_FILE" \
+  || fail 'mixed malformed Snell recovery changed lifecycle metadata'
+printf 'SNELL_MIXED_STRUCTURAL_GATE=PASS\n'
+
+# Recovery reconciles the complete authoritative scope. Persisted disabled
+# instances must be stopped and listener-free, while enabled siblings are
+# started and receive their normal runtime doctor. No install callback is
+# available or replayed at this validation-only checkpoint.
+run_disabled_scope_recovery_fixture() {
+  local scope="$1" recovery_log
+  recovery_log="$fixture/disabled-${scope}.log"
+  reset_fixture
+  write_schema
+  write_complete_manager "$SCRIPT_VERSION"
+  nb_lifecycle_begin install ready-to-validate 0 0 0 0 0 0 "$scope"
+  nb_lifecycle_mark_mutation_started
+  (
+    require_root() { return 0; }
+    require_linux() { return 0; }
+    nb_lifecycle_lock_acquire() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD + 1)); }
+    nb_lifecycle_lock_release() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD - 1)); }
+    admin_lock_acquire() { _ADMIN_LOCK_HELD=$((${_ADMIN_LOCK_HELD:-0} + 1)); }
+    admin_lock_release() { _ADMIN_LOCK_HELD=$((_ADMIN_LOCK_HELD - 1)); }
+    nobrand_manager_installation_valid() { return 0; }
+    nb_lifecycle_protocol_scope_state_valid() { return 0; }
+    nb_firewall_open_pairs() { printf 'firewall:%s\n' "$1" >>"$recovery_log"; }
+    nb_port_is_listening() {
+      printf 'probe:%s:%s\n' "$1" "$2" >>"$recovery_log"
+      return 1
+    }
+    nobrand_xray_test_config() { return 0; }
+
+    snell_instance_ids() { printf '%s\n' s0000000000000001 s0000000000000002; }
+    snell_state_field() {
+      case "$1:$2" in
+        s0000000000000001:enabled) printf false ;;
+        s0000000000000002:enabled) printf true ;;
+        s0000000000000001:listen_port) printf 32101 ;;
+        s0000000000000002:listen_port) printf 32102 ;;
+        *) return 1 ;;
+      esac
+    }
+    snell_config_matches_state() { return 0; }
+    snell_firewall_pairs() { printf 'TCP|%s\n' "$(snell_state_field "$1" listen_port)"; }
+    snell_install_service_runtime() { return 0; }
+    snell_ensure_openrc_service() { return 0; }
+    snell_service_action() { printf 'service:snell:%s:%s\n' "$1" "$2" >>"$recovery_log"; }
+    snell_wait_for_required_listeners() { return 0; }
+    snell_service_active() { return 1; }
+    snell_quic_proxy_enabled() { return 1; }
+    snell_doctor_instance() {
+      if [ "$(snell_state_field "$1" enabled)" = false ]; then
+        ! snell_service_active "$1" && ! nb_port_is_listening TCP "$(snell_state_field "$1" listen_port)" \
+          || return 1
+      fi
+      printf 'doctor:snell:%s\n' "$1" >>"$recovery_log"
+    }
+    snell_doctor_all() {
+      local id
+      while IFS= read -r id; do snell_doctor_instance "$id" || return 1; done < <(snell_instance_ids)
+    }
+
+    hysteria2_state_exists() { return 0; }
+    hysteria2_state_field() {
+      case "$1" in enabled) printf false ;; listen_port) printf 32103 ;; *) return 1 ;; esac
+    }
+    nobrand_write_hy2_service() { return 0; }
+    nobrand_hy2_service_action() { printf 'service:hy2:%s\n' "$1" >>"$recovery_log"; }
+    nobrand_hy2_service_active() { return 1; }
+    hysteria2_running() { return 0; }
+    hysteria2_doctor() {
+      ! nobrand_hy2_service_active \
+        && ! nb_port_is_listening UDP "$(hysteria2_state_field listen_port)" || return 1
+      printf 'doctor:hy2\n' >>"$recovery_log"
+    }
+
+    tuic_instance_ids() { printf '%s\n' t0000000000000001 t0000000000000002; }
+    tuic_state_field() {
+      case "$1:$2" in
+        t0000000000000001:enabled) printf false ;;
+        t0000000000000002:enabled) printf true ;;
+        t0000000000000001:listen_port) printf 32104 ;;
+        t0000000000000002:listen_port) printf 32105 ;;
+        *) return 1 ;;
+      esac
+    }
+    tuic_config_matches_state() { return 0; }
+    tuic_config_file() { printf '%s/%s.json' "$fixture" "$1"; }
+    tuic_validate_config() { return 0; }
+    tuic_restore_runtime() { return 0; }
+    tuic_ensure_openrc_service() { return 0; }
+    tuic_service_action() { printf 'service:tuic:%s:%s\n' "$1" "$2" >>"$recovery_log"; }
+    tuic_running() { return 0; }
+    tuic_service_active() { return 1; }
+    tuic_doctor_one() {
+      if [ "$(tuic_state_field "$1" enabled)" = false ]; then
+        ! tuic_service_active "$1" && ! nb_port_is_listening UDP "$(tuic_state_field "$1" listen_port)" \
+          || return 1
+      fi
+      printf 'doctor:tuic:%s\n' "$1" >>"$recovery_log"
+    }
+    tuic_doctor_all() {
+      local id
+      while IFS= read -r id; do tuic_doctor_one "$id" || return 1; done < <(tuic_instance_ids)
+    }
+
+    reality_instance_ids() { printf '%s\n' r0000000000000001 r0000000000000002; }
+    reality_state_field() {
+      case "$1:$2" in
+        r0000000000000001:enabled) printf false ;;
+        r0000000000000002:enabled) printf true ;;
+        r0000000000000001:listen_port) printf 32106 ;;
+        r0000000000000002:listen_port) printf 32107 ;;
+        r0000000000000001:defender_port) printf 32116 ;;
+        r0000000000000002:defender_port) printf 32117 ;;
+        *) return 1 ;;
+      esac
+    }
+    reality_config_matches_state() { return 0; }
+    reality_config_file() { printf '%s/%s.json' "$fixture" "$1"; }
+    reality_install_service_runtime() { return 0; }
+    reality_ensure_openrc_service() { return 0; }
+    reality_service_action() { printf 'service:reality:%s:%s\n' "$1" "$2" >>"$recovery_log"; }
+    reality_running() { return 0; }
+    reality_service_active() { return 1; }
+    reality_doctor_one() {
+      if [ "$(reality_state_field "$1" enabled)" = false ]; then
+        ! reality_service_active "$1" \
+          && ! nb_port_is_listening TCP "$(reality_state_field "$1" listen_port)" \
+          && ! nb_port_is_listening TCP "$(reality_state_field "$1" defender_port)" || return 1
+      fi
+      printf 'doctor:reality:%s\n' "$1" >>"$recovery_log"
+    }
+    reality_doctor_all() {
+      local id
+      while IFS= read -r id; do reality_doctor_one "$id" || return 1; done < <(reality_instance_ids)
+    }
+
+    vless_sudoku_state_exists() { return 0; }
+    vless_sudoku_state_field() {
+      case "$1" in enabled) printf false ;; listen_port) printf 32108 ;; *) return 1 ;; esac
+    }
+    vless_sudoku_server_config_matches() { return 0; }
+    vless_sudoku_client_config_matches() { return 0; }
+    nobrand_write_vless_sudoku_service() { return 0; }
+    nobrand_vless_sudoku_service_action() { printf 'service:sudoku:%s\n' "$1" >>"$recovery_log"; }
+    nobrand_vless_sudoku_service_active() { return 1; }
+    vless_sudoku_running() { return 0; }
+    vless_sudoku_doctor() {
+      ! nobrand_vless_sudoku_service_active \
+        && ! nb_port_is_listening TCP "$(vless_sudoku_state_field listen_port)" || return 1
+      printf 'doctor:sudoku\n' >>"$recovery_log"
+    }
+
+    disabled_recovery_unexpected_callback() {
+      : >"$fixture/disabled-${scope}-unexpected-callback"
+      return 1
+    }
+    NOBRAND_MANAGER_SESSION_ACTIVE=1
+    NOBRAND_LIFECYCLE_LOCK_HELD=0
+    _ADMIN_LOCK_HELD=0
+    nb_lifecycle_run_protocol_install "$scope" disabled_recovery_unexpected_callback
+    assert_eq 0 "$NOBRAND_LIFECYCLE_LOCK_HELD" \
+      "disabled ${scope} recovery balances lifecycle lock"
+    assert_eq 0 "$_ADMIN_LOCK_HELD" \
+      "disabled ${scope} recovery balances admin lock"
+  )
+  [ ! -e "$fixture/disabled-${scope}-unexpected-callback" ] \
+    || fail "disabled ${scope} recovery replayed install callback"
+  assert_eq complete "$(nb_lifecycle_field STATUS)" \
+    "disabled ${scope} recovery completes"
+  case "$scope" in
+    snell)
+      grep -qxF 'service:snell:s0000000000000001:stop' "$recovery_log" \
+        || fail 'disabled Snell sibling was not stopped'
+      grep -qxF 'service:snell:s0000000000000002:start' "$recovery_log" \
+        || fail 'enabled Snell sibling was not started'
+      grep -qxF 'doctor:snell:s0000000000000002' "$recovery_log" \
+        || fail 'enabled Snell sibling was not diagnosed'
+      grep -qxF 'doctor:snell:s0000000000000001' "$recovery_log" \
+        || fail 'disabled Snell sibling missed static doctor checks'
+      ;;
+    hy2)
+      grep -qxF 'service:hy2:stop' "$recovery_log" || fail 'disabled HY2 was not stopped'
+      grep -qxF 'doctor:hy2' "$recovery_log" \
+        || fail 'disabled HY2 missed static doctor checks'
+      ;;
+    tuic)
+      grep -qxF 'service:tuic:t0000000000000001:stop' "$recovery_log" \
+        || fail 'disabled TUIC sibling was not stopped'
+      grep -qxF 'service:tuic:t0000000000000002:start' "$recovery_log" \
+        || fail 'enabled TUIC sibling was not started'
+      grep -qxF 'doctor:tuic:t0000000000000002' "$recovery_log" \
+        || fail 'enabled TUIC sibling was not diagnosed'
+      grep -qxF 'doctor:tuic:t0000000000000001' "$recovery_log" \
+        || fail 'disabled TUIC sibling missed static doctor checks'
+      ;;
+    vless-reality)
+      grep -qxF 'service:reality:r0000000000000001:stop' "$recovery_log" \
+        || fail 'disabled REALITY sibling was not stopped'
+      grep -qxF 'service:reality:r0000000000000002:start' "$recovery_log" \
+        || fail 'enabled REALITY sibling was not started'
+      grep -qxF 'doctor:reality:r0000000000000002' "$recovery_log" \
+        || fail 'enabled REALITY sibling was not diagnosed'
+      grep -qxF 'doctor:reality:r0000000000000001' "$recovery_log" \
+        || fail 'disabled REALITY sibling missed static doctor checks'
+      ;;
+    vless-sudoku)
+      grep -qxF 'service:sudoku:stop' "$recovery_log" \
+        || fail 'disabled Sudoku was not stopped'
+      grep -qxF 'doctor:sudoku' "$recovery_log" \
+        || fail 'disabled Sudoku missed static doctor checks'
+      ;;
+  esac
+  grep -q '^probe:' "$recovery_log" \
+    || fail "disabled ${scope} recovery did not check for residual listeners"
+}
+
+for disabled_scope in snell hy2 tuic vless-reality vless-sudoku; do
+  run_disabled_scope_recovery_fixture "$disabled_scope"
+done
+printf 'PROTOCOL_DISABLED_STATE_RECOVERY=PASS\n'
+
+# A non-empty committed SSH state is safe to verify without reconstructing
+# accounts, keys, or policy. Cover both the ordinary ready checkpoint and a
+# callback fingerprint whose authoritative state changed before interruption.
+run_valid_ssh_recovery_fixture() {
+  local mode="$1" baseline ssh_log
+  ssh_log="$fixture/ssh-${mode}.log"
+  reset_fixture
+  write_schema
+  write_complete_manager "$SCRIPT_VERSION"
+  if [ "$mode" = changed-valid ]; then
+    baseline="$(nb_lifecycle_protocol_scope_fingerprint ssh-tunnel)"
+    nb_lifecycle_begin install "callback-${baseline:0:55}" 0 0 0 0 0 0 ssh-tunnel
+  else
+    nb_lifecycle_begin install ready-to-validate 0 0 0 0 0 0 ssh-tunnel
+  fi
+  nb_lifecycle_mark_mutation_started
+  mkdir -p "$(dirname "$NOBRAND_SSH_STATE_FILE")"
+  printf '%s\n' \
+    '{"users":[{"account_id":"a1111111111111111","linux_user":"nbt-fixture"}]}' \
+    >"$NOBRAND_SSH_STATE_FILE"
+  (
+    require_root() { return 0; }
+    require_linux() { return 0; }
+    nb_lifecycle_lock_acquire() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD + 1)); }
+    nb_lifecycle_lock_release() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD - 1)); }
+    nobrand_manager_installation_valid() { return 0; }
+    nb_lifecycle_protocol_scope_state_valid() { [ "$1" = ssh-tunnel ]; }
+    ssh_tunnel_watchdog_directory_empty_valid() { printf 'watchdog\n' >>"$ssh_log"; }
+    ssh_tunnel_group_identity_valid() { printf 'group\n' >>"$ssh_log"; }
+    ssh_tunnel_user_identity_valid() { printf 'identity:%s\n' "$(jq -r .account_id <<<"$1")" >>"$ssh_log"; }
+    ssh_tunnel_user_key_material_valid() { printf 'keys:%s\n' "$(jq -r .account_id <<<"$1")" >>"$ssh_log"; }
+    ssh_tunnel_state_exists() { return 0; }
+    ssh_tunnel_doctor() { printf 'doctor\n' >>"$ssh_log"; }
+    ssh_recovery_unexpected_callback() { : >"$fixture/ssh-${mode}-unexpected-callback"; }
+    NOBRAND_MANAGER_SESSION_ACTIVE=1
+    NOBRAND_LIFECYCLE_LOCK_HELD=0
+    nb_lifecycle_run_protocol_install ssh-tunnel ssh_recovery_unexpected_callback
+    assert_eq 0 "$NOBRAND_LIFECYCLE_LOCK_HELD" \
+      "valid SSH ${mode} recovery balances lifecycle lock"
+  )
+  [ ! -e "$fixture/ssh-${mode}-unexpected-callback" ] \
+    || fail "valid SSH ${mode} recovery replayed callback"
+  assert_eq $'watchdog\ngroup\nidentity:a1111111111111111\nkeys:a1111111111111111\ndoctor' \
+    "$(cat "$ssh_log")" "valid SSH ${mode} recovery is verification-only"
+  assert_eq complete "$(nb_lifecycle_field STATUS)" \
+    "valid SSH ${mode} recovery completes"
+  assert_eq ssh-tunnel "$(nb_lifecycle_scope)" \
+    "valid SSH ${mode} recovery preserves scope"
+}
+
+run_valid_ssh_recovery_fixture ready
+run_valid_ssh_recovery_fixture changed-valid
+printf 'SSH_VALID_STATE_RECOVERY=PASS\n'
+
+# Main marks an explicit Forward add as fresh intent only for a mutation-zero
+# transaction. Once mutation started, the dispatcher rejects it byte-for-byte.
+reset_fixture
+write_schema
+write_complete_manager "$SCRIPT_VERSION"
+nb_lifecycle_begin install prepare 0 0 0 0 0 0 forward
+forward_explicit_zero_txid="$(nb_lifecycle_field TRANSACTION_ID)"
+(
+  # shellcheck disable=SC1091
+  source "$TEST_ROOT/src/62-forward.sh"
+  id() { [ "${1:-}" = -u ] && printf 0; }
+  require_root() { return 0; }
+  require_linux() { return 0; }
+  nb_lifecycle_lock_acquire() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD + 1)); }
+  nb_lifecycle_lock_release() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD - 1)); }
+  ensure_manager_state_layout() { return 0; }
+  dry_run_should_preview() { return 1; }
+  is_mita_elf_binary() { return 1; }
+  nobrand_manager_installation_valid() { return 0; }
+  nobrand_run_forward_action_unscoped() {
+    [ "$(nb_lifecycle_field TRANSACTION_ID)" != "$forward_explicit_zero_txid" ] \
+      || fail 'explicit Forward retry reused stale transaction identity'
+    nb_lifecycle_mark_protocol_mutation_started forward
+    printf 'callback\n' >>"$fixture/forward-explicit-zero.callback"
+  }
+  nb_lifecycle_validate_protocol_scope() { return 0; }
+  ACTION=nobrand-forward
+  FORWARD_ACTION=add
+  NOBRAND_LIFECYCLE_LOCK_HELD=0
+  main
+  assert_eq 0 "$NOBRAND_LIFECYCLE_LOCK_HELD" \
+    'explicit mutation-zero Forward retry balances lifecycle lock'
+)
+assert_eq 1 "$(wc -l <"$fixture/forward-explicit-zero.callback" | tr -d '[:space:]')" \
+  'explicit mutation-zero Forward retry runs callback once'
+assert_eq complete "$(nb_lifecycle_field STATUS)" \
+  'explicit mutation-zero Forward retry completes fresh transaction'
+
+reset_fixture
+write_schema
+write_complete_manager "$SCRIPT_VERSION"
+nb_lifecycle_begin install prepare 0 0 0 0 0 0 forward
+nb_lifecycle_mark_mutation_started
+cp "$NOBRAND_LIFECYCLE_TX_FILE" "$fixture/forward-explicit-mutated.expected"
+(
+  # shellcheck disable=SC1091
+  source "$TEST_ROOT/src/62-forward.sh"
+  id() { [ "${1:-}" = -u ] && printf 0; }
+  nb_lifecycle_lock_acquire() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD + 1)); }
+  nb_lifecycle_lock_release() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD - 1)); }
+  nobrand_run_forward_action() { : >"$fixture/forward-explicit-mutated.unexpected"; }
+  ACTION=nobrand-forward
+  FORWARD_ACTION=add
+  NOBRAND_LIFECYCLE_LOCK_HELD=0
+  set +e
+  main >/dev/null 2>&1
+  forward_explicit_mutated_rc=$?
+  set -e
+  [ "$forward_explicit_mutated_rc" -ne 0 ] \
+    || fail 'explicit Forward add accepted a mutated recovery transaction'
+  assert_eq 0 "$NOBRAND_LIFECYCLE_LOCK_HELD" \
+    'mutated explicit Forward refusal balances lifecycle lock'
+)
+[ ! -e "$fixture/forward-explicit-mutated.unexpected" ] \
+  || fail 'mutated explicit Forward transaction invoked callback'
+cmp -s "$fixture/forward-explicit-mutated.expected" "$NOBRAND_LIFECYCLE_TX_FILE" \
+  || fail 'mutated explicit Forward refusal changed transaction bytes'
+printf 'FORWARD_EXPLICIT_RETRY_GATE=PASS\n'
+
+# A fresh-process Forward recovery must clear an unmutated v2 transaction before
+# fingerprint classification or input recollection. No callback can run.
+reset_fixture
+nb_lifecycle_begin install prepare 0 0 0 0 0 0 forward
+forward_unmutated_unexpected="$fixture/forward-unmutated-unexpected"
+(
+  # shellcheck disable=SC1091
+  source "$TEST_ROOT/src/62-forward.sh"
+  require_root() { return 0; }
+  require_linux() { return 0; }
+  nb_lifecycle_lock_acquire() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD + 1)); }
+  nb_lifecycle_lock_release() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD - 1)); }
+  forward_menu_reset_requests() { : >"$forward_unmutated_unexpected"; }
+  forward_menu_collect_add() { : >"$forward_unmutated_unexpected"; }
+  nobrand_run_forward_action_unscoped() { : >"$forward_unmutated_unexpected"; }
+  NOBRAND_LIFECYCLE_ACTIVE=0
+  NOBRAND_LIFECYCLE_OPERATION=""
+  NOBRAND_LIFECYCLE_SCOPE=""
+  # Consumed by the sourced dedicated recovery function.
+  # shellcheck disable=SC2034
+  NOBRAND_LIFECYCLE_MUTATION_STARTED=0
+  NOBRAND_LIFECYCLE_LOCK_HELD=0
+  nobrand_recover_forward_add >/dev/null
+  assert_eq 0 "$NOBRAND_LIFECYCLE_LOCK_HELD" \
+    'unmutated Forward recovery balances lifecycle lock'
+)
+[ ! -e "$forward_unmutated_unexpected" ] \
+  || fail 'unmutated Forward recovery collected input or invoked callback'
+[ ! -e "$NOBRAND_LIFECYCLE_TX_FILE" ] \
+  || fail 'unmutated Forward recovery retained lifecycle metadata'
+printf 'FORWARD_UNMUTATED_RECOVERY_CLEAR=PASS\n'
+
+# An unchanged post-mutation Forward transaction cannot be reconstructed: the
+# original request and pre-state were not recorded. Recovery must preserve the
+# transaction byte-for-byte without reset, collection, or callback execution.
+reset_fixture
+forward_unchanged_baseline="$(nb_lifecycle_protocol_scope_fingerprint forward)"
+nb_lifecycle_begin install "callback-${forward_unchanged_baseline:0:55}" 0 0 0 0 0 0 forward
+nb_lifecycle_mark_mutation_started
+cp "$NOBRAND_LIFECYCLE_TX_FILE" "$fixture/forward-unchanged.expected"
+forward_unchanged_log="$fixture/forward-unchanged.log"
+forward_unchanged_effects="$fixture/forward-unchanged-effects.log"
+(
+  # shellcheck disable=SC1091
+  source "$TEST_ROOT/src/62-forward.sh"
+  require_root() { return 0; }
+  require_linux() { return 0; }
+  nb_lifecycle_lock_acquire() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD + 1)); }
+  nb_lifecycle_lock_release() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD - 1)); }
+  forward_reconcile_authoritative_state() { printf 'reconcile\n' >>"$forward_unchanged_effects"; }
+  forward_menu_reset_requests() { printf 'reset\n' >>"$forward_unchanged_effects"; }
+  forward_menu_collect_add() { printf 'collect\n' >>"$forward_unchanged_effects"; }
+  nobrand_run_forward_action_unscoped() { printf 'callback\n' >>"$forward_unchanged_effects"; }
+  NOBRAND_RECOVERY_EXPECTED_SCOPE=forward
+  NOBRAND_LIFECYCLE_LOCK_HELD=0
+  LANG_ZH=0
+  set +e
+  nobrand_recover_forward_add >"$forward_unchanged_log" 2>&1
+  forward_unchanged_rc=$?
+  set -e
+  [ "$forward_unchanged_rc" -ne 0 ] \
+    || fail 'unchanged mutated Forward recovery did not fail closed'
+  assert_eq 0 "$NOBRAND_LIFECYCLE_LOCK_HELD" \
+    'unchanged mutated Forward recovery balances lifecycle lock'
+)
+cmp -s "$fixture/forward-unchanged.expected" "$NOBRAND_LIFECYCLE_TX_FILE" \
+  || fail 'unchanged mutated Forward recovery modified lifecycle metadata'
+[ ! -e "$forward_unchanged_effects" ] \
+  || fail 'unchanged mutated Forward recovery reset, recollected, or replayed'
+assert_contains "$(cat "$forward_unchanged_log")" \
+  'automatic cleanup or replay is unsafe' \
+  'Forward fail-closed message explains why automation is unsafe'
+printf 'FORWARD_UNCHANGED_RECOVERY_FAIL_CLOSED=PASS\n'
+
+# The dedicated Forward recovery route must classify changed committed state
+# before opening its input collector. Validation-only recovery skips both input
+# recollection and replay of the add callback.
+reset_fixture
+forward_committed_callback_log="$fixture/forward-committed-callback.log"
+forward_committed_recollection_log="$fixture/forward-committed-recollection.log"
+forward_committed_doctor_log="$fixture/forward-committed-doctor.log"
+(
+  # shellcheck disable=SC1091
+  source "$TEST_ROOT/src/62-forward.sh"
+  require_root() { return 0; }
+  require_linux() { return 0; }
+  nb_lifecycle_lock_acquire() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD + 1)); }
+  nb_lifecycle_lock_release() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD - 1)); }
+  ensure_manager_state_layout() { return 0; }
+  nobrand_manager_installation_valid() { return 0; }
+  nb_lifecycle_reconcile_protocol_scope() {
+    assert_eq forward "$1" 'Forward changed-state reconciliation remains scoped'
+  }
+  forward_state_valid() {
+    jq -e '
+      .schema_version==3 and .ownership=="nobrand-v3"
+      and .feature=="port-forward" and (.rules|type)=="array"
+    ' "$1" >/dev/null
+  }
+  forward_doctor() {
+    forward_state_valid "$NOBRAND_FORWARD_STATE_FILE" \
+      && jq -e '.rules|length==1' "$NOBRAND_FORWARD_STATE_FILE" >/dev/null
+    printf 'doctor\n' >>"$forward_committed_doctor_log"
+  }
+  forward_menu_reset_requests() {
+    printf 'reset\n' >>"$forward_committed_recollection_log"
+  }
+  forward_menu_collect_add() {
+    printf 'collect\n' >>"$forward_committed_recollection_log"
+  }
+  nobrand_run_forward_action_unscoped() {
+    printf 'called\n' >>"$forward_committed_callback_log"
+    nb_lifecycle_mark_protocol_mutation_started forward
+    mkdir -p "$(dirname "$NOBRAND_FORWARD_STATE_FILE")"
+    cat >"$NOBRAND_FORWARD_STATE_FILE" <<'JSON'
+{"schema_version":3,"ownership":"nobrand-v3","feature":"port-forward","rules":[{"rule_id":"f1111111111111111"}]}
+JSON
+    return 73
+  }
+  # Consumed by the sourced protocol lifecycle wrapper.
+  # shellcheck disable=SC2034
+  NOBRAND_MANAGER_SESSION_ACTIVE=1
+  set +e
+  nb_lifecycle_run_protocol_install forward nobrand_run_forward_action_unscoped
+  forward_committed_initial_rc=$?
+  set -e
+  assert_eq 73 "$forward_committed_initial_rc" \
+    'Forward callback failure after committed state propagates'
+  forward_committed_phase="$(nb_lifecycle_field LAST_COMPLETED_PHASE)"
+  [[ "$forward_committed_phase" =~ ^callback-[0-9a-f]{55}$ ]] \
+    || fail 'Forward committed callback did not retain callback fingerprint phase'
+
+  nobrand_recover_forward_add
+  assert_eq 1 "$(wc -l <"$forward_committed_callback_log" | tr -d '[:space:]')" \
+    'Forward changed-state recovery does not replay add callback'
+  [ ! -e "$forward_committed_recollection_log" ] \
+    || fail 'Forward changed-state recovery recollected add input'
+  assert_eq 1 "$(wc -l <"$forward_committed_doctor_log" | tr -d '[:space:]')" \
+    'Forward changed-state recovery validates committed state once'
+  assert_eq 1 "$(jq -r '.rules|length' "$NOBRAND_FORWARD_STATE_FILE")" \
+    'Forward changed-state recovery preserves committed rule'
+  assert_eq complete "$(nb_lifecycle_field STATUS)" \
+    'Forward changed-state recovery completes transaction'
+  assert_eq forward "$(nb_lifecycle_scope)" \
+    'Forward changed-state recovery preserves scope'
+  assert_eq 0 "$NOBRAND_LIFECYCLE_LOCK_HELD" \
+    'Forward changed-state recovery balances nested lifecycle locks'
+)
+printf 'FORWARD_COMMITTED_RECOVERY_SKIPS_RECOLLECTION=PASS\n'
+
+# Direct Forward add dispatch cannot bypass the fail-closed rule, even if an
+# internal caller incorrectly marks the retry as explicit. The valid empty
+# state and its exact transaction must remain unchanged.
+reset_fixture
+mkdir -p "$(dirname "$NOBRAND_FORWARD_STATE_FILE")"
+printf '%s\n' \
+  '{"schema_version":3,"ownership":"nobrand-v3","feature":"port-forward","rules":[]}' \
+  >"$NOBRAND_FORWARD_STATE_FILE"
+forward_empty_baseline="$(nb_lifecycle_protocol_scope_fingerprint forward)"
+nb_lifecycle_begin install "callback-${forward_empty_baseline:0:55}" 0 0 0 0 0 0 forward
+nb_lifecycle_mark_mutation_started
+cp "$NOBRAND_LIFECYCLE_TX_FILE" "$fixture/forward-empty.expected"
+cp "$NOBRAND_FORWARD_STATE_FILE" "$fixture/forward-empty-state.expected"
+forward_direct_log="$fixture/forward-direct.log"
+(
+  # shellcheck disable=SC1091
+  source "$TEST_ROOT/src/62-forward.sh"
+  require_root() { return 0; }
+  require_linux() { return 0; }
+  nb_lifecycle_lock_acquire() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD + 1)); }
+  nb_lifecycle_lock_release() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD - 1)); }
+  nobrand_run_forward_action_unscoped() {
+    : >"$fixture/forward-direct-unexpected-callback"
+  }
+  NOBRAND_MANAGER_SESSION_ACTIVE=1
+  # Consumed by the sourced lifecycle wrapper.
+  # shellcheck disable=SC2034
+  NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE=forward
+  NOBRAND_LIFECYCLE_LOCK_HELD=0
+  LANG_ZH=0
+  set +e
+  nb_lifecycle_run_protocol_install forward nobrand_run_forward_action_unscoped \
+    >"$forward_direct_log" 2>&1
+  forward_direct_rc=$?
+  set -e
+  [ "$forward_direct_rc" -ne 0 ] \
+    || fail 'direct Forward add replayed an unchanged mutated transaction'
+  assert_eq 0 "$NOBRAND_LIFECYCLE_LOCK_HELD" \
+    'direct Forward fail-closed path balances lifecycle lock'
+)
+cmp -s "$fixture/forward-empty.expected" "$NOBRAND_LIFECYCLE_TX_FILE" \
+  || fail 'direct Forward fail-closed path modified lifecycle metadata'
+cmp -s "$fixture/forward-empty-state.expected" "$NOBRAND_FORWARD_STATE_FILE" \
+  || fail 'direct Forward fail-closed path modified authoritative state'
+[ ! -e "$fixture/forward-direct-unexpected-callback" ] \
+  || fail 'direct Forward fail-closed path invoked callback'
+assert_contains "$(cat "$forward_direct_log")" \
+  'automatic cleanup or replay is unsafe' \
+  'direct Forward refusal explains why automation is unsafe'
+printf 'FORWARD_DIRECT_RETRY_FAIL_CLOSED=PASS\n'
+
+# Model SIGKILL after candidate nft/Realm/firewall effects but before Forward's
+# state rename. Because neither the request nor the pre-state is durable, the
+# recovery path must leave every effect and the exact transaction untouched.
+reset_fixture
+write_schema
+write_complete_manager "$SCRIPT_VERSION"
+forward_crash_baseline="$(nb_lifecycle_protocol_scope_fingerprint forward)"
+nb_lifecycle_begin install "callback-${forward_crash_baseline:0:55}" 0 0 0 0 0 0 forward
+nb_lifecycle_mark_mutation_started
+forward_crash_prior_tx="$fixture/forward-crash-window.prior"
+cp "$NOBRAND_LIFECYCLE_TX_FILE" "$forward_crash_prior_tx"
+forward_crash_log="$fixture/forward-crash-window.log"
+forward_crash_nft="$fixture/forward-candidate-nft"
+forward_crash_realm="$fixture/forward-candidate-realm"
+forward_crash_firewall="$fixture/forward-candidate-firewall"
+: >"$forward_crash_nft"
+: >"$forward_crash_realm"
+: >"$forward_crash_firewall"
+mkdir -p "$(dirname "$NOBRAND_FIREWALL_OWNED_STATE")"
+printf '%s\n' 'iptables|tcp|31000' 'iptables|udp|32000' \
+  >"$NOBRAND_FIREWALL_OWNED_STATE"
+(
+  # shellcheck disable=SC1091
+  source "$TEST_ROOT/src/62-forward.sh"
+  require_root() { return 0; }
+  require_linux() { return 0; }
+  nb_lifecycle_lock_acquire() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD + 1)); }
+  nb_lifecycle_lock_release() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD - 1)); }
+  forward_reconcile_authoritative_state() { printf 'reconcile\n' >>"$forward_crash_log"; }
+  forward_apply_nft_state() { printf 'nft\n' >>"$forward_crash_log"; }
+  forward_realm_apply_state() { printf 'realm\n' >>"$forward_crash_log"; }
+  nb_firewall_open_pairs() { printf 'firewall-open\n' >>"$forward_crash_log"; }
+  nb_firewall_close_pairs() { printf 'firewall-close\n' >>"$forward_crash_log"; }
+  forward_menu_reset_requests() { printf 'reset-requests\n' >>"$forward_crash_log"; }
+  forward_menu_collect_add() { printf 'collect\n' >>"$forward_crash_log"; }
+  nobrand_run_forward_action_unscoped() { printf 'callback\n' >>"$forward_crash_log"; }
+  forward_doctor() { printf 'doctor\n' >>"$forward_crash_log"; }
+  # Consumed by the sourced dedicated recovery function.
+  # shellcheck disable=SC2034
+  NOBRAND_MANAGER_SESSION_ACTIVE=1
+  # shellcheck disable=SC2034
+  NOBRAND_RECOVERY_EXPECTED_SCOPE=forward
+  NOBRAND_LIFECYCLE_LOCK_HELD=0
+  LANG_ZH=0
+  set +e
+  nobrand_recover_forward_add >"$fixture/forward-crash-window.message" 2>&1
+  forward_crash_rc=$?
+  set -e
+  [ "$forward_crash_rc" -ne 0 ] \
+    || fail 'Forward crash-window recovery did not fail closed'
+  assert_eq 0 "$NOBRAND_LIFECYCLE_LOCK_HELD" \
+    'Forward crash-window fail-closed path balances lifecycle lock'
+)
+cmp -s "$forward_crash_prior_tx" "$NOBRAND_LIFECYCLE_TX_FILE" \
+  || fail 'Forward crash-window recovery modified original metadata'
+[ ! -e "$forward_crash_log" ] \
+  || fail 'Forward crash-window recovery touched reset, collector, callback, or doctor paths'
+[ -e "$forward_crash_nft" ] && [ -e "$forward_crash_realm" ] \
+  && [ -e "$forward_crash_firewall" ] \
+  || fail 'Forward crash-window recovery changed unprovable candidate effects'
+assert_eq $'iptables|tcp|31000\niptables|udp|32000' \
+  "$(cat "$NOBRAND_FIREWALL_OWNED_STATE")" \
+  'Forward crash-window recovery preserves the firewall ledger exactly'
+assert_contains "$(cat "$fixture/forward-crash-window.message")" \
+  'automatic cleanup or replay is unsafe' \
+  'Forward crash-window refusal explains the missing durable evidence'
+printf 'FORWARD_CRASH_WINDOW_FAIL_CLOSED=PASS\n'
+
+# The menu may contain an ordinary failed action, but it must terminate the
+# manager process if that action leaves a durable post-mutation transaction.
+reset_fixture
+menu_post_mutation_marker="$fixture/menu-post-mutation-following-marker"
+set +e
+(
+  trap - ERR
+  on_error() { exit 1; }
+  menu_post_mutation_failure() {
+    nb_lifecycle_begin install prepare 0 0 0 0 0 0 snell
+    nb_lifecycle_mark_mutation_started
+    return 63
+  }
+  nobrand_menu_run menu_post_mutation_failure
+  : >"$menu_post_mutation_marker"
+)
+menu_post_mutation_rc=$?
+set -e
+assert_eq 1 "$menu_post_mutation_rc" \
+  'menu exits after an action leaves post-mutation recovery metadata'
+[ ! -e "$menu_post_mutation_marker" ] \
+  || fail 'menu continued after a post-mutation action failure'
+nb_lifecycle_tx_valid || fail 'menu post-mutation failure corrupted lifecycle metadata'
+assert_eq install "$(nb_lifecycle_field OPERATION)" \
+  'menu post-mutation failure preserves install operation'
+assert_eq snell "$(nb_lifecycle_scope)" \
+  'menu post-mutation failure preserves protocol scope'
+assert_eq 1 "$(nb_lifecycle_mutation_started)" \
+  'menu post-mutation failure preserves mutation marker'
+
+reset_fixture
+menu_ordinary_failure_marker="$fixture/menu-ordinary-failure-following-marker"
+set +e
+(
+  trap - ERR
+  on_error() { exit 1; }
+  menu_ordinary_failure() { return 64; }
+  nobrand_menu_run menu_ordinary_failure
+  : >"$menu_ordinary_failure_marker"
+)
+menu_ordinary_failure_rc=$?
+set -e
+assert_eq 0 "$menu_ordinary_failure_rc" \
+  'menu contains an ordinary failure with no lifecycle transaction'
+[ -e "$menu_ordinary_failure_marker" ] \
+  || fail 'ordinary non-transactional menu failure terminated the caller'
+[ ! -e "$NOBRAND_LIFECYCLE_TX_FILE" ] \
+  || fail 'ordinary menu failure created lifecycle metadata'
+printf 'MENU_POST_MUTATION_TERMINATION=PASS\n'
 
 reset_fixture
 (
@@ -1739,7 +4317,7 @@ ssh_repair_validation_trace="$fixture/ssh-repair-validation.trace"
     mkdir -p "$(dirname "$destination")" \
       && install -m "$mode" "$source" "$destination"
   }
-  install_self_script() { write_manager "$SCRIPT_VERSION"; }
+  install_self_script() { write_complete_manager "$SCRIPT_VERSION"; }
   nobrand_restore_protocol_runtimes() { return 0; }
   nobrand_start_enabled_services() { return 0; }
   ssh_tunnel_watchdog_claim_ready() { return 0; }
@@ -1889,6 +4467,33 @@ prepare_current_complete_uninstall_fixture() {
   ln -s "$NOBRAND_COMMAND_PATH" "$NOBRAND_SHORT_COMMAND_PATH"
   assert_state CURRENT_COMPLETE 'full-uninstall interruption starts complete'
 }
+
+# Full uninstall also preserves a prior completed lifecycle record until its
+# own mutation marker succeeds.
+prepare_current_complete_uninstall_fixture
+nb_lifecycle_begin install prepare 0 0 0 0 0 0 manager
+nb_lifecycle_mark_mutation_started
+nb_lifecycle_complete install
+cp "$NOBRAND_LIFECYCLE_TX_FILE" "$fixture/uninstall-marker-failure.expected"
+(
+  stub_uninstall_dependencies
+  nb_lifecycle_mark_mutation_started() { return 74; }
+  nobrand_uninstall_impl() { : >"$fixture/uninstall-marker-failure.unexpected"; }
+  YES=1
+  set +e
+  nobrand_uninstall >/dev/null 2>&1
+  uninstall_marker_failure_rc=$?
+  set -e
+  assert_eq 74 "$uninstall_marker_failure_rc" \
+    'full-uninstall mutation-marker failure propagates'
+)
+cmp -s "$fixture/uninstall-marker-failure.expected" "$NOBRAND_LIFECYCLE_TX_FILE" \
+  || fail 'full-uninstall mutation-marker failure changed prior metadata'
+[ ! -e "$fixture/uninstall-marker-failure.unexpected" ] \
+  || fail 'full-uninstall mutation-marker failure ran cleanup'
+assert_state CURRENT_COMPLETE \
+  'full-uninstall mutation-marker failure preserves current installation'
+printf 'UNINSTALL_PREMUTATION_RESTORE=PASS\n'
 
 # A complete uninstall must remain idempotent when any one managed resource is
 # already absent. All other modeled resources stay populated, and a foreign
@@ -2435,6 +5040,61 @@ set -e
 nobrand_clear_managed_root "$missing_root"
 nobrand_clear_managed_root "$missing_root"
 
+# A signal delivered immediately after the atomic lifecycle write must see the
+# new transaction as active. Before mutation it either removes a fresh record or
+# restores the completed record that the caller snapshotted byte-for-byte.
+run_begin_atomic_write_signal_case() {
+  local prior_record="$1" signal_rc=0
+  local expected_record="$fixture/begin-write-signal-${prior_record}.expected"
+  reset_fixture
+  if [ "$prior_record" = complete ]; then
+    write_schema
+    write_complete_manager "$SCRIPT_VERSION"
+    nb_lifecycle_begin install prepare 0 0 0 0 0 0 manager
+    nb_lifecycle_mark_mutation_started
+    nb_lifecycle_complete install
+    cp "$NOBRAND_LIFECYCLE_TX_FILE" "$expected_record"
+  fi
+  set +e
+  (
+    trap - EXIT HUP INT TERM ERR
+    nb_lifecycle_signal_handlers_install
+    nb_lifecycle_pre_mutation_snapshot
+    begin_signal_once=1
+    mv() {
+      local arg target=""
+      for arg in "$@"; do target="$arg"; done
+      command mv "$@" || return
+      if [ "$target" = "$NOBRAND_LIFECYCLE_TX_FILE" ] \
+         && [ "$begin_signal_once" -eq 1 ]; then
+        begin_signal_once=0
+        kill -INT "$BASHPID"
+      fi
+    }
+    nb_lifecycle_begin configure prepare 0 0 0 0 0 0 ingress
+    exit 99
+  ) >/dev/null 2>&1
+  signal_rc=$?
+  set -e
+  assert_eq 130 "$signal_rc" \
+    "INT immediately after atomic begin write exits conventionally: $prior_record"
+  if [ "$prior_record" = absent ]; then
+    [ ! -e "$NOBRAND_LIFECYCLE_TX_FILE" ] \
+      || fail 'atomic begin-write signal retained a fresh transaction'
+    assert_state CLEAN \
+      'atomic begin-write signal without prior record leaves CLEAN state'
+  else
+    cmp -s "$expected_record" "$NOBRAND_LIFECYCLE_TX_FILE" \
+      || fail 'atomic begin-write signal did not restore prior completed bytes'
+    assert_state CURRENT_COMPLETE \
+      'atomic begin-write signal restores prior completed classification'
+  fi
+}
+
+run_begin_atomic_write_signal_case absent
+run_begin_atomic_write_signal_case complete
+printf 'BEGIN_ATOMIC_WRITE_SIGNAL_RESTORE=PASS\n'
+
 if command -v flock >/dev/null 2>&1; then
   reset_fixture
   lock_parent="$(dirname "$NOBRAND_LIFECYCLE_LOCK_FILE")"
@@ -2503,96 +5163,286 @@ if command -v flock >/dev/null 2>&1; then
   [ "$lock_reacquired" -eq 1 ] || fail 'stale lifecycle lock did not recover after holder exit'
   nb_lifecycle_lock_release
 
-  run_lifecycle_signal_interruption() {
-    local operation="$1" signal="$2" expected_rc="$3" expected_state=""
-    local ready_file signal_log signal_rc interrupted_txid recovered_txid
-    local transaction_hash_file transaction_hash_before
-    local signal_target signal_attempt
+  run_wrapper_premutation_signal_restore() {
+    local wrapper_case="$1" wrapper_ready wrapper_prior wrapper_target
+    local wrapper_attempt wrapper_rc wrapper_expected_state
     reset_fixture
-    ready_file="$fixture/signal-${operation}-${signal}.ready"
-    signal_log="$fixture/signal-${operation}-${signal}.log"
-    transaction_hash_file="$fixture/signal-${operation}-${signal}.transaction.sha256"
+    wrapper_ready="$fixture/wrapper-signal-${wrapper_case}.ready"
+    wrapper_prior="$fixture/wrapper-signal-${wrapper_case}.expected"
+    case "$wrapper_case" in
+      manager)
+        write_schema
+        nb_lifecycle_begin install prepare 0 0 0 0 0 0 snell
+        nb_lifecycle_mark_mutation_started
+        nb_lifecycle_complete install
+        wrapper_expected_state=CURRENT_PARTIAL_INSTALL
+        ;;
+      ingress)
+        write_schema
+        write_complete_manager "$SCRIPT_VERSION"
+        nb_lifecycle_begin install prepare 0 0 0 0 0 0 manager
+        nb_lifecycle_mark_mutation_started
+        nb_lifecycle_complete install
+        wrapper_expected_state=CURRENT_COMPLETE
+        ;;
+      uninstall)
+        prepare_current_complete_uninstall_fixture
+        nb_lifecycle_begin install prepare 0 0 0 0 0 0 manager
+        nb_lifecycle_mark_mutation_started
+        nb_lifecycle_complete install
+        wrapper_expected_state=CURRENT_COMPLETE
+        ;;
+      *) fail "unknown wrapper signal case: $wrapper_case" ;;
+    esac
+    cp "$NOBRAND_LIFECYCLE_TX_FILE" "$wrapper_prior"
     set +e
     (
       trap - EXIT HUP INT TERM ERR
-      signal_target="$BASHPID"
+      wrapper_target="$BASHPID"
       (
-        for ((signal_attempt = 0; signal_attempt < 200; signal_attempt++)); do
-          [ ! -e "$ready_file" ] || break
+        for ((wrapper_attempt = 0; wrapper_attempt < 200; wrapper_attempt++)); do
+          [ ! -e "$wrapper_ready" ] || break
           sleep 0.01
         done
-        if [ -e "$ready_file" ]; then
-          kill -s "$signal" "$signal_target"
+        if [ -e "$wrapper_ready" ]; then
+          kill -INT "$wrapper_target"
         else
-          kill -TERM "$signal_target"
+          kill -TERM "$wrapper_target"
+        fi
+      ) &
+      nb_lifecycle_lock_acquire() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD + 1)); }
+      nb_lifecycle_lock_release() { NOBRAND_LIFECYCLE_LOCK_HELD=$((NOBRAND_LIFECYCLE_LOCK_HELD - 1)); }
+      NOBRAND_LIFECYCLE_LOCK_HELD=0
+      nb_lifecycle_signal_handlers_install
+      case "$wrapper_case" in
+        manager)
+          require_root() { return 0; }
+          require_linux() { return 0; }
+          detect_pkg_manager() { printf deb; }
+          ensure_management_dependencies() { return 0; }
+          nobrand_manager_installation_valid() { return 1; }
+          nb_lifecycle_mark_mutation_started() {
+            : >"$wrapper_ready"
+            while true; do sleep 0.05; done
+          }
+          ensure_manager_state_layout() { : >"$fixture/wrapper-signal-manager.unexpected"; }
+          nobrand_manager_bootstrap
+          ;;
+        ingress)
+          # Consumed by the sourced lifecycle wrapper.
+          # shellcheck disable=SC2034
+          NOBRAND_MANAGER_SESSION_ACTIVE=1
+          nobrand_run_ingress_action_unscoped() {
+            : >"$wrapper_ready"
+            while true; do sleep 0.05; done
+          }
+          nb_lifecycle_run_ingress_action
+          ;;
+        uninstall)
+          stub_uninstall_dependencies
+          nb_lifecycle_mark_mutation_started() {
+            : >"$wrapper_ready"
+            while true; do sleep 0.05; done
+          }
+          nobrand_uninstall_impl() { : >"$fixture/wrapper-signal-uninstall.unexpected"; }
+          YES=1
+          nobrand_uninstall
+          ;;
+      esac
+    ) >/dev/null 2>&1
+    wrapper_rc=$?
+    set -e
+    assert_eq 130 "$wrapper_rc" \
+      "INT interrupts ${wrapper_case} before its mutation marker"
+    cmp -s "$wrapper_prior" "$NOBRAND_LIFECYCLE_TX_FILE" \
+      || fail "${wrapper_case} pre-mutation signal changed prior metadata"
+    assert_state "$wrapper_expected_state" \
+      "${wrapper_case} pre-mutation signal restores prior classification"
+    [ ! -e "$fixture/wrapper-signal-${wrapper_case}.unexpected" ] \
+      || fail "${wrapper_case} pre-mutation signal reached external mutation"
+  }
+
+  run_wrapper_premutation_signal_restore manager
+  run_wrapper_premutation_signal_restore ingress
+  run_wrapper_premutation_signal_restore uninstall
+  printf 'WRAPPER_PREMUTATION_SIGNAL_RESTORE=PASS\n'
+
+  run_lifecycle_signal_interruption() {
+    local signal_case_operation="$1" signal_case_scope="$2"
+    local signal_case_name="$3" signal_case_expected_rc="$4"
+    local signal_case_mutated="$5" signal_case_expected_state=""
+    local signal_case_ready signal_case_log signal_case_hash_file
+    local signal_case_target signal_case_attempt signal_case_rc
+    reset_fixture
+    signal_case_ready="$fixture/signal-${signal_case_operation}-${signal_case_scope}-${signal_case_name}-${signal_case_mutated}.ready"
+    signal_case_log="$fixture/signal-${signal_case_operation}-${signal_case_scope}-${signal_case_name}-${signal_case_mutated}.log"
+    signal_case_hash_file="$fixture/signal-${signal_case_operation}-${signal_case_scope}-${signal_case_name}-${signal_case_mutated}.sha256"
+    set +e
+    (
+      trap - EXIT HUP INT TERM ERR
+      signal_case_target="$BASHPID"
+      (
+        for ((signal_case_attempt = 0; signal_case_attempt < 200; signal_case_attempt++)); do
+          [ ! -e "$signal_case_ready" ] || break
+          sleep 0.01
+        done
+        if [ -e "$signal_case_ready" ]; then
+          kill -s "$signal_case_name" "$signal_case_target"
+        else
+          kill -TERM "$signal_case_target"
         fi
       ) &
       NOBRAND_LIFECYCLE_LOCK_HELD=0
       nb_lifecycle_lock_acquire
       nb_lifecycle_lock_acquire
-      nb_lifecycle_begin "$operation" prepare
-      sha256sum "$NOBRAND_LIFECYCLE_TX_FILE" | awk '{print $1}' \
-        >"$transaction_hash_file"
+      nb_lifecycle_begin "$signal_case_operation" prepare 0 0 0 0 0 0 \
+        "$signal_case_scope"
+      if [ "$signal_case_mutated" -eq 1 ]; then
+        nb_lifecycle_mark_mutation_started
+        sha256sum "$NOBRAND_LIFECYCLE_TX_FILE" | awk '{print $1}' \
+          >"$signal_case_hash_file"
+      fi
       nb_lifecycle_signal_handlers_install
-      : >"$ready_file"
+      : >"$signal_case_ready"
       while true; do sleep 0.05; done
-    ) >"$signal_log" 2>&1
-    signal_rc=$?
+    ) >"$signal_case_log" 2>&1
+    signal_case_rc=$?
     set -e
-    assert_eq "$expected_rc" "$signal_rc" \
-      "$signal interrupts active $operation with the conventional exit status"
-    assert_contains "$(cat "$signal_log")" '生命周期操作被信号中断' \
-      "$signal invokes the production lifecycle interruption handler"
-    nb_lifecycle_tx_valid \
-      || fail "$signal interruption corrupted the $operation lifecycle transaction"
-    assert_eq "$operation" "$(nb_lifecycle_field OPERATION)" \
-      "$signal interruption preserves $operation transaction identity"
-    assert_eq in-progress "$(nb_lifecycle_field STATUS)" \
-      "$signal interruption preserves $operation recovery status"
-    assert_eq prepare "$(nb_lifecycle_field LAST_COMPLETED_PHASE)" \
-      "$signal interruption preserves $operation recovery phase"
-    transaction_hash_before="$(cat "$transaction_hash_file")"
-    assert_eq "$transaction_hash_before" \
-      "$(sha256sum "$NOBRAND_LIFECYCLE_TX_FILE" | awk '{print $1}')" \
-      "$signal interruption preserves exact $operation transaction bytes"
-    case "$operation" in
-      install) expected_state=CURRENT_PARTIAL_INSTALL ;;
-      repair) expected_state=CURRENT_PARTIAL_REPAIR ;;
-      uninstall) expected_state=CURRENT_PARTIAL_UNINSTALL ;;
-    esac
-    assert_state "$expected_state" \
-      "$signal interruption keeps $operation classifiable for recovery"
-    interrupted_txid="$(nb_lifecycle_field TRANSACTION_ID)"
+
+    assert_eq "$signal_case_expected_rc" "$signal_case_rc" \
+      "$signal_case_name interrupts active ${signal_case_operation}:${signal_case_scope} with the conventional status"
+    if [ "$signal_case_mutated" -eq 0 ]; then
+      assert_contains "$(cat "$signal_case_log")" '写入变更前被中断' \
+        "$signal_case_name reports pre-mutation interruption"
+      [ ! -e "$NOBRAND_LIFECYCLE_TX_FILE" ] \
+        || fail "$signal_case_name retained an unmutated ${signal_case_operation}:${signal_case_scope} transaction"
+      assert_state CLEAN \
+        "$signal_case_name pre-mutation interruption leaves no partial state"
+    else
+      assert_contains "$(cat "$signal_case_log")" '生命周期操作被信号中断' \
+        "$signal_case_name reports scoped post-mutation interruption"
+      nb_lifecycle_tx_valid \
+        || fail "$signal_case_name corrupted ${signal_case_operation}:${signal_case_scope} recovery metadata"
+      assert_eq "$signal_case_operation" "$(nb_lifecycle_field OPERATION)" \
+        "$signal_case_name preserves lifecycle operation"
+      assert_eq "$signal_case_scope" "$(nb_lifecycle_scope)" \
+        "$signal_case_name preserves lifecycle scope"
+      assert_eq 1 "$(nb_lifecycle_mutation_started)" \
+        "$signal_case_name preserves mutation marker"
+      assert_eq in-progress "$(nb_lifecycle_field STATUS)" \
+        "$signal_case_name preserves recovery status"
+      assert_eq prepare "$(nb_lifecycle_field LAST_COMPLETED_PHASE)" \
+        "$signal_case_name preserves recovery phase"
+      assert_eq "$(cat "$signal_case_hash_file")" \
+        "$(sha256sum "$NOBRAND_LIFECYCLE_TX_FILE" | awk '{print $1}')" \
+        "$signal_case_name preserves exact scoped transaction bytes"
+      case "$signal_case_operation" in
+        install) signal_case_expected_state=CURRENT_PARTIAL_INSTALL ;;
+        repair) signal_case_expected_state=CURRENT_PARTIAL_REPAIR ;;
+        configure) signal_case_expected_state=CURRENT_PARTIAL_CONFIGURE ;;
+        uninstall) signal_case_expected_state=CURRENT_PARTIAL_UNINSTALL ;;
+      esac
+      assert_state "$signal_case_expected_state" \
+        "$signal_case_name leaves post-mutation work recoverable"
+    fi
 
     NOBRAND_LIFECYCLE_LOCK_HELD=0
     nb_lifecycle_lock_acquire \
-      || fail "$signal interruption did not release the $operation process lock"
-    nb_lifecycle_begin "$operation" prepare
-    recovered_txid="$(nb_lifecycle_field TRANSACTION_ID)"
-    assert_eq "$interrupted_txid" "$recovered_txid" \
-      "$signal recovery resumes the existing $operation transaction"
-    case "$operation" in
-      install|repair)
-        write_schema
-        write_manager "$SCRIPT_VERSION"
-        nb_lifecycle_complete "$operation"
-        expected_state=CURRENT_COMPLETE
-        ;;
-      uninstall)
-        nb_lifecycle_clear
-        expected_state=CLEAN
-        ;;
-    esac
+      || fail "$signal_case_name did not release the child process lock"
     nb_lifecycle_lock_release
-    assert_state "$expected_state" \
-      "$signal-interrupted $operation transaction can converge"
   }
 
-  for lifecycle_signal_operation in install repair uninstall; do
-    run_lifecycle_signal_interruption "$lifecycle_signal_operation" INT 130
-    run_lifecycle_signal_interruption "$lifecycle_signal_operation" TERM 143
-  done
+  run_lifecycle_signal_interruption configure ingress INT 130 0
+  run_lifecycle_signal_interruption install snell INT 130 1
+  run_lifecycle_signal_interruption repair manager TERM 143 1
+  run_lifecycle_signal_interruption uninstall global TERM 143 1
+
+  # Model the menu action subprocess: it inherits the parent's fd 7 and lock
+  # count, then acquires one nested lifecycle depth. Its signal cleanup may
+  # release only down to that inherited floor.
+  reset_fixture
+  NOBRAND_LIFECYCLE_LOCK_HELD=0
+  nb_lifecycle_lock_acquire
+  assert_eq 1 "$NOBRAND_LIFECYCLE_LOCK_HELD" \
+    'menu-child floor fixture starts with one parent lock depth'
+
+  run_menu_child_signal_interruption() {
+    local menu_signal_mutated="$1" menu_signal_scope="$2"
+    local menu_signal_operation="$3" menu_signal_ready menu_signal_log
+    local menu_signal_target menu_signal_attempt menu_signal_rc
+    menu_signal_ready="$fixture/menu-signal-${menu_signal_scope}-${menu_signal_mutated}.ready"
+    menu_signal_log="$fixture/menu-signal-${menu_signal_scope}-${menu_signal_mutated}.log"
+    set +e
+    (
+      trap - EXIT HUP INT TERM ERR
+      # Consumed by the sourced signal handler.
+      # shellcheck disable=SC2034
+      NOBRAND_LIFECYCLE_LOCK_FLOOR="$NOBRAND_LIFECYCLE_LOCK_HELD"
+      nb_lifecycle_lock_acquire
+      nb_lifecycle_begin "$menu_signal_operation" prepare 0 0 0 0 0 0 \
+        "$menu_signal_scope"
+      if [ "$menu_signal_mutated" -eq 1 ]; then
+        nb_lifecycle_mark_mutation_started
+      fi
+      menu_signal_target="$BASHPID"
+      (
+        for ((menu_signal_attempt = 0; menu_signal_attempt < 200; menu_signal_attempt++)); do
+          [ ! -e "$menu_signal_ready" ] || break
+          sleep 0.01
+        done
+        if [ -e "$menu_signal_ready" ]; then
+          kill -INT "$menu_signal_target"
+        else
+          kill -TERM "$menu_signal_target"
+        fi
+      ) &
+      nb_lifecycle_signal_handlers_install
+      : >"$menu_signal_ready"
+      while true; do sleep 0.05; done
+    ) >"$menu_signal_log" 2>&1
+    menu_signal_rc=$?
+    set -e
+    assert_eq 130 "$menu_signal_rc" \
+      "menu-style child ${menu_signal_operation}:${menu_signal_scope} exits on INT"
+  }
+
+  run_menu_child_signal_interruption 0 ingress configure
+  [ ! -e "$NOBRAND_LIFECYCLE_TX_FILE" ] \
+    || fail 'menu-style child retained its pre-mutation transaction'
+  run_menu_child_signal_interruption 1 tuic install
+  nb_lifecycle_tx_valid || fail 'menu-style child corrupted its post-mutation transaction'
+  assert_eq install "$(nb_lifecycle_field OPERATION)" \
+    'menu-style child preserves post-mutation operation'
+  assert_eq tuic "$(nb_lifecycle_scope)" \
+    'menu-style child preserves post-mutation scope'
+  assert_eq 1 "$(nb_lifecycle_mutation_started)" \
+    'menu-style child preserves post-mutation marker'
+  assert_eq 1 "$NOBRAND_LIFECYCLE_LOCK_HELD" \
+    'menu-style child leaves parent lock depth intact'
+
+  set +e
+  (
+    trap - ERR
+    exec 7>&-
+    NOBRAND_LIFECYCLE_LOCK_HELD=0
+    nb_lifecycle_lock_acquire >/dev/null 2>&1
+  )
+  menu_floor_contender_rc=$?
+  set -e
+  [ "$menu_floor_contender_rc" -ne 0 ] \
+    || fail 'menu-style child signal handler unlocked the parent lifecycle guard'
+
+  nb_lifecycle_clear
+  nb_lifecycle_lock_release
+  (
+    trap - ERR
+    exec 7>&-
+    NOBRAND_LIFECYCLE_LOCK_HELD=0
+    nb_lifecycle_lock_acquire >/dev/null 2>&1
+    nb_lifecycle_lock_release
+  ) || fail 'lifecycle contender could not acquire after parent lock release'
   printf 'SIGNAL_INTERRUPTION_RECOVERY=PASS\n'
+  printf 'MENU_CHILD_LOCK_FLOOR=PASS\n'
 else
   printf '[SKIP] flock concurrency and signal recovery checks (flock unavailable)\n'
 fi
@@ -2607,12 +5457,18 @@ grep -Fq '"$NOBRAND_REALM_BIN" -c "$config" 7>&- >/dev/null 2>&1 &' \
   "$TEST_ROOT/src/62-forward.sh" \
   || fail 'Realm probe daemon can inherit the lifecycle lock'
 
-standard_impl_checkpoint_count="$(grep -F -c \
-  'nb_lifecycle_checkpoint "$NOBRAND_LIFECYCLE_OPERATION"' \
-  "$TEST_ROOT/src/80-lifecycle.sh")"
-standard_final_checkpoint_count="$(grep -F -c \
-  'nb_lifecycle_checkpoint "$operation" ready-to-validate' \
-  "$TEST_ROOT/src/80-lifecycle.sh")"
+standard_impl_checkpoint_count="$(awk '
+  /^do_install_impl\(\)/ { in_standard_impl=1 }
+  in_standard_impl && /^}/ { in_standard_impl=0 }
+  in_standard_impl && /nb_lifecycle_checkpoint "\$NOBRAND_LIFECYCLE_OPERATION"/ { count++ }
+  END { print count + 0 }
+' "$TEST_ROOT/src/80-lifecycle.sh")"
+standard_final_checkpoint_count="$(awk '
+  /^do_install\(\)/ { in_standard_install=1 }
+  in_standard_install && /^}/ { in_standard_install=0 }
+  in_standard_install && /nb_lifecycle_checkpoint "\$operation" ready-to-validate/ { count++ }
+  END { print count + 0 }
+' "$TEST_ROOT/src/80-lifecycle.sh")"
 standard_source_checkpoint_count=$((
   standard_impl_checkpoint_count + standard_final_checkpoint_count
 ))

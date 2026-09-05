@@ -400,43 +400,67 @@ tuic_install_transaction_rollback() {
 
 install_tuic() {
   local collect_rc=0 id="" user_id uuid password users cert key config state config_tmp="" state_tmp=""
-  local mode runtime_version runtime_snapshot template_preexisting=0
+  local mode runtime_version runtime_snapshot template_preexisting=0 rollback_needed=1
   require_root
   require_linux
   nobrand_prepare_common
   tuic_collect_install_requests || collect_rc=$?
   [ "$collect_rc" -eq 0 ] || { [ "$collect_rc" -eq 2 ] && return 0; return "$collect_rc"; }
   runtime_snapshot="$(mktemp_dir)" || return 1
-  tuic_snapshot_runtime_files "$runtime_snapshot" || return 1
+  tuic_snapshot_runtime_files "$runtime_snapshot" \
+    || { rm -rf -- "$runtime_snapshot"; return 1; }
   [ ! -e "$NOBRAND_TUIC_SYSTEMD_TEMPLATE" ] || template_preexisting=1
   tuic_prepare_runtime_for_install "$TUIC_CHANNEL" "$TUIC_VERSION" \
     || { rm -rf -- "$runtime_snapshot"; die '官方 sing-box Runtime 准备失败'; }
+  if [ "${NOBRAND_LIFECYCLE_ACTIVE:-0}" -eq 1 ]; then
+    rollback_needed="$(nb_lifecycle_mutation_started)" || {
+      rm -rf -- "$runtime_snapshot"
+      return 1
+    }
+  fi
   runtime_version="$(tuic_runtime_version)" || {
-    tuic_restore_runtime_files "$runtime_snapshot" || true
+    [ "$rollback_needed" -eq 0 ] || tuic_restore_runtime_files "$runtime_snapshot" || true
     rm -rf -- "$runtime_snapshot"
     return 1
   }
   id="$(tuic_generate_instance_id)"
   user_id="$(tuic_generate_user_id)"
   uuid="$(tuic_generate_uuid)" || {
-    tuic_install_transaction_rollback "$id" "$PORT" "$runtime_snapshot" "$template_preexisting"
+    [ "$rollback_needed" -eq 0 ] \
+      || tuic_install_transaction_rollback "$id" "$PORT" "$runtime_snapshot" "$template_preexisting"
     rm -rf -- "$runtime_snapshot"
     return 1
   }
   password="$(tuic_generate_password)" || {
-    tuic_install_transaction_rollback "$id" "$PORT" "$runtime_snapshot" "$template_preexisting"
+    [ "$rollback_needed" -eq 0 ] \
+      || tuic_install_transaction_rollback "$id" "$PORT" "$runtime_snapshot" "$template_preexisting"
     rm -rf -- "$runtime_snapshot"
     return 1
   }
   users="[$(tuic_user_json "$user_id" "$TUIC_USER" "$uuid" "$password")]"
   cert="$(tuic_cert_file "$id")" key="$(tuic_key_file "$id")"
   config="$(tuic_config_file "$id")" state="$(tuic_state_file "$id")"
+  admin_lock_acquire || {
+    [ "$rollback_needed" -eq 0 ] \
+      || tuic_install_transaction_rollback "$id" "$PORT" "$runtime_snapshot" "$template_preexisting"
+    rm -rf -- "$runtime_snapshot"
+    return 1
+  }
+  nb_lifecycle_mark_protocol_mutation_started tuic || {
+    [ "$rollback_needed" -eq 0 ] \
+      || tuic_install_transaction_rollback "$id" "$PORT" "$runtime_snapshot" "$template_preexisting"
+    admin_lock_release
+    rm -rf -- "$runtime_snapshot"
+    return 1
+  }
+  rollback_needed=1
   mkdir -p "$(dirname "$state")" "$(dirname "$config")" \
     && chmod 0700 "$(dirname "$state")" "$(dirname "$config")" \
     && tuic_generate_certificate "$cert" "$key" "$TUIC_SNI" \
     && config_tmp="$(mktemp_file .tuic-config)" \
     && state_tmp="$(mktemp_file .tuic-state)" || {
       tuic_install_transaction_rollback "$id" "$PORT" "$runtime_snapshot" "$template_preexisting"
+      admin_lock_release
       rm -f "$config_tmp" "$state_tmp"
       rm -rf -- "$runtime_snapshot"
       return 1
@@ -445,6 +469,7 @@ install_tuic() {
     && tuic_validate_config "$config_tmp" \
     || {
       tuic_install_transaction_rollback "$id" "$PORT" "$runtime_snapshot" "$template_preexisting"
+      admin_lock_release
       rm -f "$config_tmp" "$state_tmp"
       rm -rf -- "$runtime_snapshot"
       return 1
@@ -455,16 +480,11 @@ install_tuic() {
     "$cert" "$key" "$users" "" "$INGRESS_PROFILE_ID" \
     && nb_ingress_stamp_state_file "$state_tmp" "$INGRESS_PROFILE_ID" native-bind || {
       tuic_install_transaction_rollback "$id" "$PORT" "$runtime_snapshot" "$template_preexisting"
+      admin_lock_release
       rm -f "$config_tmp" "$state_tmp"
       rm -rf -- "$runtime_snapshot"
       return 1
     }
-  admin_lock_acquire || {
-    tuic_install_transaction_rollback "$id" "$PORT" "$runtime_snapshot" "$template_preexisting"
-    rm -f "$config_tmp" "$state_tmp"
-    rm -rf -- "$runtime_snapshot"
-    return 1
-  }
   if ! nb_port_available_for_profile "$PORT" UDP "$INGRESS_PROFILE_ID" \
      || ! nb_atomic_install_file "$config_tmp" "$config" 0600 \
      || ! nb_atomic_install_file "$state_tmp" "$state" 0600 \
@@ -640,8 +660,10 @@ tuic_running() {
 }
 
 tuic_doctor_one() {
-  local id="$1" failed=0 port cert key runtime expected
+  local id="$1" failed=0 port cert key runtime expected enabled
   port="$(tuic_state_field "$id" listen_port)"
+  enabled="$(tuic_state_field "$id" enabled 2>/dev/null || true)"
+  case "$enabled" in true|false) ;; *) return 1 ;; esac
   cert="$(jq -r .tls.certificate_path "$(tuic_state_file "$id")")"
   key="$(jq -r .tls.key_path "$(tuic_state_file "$id")")"
   runtime="$(tuic_runtime_version 2>/dev/null || true)"
@@ -651,11 +673,18 @@ tuic_doctor_one() {
   tuic_config_matches_state "$id" && tuic_validate_config "$(tuic_config_file "$id")" \
     && nb_doctor_line PASS "TUIC v5 配置有效: $(tuic_state_field "$id" name)" \
     || { nb_doctor_line FAIL "TUIC 配置无效: $(tuic_state_field "$id" name)"; failed=1; }
-  tuic_service_active "$id" && nb_doctor_line PASS '服务运行中' \
-    || { nb_doctor_line FAIL '服务未运行'; failed=1; }
-  tuic_running "$id" \
-    && nb_doctor_line PASS "同进程 UDP/${port} 监听正常" \
-    || { nb_doctor_line FAIL "同进程 UDP/${port} 监听异常"; failed=1; }
+  if [ "$enabled" = true ]; then
+    tuic_service_active "$id" && nb_doctor_line PASS '服务运行中' \
+      || { nb_doctor_line FAIL '服务未运行'; failed=1; }
+    tuic_running "$id" \
+      && nb_doctor_line PASS "同进程 UDP/${port} 监听正常" \
+      || { nb_doctor_line FAIL "同进程 UDP/${port} 监听异常"; failed=1; }
+  elif tuic_service_active "$id" || nb_port_is_listening UDP "$port"; then
+    nb_doctor_line FAIL "服务标记为已停止，但仍有服务或监听: UDP/${port}"
+    failed=1
+  else
+    nb_doctor_line PASS '服务按状态保持停止，且无残留监听'
+  fi
   nb_firewall_binding_owned UDP "$port" && nb_doctor_line PASS "防火墙规则正常: UDP/${port}" \
     || { nb_doctor_line FAIL "防火墙规则异常: UDP/${port}"; failed=1; }
   [ -s "$cert" ] && openssl x509 -in "$cert" -checkend 2592000 -noout >/dev/null 2>&1 \
@@ -834,8 +863,12 @@ tuic_restore_runtime() {
   if [ "$current" != "$version" ] || ! tuic_runtime_metadata_valid "$version" ""; then
     tuic_install_runtime pinned "$version" || return 1
     metadata_tmp="$(mktemp_file .tuic-runtime-meta)" || return 1
-    jq --arg channel "$channel" '.channel=$channel' "$NOBRAND_SING_BOX_RUNTIME_META" >"$metadata_tmp" \
-      && nb_atomic_install_file "$metadata_tmp" "$NOBRAND_SING_BOX_RUNTIME_META" 0600 || return 1
+    if ! jq --arg channel "$channel" '.channel=$channel' \
+        "$NOBRAND_SING_BOX_RUNTIME_META" >"$metadata_tmp" \
+       || ! nb_atomic_install_file "$metadata_tmp" "$NOBRAND_SING_BOX_RUNTIME_META" 0600; then
+      rm -f "$metadata_tmp"
+      return 1
+    fi
     rm -f "$metadata_tmp"
   fi
   tuic_install_service_runtime
@@ -844,7 +877,13 @@ tuic_restore_runtime() {
 nobrand_run_tuic_action() {
   local id
   case "${TUIC_ACTION:-menu}" in
-    install) install_tuic ;;
+    install)
+      if [ "${NOBRAND_MANAGER_SESSION_ACTIVE:-0}" -eq 1 ]; then
+        nb_lifecycle_run_protocol_install tuic install_tuic
+      else
+        install_tuic
+      fi
+      ;;
     start|stop|restart) tuic_service_command "$TUIC_ACTION" ;;
     status) tuic_status ;;
     doctor) tuic_doctor_all ;;

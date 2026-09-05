@@ -31,6 +31,35 @@ nobrand_recovery_action_allowed() {
       return 0
       ;;
   esac
+  if [ "$state" = CURRENT_PARTIAL_INSTALL ] \
+     && [ -n "${NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE:-}" ] \
+     && nb_lifecycle_tx_valid \
+     && [ "$(nb_lifecycle_field STATUS)" = in-progress ] \
+     && [ "$(nb_lifecycle_scope)" = "$NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE" ]; then
+    if [ "$NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE" = forward ]; then
+      [ "$(nb_lifecycle_field FORMAT)" = nobrand-lifecycle-v2 ] \
+        && [ "$(nb_lifecycle_mutation_started)" = 0 ] || return 1
+    fi
+    return 0
+  fi
+  if [ "$state:$action" = CURRENT_PARTIAL_REPAIR:reconfigure ] \
+     && [ "${NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE:-}" = mieru ] \
+     && nb_lifecycle_tx_valid \
+     && [ "$(nb_lifecycle_field STATUS)" = in-progress ] \
+     && [ "$(nb_lifecycle_field OPERATION)" = repair ] \
+     && [ "$(nb_lifecycle_scope)" = mieru ]; then
+    return 0
+  fi
+  if [ "$state:$action" = CURRENT_PARTIAL_CONFIGURE:nobrand-ingress ] \
+     && [ "${NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE:-}" = ingress ] \
+     && nb_lifecycle_tx_valid \
+     && [ "$(nb_lifecycle_field FORMAT)" = nobrand-lifecycle-v2 ] \
+     && [ "$(nb_lifecycle_field STATUS)" = in-progress ] \
+     && [ "$(nb_lifecycle_field OPERATION)" = configure ] \
+     && [ "$(nb_lifecycle_scope)" = ingress ] \
+     && [ "$(nb_lifecycle_mutation_started)" = 0 ]; then
+    return 0
+  fi
   return 1
 }
 
@@ -50,10 +79,130 @@ nobrand_recovery_action_refused() {
   esac
 }
 
+nobrand_recovery_scope() {
+  local state="${1:-$NOBRAND_INSTALL_STATE}"
+  if nb_lifecycle_tx_valid \
+     && [ "$(nb_lifecycle_field STATUS)" = in-progress ]; then
+    nb_lifecycle_scope
+    return $?
+  fi
+  case "$state" in
+    CURRENT_PARTIAL_INSTALL) printf 'manager' ;;
+    CURRENT_PARTIAL_REPAIR)
+      if declare -F nobrand_backup_restore_transaction_present >/dev/null 2>&1 \
+         && nobrand_backup_restore_transaction_present; then
+        printf 'global'
+      else
+        printf 'manager'
+      fi
+      ;;
+    CURRENT_PARTIAL_UNINSTALL) printf 'global' ;;
+    *) return 1 ;;
+  esac
+}
+
+nobrand_set_scoped_recovery_action() {
+  local state="${1:-$NOBRAND_INSTALL_STATE}" scope format operation phase mutation_started
+  scope="$(nobrand_recovery_scope "$state")" || return 1
+  NOBRAND_RECOVERY_EXPECTED_SCOPE="$scope"
+  NOBRAND_RECOVERY_EXPECTED_STATE="$state"
+  NOBRAND_RECOVERY_EXPECTED_TX_PRESENT=0
+  NOBRAND_RECOVERY_EXPECTED_TX_STATUS=""
+  NOBRAND_RECOVERY_EXPECTED_TX_ID=""
+  NOBRAND_RECOVERY_EXPECTED_TX_RECORD=""
+  if [ "$scope" = manager ] && nb_lifecycle_tx_valid; then
+    NOBRAND_RECOVERY_EXPECTED_TX_PRESENT=1
+    NOBRAND_RECOVERY_EXPECTED_TX_STATUS="$(nb_lifecycle_field STATUS)"
+    NOBRAND_RECOVERY_EXPECTED_TX_ID="$(nb_lifecycle_field TRANSACTION_ID)"
+    NOBRAND_RECOVERY_EXPECTED_TX_RECORD="$(<"$NOBRAND_LIFECYCLE_TX_FILE")"
+  fi
+  case "$scope" in
+    manager) ACTION=nobrand-manager-bootstrap ;;
+    ingress) ACTION=nobrand-ingress-recover ;;
+    mieru)
+      format="$(nb_lifecycle_field FORMAT 2>/dev/null || true)"
+      operation="$(nb_lifecycle_field OPERATION 2>/dev/null || true)"
+      phase="$(nb_lifecycle_field LAST_COMPLETED_PHASE 2>/dev/null || true)"
+      mutation_started="$(nb_lifecycle_mutation_started 2>/dev/null || true)"
+      if [ "$format" = nobrand-lifecycle-v2 ] && [ "$mutation_started" = 0 ]; then
+        # Nothing changed, so the install dispatcher may safely clear this
+        # record without needing to infer whether the lost request was install
+        # or reconfigure.
+        ACTION=install
+      elif [ "$operation" = repair ]; then
+        case "$phase" in
+          runtime-ready|state-committed|ready-to-validate)
+            # These phases belong to repair-install or are validation-only; the
+            # install dispatcher will never recollect when state is committed.
+            ACTION=install
+            ;;
+          *)
+            warn "$(t \
+              'Mieru 修复记录无法区分重装与重新配置，且未保存原参数。请显式执行 nobrand mieru install 或 nobrand mieru reconfigure。' \
+              'The Mieru repair record cannot distinguish reinstall from reconfigure and did not store the original request. Explicitly run nobrand mieru install or nobrand mieru reconfigure.')"
+            return 1
+            ;;
+        esac
+      elif [ "$operation" = install ]; then
+        ACTION=install
+      else
+        [ "$format" != nobrand-lifecycle-v1 ] || ACTION=install
+        [ -n "${ACTION:-}" ] || return 1
+      fi
+      ;;
+    snell) ACTION=nobrand-snell; SNELL_ACTION=install ;;
+    hy2) ACTION=nobrand-hy2; HY2_ACTION=install ;;
+    tuic) ACTION=nobrand-tuic; TUIC_ACTION=install ;;
+    vless-reality) ACTION=nobrand-vless-reality; VLESS_REALITY_ACTION=install ;;
+    vless-sudoku) ACTION=nobrand-vless-sudoku; VLESS_SUDOKU_ACTION=install ;;
+    ssh-tunnel) ACTION=nobrand-ssh-tunnel; SSH_TUNNEL_ACTION=install ;;
+    forward)
+      # Forward add parameters are intentionally not copied into lifecycle
+      # metadata. Its dedicated route therefore validates committed state or
+      # fails closed; it never guesses, recollects, or replays an incomplete add.
+      ACTION=nobrand-forward
+      FORWARD_ACTION=recover-add
+      ;;
+    global) ACTION=install ;;
+    *) return 1 ;;
+  esac
+}
+
+nobrand_mark_explicit_protocol_retry() {
+  [ -z "${NOBRAND_RECOVERY_EXPECTED_SCOPE:-}" ] || return 0
+  case "${ACTION:-}" in
+    install) NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE=mieru ;;
+    reconfigure) NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE=mieru ;;
+    nobrand-snell) [ "${SNELL_ACTION:-}" = install ] && NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE=snell ;;
+    nobrand-hy2) [ "${HY2_ACTION:-}" = install ] && NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE=hy2 ;;
+    nobrand-tuic) [ "${TUIC_ACTION:-}" = install ] && NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE=tuic ;;
+    nobrand-vless-reality)
+      [ "${VLESS_REALITY_ACTION:-}" = install ] && NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE=vless-reality
+      ;;
+    nobrand-vless-sudoku)
+      [ "${VLESS_SUDOKU_ACTION:-}" = install ] && NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE=vless-sudoku
+      ;;
+    nobrand-ssh-tunnel)
+      [ "${SSH_TUNNEL_ACTION:-}" = install ] && NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE=ssh-tunnel
+      ;;
+    nobrand-forward)
+      [ "${FORWARD_ACTION:-}" = add ] && NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE=forward
+      ;;
+    nobrand-ingress)
+      case "${INGRESS_ACTION:-}" in
+        add|modify|delete|set-default|unset-default|apply)
+          NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE=ingress
+          ;;
+      esac
+      ;;
+  esac
+  return 0
+}
+
 nb_select_partial_recovery_action() {
   local state="${1:-$NOBRAND_INSTALL_STATE}" choice=""
   case "$state" in
-    CURRENT_PARTIAL_INSTALL|CURRENT_PARTIAL_REPAIR)
+    CURRENT_PARTIAL_INSTALL|CURRENT_PARTIAL_REPAIR|CURRENT_PARTIAL_CONFIGURE)
       t '检测到未完成的安装或修复。请选择恢复操作：' \
         'An incomplete install or repair was detected. Choose a recovery action:'
       t '  1) 继续安全修复（默认）' '  1) Continue safe repair (default)'
@@ -68,7 +217,7 @@ nb_select_partial_recovery_action() {
         }
       fi
       case "${choice:-1}" in
-        1) ACTION=install ;;
+        1) nobrand_set_scoped_recovery_action "$state" ;;
         0) return 2 ;;
         *) warn "$(t '无效恢复选择' 'Invalid recovery choice')"; return 1 ;;
       esac
@@ -91,7 +240,7 @@ nb_select_partial_recovery_action() {
         }
       fi
       case "${choice:-1}" in
-        1) ACTION=install ;;
+        1) nobrand_set_scoped_recovery_action "$state" ;;
         2)
           t '[提示] 将继续清理由 NoBrand 管理的剩余资源。' \
             '[Info] Cleanup of remaining NoBrand-managed resources will continue.'
@@ -106,27 +255,32 @@ nb_select_partial_recovery_action() {
 
 main() {
   local main_lifecycle_lock=0 main_rc=0 recovery_rc=0 dispatch_rc=0
+  local NOBRAND_MANAGER_SESSION_ACTIVE=1
+  local NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE=""
   nb_lifecycle_signal_handlers_install
+  nobrand_mark_explicit_protocol_retry
   # Help/version are intentionally state-independent. Every other root action
   # detects legacy/unknown state before it can read or mutate protocol data.
   case "${ACTION:-menu}" in
     nobrand-version) nobrand_version; return 0 ;;
     nobrand-help) nobrand_usage; return 0 ;;
   esac
-  # Protocol submenus dispatch their mutations directly, so the only common
-  # exclusion boundary is the lifetime of a real root manager process. An
-  # interactive root menu deliberately retains fd 7 while it is open; nested
-  # lifecycle actions use the lock's reference count and cannot drop it early.
-  # No transaction is created here, and dry-run/non-root read paths stay free
-  # of lock-file writes.
+  # Explicit protocol commands may dispatch mutations directly, so retain the
+  # process lock across their common state boundary and dispatcher. A no-arg
+  # manager launch is different: bootstrap must install dependencies (including
+  # flock) before acquiring its transaction lock. The full menu takes the outer
+  # guard only after that bootstrap succeeds.
   if [ "${DRY_RUN:-0}" -ne 1 ] \
+     && [ -n "${ACTION:-}" ] \
+     && [ "${ACTION:-}" != nobrand-manager-upgrade ] \
      && [ "$(id -u 2>/dev/null || echo 1)" -eq 0 ]; then
     nb_lifecycle_lock_acquire || return 1
     main_lifecycle_lock=1
   fi
   nb_validate_authoritative_state_boundary
   case "$NOBRAND_INSTALL_STATE" in
-    CURRENT_PARTIAL_INSTALL|CURRENT_PARTIAL_REPAIR|CURRENT_PARTIAL_UNINSTALL|LEGACY_SUPPORTED)
+    CURRENT_PARTIAL_INSTALL|CURRENT_PARTIAL_REPAIR|CURRENT_PARTIAL_CONFIGURE|\
+      CURRENT_PARTIAL_UNINSTALL|LEGACY_SUPPORTED)
       nb_install_state_notice "$NOBRAND_INSTALL_STATE"
       ;;
     CURRENT_COMPLETE)
@@ -148,7 +302,8 @@ main() {
     fi
   fi
   case "$NOBRAND_INSTALL_STATE" in
-    CURRENT_PARTIAL_INSTALL|CURRENT_PARTIAL_REPAIR|CURRENT_PARTIAL_UNINSTALL|LEGACY_SUPPORTED)
+    CURRENT_PARTIAL_INSTALL|CURRENT_PARTIAL_REPAIR|CURRENT_PARTIAL_CONFIGURE|\
+      CURRENT_PARTIAL_UNINSTALL|LEGACY_SUPPORTED)
       if ! nobrand_recovery_action_allowed "$NOBRAND_INSTALL_STATE" "$ACTION"; then
         nobrand_recovery_action_refused "$NOBRAND_INSTALL_STATE"
         [ "$main_lifecycle_lock" -eq 0 ] || nb_lifecycle_lock_release
@@ -163,7 +318,8 @@ main() {
   fi
   if [ -z "$ACTION" ]; then
     case "$NOBRAND_INSTALL_STATE" in
-      CURRENT_PARTIAL_INSTALL|CURRENT_PARTIAL_REPAIR|CURRENT_PARTIAL_UNINSTALL)
+      CURRENT_PARTIAL_INSTALL|CURRENT_PARTIAL_REPAIR|CURRENT_PARTIAL_CONFIGURE|\
+        CURRENT_PARTIAL_UNINSTALL)
         nb_select_partial_recovery_action "$NOBRAND_INSTALL_STATE" || {
           recovery_rc=$?
           [ "$main_lifecycle_lock" -eq 0 ] || nb_lifecycle_lock_release
@@ -173,11 +329,52 @@ main() {
         ;;
     esac
   fi
-  if [ "${DRY_RUN:-0}" -ne 1 ] \
+  if [ "$main_lifecycle_lock" -eq 1 ] \
+     && [ "${DRY_RUN:-0}" -ne 1 ] \
      && [ "$(id -u 2>/dev/null || echo 1)" -eq 0 ]; then
     ensure_manager_state_layout 0
   fi
+  case "$ACTION" in
+    nobrand-manager-bootstrap)
+      nobrand_manager_bootstrap || {
+        main_rc=$?
+        [ "$main_lifecycle_lock" -eq 0 ] || nb_lifecycle_lock_release
+        return "$main_rc"
+      }
+      ACTION=""
+      NOBRAND_RECOVERY_EXPECTED_SCOPE=""
+      ;;
+    nobrand-ingress-recover)
+      nobrand_recover_ingress_scope || {
+        main_rc=$?
+        [ "$main_lifecycle_lock" -eq 0 ] || nb_lifecycle_lock_release
+        return "$main_rc"
+      }
+      ACTION=""
+      NOBRAND_RECOVERY_EXPECTED_SCOPE=""
+      ;;
+  esac
   if [ -z "$ACTION" ]; then
+    nobrand_manager_bootstrap || {
+      main_rc=$?
+      [ "$main_lifecycle_lock" -eq 0 ] || nb_lifecycle_lock_release
+      return "$main_rc"
+    }
+    if [ "$main_lifecycle_lock" -eq 0 ] \
+       && [ "${DRY_RUN:-0}" -ne 1 ] \
+       && [ "$(id -u 2>/dev/null || echo 1)" -eq 0 ]; then
+      nb_lifecycle_lock_acquire || return 1
+      main_lifecycle_lock=1
+    fi
+    NOBRAND_INSTALL_STATE="$(nb_classify_installation_state)" || {
+      [ "$main_lifecycle_lock" -eq 0 ] || nb_lifecycle_lock_release
+      return 1
+    }
+    [ "$NOBRAND_INSTALL_STATE" = CURRENT_COMPLETE ] || {
+      nb_fail_ambiguous_state
+      [ "$main_lifecycle_lock" -eq 0 ] || nb_lifecycle_lock_release
+      return 1
+    }
     nobrand_menu_loop
     main_rc=$?
     [ "$main_lifecycle_lock" -eq 0 ] || nb_lifecycle_lock_release

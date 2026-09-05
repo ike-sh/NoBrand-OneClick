@@ -17,7 +17,9 @@ for source_file in src/*.sh scripts/*.sh tests/*.sh install-nobrand.sh dist/inst
 done
 if command -v shellcheck >/dev/null 2>&1; then
   shellcheck -S warning -x scripts/shellcheck-src.sh
-  shellcheck -S warning install-nobrand.sh dist/install-nobrand.sh scripts/*.sh tests/*.sh
+  for shellcheck_file in install-nobrand.sh dist/install-nobrand.sh scripts/*.sh tests/*.sh; do
+    shellcheck -S warning "$shellcheck_file"
+  done
 fi
 bash scripts/build.sh --check
 
@@ -29,6 +31,7 @@ unit_tests=(
   tests/test_schema_v3.sh
   tests/test_common_port.sh
   tests/test_ingress_profiles.sh
+  tests/test_ingress_interactive.sh
   tests/test_ingress_enforcement.sh
   tests/test_ingress_enforcement_transaction.sh
   tests/test_forward.sh

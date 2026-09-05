@@ -7,10 +7,15 @@ trap 'rm -rf -- "$fixture"' EXIT
 export NOBRAND_STATE_DIR="$fixture/nobrand-oneclick/state"
 export NOBRAND_CONFIG_DIR="$fixture/nobrand-oneclick/config"
 export NOBRAND_LIB_DIR="$fixture/nobrand-oneclick/lib"
+export NOBRAND_LIFECYCLE_DIR="$fixture/nobrand-oneclick-lifecycle"
+export NOBRAND_LIFECYCLE_TX_FILE="$NOBRAND_LIFECYCLE_DIR/transaction.env"
+export NOBRAND_LIFECYCLE_LOCK_FILE="$fixture/run/nobrand-oneclick/lifecycle.lock"
 export NOBRAND_INSTALL_SCRIPT_PATH="$fixture/commands/install-nobrand"
 export NOBRAND_COMMAND_PATH="$fixture/commands/nobrand"
 export NOBRAND_SHORT_COMMAND_PATH="$fixture/commands/nb"
 export NOBRAND_LEGACY_MIERU_STATE_DIR="$fixture/mita-oneclick"
+mkdir -p "$(dirname "$NOBRAND_LIFECYCLE_LOCK_FILE")"
+chmod 0700 "$(dirname "$NOBRAND_LIFECYCLE_LOCK_FILE")"
 source_installer
 
 nb_init_state_layout
@@ -47,8 +52,8 @@ legacy="$NOBRAND_LEGACY_MIERU_STATE_DIR"
 mkdir -p "$legacy"
 printf 'do-not-read-or-change\n' >"$legacy/users.json"
 legacy_hash="$(sha256sum "$legacy/users.json")"
-NOBRAND_LEGACY_MIERU_STATE_DIR="$legacy" bash "$TEST_ROOT/install-nobrand.sh" --version   | grep -qx 'NoBrand-OneClick 3.2.1' || fail 'version must bypass legacy state'
-NOBRAND_LEGACY_MIERU_STATE_DIR="$legacy" bash "$TEST_ROOT/install-nobrand.sh" --help   | grep -q 'NoBrand-OneClick 3.2.1' || fail 'help must bypass legacy state'
+NOBRAND_LEGACY_MIERU_STATE_DIR="$legacy" bash "$TEST_ROOT/install-nobrand.sh" --version   | grep -qx 'NoBrand-OneClick 3.2.2' || fail 'version must bypass legacy state'
+NOBRAND_LEGACY_MIERU_STATE_DIR="$legacy" bash "$TEST_ROOT/install-nobrand.sh" --help   | grep -q 'NoBrand-OneClick 3.2.2' || fail 'help must bypass legacy state'
 if NOBRAND_LEGACY_MIERU_STATE_DIR="$legacy"    NOBRAND_STATE_DIR="$fixture/unused-state"    bash "$TEST_ROOT/install-nobrand.sh" status >/dev/null 2>&1; then
   fail 'stateful action must fail closed when a legacy Mieru root exists'
 fi

@@ -5,7 +5,7 @@
 
 NoBrand-OneClick 是一个面向 Linux 服务器的多协议代理、隧道与网络入口管理工具。它通过统一的 `nobrand` 管理界面部署和维护 Mieru、Snell、Hysteria2、TUIC、VLESS 与 SSH Tunnel，并提供 Multi-Ingress、Strict Ingress、Port Forward、备份与恢复等能力。
 
-当前稳定版本：[v3.2.1](https://github.com/ike-sh/NoBrand-OneClick/releases/tag/v3.2.1)
+当前稳定版本：[v3.2.2](https://github.com/ike-sh/NoBrand-OneClick/releases/tag/v3.2.2)
 
 正式管理命令：`nobrand`；短别名：`nb`
 
@@ -44,13 +44,15 @@ curl -fsSLO https://github.com/ike-sh/NoBrand-OneClick/releases/latest/download/
 sudo bash install-nobrand.sh
 ```
 
-安装器会打开统一交互菜单。完成管理器安装后，公开命令位于：
+安装器会先原子安装并验证当前管理器及 `nobrand`/`nb` 命令，再打开统一交互菜单。公开命令位于：
 
 ```text
 /usr/local/bin/install-nobrand
 /usr/local/bin/nobrand
 /usr/local/bin/nb
 ```
+
+NoBrand 支持仅安装管理器而暂不安装任何协议；此时仍是完整、可管理的状态，可以直接配置 Ingress、查看状态或退出，之后再按需添加协议。
 
 Alpine Linux 默认可能没有 Bash；请先安装 `bash` 与 `curl`，然后以 root 身份执行 `bash install-nobrand.sh`，不使用 `sudo`。
 
