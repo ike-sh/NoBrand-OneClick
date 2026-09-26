@@ -39,6 +39,17 @@ parse_reality() {
       "$VLESS_REALITY_TARGET" "$VLESS_REALITY_TARGET_PORT" "$INGRESS_PROFILE"
   ' test "$TEST_ROOT/install-nobrand.sh" "$@"
 }
+parse_mieru_user_add() {
+  bash -c '
+    set -euo pipefail
+    MITA_SOURCE_ONLY=1
+    installer="$1"
+    shift
+    source "$installer"
+    printf "%s|%s|%s|%s|%s|%s\n" "$ACTION" "$USERNAME" \
+      "$ADVERTISE_HOST" "$ADVERTISE_PORT" "$ADVERTISE_CLI" "$ADVERTISE_AUTO_REQUESTED"
+  ' test "$TEST_ROOT/install-nobrand.sh" mieru user-add "$@"
+}
 
 assert_cli_error_text() {
   local expected="$1" forbidden="$2" output=""
@@ -60,6 +71,14 @@ assert_contains "$(parse install-nobrand.sh uninstall -y)" 'nobrand-uninstall|' 
 assert_contains "$(parse install-nobrand.sh manager upgrade)" 'nobrand-manager-upgrade|' 'NoBrand manager-only upgrade routing'
 assert_contains "$(parse install-nobrand.sh manager install)" 'nobrand-manager-upgrade|' 'NoBrand manager-only install routing'
 assert_contains "$(parse install-nobrand.sh mieru users)" 'user-list|' 'NoBrand Mieru delegation'
+assert_eq 'user-add|bob|203.0.113.10|443|1|0' \
+  "$(parse_mieru_user_add --user bob --advertise-host 203.0.113.10 --advertise-port 443)" \
+  'Mieru user-add custom Display Endpoint CLI parsing'
+assert_eq 'user-add|bob|||0|0' \
+  "$(parse_mieru_user_add --user bob)" 'Mieru user-add default CLI parsing'
+assert_eq 'user-add|bob|edge.example.com||1|0' \
+  "$(parse_mieru_user_add --user bob --advertise-host edge.example.com -y)" \
+  'Mieru user-add host-only non-interactive CLI parsing'
 snell="$(parse install-nobrand.sh snell install --name alice --version 5 --port 3611 --advertise-auto -y)"
 assert_eq 'nobrand-snell|install|5|alice|||1|1||0|||||' "$snell" 'Snell CLI parser default QUIC'
 snell_quic="$(parse install-nobrand.sh snell install --name alice --version 5 --port 3611 --quic on --advertise-auto -y)"
@@ -167,20 +186,20 @@ if parse install-nobrand.sh manager upgrade extra >/dev/null 2>&1; then
 fi
 
 version="$(bash "$TEST_ROOT/install-nobrand.sh" --version)"
-assert_eq $'NoBrand-OneClick 3.2.2\n作者: ike' "$version" 'NoBrand Chinese-first version output'
+assert_eq $'NoBrand-OneClick 3.2.3\n作者: ike' "$version" 'NoBrand Chinese-first version output'
 english_version="$(bash -c '
   installer="$1"
   set --
   MITA_SOURCE_ONLY=1 source "$installer"
   LANG_ZH=0 nobrand_version
 ' test "$TEST_ROOT/install-nobrand.sh")"
-assert_eq $'NoBrand-OneClick 3.2.2\nAuthor: ike' "$english_version" \
+assert_eq $'NoBrand-OneClick 3.2.3\nAuthor: ike' "$english_version" \
   'NoBrand English version output'
 mieru_version="$(bash "$TEST_ROOT/install-nobrand.sh" mieru --version)"
-assert_eq $'NoBrand-OneClick Mieru 3.2.2\n作者: ike' "$mieru_version" \
+assert_eq $'NoBrand-OneClick Mieru 3.2.3\n作者: ike' "$mieru_version" \
   'Mieru Chinese-first version output'
 mieru_english_version="$(bash "$TEST_ROOT/install-nobrand.sh" mieru --lang en --version)"
-assert_eq $'NoBrand-OneClick Mieru 3.2.2\nAuthor: ike' "$mieru_english_version" \
+assert_eq $'NoBrand-OneClick Mieru 3.2.3\nAuthor: ike' "$mieru_english_version" \
   'Mieru English version output'
 cp "$TEST_ROOT/install-nobrand.sh" "$cli_fixture/nb"
 short_version="$(bash "$cli_fixture/nb" --version)"

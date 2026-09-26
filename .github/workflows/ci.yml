@@ -17,20 +17,24 @@ jobs:
         image: [debian:12, ubuntu:24.04, alpine:3.20]
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Build and unit tests
         run: |
           if [[ "${{ matrix.image }}" == alpine:* ]]; then
-            setup='apk add --no-cache bash curl jq unzip openssl python3 iproute2 util-linux tar coreutils shellcheck'
+            setup='apk add --no-cache bash curl git jq unzip openssl python3 iproute2 util-linux tar coreutils shellcheck'
           else
-            setup='apt-get update && apt-get install -y bash curl ca-certificates jq unzip openssl python3 iproute2 util-linux tar coreutils shellcheck'
+            setup='apt-get update && apt-get install -y bash curl ca-certificates git jq unzip openssl python3 iproute2 util-linux tar coreutils shellcheck'
           fi
-          docker run --rm -v "$PWD:/work" -w /work "${{ matrix.image }}" sh -lc "$setup && bash scripts/test.sh"
+          docker run --rm -v "$PWD:/work" -w /work "${{ matrix.image }}" sh -lc "$setup && git config --global --add safe.directory /work && bash scripts/test.sh"
           git diff --exit-code -- install-nobrand.sh dist/install-nobrand.sh
 
   mieru-regression:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Original Mieru isolated-v2 regression
         run: bash scripts/docker-smoke.sh
       - name: Debian Ubuntu Rocky Alpine platform matrix
@@ -40,10 +44,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Real HY2 and VLESS FinalMask Xray data plane plus Surge Snell runtimes
         run: |
           docker run --rm -v "$PWD:/work" -w /work debian:12 sh -lc '
             apt-get update &&
-            apt-get install -y bash curl ca-certificates jq unzip openssl python3 iproute2 util-linux tar coreutils shellcheck libstdc++6 &&
+            apt-get install -y bash curl ca-certificates git jq unzip openssl python3 iproute2 util-linux tar coreutils shellcheck libstdc++6 &&
+            git config --global --add safe.directory /work &&
             bash scripts/test.sh --runtime
           '

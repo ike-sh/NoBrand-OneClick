@@ -296,6 +296,7 @@ do_user_manage() {
       1) do_user_list ;;
       2)
         USERNAME=""; PASSWORD=""; PORT=""; PORT_CLI=0
+        ADVERTISE_HOST=""; ADVERTISE_PORT=""; ADVERTISE_CLI=0; ADVERTISE_AUTO_REQUESTED=0
         USER_PACKAGE=""; USER_QUOTA_MB=""; USER_QUOTA_DAYS=""; USER_QUOTA_MODE=""; USER_EXPIRE=""; USER_BANDWIDTH_MBPS=""
         local bw_in="" qm_in=""
         read_tty USERNAME "$(t '新用户名: ' 'New username: ')" || true

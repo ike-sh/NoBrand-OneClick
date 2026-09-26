@@ -15,7 +15,7 @@ nobrand_version() {
 
 nobrand_usage() {
   cat <<EOF
-NoBrand-OneClick 3.2.2 — Multi-Ingress / Mieru / Snell v4-v5 / Hysteria2 / TUIC v5 / VLESS REALITY / VLESS + FinalMask + Sudoku / SSH Tunnel / Port Forward
+NoBrand-OneClick 3.2.3 — Multi-Ingress / Mieru / Snell v4-v5 / Hysteria2 / TUIC v5 / VLESS REALITY / VLESS + FinalMask + Sudoku / SSH Tunnel / Port Forward
 
 用法:
   nobrand                         打开统一菜单
@@ -43,6 +43,7 @@ NoBrand-OneClick 3.2.2 — Multi-Ingress / Mieru / Snell v4-v5 / Hysteria2 / TUI
   nobrand mieru user-scan|user-quota-reset|user-set-rate|user-usage
   nobrand mieru user-backup|user-restore|user-export|user-import|user-export-clients
   Mieru 参数: --port --protocol --profile --advertise-host --advertise-port --advertise-auto
+    user-add 可在交互中选择自动/自定义展示入口；--advertise-host 可省略展示端口并继承新用户的有效端口。
     --ingress-profile PROFILE
     --mtu --traffic-pattern --low-entropy --multiplexing --handshake-mode
     --mieru-channel --mieru-version --user --password --package --quota-mb
@@ -100,6 +101,7 @@ NoBrand-OneClick 3.2.2 — Multi-Ingress / Mieru / Snell v4-v5 / Hysteria2 / TUI
   - Snell v5 QUIC 默认关闭；--quic on 才让 NoBrand 管理同号 UDP firewall ownership。
   - 官方 v5 runtime 即使 QUIC 关闭也可能监听同号 UDP；本地 socket 不等于公网 QUIC 已启用。
   - Display Endpoint 只影响客户端输出，不创建 DNAT/IPLC 转发，也不改 listener。
+  - Display Endpoint 不配置 VPS 系统出站 IP、默认路由或 policy routing。
   - 非交互 -y 必须明确给出完整 Display Endpoint 或 --advertise-auto。
   - VLESS Sudoku = plain VLESS + FinalMask(sudoku) + TCP。
   - VLESS REALITY = VLESS + TCP + REALITY + xtls-rprx-vision；public Profile 推荐，mapped 仅警告。

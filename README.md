@@ -5,7 +5,7 @@
 
 NoBrand-OneClick 是一个面向 Linux 服务器的多协议代理、隧道与网络入口管理工具。它通过统一的 `nobrand` 管理界面部署和维护 Mieru、Snell、Hysteria2、TUIC、VLESS 与 SSH Tunnel，并提供 Multi-Ingress、Strict Ingress、Port Forward、备份与恢复等能力。
 
-当前稳定版本：[v3.2.2](https://github.com/ike-sh/NoBrand-OneClick/releases/tag/v3.2.2)
+当前稳定版本：[v3.2.3](https://github.com/ike-sh/NoBrand-OneClick/releases/tag/v3.2.3)
 
 正式管理命令：`nobrand`；短别名：`nb`
 
@@ -144,6 +144,7 @@ Mieru 使用官方 Mita runtime，并保留多用户、独立实例、TCP/UDP/BO
 sudo nobrand mieru install
 sudo nobrand mieru users
 sudo nobrand mieru user-add
+sudo nobrand mieru user-add --user bob --advertise-host 203.0.113.10 --advertise-port 443
 sudo nobrand mieru user-show USER
 sudo nobrand mieru user-export-clients
 sudo nobrand mieru show
@@ -151,7 +152,7 @@ sudo nobrand mieru status
 sudo nobrand mieru doctor
 ```
 
-Display Endpoint 变更只更新节点和客户端输出，不会改写 Mita 服务端配置、listener、service、firewall、限速或配额状态。完整参数合同见 [Mieru 文档](docs/MIERU-PARITY-3.0.md)。
+创建 Mieru 用户时可以在交互流程选择自动探测或自定义客户端 Display Endpoint；CLI 可指定 `--advertise-host` 和可选的 `--advertise-port`（省略时继承新用户的有效展示端口）。未指定时继续自动选择。Display Endpoint 只影响客户端展示、节点和导出，不配置 VPS 实际系统出站 IP、默认路由或 policy routing，也不会因自定义入口改写 Mita listener。完整参数合同见 [Mieru 文档](docs/MIERU-PARITY-3.0.md)。
 
 ### 其他协议入口
 

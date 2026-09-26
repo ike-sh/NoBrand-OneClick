@@ -70,6 +70,8 @@ def normalize_endpoint_host(value):
     raw=value[:-1] if value.endswith(".") else value
     if not raw or len(raw)>253 or "://" in raw or ":" in raw or "/" in raw:
         raise ValueError("invalid host")
+    if re.fullmatch(r"[0-9]+(?:\.[0-9]+){3}", raw):
+        raise ValueError("invalid IPv4")
     labels=raw.split(".")
     if any(not label or len(label)>63 or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?", label) for label in labels):
         raise ValueError("invalid host")
@@ -535,6 +537,8 @@ do_user_add() {
   mita_installed || die "$(t 'mita 未安装，请先执行安装' 'mita is not installed; run install first')"
   # CLI 参数先保存，避免被 load_install_state 覆盖
   local name="${USERNAME:-}" password="${PASSWORD:-}" prefer="" tx
+  local selected_port="" default_display_port="" choice="" input_host="" input_port="" owner=""
+  local old_pairs="" new_pairs=""
   local requested_advertise_host="${ADVERTISE_HOST:-}" requested_advertise_port="${ADVERTISE_PORT:-}"
   local requested_advertise_cli="${ADVERTISE_CLI:-0}"
   local saved_pkg="${USER_PACKAGE:-}" saved_qmb="${USER_QUOTA_MB:-}" saved_qd="${USER_QUOTA_DAYS:-}" saved_exp="${USER_EXPIRE:-}" saved_bw="${USER_BANDWIDTH_MBPS:-}"
@@ -557,13 +561,7 @@ do_user_add() {
   if [ "$requested_advertise_cli" -ne 1 ]; then
     requested_advertise_host=""
     requested_advertise_port=""
-  elif ! validate_advertise_endpoint_values "$requested_advertise_host" \
-    "$requested_advertise_port" "${PROTOCOL:-TCP}"; then
-    die "$(t '新用户的自定义客户端入口参数无效' \
-      'Invalid custom client entry parameters for the new user')"
   fi
-  [ -z "$requested_advertise_port" ] \
-    || requested_advertise_port="$(normalize_uint "$requested_advertise_port")"
   if ! users_state_exists || [ "$(users_count)" -eq 0 ]; then
     die "$(t 'schema v3 Mieru 用户状态缺失；请重新执行全新安装' \
       'Schema-v3 Mieru user state is missing; perform a fresh install')"
@@ -601,7 +599,68 @@ do_user_add() {
       *) USER_PACKAGE=unlimited ;;
     esac
   fi
+  if [ "$requested_advertise_cli" -eq 0 ] && [ "$YES" -ne 1 ]; then
+    t '客户端展示入口：1) 自动探测（默认） 2) 自定义入口 3) 取消' \
+      'Client Display Endpoint: 1) Auto (default) 2) Custom 3) Cancel'
+    read_tty choice "$(t '请选择 [1]: ' 'Choose [1]: ')" || return 3
+    case "${choice:-1}" in
+      1) ;;
+      2)
+        nb_prepare_ingress_request || return 1
+        selected_port="$(allocate_user_port "$prefer")" || return 1
+        prefer="$selected_port"
+        default_display_port="$(nb_effective_advertise_port auto '' "$selected_port" "$INGRESS_PROFILE_ID")"
+        while true; do
+          read_tty input_host "$(t '展示 Host/IP（q=取消）: ' 'Display Host/IP (q=cancel): ')" || return 3
+          [ "$input_host" != q ] || return 3
+          read_tty input_port "$(t "展示端口 [${default_display_port}]（q=取消）: " \
+            "Display port [${default_display_port}] (q=cancel): ")" || return 3
+          [ "$input_port" != q ] || return 3
+          input_port="${input_port:-$default_display_port}"
+          if nb_validate_advertise_endpoint "$input_host" "$input_port" "$PROTOCOL"; then
+            requested_advertise_host="$input_host"
+            requested_advertise_port="$input_port"
+            break
+          fi
+          warn "$(t '展示入口无效；请输入 IPv4、IPv6 或域名及有效端口' \
+            'Invalid Display Endpoint; enter an IPv4, IPv6, or domain and valid port')"
+        done
+        ;;
+      3) return 3 ;;
+      *) warn "$(t '无效选择' 'Invalid choice')"; return 1 ;;
+    esac
+  elif [ "$requested_advertise_cli" -eq 1 ] \
+       && { [ -n "$requested_advertise_host" ] || [ -n "$requested_advertise_port" ]; } \
+       && { [ -z "$requested_advertise_host" ] || [ -z "$requested_advertise_port" ]; }; then
+    nb_prepare_ingress_request || return 1
+    selected_port="$(allocate_user_port "$prefer")" || return 1
+    prefer="$selected_port"
+    if [ -z "$requested_advertise_host" ]; then
+      requested_advertise_host="$(nb_effective_advertise_host auto '' "$INGRESS_PROFILE_ID")"
+    fi
+    if [ -z "$requested_advertise_port" ]; then
+      requested_advertise_port="$(nb_effective_advertise_port auto '' "$selected_port" "$INGRESS_PROFILE_ID")"
+    fi
+  fi
+  if ! validate_advertise_endpoint_values "$requested_advertise_host" \
+    "$requested_advertise_port" "${PROTOCOL:-TCP}"; then
+    die "$(t '新用户的自定义客户端入口参数无效' \
+      'Invalid custom client entry parameters for the new user')"
+  fi
+  if [ -n "$requested_advertise_host" ]; then
+    requested_advertise_host="$(nb_normalize_endpoint_host "$requested_advertise_host")"
+    requested_advertise_port="$(normalize_uint "$requested_advertise_port")"
+    owner="$(nb_endpoint_conflict_owner "${PROTOCOL/BOTH/TCP}" "$requested_advertise_host" "$requested_advertise_port" '' 2>/dev/null || true)"
+    if [ -z "$owner" ] && [ "$PROTOCOL" = BOTH ]; then
+      owner="$(nb_endpoint_conflict_owner UDP "$requested_advertise_host" "$((requested_advertise_port + 1))" '' 2>/dev/null || true)"
+    fi
+    if [ -n "$owner" ]; then
+      warn "$(t "客户端展示入口已被占用: $owner" "Client Display Endpoint is already used by: $owner")"
+      return 1
+    fi
+  fi
   admin_lock_acquire || return 1
+  old_pairs="$(multi_user_port_protocol_pairs)"
   tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
   if ! users_add "$name" "$password" "$prefer" \
     "$requested_advertise_host" "$requested_advertise_port" >/dev/null; then
@@ -619,7 +678,15 @@ do_user_add() {
     admin_lock_release
     return 1
   fi
-  open_firewall_for_pairs "$(multi_user_port_protocol_pairs)"
+  new_pairs="$(comm -23 \
+    <(multi_user_port_protocol_pairs | sed '/^[[:space:]]*$/d' | LC_ALL=C sort -u) \
+    <(printf '%s\n' "$old_pairs" | sed '/^[[:space:]]*$/d' | LC_ALL=C sort -u))"
+  if ! open_firewall_for_pairs "$(multi_user_port_protocol_pairs)"; then
+    close_firewall_for_bindings "$new_pairs" 2>/dev/null || true
+    users_tx_rollback "$tx" 1
+    admin_lock_release
+    return 1
+  fi
   users_tx_commit "$tx"
   admin_lock_release
   print_user_outputs "$name"

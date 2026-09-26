@@ -45,7 +45,7 @@ NoBrand-OneClick Mieru 管理 ${SCRIPT_VERSION}
   --stop              停止服务
   --restart           重启服务（守护进程异常时一键恢复）
   --users / user-list 列出代理用户及专属实例端口
-  --user-add          添加用户（可配合 --user/--password/--port/--package 等）
+  --user-add          添加用户（可配合 --user/--password/--port/--package/--advertise-host 等）
   --user-del NAME     删除用户并释放端口
   --user-show NAME    查看指定用户节点配置
   --user-set-endpoint 设置展示入口：--user NAME --advertise-host IP --advertise-port PORT；或 --advertise-auto
@@ -110,6 +110,7 @@ NoBrand-OneClick Mieru 管理 ${SCRIPT_VERSION}
   nobrand mieru mtu [auto|数值]    调整 MTU 并重新输出节点配置
   nobrand mieru users              用户管理列表
   nobrand mieru user-add --user a --password p
+  nobrand mieru user-add --user bob --advertise-host 203.0.113.10 --advertise-port 443
   nobrand mieru user-del a
   nobrand mieru restart            重启服务（start/stop 同理）
 

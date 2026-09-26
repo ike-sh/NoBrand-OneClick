@@ -15,7 +15,7 @@
 set -euo pipefail
 umask 077
 
-SCRIPT_VERSION="3.2.2"
+SCRIPT_VERSION="3.2.3"
 SCRIPT_AUTHOR="ike"
 SCRIPT_NAME="NoBrand-OneClick"
 SCRIPT_REPO="ike-sh/NoBrand-OneClick"
@@ -509,7 +509,7 @@ NoBrand-OneClick Mieru 管理 ${SCRIPT_VERSION}
   --stop              停止服务
   --restart           重启服务（守护进程异常时一键恢复）
   --users / user-list 列出代理用户及专属实例端口
-  --user-add          添加用户（可配合 --user/--password/--port/--package 等）
+  --user-add          添加用户（可配合 --user/--password/--port/--package/--advertise-host 等）
   --user-del NAME     删除用户并释放端口
   --user-show NAME    查看指定用户节点配置
   --user-set-endpoint 设置展示入口：--user NAME --advertise-host IP --advertise-port PORT；或 --advertise-auto
@@ -574,6 +574,7 @@ NoBrand-OneClick Mieru 管理 ${SCRIPT_VERSION}
   nobrand mieru mtu [auto|数值]    调整 MTU 并重新输出节点配置
   nobrand mieru users              用户管理列表
   nobrand mieru user-add --user a --password p
+  nobrand mieru user-add --user bob --advertise-host 203.0.113.10 --advertise-port 443
   nobrand mieru user-del a
   nobrand mieru restart            重启服务（start/stop 同理）
 
@@ -5379,7 +5380,7 @@ nobrand_version() {
 
 nobrand_usage() {
   cat <<EOF
-NoBrand-OneClick 3.2.2 — Multi-Ingress / Mieru / Snell v4-v5 / Hysteria2 / TUIC v5 / VLESS REALITY / VLESS + FinalMask + Sudoku / SSH Tunnel / Port Forward
+NoBrand-OneClick 3.2.3 — Multi-Ingress / Mieru / Snell v4-v5 / Hysteria2 / TUIC v5 / VLESS REALITY / VLESS + FinalMask + Sudoku / SSH Tunnel / Port Forward
 
 用法:
   nobrand                         打开统一菜单
@@ -5407,6 +5408,7 @@ NoBrand-OneClick 3.2.2 — Multi-Ingress / Mieru / Snell v4-v5 / Hysteria2 / TUI
   nobrand mieru user-scan|user-quota-reset|user-set-rate|user-usage
   nobrand mieru user-backup|user-restore|user-export|user-import|user-export-clients
   Mieru 参数: --port --protocol --profile --advertise-host --advertise-port --advertise-auto
+    user-add 可在交互中选择自动/自定义展示入口；--advertise-host 可省略展示端口并继承新用户的有效端口。
     --ingress-profile PROFILE
     --mtu --traffic-pattern --low-entropy --multiplexing --handshake-mode
     --mieru-channel --mieru-version --user --password --package --quota-mb
@@ -5464,6 +5466,7 @@ NoBrand-OneClick 3.2.2 — Multi-Ingress / Mieru / Snell v4-v5 / Hysteria2 / TUI
   - Snell v5 QUIC 默认关闭；--quic on 才让 NoBrand 管理同号 UDP firewall ownership。
   - 官方 v5 runtime 即使 QUIC 关闭也可能监听同号 UDP；本地 socket 不等于公网 QUIC 已启用。
   - Display Endpoint 只影响客户端输出，不创建 DNAT/IPLC 转发，也不改 listener。
+  - Display Endpoint 不配置 VPS 系统出站 IP、默认路由或 policy routing。
   - 非交互 -y 必须明确给出完整 Display Endpoint 或 --advertise-auto。
   - VLESS Sudoku = plain VLESS + FinalMask(sudoku) + TCP。
   - VLESS REALITY = VLESS + TCP + REALITY + xtls-rprx-vision；public Profile 推荐，mapped 仅警告。
@@ -12510,6 +12513,8 @@ def normalize_endpoint_host(value):
     raw=value[:-1] if value.endswith(".") else value
     if not raw or len(raw)>253 or "://" in raw or ":" in raw or "/" in raw:
         raise ValueError("invalid host")
+    if re.fullmatch(r"[0-9]+(?:\.[0-9]+){3}", raw):
+        raise ValueError("invalid IPv4")
     labels=raw.split(".")
     if any(not label or len(label)>63 or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?", label) for label in labels):
         raise ValueError("invalid host")
@@ -12975,6 +12980,8 @@ do_user_add() {
   mita_installed || die "$(t 'mita 未安装，请先执行安装' 'mita is not installed; run install first')"
   # CLI 参数先保存，避免被 load_install_state 覆盖
   local name="${USERNAME:-}" password="${PASSWORD:-}" prefer="" tx
+  local selected_port="" default_display_port="" choice="" input_host="" input_port="" owner=""
+  local old_pairs="" new_pairs=""
   local requested_advertise_host="${ADVERTISE_HOST:-}" requested_advertise_port="${ADVERTISE_PORT:-}"
   local requested_advertise_cli="${ADVERTISE_CLI:-0}"
   local saved_pkg="${USER_PACKAGE:-}" saved_qmb="${USER_QUOTA_MB:-}" saved_qd="${USER_QUOTA_DAYS:-}" saved_exp="${USER_EXPIRE:-}" saved_bw="${USER_BANDWIDTH_MBPS:-}"
@@ -12997,13 +13004,7 @@ do_user_add() {
   if [ "$requested_advertise_cli" -ne 1 ]; then
     requested_advertise_host=""
     requested_advertise_port=""
-  elif ! validate_advertise_endpoint_values "$requested_advertise_host" \
-    "$requested_advertise_port" "${PROTOCOL:-TCP}"; then
-    die "$(t '新用户的自定义客户端入口参数无效' \
-      'Invalid custom client entry parameters for the new user')"
   fi
-  [ -z "$requested_advertise_port" ] \
-    || requested_advertise_port="$(normalize_uint "$requested_advertise_port")"
   if ! users_state_exists || [ "$(users_count)" -eq 0 ]; then
     die "$(t 'schema v3 Mieru 用户状态缺失；请重新执行全新安装' \
       'Schema-v3 Mieru user state is missing; perform a fresh install')"
@@ -13041,7 +13042,68 @@ do_user_add() {
       *) USER_PACKAGE=unlimited ;;
     esac
   fi
+  if [ "$requested_advertise_cli" -eq 0 ] && [ "$YES" -ne 1 ]; then
+    t '客户端展示入口：1) 自动探测（默认） 2) 自定义入口 3) 取消' \
+      'Client Display Endpoint: 1) Auto (default) 2) Custom 3) Cancel'
+    read_tty choice "$(t '请选择 [1]: ' 'Choose [1]: ')" || return 3
+    case "${choice:-1}" in
+      1) ;;
+      2)
+        nb_prepare_ingress_request || return 1
+        selected_port="$(allocate_user_port "$prefer")" || return 1
+        prefer="$selected_port"
+        default_display_port="$(nb_effective_advertise_port auto '' "$selected_port" "$INGRESS_PROFILE_ID")"
+        while true; do
+          read_tty input_host "$(t '展示 Host/IP（q=取消）: ' 'Display Host/IP (q=cancel): ')" || return 3
+          [ "$input_host" != q ] || return 3
+          read_tty input_port "$(t "展示端口 [${default_display_port}]（q=取消）: " \
+            "Display port [${default_display_port}] (q=cancel): ")" || return 3
+          [ "$input_port" != q ] || return 3
+          input_port="${input_port:-$default_display_port}"
+          if nb_validate_advertise_endpoint "$input_host" "$input_port" "$PROTOCOL"; then
+            requested_advertise_host="$input_host"
+            requested_advertise_port="$input_port"
+            break
+          fi
+          warn "$(t '展示入口无效；请输入 IPv4、IPv6 或域名及有效端口' \
+            'Invalid Display Endpoint; enter an IPv4, IPv6, or domain and valid port')"
+        done
+        ;;
+      3) return 3 ;;
+      *) warn "$(t '无效选择' 'Invalid choice')"; return 1 ;;
+    esac
+  elif [ "$requested_advertise_cli" -eq 1 ] \
+       && { [ -n "$requested_advertise_host" ] || [ -n "$requested_advertise_port" ]; } \
+       && { [ -z "$requested_advertise_host" ] || [ -z "$requested_advertise_port" ]; }; then
+    nb_prepare_ingress_request || return 1
+    selected_port="$(allocate_user_port "$prefer")" || return 1
+    prefer="$selected_port"
+    if [ -z "$requested_advertise_host" ]; then
+      requested_advertise_host="$(nb_effective_advertise_host auto '' "$INGRESS_PROFILE_ID")"
+    fi
+    if [ -z "$requested_advertise_port" ]; then
+      requested_advertise_port="$(nb_effective_advertise_port auto '' "$selected_port" "$INGRESS_PROFILE_ID")"
+    fi
+  fi
+  if ! validate_advertise_endpoint_values "$requested_advertise_host" \
+    "$requested_advertise_port" "${PROTOCOL:-TCP}"; then
+    die "$(t '新用户的自定义客户端入口参数无效' \
+      'Invalid custom client entry parameters for the new user')"
+  fi
+  if [ -n "$requested_advertise_host" ]; then
+    requested_advertise_host="$(nb_normalize_endpoint_host "$requested_advertise_host")"
+    requested_advertise_port="$(normalize_uint "$requested_advertise_port")"
+    owner="$(nb_endpoint_conflict_owner "${PROTOCOL/BOTH/TCP}" "$requested_advertise_host" "$requested_advertise_port" '' 2>/dev/null || true)"
+    if [ -z "$owner" ] && [ "$PROTOCOL" = BOTH ]; then
+      owner="$(nb_endpoint_conflict_owner UDP "$requested_advertise_host" "$((requested_advertise_port + 1))" '' 2>/dev/null || true)"
+    fi
+    if [ -n "$owner" ]; then
+      warn "$(t "客户端展示入口已被占用: $owner" "Client Display Endpoint is already used by: $owner")"
+      return 1
+    fi
+  fi
   admin_lock_acquire || return 1
+  old_pairs="$(multi_user_port_protocol_pairs)"
   tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
   if ! users_add "$name" "$password" "$prefer" \
     "$requested_advertise_host" "$requested_advertise_port" >/dev/null; then
@@ -13059,7 +13121,15 @@ do_user_add() {
     admin_lock_release
     return 1
   fi
-  open_firewall_for_pairs "$(multi_user_port_protocol_pairs)"
+  new_pairs="$(comm -23 \
+    <(multi_user_port_protocol_pairs | sed '/^[[:space:]]*$/d' | LC_ALL=C sort -u) \
+    <(printf '%s\n' "$old_pairs" | sed '/^[[:space:]]*$/d' | LC_ALL=C sort -u))"
+  if ! open_firewall_for_pairs "$(multi_user_port_protocol_pairs)"; then
+    close_firewall_for_bindings "$new_pairs" 2>/dev/null || true
+    users_tx_rollback "$tx" 1
+    admin_lock_release
+    return 1
+  fi
   users_tx_commit "$tx"
   admin_lock_release
   print_user_outputs "$name"
@@ -14131,6 +14201,7 @@ do_user_manage() {
       1) do_user_list ;;
       2)
         USERNAME=""; PASSWORD=""; PORT=""; PORT_CLI=0
+        ADVERTISE_HOST=""; ADVERTISE_PORT=""; ADVERTISE_CLI=0; ADVERTISE_AUTO_REQUESTED=0
         USER_PACKAGE=""; USER_QUOTA_MB=""; USER_QUOTA_DAYS=""; USER_QUOTA_MODE=""; USER_EXPIRE=""; USER_BANDWIDTH_MBPS=""
         local bw_in="" qm_in=""
         read_tty USERNAME "$(t '新用户名: ' 'New username: ')" || true
@@ -20104,6 +20175,9 @@ valid_domain_name() {
   [[ "$value" != *://* && "$value" != *:* && "$value" != /* ]] || return 1
   value="${value%.}"
   [ -n "$value" ] || return 1
+  # A dotted decimal quad is an IPv4 candidate, not a DNS name. Reject it
+  # here when valid_ip_literal has already rejected its octets.
+  [[ ! "$value" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
   rest="$value"
   while true; do
     label="${rest%%.*}"

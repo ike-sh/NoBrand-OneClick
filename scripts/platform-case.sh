@@ -28,7 +28,7 @@ export MITA_SOURCE_ONLY=1
 source /work/install-nobrand.sh
 trap - ERR
 
-test "$SCRIPT_VERSION" = 3.2.2
+test "$SCRIPT_VERSION" = 3.2.3
 test "$SCRIPT_NAME|$SCRIPT_REPO" = 'NoBrand-OneClick|ike-sh/NoBrand-OneClick'
 case "$(detect_pkg_manager)" in
   deb|rpm|alpine) ;;

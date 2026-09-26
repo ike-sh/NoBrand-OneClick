@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+## 3.2.3 - 2026-09-26
+
+### Added
+
+- Mieru user creation now offers automatic or custom client Display Endpoint selection. `user-add --advertise-host` accepts an optional `--advertise-port`; Host-only requests inherit the new user's effective display port.
+- Regression coverage for IPv4, IPv6, domains, Host-only, collisions, cancellation, backup/restore, mapped Ingress isolation, and firewall rollback.
+
+### Fixed
+
+- Failed firewall application during Mieru user creation now rolls back the new user and only the bindings created by that transaction, preserving existing ownership.
+- Display Endpoint validation rejects invalid dotted-decimal IPv4 candidates instead of treating them as domains.
+- Custom Display Endpoint remains client metadata for nodes and exports; it does not alter the Mita listener, Linux route, policy routing, or VPS egress IP.
+
 ## 3.2.2 — 2026-09-05
 
 ### Changed

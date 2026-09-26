@@ -293,6 +293,9 @@ valid_domain_name() {
   [[ "$value" != *://* && "$value" != *:* && "$value" != /* ]] || return 1
   value="${value%.}"
   [ -n "$value" ] || return 1
+  # A dotted decimal quad is an IPv4 candidate, not a DNS name. Reject it
+  # here when valid_ip_literal has already rejected its octets.
+  [[ ! "$value" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
   rest="$value"
   while true; do
     label="${rest%%.*}"

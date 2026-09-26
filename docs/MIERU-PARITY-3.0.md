@@ -83,7 +83,7 @@ Status vocabulary:
 | Upstream runtime identity | All runtime actions | owned-package markers | official `mita` behavior | Explicit managed real-Mita path; never a management wrapper | LOCKED |
 | Isolated-v2 deployment | First install and all user changes | deployment model plus `users.json` | One server config and one Mita process per enabled user | Same behavior under NoBrand-owned Mieru state | LOCKED |
 | Stable instance identity | User creation | user `instance_id`, independent of later name/port metadata | Selects config/socket/metrics/service paths | Same | LOCKED |
-| Add user | `--user-add`, `user-add`, User menu `2` | complete user object | Dedicated one-user config and exclusive port | `nobrand mieru user-add` | LOCKED |
+| Add user | `--user-add`, `user-add`, User menu `2` | complete user object | Dedicated one-user config and exclusive port | `nobrand mieru user-add`; interactive auto/custom Display Endpoint choice; CLI `--advertise-host HOST [--advertise-port PORT]` or `--advertise-auto` | LOCKED |
 | Delete user | `--user-del NAME`, User menu `3` | removes exact user after backup | Removes exact instance; stale credentials explicitly revoked | `nobrand mieru user-del NAME` | LOCKED |
 | List/view user | `--users`, `--user-list`, `--user-show`; User menu `1/4` | read-only user fields | read-only | Same | LOCKED |
 | Enable/disable user | `--user-enable`, `--user-disable`; User menu `7/8` | `enabled` | Enabled user has an instance/binding; disabled user retains state/port | Same | LOCKED |

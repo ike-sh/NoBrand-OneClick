@@ -47,6 +47,7 @@ unit_tests=(
   tests/test_upgrade_3_0_3_1.sh
   tests/test_endpoint_isolation.sh
   tests/test_mieru_endpoint_isolation.sh
+  tests/test_mieru_user_add_endpoint.sh
   tests/test_hy2_golden.sh
   tests/test_hy2_certificate.sh
   tests/test_vless_sudoku_golden.sh

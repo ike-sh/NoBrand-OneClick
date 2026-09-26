@@ -206,7 +206,7 @@ assert_contains "$maintenance_ui_source" '可执行 `hash -r` 清除命令缓存
   'Chinese-first Bash command-cache guidance'
 
 readme_source="$(<"$TEST_ROOT/README.md")"
-assert_contains "$readme_source" '当前稳定版本：[v3.2.2]' \
+assert_contains "$readme_source" '当前稳定版本：[v3.2.3]' \
   'README current stable release boundary'
 assert_not_contains "$readme_source" '当前稳定版本：[v3.2.1]' \
   'README must not retain the previous stable release boundary'
