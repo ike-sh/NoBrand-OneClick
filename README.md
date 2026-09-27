@@ -5,7 +5,7 @@
 
 NoBrand-OneClick 是一个面向 Linux 服务器的多协议代理、隧道与网络入口管理工具。它通过统一的 `nobrand` 管理界面部署和维护 Mieru、Snell、Hysteria2、TUIC、VLESS 与 SSH Tunnel，并提供 Multi-Ingress、Strict Ingress、Port Forward、备份与恢复等能力。
 
-当前稳定版本：[v3.2.3](https://github.com/ike-sh/NoBrand-OneClick/releases/tag/v3.2.3)
+当前稳定版本：[v3.2.4](https://github.com/ike-sh/NoBrand-OneClick/releases/tag/v3.2.4)
 
 正式管理命令：`nobrand`；短别名：`nb`
 

@@ -22,11 +22,11 @@ jobs:
       - name: Build and unit tests
         run: |
           if [[ "${{ matrix.image }}" == alpine:* ]]; then
-            setup='apk add --no-cache bash curl git jq unzip openssl python3 iproute2 util-linux tar coreutils shellcheck'
+            setup='apk add --no-cache bash curl git jq unzip openssl openssh-keygen python3 iproute2 util-linux tar coreutils shellcheck'
           else
-            setup='apt-get update && apt-get install -y bash curl ca-certificates git jq unzip openssl python3 iproute2 util-linux tar coreutils shellcheck'
+            setup='apt-get update && apt-get install -y bash curl ca-certificates git jq unzip openssl openssh-client python3 iproute2 util-linux tar coreutils shellcheck'
           fi
-          docker run --rm -v "$PWD:/work" -w /work "${{ matrix.image }}" sh -lc "$setup && git config --global --add safe.directory /work && bash scripts/test.sh"
+          docker run --rm -v "$PWD:/work" -w /work "${{ matrix.image }}" sh -lc "$setup && command -v ssh-keygen && git config --global --add safe.directory /work && bash scripts/test.sh"
           git diff --exit-code -- install-nobrand.sh dist/install-nobrand.sh
 
   mieru-regression:
@@ -48,9 +48,12 @@ jobs:
           fetch-depth: 0
       - name: Real HY2 and VLESS FinalMask Xray data plane plus Surge Snell runtimes
         run: |
-          docker run --rm -v "$PWD:/work" -w /work debian:12 sh -lc '
+          # The suite mounts isolated filesystems and writes ip_forward inside
+          # disposable network namespaces; Docker's default /proc/sys is read-only.
+          docker run --rm --privileged -v "$PWD:/work" -w /work debian:12 sh -lc '
             apt-get update &&
-            apt-get install -y bash curl ca-certificates git jq unzip openssl python3 iproute2 util-linux tar coreutils shellcheck libstdc++6 &&
+            apt-get install -y bash curl ca-certificates git jq unzip openssl openssh-client openssh-server python3 iproute2 util-linux tar coreutils shellcheck libstdc++6 nftables procps &&
+            command -v ssh-keygen && command -v sshd && command -v nft &&
             git config --global --add safe.directory /work &&
             bash scripts/test.sh --runtime
           '

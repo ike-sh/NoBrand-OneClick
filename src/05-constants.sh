@@ -1,4 +1,4 @@
-SCRIPT_VERSION="3.2.3"
+SCRIPT_VERSION="3.2.4"
 SCRIPT_AUTHOR="ike"
 SCRIPT_NAME="NoBrand-OneClick"
 SCRIPT_REPO="ike-sh/NoBrand-OneClick"

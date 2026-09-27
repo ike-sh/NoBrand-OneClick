@@ -175,10 +175,10 @@ assert_contains "$unified_output" 'hash -r' 'unified uninstall Bash command-cach
 assert_eq external-mieru "$(tr -d '\r\n' <"$fixture/external-mieru/config.json")" 'external Mieru after unified uninstall'
 assert_eq external-xray "$(tr -d '\r\n' <"$fixture/external-xray/config.json")" 'external Xray after unified uninstall'
 
-state_line="$(grep -n 'find "$safe_state"' "$TEST_ROOT/install-nobrand.sh" | head -n1 | cut -d: -f1)"
-nb_line="$(grep -n 'nobrand_remove_owned_command "$NOBRAND_SHORT_COMMAND_PATH"' "$TEST_ROOT/install-nobrand.sh" | head -n1 | cut -d: -f1)"
-nobrand_line="$(grep -n 'nobrand_remove_owned_command "$NOBRAND_COMMAND_PATH"' "$TEST_ROOT/install-nobrand.sh" | head -n1 | cut -d: -f1)"
-installer_line="$(grep -n 'nobrand_remove_owned_command "$NOBRAND_INSTALL_SCRIPT_PATH"' "$TEST_ROOT/install-nobrand.sh" | head -n1 | cut -d: -f1)"
+state_line="$(grep -m1 -n 'find "$safe_state"' "$TEST_ROOT/install-nobrand.sh" | cut -d: -f1)"
+nb_line="$(grep -m1 -n 'nobrand_remove_owned_command "$NOBRAND_SHORT_COMMAND_PATH"' "$TEST_ROOT/install-nobrand.sh" | cut -d: -f1)"
+nobrand_line="$(grep -m1 -n 'nobrand_remove_owned_command "$NOBRAND_COMMAND_PATH"' "$TEST_ROOT/install-nobrand.sh" | cut -d: -f1)"
+installer_line="$(grep -m1 -n 'nobrand_remove_owned_command "$NOBRAND_INSTALL_SCRIPT_PATH"' "$TEST_ROOT/install-nobrand.sh" | cut -d: -f1)"
 [ "$state_line" -lt "$nb_line" ] && [ "$nb_line" -lt "$nobrand_line" ] \
   && [ "$nobrand_line" -lt "$installer_line" ] \
   || fail 'self-removal order must be state -> nb -> nobrand -> installer'

@@ -28,6 +28,10 @@ export NOBRAND_SSH_CONFIG_DROPIN="$fixture/sshd_config.d/90-nobrand-ssh-tunnel.c
 export NOBRAND_SSH_WATCHDOG_TIMEOUT=30
 source_installer
 nb_init_state_layout
+command -v ssh-keygen >/dev/null 2>&1 \
+  || fail 'SSH tunnel transaction test requires ssh-keygen'
+test_nologin_shell="$(ssh_tunnel_nologin_shell)" \
+  || fail 'SSH tunnel transaction test requires a nologin shell'
 
 fake_sshd="$fixture/sshd"
 cat >"$fake_sshd" <<'EOF'
@@ -55,7 +59,7 @@ cat "$key_validation_dir/one.pub" "$key_validation_dir/two.pub" \
 if ssh_tunnel_key_fingerprint "$key_validation_dir/multiple.pub" >/dev/null 2>&1; then
   fail 'multiple public-key records produced a single accepted fingerprint'
 fi
-if ssh_tunnel_authorized_key_line "$key_validation_dir/multiple.pub" /usr/sbin/nologin \
+if ssh_tunnel_authorized_key_line "$key_validation_dir/multiple.pub" "$test_nologin_shell" \
      >"$key_validation_dir/authorized" 2>/dev/null; then
   fail 'multiple public-key records produced authorized_keys output'
 fi
@@ -499,7 +503,7 @@ for dropin_link_kind in live dangling; do
 done
 
 owned_dropin_policy="$fixture/owned-dropin-policy"
-ssh_tunnel_generate_policy "$owned_dropin_policy" /usr/sbin/nologin
+ssh_tunnel_generate_policy "$owned_dropin_policy" "$test_nologin_shell"
 rm -f "$NOBRAND_SSH_CONFIG_DROPIN"
 install -m 0600 "$owned_dropin_policy" "$NOBRAND_SSH_CONFIG_DROPIN"
 write_ssh_config_target_state dropin "$NOBRAND_SSH_CONFIG_DROPIN" true
@@ -728,7 +732,7 @@ printf '%s\n' 'Port 2222' >"$NOBRAND_SSH_CONFIG_MAIN"
   || fail 'initial SSH install invoked empty-install rollback for recovery status 75'
 
 policy="$fixture/policy"
-ssh_tunnel_generate_policy "$policy" /usr/sbin/nologin
+ssh_tunnel_generate_policy "$policy" "$test_nologin_shell"
 {
   printf '%s\n' 'Port 2222'
   printf '%s\n' "$NOBRAND_SSH_BLOCK_BEGIN"
