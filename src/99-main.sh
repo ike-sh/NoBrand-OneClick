@@ -253,6 +253,17 @@ nb_select_partial_recovery_action() {
   esac
 }
 
+nobrand_action_opens_interactive_menu() {
+  case "${ACTION:-}" in
+    menu|nobrand-mieru-menu|user-manage) return 0 ;;
+    nobrand-snell) [ "${SNELL_ACTION:-menu}" = menu ] ;;
+    nobrand-hy2) [ "${HY2_ACTION:-menu}" = menu ] ;;
+    nobrand-vless-sudoku) [ "${VLESS_SUDOKU_ACTION:-menu}" = menu ] ;;
+    nobrand-forward) [ "${FORWARD_ACTION:-}" = menu ] ;;
+    *) return 1 ;;
+  esac
+}
+
 main() {
   local main_lifecycle_lock=0 main_rc=0 recovery_rc=0 dispatch_rc=0
   local NOBRAND_MANAGER_SESSION_ACTIVE=1
@@ -375,6 +386,11 @@ main() {
       [ "$main_lifecycle_lock" -eq 0 ] || nb_lifecycle_lock_release
       return 1
     }
+    NOBRAND_MENU_EXPECTED_STATE="$NOBRAND_INSTALL_STATE"
+    if [ "$main_lifecycle_lock" -eq 1 ]; then
+      nb_lifecycle_lock_release
+      main_lifecycle_lock=0
+    fi
     nobrand_menu_loop
     main_rc=$?
     [ "$main_lifecycle_lock" -eq 0 ] || nb_lifecycle_lock_release
@@ -393,6 +409,11 @@ main() {
      && nb_schema_v3_file_valid \
      && is_mita_elf_binary "$MITA_BIN"; then
     repair_mita_binary_paths 2>/dev/null || true
+  fi
+  if [ "$main_lifecycle_lock" -eq 1 ] && nobrand_action_opens_interactive_menu; then
+    NOBRAND_MENU_EXPECTED_STATE="$NOBRAND_INSTALL_STATE"
+    nb_lifecycle_lock_release
+    main_lifecycle_lock=0
   fi
   case "$ACTION" in
     install) do_install ;;

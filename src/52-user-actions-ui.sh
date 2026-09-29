@@ -261,16 +261,35 @@ do_user_manage() {
     msg "  17) 设置客户端展示入口"
     msg "  18) 返回主菜单"
     local c=""
-    read_tty c "$(t '请选择 [1-18]: ' 'Choose [1-18]: ')" || c=""
+    read_tty c "$(t '请选择 [1-18]: ' 'Choose [1-18]: ')" || {
+      [ "${MAIN_MENU_ACTIVE:-0}" -ne 1 ] || return 3
+      return 0
+    }
     c="$(printf '%s' "$c" | tr -d '[:space:]')"
     if [ "$c" = 18 ]; then
       [ "${MAIN_MENU_ACTIVE:-0}" -eq 1 ] && return 3
       return 0
     fi
-    local action_rc=0
+    local action_rc=0 action_lock=0
+    if [ "${NOBRAND_MANAGER_SESSION_ACTIVE:-0}" -eq 1 ]; then
+      nb_lifecycle_lock_acquire || return 1
+      action_lock=1
+      if ! nobrand_menu_state_current || ! mita_installed; then
+        nb_lifecycle_lock_release
+        warn "$(t '菜单显示后 Mieru 状态已变化；请重新选择操作。' \
+          'Mieru state changed after the menu was shown; select the action again.')"
+        return 1
+      fi
+    fi
     set +e
     (
       set -Eeuo pipefail
+      NOBRAND_LIFECYCLE_LOCK_FLOOR="${NOBRAND_LIFECYCLE_LOCK_HELD:-0}"
+      NOBRAND_LIFECYCLE_ACTIVE=0
+      NOBRAND_LIFECYCLE_OPERATION=""
+      NOBRAND_LIFECYCLE_SCOPE=""
+      NOBRAND_LIFECYCLE_MUTATION_STARTED=0
+      nb_lifecycle_signal_handlers_install
       trap 'rc=$?; if [ "$rc" -eq 3 ] || [ "$rc" -eq "$USER_MENU_HANDLED_RC" ]; then exit "$rc"; fi; on_error' ERR
       case "$c" in
         1) STAGE="列出用户" ;;
@@ -383,6 +402,7 @@ do_user_manage() {
     )
     action_rc=$?
     set -e
+    [ "$action_lock" -eq 0 ] || nb_lifecycle_lock_release
     [ "$action_rc" -ne 3 ] || return 3
     if [ "$action_rc" -ne 0 ] && [ "$action_rc" -ne "$USER_MENU_HANDLED_RC" ]; then
       warn "$(t '用户操作未完成，请根据上方错误重试' \

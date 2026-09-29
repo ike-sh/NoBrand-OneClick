@@ -5,7 +5,7 @@
 
 NoBrand-OneClick 是一个面向 Linux 服务器的多协议代理、隧道与网络入口管理工具。它通过统一的 `nobrand` 管理界面部署和维护 Mieru、Snell、Hysteria2、TUIC、VLESS 与 SSH Tunnel，并提供 Multi-Ingress、Strict Ingress、Port Forward、备份与恢复等能力。
 
-当前稳定版本：[v3.2.4](https://github.com/ike-sh/NoBrand-OneClick/releases/tag/v3.2.4)
+当前稳定版本：[v3.2.6](https://github.com/ike-sh/NoBrand-OneClick/releases/tag/v3.2.6)。
 
 正式管理命令：`nobrand`；短别名：`nb`
 
@@ -15,6 +15,7 @@ NoBrand-OneClick 是一个面向 Linux 服务器的多协议代理、隧道与�
 - 通过 Multi-Ingress 的 Public、Mapped Ingress Profile 表达单网卡、多网卡及映射入口。
 - 支持 `permissive` 与 `strict` 两种 Ingress Enforcement，以及 `derived-tail`、`custom-range`、`manual-only` 三种端口策略。
 - 分离 Actual Listener 与 Display Endpoint：客户端展示地址可以独立于服务端真实监听地址。
+- 客户端 Display Endpoint Host 支持 IPv4、IPv6 和 ASCII DNS hostname（国际化域名请使用 punycode）；域名按输入保存，由客户端连接时解析，无须在配置时解析成功。DNS 记录需指向客户端可访问的入口。
 - 提供多用户或多实例管理、客户端配置导出、统一节点视图、状态检查与 Doctor。
 - 通过 nftables 或 Realm 管理 TCP、UDP、BOTH 端口转发，并支持规则导入、导出与后端切换。
 - 配置和生命周期变更采用事务式流程；验证失败时尽可能恢复原有配置、状态与运行服务。
@@ -90,6 +91,8 @@ Ingress Profile 用于描述客户端如何进入服务器，并将入口身份�
 | Actual Listener | 协议服务或 Forward 数据面真实接收流量的地址与端口 |
 | Display Endpoint | 写入分享链接、客户端配置、导出和 `nobrand nodes` 的地址与端口 |
 | Forward Target | Forward 规则的目标地址；不等于入口地址或 Display Endpoint |
+
+修改 Display Endpoint 不会改变 Actual Listener、服务端配置、Linux 路由或出口源 IP。REALITY 的连接地址与伪装目标及 SNI 各自独立；SSH Tunnel 导出的 `known_hosts` 条目使用当前展示 Host 作为主机密钥查找身份。Forward 的 Realm Target 可以是域名，nftables Target 仍要求 IPv4；它们与 Forward Display Endpoint 是不同字段。
 
 Profile 类型：
 

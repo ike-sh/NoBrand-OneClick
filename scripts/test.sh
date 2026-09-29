@@ -64,6 +64,11 @@ unit_tests=(
   tests/test_rollback.sh
   tests/test_cli.sh
   tests/test_menu.sh
+  tests/test_menu_lifecycle_lock_scope.sh
+  tests/test_menu_instance_selection.sh
+  tests/test_display_endpoint_domain.sh
+  tests/test_version_consistency.sh
+  tests/test_direct_3_2_4_upgrade.sh
   tests/test_lifecycle_recovery.sh
   tests/test_localization.sh
 )

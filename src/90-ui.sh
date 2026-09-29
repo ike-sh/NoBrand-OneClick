@@ -80,9 +80,16 @@ menu_loop() {
   # 会因找不到二进制而走 recover_deb_mita → reinstall_mita_package，在显示菜单前就「自动重下安装」mita，
   # 随后用户选「1) 新装安装」时便被误判「检测到已安装」。修复必须放进 mita_installed 守卫内（与非交互路径一致）。
   if [ "${DRY_RUN:-0}" -ne 1 ] && mita_installed; then
-    repair_mita_binary_paths 2>/dev/null || true
-    ensure_management_scripts || true
-    MENU_SCRIPTS_READY=1
+    if [ "${NOBRAND_MANAGER_SESSION_ACTIVE:-0}" -eq 1 ]; then
+      nb_lifecycle_lock_acquire || return 1
+      nobrand_menu_state_current || { nb_lifecycle_lock_release; return 1; }
+    fi
+    if mita_installed; then
+      repair_mita_binary_paths 2>/dev/null || true
+      ensure_management_scripts || true
+      MENU_SCRIPTS_READY=1
+    fi
+    [ "${NOBRAND_MANAGER_SESSION_ACTIVE:-0}" -ne 1 ] || nb_lifecycle_lock_release
   fi
   while true; do
     ACTION=""
@@ -97,15 +104,32 @@ menu_loop() {
     fi
     # 不能把业务函数放在 if/|| 条件上下文中：Bash 会在整个函数调用链内
     # 抑制 errexit。用独立子 shell 作为简单命令执行，父菜单再读取退出码。
-    local rc=0
+    local rc=0 action_lock=0
+    if [ "${NOBRAND_MANAGER_SESSION_ACTIVE:-0}" -eq 1 ] && [ "$ACTION" != user-manage ]; then
+      nb_lifecycle_lock_acquire || return 1
+      action_lock=1
+      if ! nobrand_menu_state_current; then
+        nb_lifecycle_lock_release
+        warn "$(t '菜单显示后权威状态已变化；请重新进入管理菜单选择操作。' \
+          'Authoritative state changed after the menu was shown; reopen the manager and select the action again.')"
+        return 1
+      fi
+    fi
     set +e
     (
       set -Eeuo pipefail
+      NOBRAND_LIFECYCLE_LOCK_FLOOR="${NOBRAND_LIFECYCLE_LOCK_HELD:-0}"
+      NOBRAND_LIFECYCLE_ACTIVE=0
+      NOBRAND_LIFECYCLE_OPERATION=""
+      NOBRAND_LIFECYCLE_SCOPE=""
+      NOBRAND_LIFECYCLE_MUTATION_STARTED=0
+      nb_lifecycle_signal_handlers_install
       trap 'rc=$?; if [ "$rc" -eq 2 ] || [ "$rc" -eq 3 ]; then exit "$rc"; fi; on_error' ERR
       menu_run_action
     )
     rc=$?
     set -e
+    [ "$action_lock" -eq 0 ] || nb_lifecycle_lock_release
     if [ "$rc" -eq 2 ]; then
       break
     fi
@@ -134,7 +158,7 @@ show_performance_menu() {
   msg ' 10) 清理并恢复本项目 tc 规则'
   msg '  0) 返回'
   local choice=""
-  read_tty choice "$(t '请选择 [0-10]: ' 'Choose [0-10]: ')" || choice=""
+  read_tty choice "$(t '请选择 [0-10]: ' 'Choose [0-10]: ')" || return 2
   case "$(printf '%s' "$choice" | tr -d '[:space:]')" in
     1) ACTION=perf ;;
     2) ACTION="profile-config" ;;
@@ -160,7 +184,7 @@ show_service_menu() {
   msg '  4) 重启'
   msg '  0) 返回'
   local choice=""
-  read_tty choice "$(t '请选择 [0-4]: ' 'Choose [0-4]: ')" || choice=""
+  read_tty choice "$(t '请选择 [0-4]: ' 'Choose [0-4]: ')" || return 2
   case "$(printf '%s' "$choice" | tr -d '[:space:]')" in
     1) ACTION=status ;;
     2) ACTION=start ;;
@@ -181,7 +205,7 @@ show_backup_menu() {
   msg '  5) 批量导出客户端配置'
   msg '  0) 返回'
   local choice=""
-  read_tty choice "$(t '请选择 [0-5]: ' 'Choose [0-5]: ')" || choice=""
+  read_tty choice "$(t '请选择 [0-5]: ' 'Choose [0-5]: ')" || return 2
   case "$(printf '%s' "$choice" | tr -d '[:space:]')" in
     1) ACTION="user-backup" ;;
     2) ACTION="user-restore" ;;
@@ -197,8 +221,15 @@ show_menu() {
   if [ "${DRY_RUN:-0}" -ne 1 ] \
      && [ "${MENU_SCRIPTS_READY:-0}" -eq 0 ] \
      && mita_installed; then
-    ensure_management_scripts || true
-    MENU_SCRIPTS_READY=1
+    if [ "${NOBRAND_MANAGER_SESSION_ACTIVE:-0}" -eq 1 ]; then
+      nb_lifecycle_lock_acquire || return 1
+      nobrand_menu_state_current || { nb_lifecycle_lock_release; return 2; }
+    fi
+    if mita_installed; then
+      ensure_management_scripts || true
+      MENU_SCRIPTS_READY=1
+    fi
+    [ "${NOBRAND_MANAGER_SESSION_ACTIVE:-0}" -ne 1 ] || nb_lifecycle_lock_release
   fi
   load_install_state 2>/dev/null || true
   local installed="no" users="-" selected_rc=0 profile_text="-" version_text=""
@@ -245,7 +276,7 @@ show_menu() {
     'Quick command: nobrand mieru (or nb mieru)'
   msg ""
   local choice=""
-  read_tty choice "$(t '请选择 [0-10]: ' 'Choose [0-10]: ')" || choice=""
+  read_tty choice "$(t '请选择 [0-10]: ' 'Choose [0-10]: ')" || return 2
   choice="$(printf '%s' "$choice" | tr -d '[:space:]')"
   if [ -z "$choice" ]; then
     warn "$(t '请输入 0-10' 'Enter 0-10')"
@@ -282,8 +313,73 @@ show_menu() {
 
 # ---------- NoBrand unified interactive presentation ----------
 
+nobrand_menu_state_current() {
+  if [ -n "${NOBRAND_MENU_EXPECTED_STATE:-}" ]; then
+    nb_validate_authoritative_state_boundary || return 1
+    [ "$NOBRAND_INSTALL_STATE" = "$NOBRAND_MENU_EXPECTED_STATE" ] || return 1
+  fi
+  ! nobrand_ssh_confirmation_pending
+}
+
+nobrand_menu_selection_clear() {
+  NOBRAND_MENU_SELECTION_SCOPE=""
+  NOBRAND_MENU_SELECTION_ID=""
+  NOBRAND_MENU_SELECTION_NAME=""
+  NOBRAND_MENU_SELECTION_HASH=""
+}
+
+nobrand_menu_selection_current() {
+  local scope="${NOBRAND_MENU_SELECTION_SCOPE:-}" selected_id="${NOBRAND_MENU_SELECTION_ID:-}"
+  local selected_name="${NOBRAND_MENU_SELECTION_NAME:-}" expected_hash="${NOBRAND_MENU_SELECTION_HASH:-}"
+  local path="" ids="" id="" name="" matching_id="" matches=0 current_hash=""
+  [ -n "$scope" ] || return 0
+  [ -n "$selected_id" ] && [ -n "$selected_name" ] && [ -n "$expected_hash" ] || return 1
+  case "$scope" in
+    snell)
+      path="$(snell_state_path "$selected_id")" || return 1
+      ids="$(snell_instance_ids)" || return 1
+      ;;
+    vless-reality)
+      path="$(reality_state_file "$selected_id")" || return 1
+      ids="$(reality_instance_ids)" || return 1
+      ;;
+    tuic)
+      path="$(tuic_state_file "$selected_id")" || return 1
+      ids="$(tuic_instance_ids)" || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  current_hash="$(sha256sum <"$path" | cut -d' ' -f1)" || return 1
+  [ "$current_hash" = "$expected_hash" ] || return 1
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    case "$scope" in
+      snell) name="$(snell_state_field "$id" name 2>/dev/null || true)" ;;
+      vless-reality) name="$(reality_state_field "$id" name 2>/dev/null || true)" ;;
+      tuic) name="$(tuic_state_field "$id" name 2>/dev/null || true)" ;;
+    esac
+    [ "$name" = "$selected_name" ] || continue
+    matches=$((matches + 1))
+    matching_id="$id"
+  done <<<"$ids"
+  [ "$matches" -eq 1 ] && [ "$matching_id" = "$selected_id" ]
+}
+
+nobrand_menu_selection_record() {
+  local scope="$1" id="$2" name="$3" path="$4"
+  nobrand_menu_selection_clear
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  NOBRAND_MENU_SELECTION_HASH="$(sha256sum <"$path" | cut -d' ' -f1)" || return 1
+  NOBRAND_MENU_SELECTION_SCOPE="$scope"
+  NOBRAND_MENU_SELECTION_ID="$id"
+  NOBRAND_MENU_SELECTION_NAME="$name"
+  nobrand_menu_selection_current || { nobrand_menu_selection_clear; return 1; }
+}
+
 nobrand_menu_run() {
   local rc=0 restore_errexit=0 callback="${1:-}"
+  local menu_lock=0
   local global_uninstall_callback=0 authenticated_exit_rc=125
   local auth_path="" auth_read_fd="" auth_write_fd="" auth_proof=""
   local auth_expected='nobrand-global-uninstall-confirmed-v1'
@@ -318,6 +414,22 @@ nobrand_menu_run() {
     fi
     auth_path=""
   fi
+  # The menu itself is unlocked. Each action rechecks the authoritative state
+  # and any named instance after taking the mutation guard. Global uninstall
+  # takes that guard itself after its confirmation prompt.
+  if [ "${NOBRAND_MANAGER_SESSION_ACTIVE:-0}" -eq 1 ] \
+     && [ "$global_uninstall_callback" -eq 0 ]; then
+    nb_lifecycle_lock_acquire || return 1
+    menu_lock=1
+    if ! nobrand_menu_state_current || ! nobrand_menu_selection_current; then
+      nb_lifecycle_lock_release
+      nobrand_menu_selection_clear
+      warn "$(t '菜单显示后权威状态已变化；请重新进入管理菜单选择操作。' \
+        'Authoritative state changed after the menu was shown; reopen the manager and select the action again.')"
+      return 1
+    fi
+  fi
+  nobrand_menu_selection_clear
   case "$-" in *e*) restore_errexit=1 ;; esac
   set +e
   (
@@ -359,9 +471,11 @@ nobrand_menu_run() {
      && ! nobrand_ssh_confirmation_pending; then
     warn "$(t '操作在写入变更后中断；已保留组件范围恢复信息，当前管理器将退出。' \
       'The action stopped after mutation; scoped recovery metadata was preserved and this manager will exit.')"
+    [ "$menu_lock" -eq 0 ] || nb_lifecycle_lock_release
     nb_lifecycle_lock_release_all >/dev/null 2>&1 || true
     exit 1
   fi
+  [ "$menu_lock" -eq 0 ] || nb_lifecycle_lock_release
   if [ "$rc" -ne 0 ]; then
     warn "$(t '操作未完成；请重试或运行 nobrand doctor' \
       'Action did not complete; retry or run nobrand doctor')"
@@ -370,7 +484,8 @@ nobrand_menu_run() {
 }
 
 snell_menu_select_instance() {
-  local id name major found=0 choice=""
+  local id name major count=0 only_name="" choice="" selected_id="" prompt=""
+  nobrand_menu_selection_clear
   msg ''
   msg 'Snell 节点:'
   while IFS= read -r id; do
@@ -378,12 +493,21 @@ snell_menu_select_instance() {
     name="$(snell_state_field "$id" name)"
     major="$(snell_state_field "$id" version)"
     printf '  - %s (v%s, %s)\n' "$name" "$major" "$id"
-    found=1
+    count=$((count + 1))
+    only_name="$name"
   done < <(snell_instance_ids)
-  [ "$found" -eq 1 ] || { warn 'Snell 尚无节点'; return 1; }
-  read_tty choice "$(t '输入节点名: ' 'Enter node name: ')" || choice=""
-  [ -n "$choice" ] && snell_find_id_by_name "$choice" >/dev/null 2>&1 \
+  [ "$count" -gt 0 ] || { warn 'Snell 尚无节点'; return 1; }
+  prompt="$(t '输入节点名: ' 'Enter node name: ')"
+  [ "$count" -ne 1 ] || prompt="$(t "输入节点名 [${only_name}]: " "Enter node name [${only_name}]: ")"
+  read_tty choice "$prompt" || return 1
+  if [ -z "$choice" ]; then
+    [ "$count" -eq 1 ] || { warn '存在多个节点，请输入要操作的节点名'; return 1; }
+    choice="$only_name"
+  fi
+  selected_id="$(snell_find_id_by_name "$choice")" \
     || { warn '节点名不存在'; return 1; }
+  nobrand_menu_selection_record snell "$selected_id" "$choice" "$(snell_state_path "$selected_id")" \
+    || { warn '节点状态已变化，请重新选择'; return 1; }
   SNELL_NAME="$choice"
 }
 
@@ -445,7 +569,7 @@ snell_menu_loop() {
     msg '  8) Doctor / 诊断'
     msg '  9) 删除节点'
     msg '  0) 返回'
-    read_tty choice "$(t '请选择 [0-9]: ' 'Choose [0-9]: ')" || choice=""
+    read_tty choice "$(t '请选择 [0-9]: ' 'Choose [0-9]: ')" || return 0
     case "$choice" in
       1) snell_menu_install_version 5 ;;
       2) snell_menu_install_version 4 ;;
@@ -496,7 +620,7 @@ hysteria2_menu_loop() {
     msg '  9) Doctor / 诊断'
     msg ' 10) 删除 Hysteria2'
     msg '  0) 返回'
-    read_tty choice "$(t '请选择 [0-10]: ' 'Choose [0-10]: ')" || choice=""
+    read_tty choice "$(t '请选择 [0-10]: ' 'Choose [0-10]: ')" || return 0
     case "$choice" in
       1)
         PORT="" PORT_CLI=0 HY2_SNI="" ADVERTISE_HOST="" ADVERTISE_PORT=""
@@ -546,7 +670,7 @@ vless_sudoku_menu_loop() {
     msg ' 10) 升级共享 Xray Runtime'
     msg ' 11) 删除'
     msg '  0) 返回'
-    read_tty choice "$(t '请选择 [0-11]: ' 'Choose [0-11]: ')" || choice=""
+    read_tty choice "$(t '请选择 [0-11]: ' 'Choose [0-11]: ')" || return 0
     case "$choice" in
       1)
         PORT="" PORT_CLI=0 VLESS_SUDOKU_UUID="" VLESS_SUDOKU_PASSWORD=""
@@ -581,16 +705,26 @@ vless_sudoku_menu_loop() {
 }
 
 reality_menu_select_instance() {
-  local id name choice="" found=0
+  local id name choice="" count=0 only_name="" selected_id="" prompt=""
+  nobrand_menu_selection_clear
   while IFS= read -r id; do
     name="$(reality_state_field "$id" name)"
     printf '  - %s (%s)\n' "$name" "$id"
-    found=1
+    count=$((count + 1))
+    only_name="$name"
   done < <(reality_instance_ids)
-  [ "$found" -eq 1 ] || { warn 'VLESS REALITY 尚无实例'; return 1; }
-  read_tty choice '请输入 VLESS REALITY 实例名称: ' || choice=""
-  reality_find_id_by_name "$choice" >/dev/null 2>&1 \
+  [ "$count" -gt 0 ] || { warn 'VLESS REALITY 尚无实例'; return 1; }
+  prompt='请输入 VLESS REALITY 实例名称: '
+  [ "$count" -ne 1 ] || prompt="请输入 VLESS REALITY 实例名称 [${only_name}]: "
+  read_tty choice "$prompt" || return 1
+  if [ -z "$choice" ]; then
+    [ "$count" -eq 1 ] || { warn '存在多个实例，请输入要操作的实例名称'; return 1; }
+    choice="$only_name"
+  fi
+  selected_id="$(reality_find_id_by_name "$choice")" \
     || { warn 'VLESS REALITY 实例不存在'; return 1; }
+  nobrand_menu_selection_record vless-reality "$selected_id" "$choice" "$(reality_state_file "$selected_id")" \
+    || { warn 'VLESS REALITY 实例状态已变化，请重新选择'; return 1; }
   VLESS_REALITY_NAME="$choice"
 }
 
@@ -613,7 +747,7 @@ vless_reality_menu_loop() {
     msg ' 10) 升级共享 Xray Runtime'
     msg ' 11) 删除实例'
     msg '  0) 返回'
-    read_tty choice "$(t '请选择 [0-11]: ' 'Choose [0-11]: ')" || choice=""
+    read_tty choice "$(t '请选择 [0-11]: ' 'Choose [0-11]: ')" || return 0
     case "$choice" in
       1)
         PORT="" PORT_CLI=0 VLESS_REALITY_NAME="" VLESS_REALITY_TARGET="" VLESS_REALITY_TARGET_CLI=0
@@ -667,15 +801,26 @@ vless_reality_menu_loop() {
 }
 
 tuic_menu_select_instance() {
-  local id name choice="" found=0
+  local id name choice="" count=0 only_name="" selected_id="" prompt=""
+  nobrand_menu_selection_clear
   while IFS= read -r id; do
     name="$(tuic_state_field "$id" name)"
     printf '  - %s (%s)\n' "$name" "$id"
-    found=1
+    count=$((count + 1))
+    only_name="$name"
   done < <(tuic_instance_ids)
-  [ "$found" -eq 1 ] || { warn 'TUIC 尚无实例'; return 1; }
-  read_tty choice '请输入 TUIC 实例名称: ' || choice=""
-  tuic_find_id_by_name "$choice" >/dev/null 2>&1 || { warn 'TUIC 实例不存在'; return 1; }
+  [ "$count" -gt 0 ] || { warn 'TUIC 尚无实例'; return 1; }
+  prompt='请输入 TUIC 实例名称: '
+  [ "$count" -ne 1 ] || prompt="请输入 TUIC 实例名称 [${only_name}]: "
+  read_tty choice "$prompt" || return 1
+  if [ -z "$choice" ]; then
+    [ "$count" -eq 1 ] || { warn '存在多个实例，请输入要操作的实例名称'; return 1; }
+    choice="$only_name"
+  fi
+  selected_id="$(tuic_find_id_by_name "$choice")" \
+    || { warn 'TUIC 实例不存在'; return 1; }
+  nobrand_menu_selection_record tuic "$selected_id" "$choice" "$(tuic_state_file "$selected_id")" \
+    || { warn 'TUIC 实例状态已变化，请重新选择'; return 1; }
   TUIC_NAME="$choice"
 }
 
@@ -697,7 +842,7 @@ tuic_menu_loop() {
     msg ' 10) Doctor / 诊断'
     msg ' 11) 卸载实例'
     msg '  0) 返回'
-    read_tty choice '请选择 [0-11]: ' || choice=""
+    read_tty choice '请选择 [0-11]: ' || return 0
     case "$choice" in
       1)
         read_tty TUIC_NAME '实例名称 [primary]: ' || TUIC_NAME=""
@@ -768,7 +913,7 @@ ssh_tunnel_menu_loop() {
     msg '  7) Doctor / 诊断'
     msg '  8) 卸载 SSH Tunnel'
     msg '  0) 返回'
-    read_tty choice '请选择 [0-8]: ' || choice=""
+    read_tty choice '请选择 [0-8]: ' || return 0
     case "$choice" in
       1)
         read_tty SSH_TUNNEL_USER '首个隧道用户标签 [default]: ' || SSH_TUNNEL_USER=""
@@ -908,7 +1053,7 @@ forward_menu_loop() {
     msg ' 12) 导入 JSON'
     msg ' 13) 升级官方 Realm Runtime'
     msg '  0) 返回'
-    read_tty choice '请选择 [0-13]: ' || choice=""
+    read_tty choice '请选择 [0-13]: ' || return 0
     case "$choice" in
       1)
         forward_menu_collect_add || continue
@@ -977,7 +1122,7 @@ nobrand_backup_menu_loop() {
     msg '  2) 列出备份'
     msg '  3) 从备份恢复'
     msg '  0) 返回'
-    read_tty choice "$(t '请选择 [0-3]: ' 'Choose [0-3]: ')" || choice=""
+    read_tty choice "$(t '请选择 [0-3]: ' 'Choose [0-3]: ')" || return 0
     case "$choice" in
       1)
         NOBRAND_BACKUP_ACTION=create NOBRAND_BACKUP_PATH=""
@@ -1440,7 +1585,7 @@ ingress_menu_loop() {
     msg '  7) 应用入口强制策略'
     msg '  8) Doctor / 入口诊断'
     msg '  0) 返回'
-    read_tty choice "$(t '请选择 [0-8]: ' 'Choose [0-8]: ')" || choice=""
+    read_tty choice "$(t '请选择 [0-8]: ' 'Choose [0-8]: ')" || return 0
     case "$choice" in
       1) nobrand_menu_run nb_ingress_list ;;
       2)
@@ -1513,7 +1658,7 @@ nobrand_menu_loop() {
     msg ' 15) 帮助 / CLI'
     msg ' 16) 卸载 NoBrand-OneClick（全部协议）'
     msg '  0) 退出'
-    read_tty choice "$(t '请选择 [0-16]: ' 'Choose [0-16]: ')" || choice=""
+    read_tty choice "$(t '请选择 [0-16]: ' 'Choose [0-16]: ')" || return 0
     case "$choice" in
       1) menu_loop ;;
       2) snell_menu_loop ;;

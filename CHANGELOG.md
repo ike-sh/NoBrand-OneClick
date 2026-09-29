@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 3.2.6 - 2026-09-29
+
+### Fixed
+
+- Release the lifecycle lock while interactive management menus and instance selectors wait for input, then recheck authoritative state under the lock before each action. Concurrent changes remain serialized and stale named selections are rejected.
+- Exit menus when their input stream closes instead of repeatedly prompting after a terminal disconnect.
+- Let Enter select the sole existing Snell, VLESS REALITY, or TUIC instance; multiple instances still require an explicit name.
+
+### Improved
+
+- Verify IPv4, IPv6, and DNS hostname Display Endpoint handling across Mieru, Snell, Hysteria2, TUIC, VLESS, SSH Tunnel, and Forward display fields. Custom hostnames remain client-facing state and exports; listener, service, firewall, and Linux routing stay independent.
+- Add cross-protocol domain endpoint, export, backup, and direct v3.2.4 upgrade regression coverage.
+
 ## 3.2.4 - 2026-09-27
 
 ### Added

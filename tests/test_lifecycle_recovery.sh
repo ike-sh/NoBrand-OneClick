@@ -2093,7 +2093,7 @@ write_complete_manager "$SCRIPT_VERSION"
   nb_select_partial_recovery_action() { : >"$fixture/unexpected-complete-recovery"; return 1; }
   nobrand_menu_loop() {
     (
-      assert_eq 1 "$NOBRAND_LIFECYCLE_LOCK_HELD" 'menu child inherits lifecycle guard'
+      assert_eq 0 "$NOBRAND_LIFECYCLE_LOCK_HELD" 'idle menu releases lifecycle guard'
       : >"$fixture/current-complete-menu"
     )
   }
@@ -2594,6 +2594,9 @@ reset_fixture
     [ ! -e "$NOBRAND_LIFECYCLE_TX_FILE" ] || return 1
     : >"$fixture/protocol-dispatched"
   }
+  # Read by the dynamically sourced protocol dispatcher.
+  # shellcheck disable=SC2034
+  SNELL_ACTION=restart
   export ACTION=nobrand-snell
   main
   assert_eq 0 "$NOBRAND_LIFECYCLE_LOCK_HELD" 'protocol dispatch outer lock balance'
