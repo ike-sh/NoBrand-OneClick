@@ -218,27 +218,22 @@ nobrand_run_vless_sudoku_action() { printf 'vless:%s\n' "$VLESS_SUDOKU_ACTION" >
 nobrand_backup_action() { printf 'backup:%s:%s\n' "$NOBRAND_BACKUP_ACTION" "${NOBRAND_BACKUP_PATH:-}" >>"$action_log"; }
 
 # Exercise the real Snell submenu before replacing it for the top-level
-# routing pass. No v6 label or handler may remain, and both QUIC directions
-# must be reachable without numbering holes.
+# routing pass. No v6 label or unsupported QUIC enable action may remain.
 nobrand_run_snell_action() {
   printf 'snell:%s:%s:%s\n' "$SNELL_ACTION" "${SNELL_VERSION:-}" "${SNELL_QUIC_PROXY:-}" >>"$action_log"
 }
 # The real menu function reads this test-selection global indirectly.
 # shellcheck disable=SC2034
 snell_menu_select_instance() { SNELL_NAME=menu-v5; }
-set_inputs invalid '' 1 2 3 4 1 4 2 7 1 7 2 8 0
-# Loaded by source_installer; the later definition is the top-level routing stub.
+set_inputs 1 2 3 4 8 0
+# Loaded by source_installer; the later definition is the routing stub.
 # shellcheck disable=SC2218
 snell_menu_loop >"$fixture/snell.out"
 snell_output="$(<"$fixture/snell.out")"
-assert_contains "$snell_output" '安装 Snell v5 [推荐]' 'Snell v5 menu default'
-assert_contains "$snell_output" '安装 Snell v4 [兼容]' 'Snell v4 compatibility menu'
-assert_contains "$snell_output" 'QUIC 设置' 'Snell QUIC menu'
-assert_not_contains "$snell_output" 'v6' 'Snell v6 menu removed'
-grep -qx 'snell:set-quic:4:off' "$action_log" || fail 'Snell menu QUIC OFF handler'
-grep -qx 'snell:set-quic:4:on' "$action_log" || fail 'Snell menu QUIC ON handler'
-grep -qx 'snell:upgrade:5:on' "$action_log" || fail 'Snell menu v5 upgrade handler'
-grep -qx 'snell:upgrade:4:on' "$action_log" || fail 'Snell menu v4 upgrade handler'
+assert_contains "$snell_output" '安装 Snell v5 [推荐]' 'Snell v5 menu'
+assert_contains "$snell_output" 'QUIC 支持范围' 'Snell native capability label'
+assert_contains "$snell_output" 'QUIC Proxy Mode' 'Snell unsupported QUIC explanation'
+assert_not_contains "$snell_output" '启用 QUIC Proxy Mode' 'no unsupported QUIC enable action'
 
 set_inputs invalid -1 999 '' 1 2 3 4 5 6 7 8 9 10 11 yes 0
 # Loaded by source_installer; the later definition is the top-level routing stub.
@@ -270,7 +265,7 @@ nobrand_menu_loop >"$fixture/top.out"
 top_output="$(<"$fixture/top.out")"
 assert_contains "$top_output" 'VLESS REALITY + Vision（TCP；推荐 Public Ingress）' 'top REALITY menu visibility'
 assert_contains "$top_output" 'VLESS + FinalMask + Sudoku（TCP）' 'top VLESS menu visibility'
-assert_contains "$top_output" 'TUIC v5（官方 sing-box Runtime）' 'top TUIC menu visibility'
+assert_contains "$top_output" 'TUIC v5' 'top TUIC menu visibility'
 assert_contains "$top_output" 'SSH Tunnel（现有 OpenSSH）' 'top SSH Tunnel menu visibility'
 assert_contains "$top_output" '端口转发 / Port Forward（nftables / Realm）' 'top Port Forward menu visibility'
 assert_contains "$top_output" '网络入口 / Ingress' 'top Ingress menu visibility'

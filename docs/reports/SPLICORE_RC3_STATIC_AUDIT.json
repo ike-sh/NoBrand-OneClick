@@ -1,0 +1,245 @@
+{
+  "date": "2026-10-18 Asia/Shanghai",
+  "current_pin": "v0.3.0-rc.3",
+  "active_unexpected_rc2_references": 0,
+  "active_splicore_latest_urls": 0,
+  "active_splicore_main_urls": 0,
+  "ordinary_legacy_core_downloads_in_reviewed_call_graph": 0,
+  "reference_classes": {
+    "dist/install-nobrand.sh": {
+      "classification": "approved historical rollback metadata (embedded copies included)",
+      "lines": [
+        18,
+        20,
+        26,
+        32
+      ]
+    },
+    "docs/SPLICORE-MIGRATION.md": {
+      "classification": "current explanation of historical evidence and approved rollback",
+      "lines": [
+        75,
+        77,
+        78
+      ]
+    },
+    "docs/SPLICORE-RC2-CONTRACT.md": {
+      "classification": "historical report/contract",
+      "lines": [
+        1,
+        12,
+        18,
+        30,
+        31,
+        46,
+        61,
+        81,
+        115,
+        117,
+        127,
+        159,
+        166,
+        168,
+        169,
+        175,
+        176,
+        199,
+        203,
+        217,
+        220,
+        234
+      ]
+    },
+    "docs/SPLICORE-RC3-CONTRACT.md": {
+      "classification": "current explanation of historical evidence and approved rollback",
+      "lines": [
+        7,
+        8
+      ]
+    },
+    "docs/reports/SPLICORE_BLOCKER_CLOSURE_PROBE.json": {
+      "classification": "historical report/contract",
+      "lines": [
+        1
+      ]
+    },
+    "docs/reports/SPLICORE_LOCAL_INTEGRATION.json": {
+      "classification": "historical report/contract",
+      "lines": [
+        7,
+        12,
+        25
+      ]
+    },
+    "docs/reports/SPLICORE_PRE_MIGRATION_AUDIT.md": {
+      "classification": "historical report/contract",
+      "lines": [
+        13,
+        67,
+        74,
+        129,
+        130,
+        183,
+        237,
+        238,
+        239,
+        241,
+        242,
+        243,
+        244,
+        270,
+        415,
+        417,
+        418,
+        431
+      ]
+    },
+    "docs/reports/SPLICORE_RC2_BLOCKER_CLOSURE_REPORT.md": {
+      "classification": "historical report/contract",
+      "lines": [
+        10,
+        24,
+        64,
+        89,
+        100,
+        134,
+        193,
+        217,
+        353,
+        356,
+        357,
+        380
+      ]
+    },
+    "docs/reports/SPLICORE_RC2_CONTRACT_PROBE.json": {
+      "classification": "historical report/contract",
+      "lines": [
+        2,
+        48
+      ]
+    },
+    "docs/reports/SPLICORE_RC2_MIGRATION_REPORT.md": {
+      "classification": "historical report/contract",
+      "lines": [
+        13,
+        27,
+        43,
+        76,
+        80,
+        100,
+        116,
+        119,
+        162,
+        175,
+        282,
+        283,
+        341
+      ]
+    },
+    "docs/reports/SPLICORE_REFERENCE_AUDIT.md": {
+      "classification": "current explanation of historical evidence and approved rollback",
+      "lines": [
+        11,
+        14
+      ]
+    },
+    "docs/reports/SPLICORE_SINGLE_CORE_BLOCKER_CLOSURE_REPORT.md": {
+      "classification": "current explanation of historical evidence and approved rollback",
+      "lines": [
+        14,
+        15,
+        27,
+        55,
+        117,
+        224,
+        227,
+        228,
+        230,
+        231
+      ]
+    },
+    "docs/reports/SPLICORE_SINGLE_CORE_FREEZE_REPORT.md": {
+      "classification": "historical report/contract",
+      "lines": [
+        11,
+        67,
+        91,
+        116
+      ]
+    },
+    "docs/reports/SPLICORE_SINGLE_CORE_MIGRATION_REPORT.md": {
+      "classification": "current explanation of historical evidence and approved rollback",
+      "lines": [
+        29,
+        30,
+        42,
+        45,
+        61,
+        62,
+        100,
+        124,
+        125,
+        127
+      ]
+    },
+    "install-nobrand.sh": {
+      "classification": "approved historical rollback metadata (embedded copies included)",
+      "lines": [
+        18,
+        20,
+        26,
+        32
+      ]
+    },
+    "runtime/splicore-release.json": {
+      "classification": "approved historical rollback metadata (embedded copies included)",
+      "lines": [
+        8,
+        10,
+        16,
+        22
+      ]
+    },
+    "tests/helpers/splicore_blocker_probe.py": {
+      "classification": "historical audit or explicit rc.2 to rc.3 upgrade/rollback fixture",
+      "lines": [
+        2,
+        128
+      ]
+    },
+    "tests/helpers/splicore_rc2_probe.py": {
+      "classification": "historical audit or explicit rc.2 to rc.3 upgrade/rollback fixture",
+      "lines": [
+        2,
+        139
+      ]
+    },
+    "tests/helpers/splicore_rc3_probe.py": {
+      "classification": "historical audit or explicit rc.2 to rc.3 upgrade/rollback fixture",
+      "lines": [
+        230,
+        256,
+        339,
+        361,
+        367
+      ]
+    },
+    "tests/test_splicore_rc2_contract.sh": {
+      "classification": "historical audit or explicit rc.2 to rc.3 upgrade/rollback fixture",
+      "lines": [
+        6
+      ]
+    }
+  },
+  "source_hashes": {
+    "internal/splicore/engine/native/vless.go": "853beb68798ceccdf519d394052858564959ff28711f31ef79b5742e010351c6",
+    "internal/splicore/underlay/factory.go": "ce82b32a71128c12a7cbdf482afa4b68a780c36c05761e9e1baf4ebd7db47330",
+    "internal/splicore/domain/streamtransport/hysteria.go": "83fd9e200bcf9f57349e9469a96d7b2ed6621cdc203e25a5512a94ecfa3626fd",
+    "internal/splicore/domain/streamtransport/hysteria_udp.go": "13668090c691129d9b64a6f186e756d41859d6f30ac7aeaffdef6c186220eb3c",
+    "internal/splicore/tlsconfig/material.go": "d771eff8af067141791dea24fc64823e43937d3d7f62c1d12a0e3460da3d9416",
+    "docs/architecture/HYSTERIA_TRANSPORT.md": "a5b7fbbb1b45f81e84d92c09021b0f6f605df1d1878a2c2e04d2fd41cc0065bd"
+  },
+  "scope": "source/download resolver plus runtime URL trace; old core references individually classified in SPLICORE_REFERENCE_AUDIT.md",
+  "native_vless_equal_to_historical_rc2": true,
+  "release_metadata_digests_match": true
+}

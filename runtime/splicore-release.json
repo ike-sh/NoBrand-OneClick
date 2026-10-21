@@ -1,0 +1,66 @@
+{
+  "repository": "ike-sh/Splicore",
+  "version": "v0.3.0-rc.4",
+  "commit": "2634ea50d19623591c5db63329a288862726db74",
+  "checksum_asset": "SHA256SUMS",
+  "qualification": "Release Candidate / Experimental",
+  "rollback_releases": {},
+  "capabilities": {
+    "snell": {
+      "managed": true,
+      "fresh_install": "v4/v5; QUIC disabled"
+    },
+    "mieru": {
+      "managed": true,
+      "fresh_install": "TCP/UDP/BOTH; traffic off; no quota, expiry or rate"
+    },
+    "tuic": {
+      "managed": true,
+      "fresh_install": "v5; verified non-CA leaf and explicit CA"
+    },
+    "hysteria2": {
+      "managed": true,
+      "salamander": true,
+      "gecko": {
+        "core": "SUPPORTED / EXPERIMENTAL",
+        "nobrand_surface": "NOT EXPOSED"
+      },
+      "udp_port_hopping": {
+        "core": "SUPPORTED",
+        "nobrand_surface": "NOT EXPOSED"
+      },
+      "linux_server_port_range": {
+        "core": "SUPPORTED",
+        "nobrand_surface": "NOT EXPOSED",
+        "qualification": "PENDING EXTERNAL QUALIFICATION; nftables and CAP_NET_ADMIN required"
+      },
+      "fresh_install": "new private CA and server leaf; verified client trust; native Salamander"
+    },
+    "vless-reality": {
+      "managed": true,
+      "core_vision": true,
+      "core_flow_none": true,
+      "local_tunnel_guard": true,
+      "fresh_install": "raw TCP + Vision + native protected destination"
+    },
+    "vless-sudoku": {
+      "managed": false,
+      "requires_external_xray": true,
+      "scope": "existing specialized pinned Xray exception"
+    }
+  },
+  "assets": {
+    "amd64": {
+      "name": "splicore-v0.3.0-rc.4-linux-amd64.tar.gz",
+      "sha256": "9dd1941c817143d18ea1c892a5fc13266c1b209600576946504a9d3c98c62161",
+      "binary_sha256": "0a347f06f0d1a17ef37edd779826ad79739217b65f80bf39dc6077f115ac175f",
+      "qualification": "Experimental; external runtime qualification pending"
+    },
+    "arm64": {
+      "name": "splicore-v0.3.0-rc.4-linux-arm64.tar.gz",
+      "sha256": "5b5e39bd8e6ef373ebc00e7e3a8a688ce09d0369dc2c4ecfab06ed535d948b64",
+      "binary_sha256": "85ec863d21707ac309a4c7a64b3b7228eb34bb0405379db6b569d8d550032a4c",
+      "qualification": "BUILD ONLY; runtime qualification pending"
+    }
+  }
+}

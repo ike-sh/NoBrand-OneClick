@@ -1,5 +1,9 @@
 # TUIC v5 contract for NoBrand-OneClick 3.1
 
+Historical sing-box contract retained as design evidence and client-field
+reference. Legacy recovery is unsupported. Current ordinary core is Splicore;
+see [current scope](SPLICORE-MIGRATION.md).
+
 Status: v3.1.0 release contract, qualified 2026-08-31. This document records the upstream audit and the exact product choices implemented for 3.1.0.
 
 ## Upstream authorities

@@ -27,104 +27,18 @@ trap on_error ERR
 
 usage() {
   cat <<EOF
-用法：nobrand mieru <动作> [选项]
-
-NoBrand-OneClick Mieru 管理 ${SCRIPT_VERSION}
-上游项目：https://github.com/${UPSTREAM_REPO}
-支持系统：Debian/Ubuntu、RHEL/CentOS/Rocky、Alpine Linux
-
-执行 nobrand mieru 时显示交互菜单；非交互请指定动作：
-  --install           新装 mita（已安装时建议用 --reconfigure）
-  --reconfigure       修改端口 / 密码 / 协议（不重装二进制）
-  --upgrade           按保存的 stable/latest/pinned 通道升级 mita
-  --uninstall         卸载 mita
-  --status            查看运行状态与配置摘要
-  --client-config     查看节点链接并生成客户端 JSON（同 --show）
-  --mtu-config        随时调整 MTU，重启服务并重新输出节点配置
-  --start             启动服务（守护进程 + 代理）
-  --stop              停止服务
-  --restart           重启服务（守护进程异常时一键恢复）
-  --users / user-list 列出代理用户及专属实例端口
-  --user-add          添加用户（可配合 --user/--password/--port/--package/--advertise-host 等）
-  --user-del NAME     删除用户并释放端口
-  --user-show NAME    查看指定用户节点配置
-  --user-set-endpoint 设置展示入口：--user NAME --advertise-host IP --advertise-port PORT；或 --advertise-auto
-  --user-set-quota    设置套餐：--user NAME --quota-mb N --quota-days D
-  --user-set-expire   设置到期：--user NAME --expire YYYY-MM-DD|+Nd|0
-  --user-enable NAME  启用用户
-  --user-disable NAME 停用用户（从 mita 配置移除，端口保留）
-  --user-scan         扫描到期/日历月配额重置（供 cron/timer）
-  --user-quota-reset  手动触发日历月配额重置（可加 -y 强制）
-  --user-set-rate     设置专属实例双向限速：--user NAME --bandwidth Mbps（0=不限）
-  --rate-status       查看带宽配置和脚本拥有的 tc filter
-  --user-usage        查看 mita 用户流量/配额用量（mita get users/quotas）
-  --user-export-clients [DIR]  批量导出各用户客户端 JSON/链接
-  --user-backup       备份 users.json
-  --user-restore FILE 从备份恢复用户状态并应用配置与 tc 限速
-  --user-export [FILE] 导出用户状态 JSON（默认 stdout）
-  --user-import FILE  导入用户状态（覆盖前自动备份）
-  --doctor / verify   一键验收：服务/用户/配额/tc/定时任务
-  --perf              只读性能诊断（不会修改服务、内核、防火墙或 tc）
-  --profile-config    选择并应用配置预设
-
-安装选项：
-  --yes, -y           跳过确认
-  --port PORT         监听端口（1025-65535）；多用户时作为主用户端口
-  --port-range RANGE  已弃用；v2 专属实例要求每用户使用单端口
-  --protocol TCP|UDP|BOTH  传输协议（默认 TCP；BOTH 时 UDP 使用 PORT+1）
-  --profile NAME      配置预设：iplc|balanced|stealth|custom
-  --advertise-host HOST 客户端连接入口（IPv4/IPv6/域名；不修改服务端监听）
-  --advertise-port PORT 客户端配置展示的入口端口（仅展示，可使用 1-65535）
-  --advertise-auto    恢复自动探测公网 IP，并展示服务端监听端口
-  --mtu VALUE         MTU 策略/值：safe|auto|1280-1500（默认 safe=1400）
-  --traffic-pattern LV  流量伪装/抗 DPI：off|conservative|aggressive（默认 conservative）
-  --low-entropy MODE  低熵模式：off|56|48|40|32（性能优先默认 off；56 为需要时的低开销选择）
-  --multiplexing MODE  多路复用：off|low|middle|high（默认 off）
-  --handshake-mode MODE 握手：no-wait|standard（默认 no-wait）
-  --mieru-channel CHANNEL 版本通道：stable|latest（默认 stable）
-  --mieru-version VER 精确指定上游版本（高级；通道记为 pinned）
-  --user NAME         代理用户名（安装主用户 / user-add）
-  --password PASS     代理密码
-  --package NAME      套餐：unlimited|trial|standard|custom（user-add）
-  --quota-mb N        流量配额 MB（0=不限；写入 mita quotas）
-  --quota-days D      配额滚动窗口天数（默认 30；rolling 模式）
-  --quota-mode MODE   rolling|calendar（calendar=按月重置该用户专属指标）
-  --expire WHEN       到期：YYYY-MM-DD 或 +30d 或 0/never
-  --bandwidth Mbps    专属实例双向限速（0=不限）
-  --op-user USER      加入 mita 用户组的 Linux 用户
-  --enable-bbr        安装后启用 TCP BBR + FQ
-  --lang en           使用英文提示
-
-其它：
-  --dry-run           仅预览，不执行
-  --help, -h          显示帮助
-  --version           显示版本
-
-快捷命令（子命令不区分大小写）：
-  nobrand mieru                    打开 Mieru 菜单
-  nobrand mieru status             查看状态
-  nobrand mieru perf               只读性能诊断
-  nobrand mieru profile            选择配置预设
-  nobrand mieru reconfigure        重新配置
-  nobrand mieru show               查看节点链接
-  nobrand mieru mtu [auto|数值]    调整 MTU 并重新输出节点配置
-  nobrand mieru users              用户管理列表
-  nobrand mieru user-add --user a --password p
-  nobrand mieru user-add --user bob --advertise-host 203.0.113.10 --advertise-port 443
-  nobrand mieru user-del a
-  nobrand mieru restart            重启服务（start/stop 同理）
-
-一键安装（交互式，Debian/Ubuntu/CentOS 等）：
-  curl -fsSLO ${NOBRAND_RELEASE_INSTALLER_URL}
-  sudo bash install-nobrand.sh
-
-Alpine Linux（无 sudo，需先装 bash）：
-  apk add --no-cache bash curl
-  curl -fsSLO ${NOBRAND_RELEASE_INSTALLER_URL}
-  bash install-nobrand.sh
-
-非交互示例：
-  nobrand mieru install -y --port 2088 --advertise-auto --user alice --password 'secret'
+NoBrand-OneClick ${SCRIPT_VERSION} / Splicore v0.3.0-rc.4
+用法 / Usage: nobrand <protocol> <action> [options]
+协议 / Protocols: mieru, snell, hy2, tuic, vless-reality, vless-sudoku, ssh, forward
+Actions: install, show, status, doctor, start, stop, restart, uninstall
+Fresh install: --port PORT --advertise-host HOST -y
+Mieru: --protocol TCP|UDP|BOTH --user NAME --password VALUE --mtu 1400
+Snell: --version 4|5; QUIC Proxy Mode is unsupported.
+REALITY: --target COVER_HOST --target-port 443; native Vision and Local Tunnel Guard.
+HY2: --sni HOST; fresh TLS trust and Salamander credentials.
+Native state: nobrand runtime status|doctor|backup|restore|rollback
+Product backup: nobrand backup create|list|restore --file PATH
+Legacy multi-core in-place migration is NOT SUPPORTED. Use a clean installation.
 EOF
 }
 
@@ -137,10 +51,6 @@ die() {
     return 1
   fi
   exit 1
-}
-
-bail() {
-  die "$@" || return 1
 }
 
 t() {
@@ -295,8 +205,8 @@ parse_nobrand_snell_args() {
   SNELL_ACTION="${1:-menu}"
   [ "$#" -eq 0 ] || shift
   case "$SNELL_ACTION" in
-    v4|4) SNELL_ACTION=install; SNELL_VERSION=4; SNELL_VERSION_CLI=1 ;;
-    v5|5) SNELL_ACTION=install; SNELL_VERSION=5; SNELL_VERSION_CLI=1 ;;
+    v4|4) SNELL_ACTION=install; SNELL_VERSION=4; ;;
+    v5|5) SNELL_ACTION=install; SNELL_VERSION=5; ;;
     add|create) SNELL_ACTION=install ;;
     list|nodes) SNELL_ACTION=show ;;
     delete|uninstall) SNELL_ACTION=remove ;;
@@ -315,7 +225,6 @@ parse_nobrand_snell_args() {
         ;;
       --version)
         SNELL_VERSION="${2:-}"
-        SNELL_VERSION_CLI=1
         [ -n "$SNELL_VERSION" ] || die "--version 需要 4 或 5"
         shift 2
         ;;
@@ -326,7 +235,6 @@ parse_nobrand_snell_args() {
         ;;
       --quic)
         SNELL_QUIC_PROXY="${2:-}"
-        SNELL_QUIC_CLI=1
         [ -n "$SNELL_QUIC_PROXY" ] || die "--quic 需要 on 或 off"
         case "$SNELL_QUIC_PROXY" in
           on|off) ;;
@@ -449,14 +357,12 @@ parse_nobrand_vless_reality_args() {
         VLESS_REALITY_TARGET="${2:-}"
         [ -n "$VLESS_REALITY_TARGET" ] && [[ "$VLESS_REALITY_TARGET" != --* ]] \
           || die "$1 需要公网主机名"
-        VLESS_REALITY_TARGET_CLI=1
         shift 2
         ;;
       --target-port)
         VLESS_REALITY_TARGET_PORT="${2:-}"
         [ -n "$VLESS_REALITY_TARGET_PORT" ] && [[ "$VLESS_REALITY_TARGET_PORT" != --* ]] \
           || die '--target-port 需要端口'
-        VLESS_REALITY_TARGET_PORT_CLI=1
         shift 2
         ;;
       *)
@@ -759,6 +665,11 @@ detect_nobrand_entry() {
       shift
       parse_nobrand_ingress_args "$@"
       ;;
+    runtime)
+      shift
+      NOBRAND_RUNTIME_ARGS=("$@")
+      ACTION="nobrand-runtime"; NOBRAND_ARGS_HANDLED=1
+      ;;
     manager)
       shift
       NOBRAND_MANAGER_ACTION="${1:-}"
@@ -909,10 +820,7 @@ while [ "$NOBRAND_ARGS_HANDLED" -eq 0 ] && [ $# -gt 0 ]; do
     --user-export)
       ACTION="user-export"
       if [ -n "${2:-}" ] && [[ "${2}" != --* ]]; then
-        USER_EXPORT_FILE="${2}"
         shift
-      else
-        USER_EXPORT_FILE=""
       fi
       ;;
     --user-import)
@@ -954,7 +862,6 @@ while [ "$NOBRAND_ARGS_HANDLED" -eq 0 ] && [ $# -gt 0 ]; do
             shift
             ;;
           user-export)
-            USER_EXPORT_FILE="${2}"
             shift
             ;;
           user-export-clients)
@@ -985,7 +892,6 @@ while [ "$NOBRAND_ARGS_HANDLED" -eq 0 ] && [ $# -gt 0 ]; do
       ;;
     --port-range)
       PORT_RANGE="${2:-}"
-      PORT_RANGE_CLI=1
       [ -n "$PORT_RANGE" ] || die "--port-range 需要端口段"
       shift
       ;;
@@ -1063,7 +969,6 @@ while [ "$NOBRAND_ARGS_HANDLED" -eq 0 ] && [ $# -gt 0 ]; do
       ;;
     --mieru-version)
       MIERU_VERSION="${2:-}"
-      MIERU_VERSION_CLI=1
       MIERU_CHANNEL="pinned"
       MIERU_CHANNEL_CLI=1
       [ -n "$MIERU_VERSION" ] || die "--mieru-version 需要版本号"
@@ -1071,7 +976,6 @@ while [ "$NOBRAND_ARGS_HANDLED" -eq 0 ] && [ $# -gt 0 ]; do
       ;;
     --user)
       USERNAME="${2:-}"
-      USERNAME_CLI=1
       [ -n "$USERNAME" ] && [[ "$USERNAME" != --* ]] || die "--user 需要用户名"
       shift
       ;;

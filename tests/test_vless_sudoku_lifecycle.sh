@@ -119,12 +119,16 @@ vless_sudoku_service_command start
 assert_eq true "$(vless_sudoku_state_field enabled)" 'start state'
 vless_sudoku_service_command restart
 
-printf '{"protocol":"hysteria2"}\n' >"$NOBRAND_HY2_STATE_FILE"
+native_state="$NOBRAND_STATE_DIR/splicore/retained-native-fixture.json"
+mkdir -p "$(dirname "$native_state")"
+printf '{"architecture":"splicore-native","nodes":[]}\n' >"$native_state"
+native_hash="$(sha256sum "$native_state")"
 remove_vless_sudoku_config >/dev/null
 [ ! -e "$NOBRAND_VLESS_CONFIG_FILE" ] && [ ! -e "$NOBRAND_VLESS_STATE_FILE" ] \
   && [ ! -e "$NOBRAND_VLESS_CLIENT_FILE" ] || fail 'remove must delete only VLESS artifacts'
-[ -x "$NOBRAND_XRAY_BIN" ] || fail 'individual VLESS remove must retain shared Xray runtime'
-[ -s "$NOBRAND_HY2_STATE_FILE" ] || fail 'individual VLESS remove must retain HY2 state'
+[ ! -e "$NOBRAND_XRAY_BIN" ] || fail 'individual Sudoku removal left its dedicated Xray runtime'
+assert_eq "$native_hash" "$(sha256sum "$native_state")" 'Sudoku removal preserves native state'
+nb_splicore_legacy_preflight || fail 'Sudoku removal left falsely detected legacy resources'
 
 # A failure after listener acceptance but before state commit must restore the
 # exact pre-install boundary and remove the newly owned firewall binding.
@@ -145,7 +149,7 @@ fi
   && [ ! -e "$NOBRAND_VLESS_CLIENT_FILE" ] && [ ! -e "$NOBRAND_VLESS_SYSTEMD_SERVICE" ] \
   || fail 'failed install must not leave VLESS config/state/client/service'
 [ ! -e "$NOBRAND_FIREWALL_OWNED_STATE" ] || fail 'failed install must close newly owned firewall binding'
-[ -x "$NOBRAND_XRAY_BIN" ] && [ -s "$NOBRAND_HY2_STATE_FILE" ] \
-  || fail 'failed VLESS install must preserve shared runtime and HY2 state'
+[ ! -e "$NOBRAND_XRAY_BIN" ] || fail 'failed VLESS install left an unowned Xray runtime'
+assert_eq "$native_hash" "$(sha256sum "$native_state")" 'failed Sudoku install preserves native state'
 
 pass 'VLESS install/idempotency/endpoint/service/remove and post-listener rollback lifecycle'

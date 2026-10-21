@@ -341,7 +341,6 @@ vless_sudoku_configure_requests() {
   if [ -z "${PORT:-}" ]; then
     PORT="$(nb_select_available_port TCP "$INGRESS_PROFILE_ID")" \
       || die '所选入口配置没有可用 VLESS Sudoku TCP 自动端口；manual-only 必须显式使用 --port'
-    PORT_AUTO_SELECTED=1
   else
     nb_valid_port "$PORT" || die 'VLESS Sudoku 端口必须是 1-65535'
     PORT="$(normalize_uint "$PORT")"
@@ -766,11 +765,14 @@ remove_vless_sudoku_config() {
   admin_lock_acquire || return 1
   nobrand_remove_vless_sudoku_service || { admin_lock_release; return 1; }
   nb_firewall_close_pairs "TCP|${port}" || { admin_lock_release; return 1; }
+  # Xray is now exclusive to Sudoku. Leaving it without its ownership state
+  # would look like an unsupported legacy runtime on the next invocation.
+  nobrand_remove_xray_runtime_files || { admin_lock_release; return 1; }
   rm -f "$NOBRAND_VLESS_CONFIG_FILE" "$NOBRAND_VLESS_STATE_FILE" "$NOBRAND_VLESS_CLIENT_FILE"
   rmdir "$NOBRAND_VLESS_CONFIG_DIR" "$NOBRAND_VLESS_STATE_DIR" 2>/dev/null || true
   admin_lock_release
-  t '已删除 NoBrand VLESS Sudoku；共享 Xray、HY2、Mieru、Snell 与外部 Xray 均保留' \
-    'Removed NoBrand VLESS Sudoku; shared Xray, HY2, Mieru, Snell, and external Xray are preserved'
+  t '已删除 NoBrand VLESS Sudoku 及其专用 Xray；Splicore 与外部资源保留' \
+    'Removed NoBrand VLESS Sudoku and its dedicated Xray; Splicore and external resources are preserved'
 }
 
 vless_sudoku_doctor() {

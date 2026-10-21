@@ -51,6 +51,8 @@ source "$TEST_ROOT/src/15-core-state.sh"
 # shellcheck disable=SC1091
 source "$TEST_ROOT/src/18-core-nodes.sh"
 # shellcheck disable=SC1091
+source "$TEST_ROOT/src/19-splicore.sh"
+# shellcheck disable=SC1091
 source "$TEST_ROOT/src/61-ssh-tunnel.sh"
 # shellcheck disable=SC1091
 source "$TEST_ROOT/src/80-lifecycle.sh"
@@ -2579,7 +2581,9 @@ assert_eq mieru "$(nb_lifecycle_scope)" \
 printf 'MIERU_V1_FAIL_CLOSED_COMPATIBILITY=PASS\n'
 
 # Representative protocol dispatch and a nested native lifecycle action both
-# retain the main process guard. Locking alone must not create transaction
+# retain the main process guard. Specialized Xray still uses this outer guard;
+# ordinary primary transactions are covered by the Splicore fixture tests.
+# Locking alone must not create transaction
 # metadata for unrelated protocol work.
 reset_fixture
 (
@@ -2589,15 +2593,15 @@ reset_fixture
   ensure_manager_state_layout() { return 0; }
   dry_run_should_preview() { return 1; }
   is_mita_elf_binary() { return 1; }
-  nobrand_run_snell_action() {
+  nobrand_run_vless_sudoku_action() {
     assert_eq 1 "$NOBRAND_LIFECYCLE_LOCK_HELD" 'protocol mutation lifecycle guard depth'
     [ ! -e "$NOBRAND_LIFECYCLE_TX_FILE" ] || return 1
     : >"$fixture/protocol-dispatched"
   }
   # Read by the dynamically sourced protocol dispatcher.
   # shellcheck disable=SC2034
-  SNELL_ACTION=restart
-  export ACTION=nobrand-snell
+  VLESS_SUDOKU_ACTION=restart
+  export ACTION=nobrand-vless-sudoku
   main
   assert_eq 0 "$NOBRAND_LIFECYCLE_LOCK_HELD" 'protocol dispatch outer lock balance'
 )
@@ -4208,6 +4212,8 @@ reset_fixture
     nb_lifecycle_lock_release
     assert_eq 1 "$NOBRAND_LIFECYCLE_LOCK_HELD" 'nested release retains outer lifecycle guard'
   }
+  # Explicit interrupted legacy repair still exercises nested Bash locks.
+  nb_lifecycle_begin install prepare
   export ACTION=install
   main
   assert_eq 0 "$NOBRAND_LIFECYCLE_LOCK_HELD" 'nested lifecycle final lock balance'

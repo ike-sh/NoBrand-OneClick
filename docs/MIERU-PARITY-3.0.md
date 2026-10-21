@@ -1,5 +1,8 @@
 # Mieru parity contract for NoBrand-OneClick 3.0
 
+Historical legacy contract. Ordinary runtime routing now uses pinned Splicore;
+unrepresentable options fail closed. See [current migration scope](SPLICORE-MIGRATION.md).
+
 This document freezes the user-visible Mieru contract that NoBrand-OneClick
 3.0 must preserve before any legacy-management code is removed. The authority
 is the last immutable Mieru-only release of `ike-sh/mieru-OneClick`:

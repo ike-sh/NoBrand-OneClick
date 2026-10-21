@@ -200,22 +200,15 @@ nb_port_listener_pids() {
     | LC_ALL=C sort -u
 }
 
-# 输出 owner|transport|port|advertise_host|advertise_port。Mieru only reads
-# schema-v3 users.json under the authoritative NoBrand state root.
+# 输出 native/retained-feature owner|transport|port|advertise_host|advertise_port。
 nb_registry_rows() {
   command -v python3 >/dev/null 2>&1 || return 0
-  NOBRAND_SNELL_STATE_DIR="$NOBRAND_SNELL_STATE_DIR" \
-  NOBRAND_HY2_STATE_FILE="$NOBRAND_HY2_STATE_FILE" \
   NOBRAND_VLESS_STATE_FILE="$NOBRAND_VLESS_STATE_FILE" \
-  NOBRAND_REALITY_STATE_DIR="$NOBRAND_REALITY_STATE_DIR" \
-  NOBRAND_TUIC_STATE_DIR="$NOBRAND_TUIC_STATE_DIR" \
   NOBRAND_FORWARD_STATE_FILE="$NOBRAND_FORWARD_STATE_FILE" \
-  MITA_USERS_STATE="$MITA_USERS_STATE" \
+  NOBRAND_SPLICORE_DESIRED="${NOBRAND_STATE_DIR}/splicore/current/desired.json" \
   python3 - <<'PY'
-import glob
 import json
 import os
-import shlex
 
 def emit(owner, transport, port, host="", advertise_port=""):
     try:
@@ -224,63 +217,26 @@ def emit(owner, transport, port, host="", advertise_port=""):
         return
     print("%s|%s|%s|%s|%s" % (owner, transport.upper(), port, host or "", advertise_port or ""))
 
-snell_dir = os.environ.get("NOBRAND_SNELL_STATE_DIR", "")
-for path in sorted(glob.glob(os.path.join(snell_dir, "*.json"))):
-    try:
-        state = json.load(open(path, encoding="utf-8"))
-        file_id = os.path.basename(path)[:-5]
-        instance_id = str(state.get("instance_id") or "")
-        version = state.get("version")
-        if state.get("protocol") != "snell" or instance_id != file_id or version not in (4, 5):
-            continue
-        owner = "snell:" + instance_id
-        emit(owner, "TCP", state.get("listen_port"), state.get("advertise_host"), state.get("advertise_port"))
-        if version == 5 and state.get("managed_udp") is True:
-            emit(owner, "UDP", state.get("listen_port"), state.get("advertise_host"), state.get("advertise_port"))
-    except Exception:
-        continue
-
-hy2_path = os.environ.get("NOBRAND_HY2_STATE_FILE", "")
-if hy2_path and os.path.isfile(hy2_path):
-    try:
-        state = json.load(open(hy2_path, encoding="utf-8"))
-        emit("hy2:default", "UDP", state.get("listen_port"), state.get("advertise_host"), state.get("advertise_port"))
-    except Exception:
-        pass
+primary_path = os.environ.get("NOBRAND_SPLICORE_DESIRED", "")
+primary = bool(primary_path and os.path.isfile(primary_path))
+if primary:
+    state = json.load(open(primary_path, encoding="utf-8"))
+    if state.get("owner") != "nobrand-splicore-v1":
+        raise SystemExit(1)
+    for node in state["nodes"]:
+        doc = node["document"]
+        protocol = node["protocol"]
+        transport = doc["settings"]["transport"] if protocol == "mieru" else "TCP" if protocol in ("snell", "vless-reality") else "UDP"
+        emit(protocol + ":" + node["id"], transport, doc["listener"]["port"],
+             doc["display_endpoint"]["host"], doc["display_endpoint"]["port"])
+        if node.get("guard"):
+            emit("splicore-guard:" + node["id"], "TCP", node["guard"]["listen"]["port"])
 
 vless_path = os.environ.get("NOBRAND_VLESS_STATE_FILE", "")
 if vless_path and os.path.isfile(vless_path):
     try:
         state = json.load(open(vless_path, encoding="utf-8"))
         emit("vless-sudoku:default", "TCP", state.get("listen_port"),
-             state.get("advertise_host"), state.get("advertise_port"))
-    except Exception:
-        pass
-
-reality_dir = os.environ.get("NOBRAND_REALITY_STATE_DIR", "")
-for path in sorted(glob.glob(os.path.join(reality_dir, "*", "state.json"))):
-    try:
-        state = json.load(open(path, encoding="utf-8"))
-        instance_id = str(state.get("instance_id") or "")
-        if (state.get("schema_version") != 3 or state.get("ownership") != "nobrand-v3"
-                or state.get("protocol") != "vless-reality"
-                or os.path.basename(os.path.dirname(path)) != instance_id):
-            continue
-        emit("vless-reality:" + instance_id, "TCP", state.get("listen_port"),
-             state.get("advertise_host"), state.get("advertise_port"))
-    except Exception:
-        pass
-
-tuic_dir = os.environ.get("NOBRAND_TUIC_STATE_DIR", "")
-for path in sorted(glob.glob(os.path.join(tuic_dir, "*", "state.json"))):
-    try:
-        state = json.load(open(path, encoding="utf-8"))
-        instance_id = str(state.get("instance_id") or "")
-        if (state.get("schema_version") != 3 or state.get("ownership") != "nobrand-v3"
-                or state.get("protocol") != "tuic" or state.get("tuic_version") != 5
-                or os.path.basename(os.path.dirname(path)) != instance_id):
-            continue
-        emit("tuic:" + instance_id, "UDP", state.get("listen_port"),
              state.get("advertise_host"), state.get("advertise_port"))
     except Exception:
         pass
@@ -304,22 +260,7 @@ if forward_path and os.path.isfile(forward_path):
     except Exception:
         pass
 
-mita_users = os.environ.get("MITA_USERS_STATE", "")
-if mita_users and os.path.isfile(mita_users):
-    try:
-        state = json.load(open(mita_users, encoding="utf-8"))
-        protocol = str(state.get("protocol") or "TCP").upper()
-        for user in state.get("users") or []:
-            port = int(user.get("port"))
-            owner = "mieru:" + str(user.get("instance_id") or user.get("name") or port)
-            if protocol == "BOTH":
-                emit(owner, "TCP", port, user.get("advertise_host"), user.get("advertise_port"))
-                advertised = int(user.get("advertise_port") or port)
-                emit(owner, "UDP", port + 1, user.get("advertise_host"), advertised + 1)
-            else:
-                emit(owner, protocol, port, user.get("advertise_host"), user.get("advertise_port"))
-    except Exception:
-        pass
+
 PY
 }
 

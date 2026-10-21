@@ -1,0 +1,649 @@
+{
+  "scope": "synthetic Linux amd64 detached network namespace; loopback only, no external route or host network mutation",
+  "public_identity": {
+    "product": "Splicore",
+    "version": "v0.3.0-rc.3",
+    "commit": "72166d2fcda95b943cbae584bdd59876df7d0ed8",
+    "dirty": false,
+    "build_time": "2026-10-18T09:47:37Z",
+    "go_version": "go1.26.3",
+    "platform": "linux/amd64",
+    "upstream_tag": "v1.14.1",
+    "upstream_commit": "1ac1a339cb1223e9c70eae14c44411c75033c02d",
+    "channel": "development",
+    "api_version": "v1",
+    "source_digest": "2e87b280a86c188c888d82e1cdd1399f6d5061d6",
+    "build_tags": "with_quic,with_utls,with_gvisor"
+  },
+  "artifacts": {
+    "splicore": "737d5b2b22daafd36940c12192185922b53711e0dc24946327be4119304f1a61",
+    "xray": "8255dd939c34cf966cc91517b6324dd3c8d0bcf49ffac8beca049a38c46845ed"
+  },
+  "freeze": "NO",
+  "openssl_version": "OpenSSL 3.0.13 30 Jan 2024 (Library: OpenSSL 3.0.13 30 Jan 2024)",
+  "openssl_config_sha256": "529815b0dd4bd6608bafeeb3d410b0683374e61aef792b3e3f38b3767d26f747",
+  "certificates": {
+    "old": {
+      "basic_constraints_valid": true,
+      "certificate_count": 1,
+      "dns_san": null,
+      "eku": null,
+      "extensions": [
+        {
+          "critical": false,
+          "oid": "2.5.29.14"
+        },
+        {
+          "critical": false,
+          "oid": "2.5.29.35"
+        },
+        {
+          "critical": true,
+          "oid": "2.5.29.19"
+        }
+      ],
+      "ip_san": null,
+      "is_ca": true,
+      "issuer": "CN=probe.example",
+      "key_type": "*ecdsa.PublicKey",
+      "key_usage": 0,
+      "not_after": "2036-10-15T12:05:23Z",
+      "not_before": "2026-10-18T12:05:23Z",
+      "pair_load": "PASS",
+      "self_signature": "PASS",
+      "sha256": "03ef5ad9a9f81795de64512de49aa115e35debf1c6ccd4b51f168b6e747b7bb1",
+      "signature_algorithm": "ECDSA-SHA256",
+      "subject": "CN=probe.example",
+      "validity_seconds": 315360000,
+      "verify_chain_no_hostname": "PASS",
+      "verify_hostname": "x509: certificate relies on legacy Common Name field, use SANs instead"
+    },
+    "san_ca": {
+      "basic_constraints_valid": true,
+      "certificate_count": 1,
+      "dns_san": [
+        "probe.example",
+        "localhost"
+      ],
+      "eku": [
+        1
+      ],
+      "extensions": [
+        {
+          "critical": true,
+          "oid": "2.5.29.15"
+        },
+        {
+          "critical": false,
+          "oid": "2.5.29.37"
+        },
+        {
+          "critical": true,
+          "oid": "2.5.29.19"
+        },
+        {
+          "critical": false,
+          "oid": "2.5.29.14"
+        },
+        {
+          "critical": false,
+          "oid": "2.5.29.17"
+        }
+      ],
+      "ip_san": null,
+      "is_ca": true,
+      "issuer": "CN=probe.example",
+      "key_type": "*ecdsa.PublicKey",
+      "key_usage": 33,
+      "not_after": "2026-10-19T12:05:23Z",
+      "not_before": "2026-10-18T11:05:23Z",
+      "pair_load": "PASS",
+      "self_signature": "PASS",
+      "sha256": "1b5adee72ecc25eb2d3c7f011e3874fd9f9527a0ca7c6383ff0eb6bac5bccb7b",
+      "signature_algorithm": "ECDSA-SHA256",
+      "subject": "CN=probe.example",
+      "validity_seconds": 90000,
+      "verify_chain_no_hostname": "PASS",
+      "verify_hostname": "PASS"
+    },
+    "same_ca_leaf": {
+      "basic_constraints_valid": true,
+      "certificate_count": 1,
+      "dns_san": [
+        "probe.example",
+        "localhost"
+      ],
+      "eku": [
+        1
+      ],
+      "extensions": [
+        {
+          "critical": true,
+          "oid": "2.5.29.15"
+        },
+        {
+          "critical": false,
+          "oid": "2.5.29.37"
+        },
+        {
+          "critical": true,
+          "oid": "2.5.29.19"
+        },
+        {
+          "critical": false,
+          "oid": "2.5.29.35"
+        },
+        {
+          "critical": false,
+          "oid": "2.5.29.17"
+        }
+      ],
+      "ip_san": null,
+      "is_ca": false,
+      "issuer": "CN=probe.example",
+      "key_type": "*ecdsa.PublicKey",
+      "key_usage": 1,
+      "not_after": "2026-10-19T12:05:23Z",
+      "not_before": "2026-10-18T11:05:23Z",
+      "pair_load": "PASS",
+      "self_signature": "x509: ECDSA verification failure",
+      "sha256": "ff7d8e1a24ca2daa681bb076fee88ffa1c448d5b354288b131d6abab0c9afcd8",
+      "signature_algorithm": "ECDSA-SHA256",
+      "subject": "CN=probe.example",
+      "validity_seconds": 90000,
+      "verify_chain_no_hostname": "PASS",
+      "verify_hostname": "PASS"
+    },
+    "new_ca_leaf": {
+      "basic_constraints_valid": true,
+      "certificate_count": 1,
+      "dns_san": [
+        "probe.example",
+        "localhost"
+      ],
+      "eku": [
+        1
+      ],
+      "extensions": [
+        {
+          "critical": true,
+          "oid": "2.5.29.15"
+        },
+        {
+          "critical": false,
+          "oid": "2.5.29.37"
+        },
+        {
+          "critical": true,
+          "oid": "2.5.29.19"
+        },
+        {
+          "critical": false,
+          "oid": "2.5.29.17"
+        }
+      ],
+      "ip_san": null,
+      "is_ca": false,
+      "issuer": "CN=probe.example",
+      "key_type": "*ecdsa.PublicKey",
+      "key_usage": 1,
+      "not_after": "2026-10-19T12:05:23Z",
+      "not_before": "2026-10-18T11:05:23Z",
+      "pair_load": "PASS",
+      "self_signature": "x509: ECDSA verification failure",
+      "sha256": "d519185d9b1a706eae300f2dfb16f0d32b8b897c06f0a22400e98906ba30b8b3",
+      "signature_algorithm": "ECDSA-SHA256",
+      "subject": "CN=probe.example",
+      "validity_seconds": 90000,
+      "verify_chain_no_hostname": "PASS",
+      "verify_hostname": "PASS"
+    },
+    "expired": {
+      "basic_constraints_valid": true,
+      "certificate_count": 1,
+      "dns_san": [
+        "probe.example",
+        "localhost"
+      ],
+      "eku": [
+        1
+      ],
+      "extensions": [
+        {
+          "critical": true,
+          "oid": "2.5.29.15"
+        },
+        {
+          "critical": false,
+          "oid": "2.5.29.37"
+        },
+        {
+          "critical": true,
+          "oid": "2.5.29.19"
+        },
+        {
+          "critical": false,
+          "oid": "2.5.29.35"
+        },
+        {
+          "critical": false,
+          "oid": "2.5.29.17"
+        }
+      ],
+      "ip_san": null,
+      "is_ca": false,
+      "issuer": "CN=probe.example",
+      "key_type": "*ecdsa.PublicKey",
+      "key_usage": 1,
+      "not_after": "2026-10-18T11:05:23Z",
+      "not_before": "2026-10-16T12:05:23Z",
+      "pair_load": "PASS",
+      "self_signature": "x509: ECDSA verification failure",
+      "sha256": "881090e5be5699d071989cfa8018d9fcfc098d159dc452ee16a6af138259b182",
+      "signature_algorithm": "ECDSA-SHA256",
+      "subject": "CN=probe.example",
+      "validity_seconds": 169200,
+      "verify_chain_no_hostname": "x509: certificate has expired or is not yet valid: current time 2026-10-18T20:05:23+08:00 is after 2026-10-18T11:05:23Z",
+      "verify_hostname": "x509: certificate has expired or is not yet valid: current time 2026-10-18T20:05:23+08:00 is after 2026-10-18T11:05:23Z"
+    },
+    "wrong_eku": {
+      "basic_constraints_valid": true,
+      "certificate_count": 1,
+      "dns_san": [
+        "probe.example",
+        "localhost"
+      ],
+      "eku": [
+        2
+      ],
+      "extensions": [
+        {
+          "critical": true,
+          "oid": "2.5.29.15"
+        },
+        {
+          "critical": false,
+          "oid": "2.5.29.37"
+        },
+        {
+          "critical": true,
+          "oid": "2.5.29.19"
+        },
+        {
+          "critical": false,
+          "oid": "2.5.29.35"
+        },
+        {
+          "critical": false,
+          "oid": "2.5.29.17"
+        }
+      ],
+      "ip_san": null,
+      "is_ca": false,
+      "issuer": "CN=probe.example",
+      "key_type": "*ecdsa.PublicKey",
+      "key_usage": 1,
+      "not_after": "2026-10-19T12:05:23Z",
+      "not_before": "2026-10-18T11:05:23Z",
+      "pair_load": "PASS",
+      "self_signature": "x509: ECDSA verification failure",
+      "sha256": "d14f65e27e079eab1f3aae53689046bf069627d4d4050c6d6b34c51817fd767c",
+      "signature_algorithm": "ECDSA-SHA256",
+      "subject": "CN=probe.example",
+      "validity_seconds": 90000,
+      "verify_chain_no_hostname": "x509: certificate specifies an incompatible key usage",
+      "verify_hostname": "x509: certificate specifies an incompatible key usage"
+    },
+    "wrong_ku": {
+      "basic_constraints_valid": true,
+      "certificate_count": 1,
+      "dns_san": [
+        "probe.example",
+        "localhost"
+      ],
+      "eku": [
+        1
+      ],
+      "extensions": [
+        {
+          "critical": true,
+          "oid": "2.5.29.15"
+        },
+        {
+          "critical": false,
+          "oid": "2.5.29.37"
+        },
+        {
+          "critical": true,
+          "oid": "2.5.29.19"
+        },
+        {
+          "critical": false,
+          "oid": "2.5.29.35"
+        },
+        {
+          "critical": false,
+          "oid": "2.5.29.17"
+        }
+      ],
+      "ip_san": null,
+      "is_ca": false,
+      "issuer": "CN=probe.example",
+      "key_type": "*ecdsa.PublicKey",
+      "key_usage": 4,
+      "not_after": "2026-10-19T12:05:23Z",
+      "not_before": "2026-10-18T11:05:23Z",
+      "pair_load": "PASS",
+      "self_signature": "x509: ECDSA verification failure",
+      "sha256": "7b3ae4bf97059fd1980db52e4a05686f2f1c0e91c0e3dbefb7b8a51a8b9025bc",
+      "signature_algorithm": "ECDSA-SHA256",
+      "subject": "CN=probe.example",
+      "validity_seconds": 90000,
+      "verify_chain_no_hostname": "PASS",
+      "verify_hostname": "PASS"
+    },
+    "absent_usage": {
+      "basic_constraints_valid": true,
+      "certificate_count": 1,
+      "dns_san": [
+        "probe.example",
+        "localhost"
+      ],
+      "eku": null,
+      "extensions": [
+        {
+          "critical": true,
+          "oid": "2.5.29.19"
+        },
+        {
+          "critical": false,
+          "oid": "2.5.29.35"
+        },
+        {
+          "critical": false,
+          "oid": "2.5.29.17"
+        }
+      ],
+      "ip_san": null,
+      "is_ca": false,
+      "issuer": "CN=probe.example",
+      "key_type": "*ecdsa.PublicKey",
+      "key_usage": 0,
+      "not_after": "2026-10-19T12:05:23Z",
+      "not_before": "2026-10-18T11:05:23Z",
+      "pair_load": "PASS",
+      "self_signature": "x509: ECDSA verification failure",
+      "sha256": "96cc346b6f1e0e0abf184b5b5729cd41f9d31d6104ff9e9b74de2ae6ddf40176",
+      "signature_algorithm": "ECDSA-SHA256",
+      "subject": "CN=probe.example",
+      "validity_seconds": 90000,
+      "verify_chain_no_hostname": "PASS",
+      "verify_hostname": "PASS"
+    }
+  },
+  "go_tls": {
+    "old": {
+      "ca_hostname": "tls: failed to verify certificate: x509: certificate relies on legacy Common Name field, use SANs instead",
+      "fingerprint": "PASS",
+      "insecure": "PASS"
+    },
+    "san_ca": {
+      "ca_hostname": "tls: failed to verify certificate: x509: certificate signed by unknown authority",
+      "fingerprint": "fingerprint mismatch",
+      "insecure": "PASS"
+    },
+    "same_ca_leaf": {
+      "ca_hostname": "PASS",
+      "fingerprint": "fingerprint mismatch",
+      "insecure": "PASS"
+    },
+    "new_ca_leaf": {
+      "ca_hostname": "tls: failed to verify certificate: x509: certificate signed by unknown authority",
+      "fingerprint": "fingerprint mismatch",
+      "insecure": "PASS"
+    },
+    "expired": {
+      "ca_hostname": "tls: failed to verify certificate: x509: certificate has expired or is not yet valid: current time 2026-10-18T20:05:24+08:00 is after 2026-10-18T11:05:23Z",
+      "fingerprint": "fingerprint mismatch",
+      "insecure": "PASS"
+    },
+    "wrong_eku": {
+      "ca_hostname": "tls: failed to verify certificate: x509: certificate specifies an incompatible key usage",
+      "fingerprint": "fingerprint mismatch",
+      "insecure": "PASS"
+    },
+    "wrong_ku": {
+      "ca_hostname": "PASS",
+      "fingerprint": "fingerprint mismatch",
+      "insecure": "PASS"
+    },
+    "absent_usage": {
+      "ca_hostname": "PASS",
+      "fingerprint": "fingerprint mismatch",
+      "insecure": "PASS"
+    },
+    "san_ca_own_trust": {
+      "ca_hostname": "PASS",
+      "fingerprint": "PASS",
+      "insecure": "PASS"
+    }
+  },
+  "certificate_admission": {
+    "old": {
+      "structural_validate": 0,
+      "material_phase": "apply",
+      "returncode": 1,
+      "error": "invalid: command rejected",
+      "published_snapshot": {
+        "result": "invalid: TLS certificate identity or trust invalid"
+      }
+    },
+    "san_ca": {
+      "structural_validate": 0,
+      "material_phase": "apply",
+      "returncode": 1,
+      "error": "invalid: command rejected",
+      "published_snapshot": {
+        "result": "invalid: TLS server certificate must be a leaf"
+      }
+    },
+    "same_ca_leaf": {
+      "structural_validate": 0,
+      "material_phase": "apply",
+      "returncode": 0,
+      "error": "",
+      "published_snapshot": {
+        "result": "PASS"
+      }
+    },
+    "new_ca_leaf": {
+      "structural_validate": 0,
+      "material_phase": "apply",
+      "returncode": 0,
+      "error": "",
+      "published_snapshot": {
+        "result": "PASS"
+      }
+    },
+    "expired": {
+      "structural_validate": 0,
+      "material_phase": "apply",
+      "returncode": 1,
+      "error": "invalid: command rejected",
+      "published_snapshot": {
+        "result": "invalid: TLS certificate identity or trust invalid"
+      }
+    },
+    "wrong_eku": {
+      "structural_validate": 0,
+      "material_phase": "apply",
+      "returncode": 1,
+      "error": "invalid: command rejected",
+      "published_snapshot": {
+        "result": "invalid: TLS certificate identity or trust invalid"
+      }
+    },
+    "wrong_ku": {
+      "structural_validate": 0,
+      "material_phase": "apply",
+      "returncode": 0,
+      "error": "",
+      "published_snapshot": {
+        "result": "PASS"
+      }
+    },
+    "absent_usage": {
+      "structural_validate": 0,
+      "material_phase": "apply",
+      "returncode": 0,
+      "error": "",
+      "published_snapshot": {
+        "result": "PASS"
+      }
+    },
+    "key_mismatch": {
+      "structural_validate": 0,
+      "material_phase": "apply",
+      "returncode": 1,
+      "error": "invalid: command rejected",
+      "published_snapshot": {
+        "result": "invalid: invalid TLS certificate or private key"
+      }
+    }
+  },
+  "nobrand_old_certificate_gate": "CAPABILITY_UNSUPPORTED: rc.3 requires a non-CA TLS leaf; existing certificate unchanged",
+  "hy2": {
+    "legacy_xray_old_cert": "PASS",
+    "public_backend_old": "PASS",
+    "old_cert_wrong_auth": "BLOCKED",
+    "old_cert_verified_client": "BLOCKED",
+    "public_backend_same_ca_leaf": "PASS",
+    "public_backend_new_ca_leaf": "PASS",
+    "unchanged_export_profile_sha256": "f08183d6facc2c4fc33d22dcf24fa20aa9e2a423ee772cf29289a9f7713d874d"
+  },
+  "reality": {
+    "legacy": {
+      "valid": "PASS",
+      "wrong_uuid": "BLOCKED",
+      "wrong_short_id": "BLOCKED",
+      "wrong_sni": "BLOCKED",
+      "private_ip_destination": "BLOCKED",
+      "dangerous_tcp_25": "BLOCKED",
+      "bittorrent": "BLOCKED",
+      "plain_tls_expected_sni": "TLS_HANDSHAKE",
+      "plain_tls_wrong_sni": "BLOCKED",
+      "fallback_http_over_tls": "HTTP_RESPONSE",
+      "plaintext_http": "BLOCKED",
+      "random_tcp": "BLOCKED",
+      "target_observations": {
+        "plain_tls_expected_sni": [
+          {
+            "bytes": "tls"
+          },
+          {
+            "sni": "localhost"
+          }
+        ],
+        "plain_tls_wrong_sni": [],
+        "fallback_http_over_tls": [
+          {
+            "bytes": "tls"
+          },
+          {
+            "sni": "localhost"
+          }
+        ],
+        "plaintext_http": [],
+        "random_tcp": []
+      },
+      "defender_direct_expected_sni": "TLS_HANDSHAKE",
+      "defender_direct_wrong_sni": "BLOCKED"
+    },
+    "rc3": {
+      "valid": "PASS",
+      "wrong_uuid": "BLOCKED",
+      "wrong_short_id": "BLOCKED",
+      "wrong_sni": "BLOCKED",
+      "private_ip_destination": "PASS",
+      "dangerous_tcp_25": "PASS",
+      "bittorrent": "PASS",
+      "plain_tls_expected_sni": "TLS_HANDSHAKE",
+      "plain_tls_wrong_sni": "TLS_HANDSHAKE",
+      "fallback_http_over_tls": "HTTP_RESPONSE",
+      "plaintext_http": "BLOCKED",
+      "random_tcp": "BLOCKED",
+      "target_observations": {
+        "plain_tls_expected_sni": [
+          {
+            "bytes": "tls"
+          },
+          {
+            "sni": "localhost"
+          }
+        ],
+        "plain_tls_wrong_sni": [
+          {
+            "bytes": "tls"
+          },
+          {
+            "sni": "unexpected.invalid"
+          }
+        ],
+        "fallback_http_over_tls": [
+          {
+            "bytes": "tls"
+          },
+          {
+            "sni": "localhost"
+          }
+        ],
+        "plaintext_http": [
+          {
+            "bytes": "http"
+          }
+        ],
+        "random_tcp": []
+      },
+      "network_final_reject": "APPLIED",
+      "route_explain_after_reject": {
+        "rule_sets": [],
+        "action": {
+          "kind": "reject"
+        },
+        "selected": {
+          "kind": "reject"
+        },
+        "available": false
+      },
+      "private_ip_after_network_final_reject": "PASS"
+    }
+  },
+  "original_certificate_key_bytes_unchanged": true,
+  "audit_assertions": "PASS; includes expected policy counterexamples, not migration acceptance",
+  "validation": {
+    "default_bash_entries": 50,
+    "default_bash_result": "PASS",
+    "bash_syntax_files": 108,
+    "bash_syntax_result": "PASS",
+    "shellcheck_source_graph": "PASS",
+    "shellcheck_direct_files": 70,
+    "shellcheck_result": "PASS",
+    "opt_in_native_runtime_entries": 9,
+    "opt_in_native_runtime_result": "NOT RUN",
+    "existing_candidate_files": 175,
+    "existing_candidate_files_changed": [],
+    "head": "f98cf70e7159c07826101676a4a08394f0a203f9",
+    "index": "EMPTY",
+    "formal_public_source_archive_files": 510,
+    "formal_public_source_differences": 0,
+    "python_ast": "PASS",
+    "go_fixture_compile": "PASS",
+    "shellcheck_version": "0.9.0",
+    "final_repository_secret_scan": "PASS; all seven leak counts zero",
+    "git_diff_check": "PASS"
+  },
+  "audit_helper_sha256": {
+    "splicore_ownership_audit.py": "a32909676576322f2b8ab4d8da27b94731cc5e834167d83bb739b475d5c3484c",
+    "splicore_ownership_tls.go": "4815d68ec6fb2a848cafb5345efac77a5e1c47706f40a0cde28d6fc47466d765"
+  }
+}

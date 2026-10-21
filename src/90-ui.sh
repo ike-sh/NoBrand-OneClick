@@ -4,93 +4,23 @@ menu_pause() {
   read_tty _ignore "$(t '按回车返回主菜单...' 'Press Enter to return to the menu...')" || true
 }
 
-user_menu_pause() {
-  local _ignore=""
-  msg ""
-  read_tty _ignore "$(t '按回车返回用户管理菜单...' \
-    'Press Enter to return to user management...')" || true
-}
-
 menu_run_action() {
-  if dry_run_should_preview "$ACTION"; then
-    dry_run_action_preview "$ACTION"
-    return 0
-  fi
+  local runtime_rc=0
+  nb_splicore_route_main || runtime_rc=$?
+  [ "${NOBRAND_SPLICORE_HANDLED:-0}" -ne 1 ] || return "$runtime_rc"
   case "$ACTION" in
-    install) do_install ;;
-    reconfigure) do_reconfigure ;;
-    upgrade) do_upgrade ;;
-    uninstall)
-      do_uninstall
-      [ "${UNINSTALL_CANCELLED:-0}" -eq 1 ] && return 0
-      # do_uninstall 只有在最终残留验收通过后才返回成功。
-      return 2
-      ;;
-    status) do_status ;;
-    client-config) do_client_config ;;
-    mtu-config) do_mtu_config ;;
-    start) do_start ;;
-    stop) do_stop ;;
-    restart) do_restart ;;
-    user-list) do_user_list ;;
-    user-add) do_user_add ;;
-    user-del) do_user_del ;;
-    user-show) do_user_show ;;
     user-manage) do_user_manage ;;
-    user-set-endpoint) do_user_set_endpoint ;;
-    user-set-quota) do_user_set_quota ;;
-    user-set-expire) do_user_set_expire ;;
-    user-enable) do_user_enable ;;
-    user-disable) do_user_disable ;;
-    user-scan) do_user_scan ;;
-    user-quota-reset)
-      if [ "${YES:-0}" -eq 1 ]; then
-        do_user_quota_reset force
-      else
-        do_user_quota_reset
-      fi
-      ;;
-    user-set-rate) do_user_set_rate ;;
-    rate-status) do_rate_status ;;
-    rate-restore) do_rate_restore ;;
-    user-usage) do_user_usage ;;
-    user-export-clients) do_user_export_clients ;;
-    user-backup) do_user_backup ;;
-    user-restore) do_user_restore ;;
-    user-export) do_user_export ;;
-    user-import) do_user_import ;;
-    doctor) do_doctor ;;
     perf) do_perf ;;
-    profile-config) do_profile_config ;;
-    client-modes-config) do_tuning_config client-modes ;;
-    traffic-config) do_tuning_config traffic ;;
-    low-entropy-config) do_tuning_config low-entropy ;;
     bbr-config) do_bbr_config ;;
-    version-channel) do_version_channel_config ;;
-    help) usage ;;
-    *) warn "$(t '未知操作' 'Unknown action')"; return 1 ;;
+    help) nobrand_usage ;;
+    *) warn 'Unsupported action'; return 1 ;;
   esac
 }
 
 menu_loop() {
   MENU_MODE=1
-  MAIN_MENU_ACTIVE=1
   trap - ERR
-  # 仅当已安装(或半装/损坏状态)时才做二进制修复。否则在「全新系统」上，repair_mita_binary_paths
-  # 会因找不到二进制而走 recover_deb_mita → reinstall_mita_package，在显示菜单前就「自动重下安装」mita，
-  # 随后用户选「1) 新装安装」时便被误判「检测到已安装」。修复必须放进 mita_installed 守卫内（与非交互路径一致）。
-  if [ "${DRY_RUN:-0}" -ne 1 ] && mita_installed; then
-    if [ "${NOBRAND_MANAGER_SESSION_ACTIVE:-0}" -eq 1 ]; then
-      nb_lifecycle_lock_acquire || return 1
-      nobrand_menu_state_current || { nb_lifecycle_lock_release; return 1; }
-    fi
-    if mita_installed; then
-      repair_mita_binary_paths 2>/dev/null || true
-      ensure_management_scripts || true
-      MENU_SCRIPTS_READY=1
-    fi
-    [ "${NOBRAND_MANAGER_SESSION_ACTIVE:-0}" -ne 1 ] || nb_lifecycle_lock_release
-  fi
+  nb_splicore_legacy_preflight || return 1
   while true; do
     ACTION=""
     # 安全捕获：set -e 下裸调用 show_menu 返回非0(无效输入)会直接退脚本
@@ -137,42 +67,19 @@ menu_loop() {
       continue
     fi
     if [ "$rc" -ne 0 ]; then
-      warn "$(t '操作未完成，请重试或运行 mita doctor 排查' 'Action failed; retry or run mita doctor')"
+      warn "$(t '操作未完成，请重试或运行 nobrand doctor 排查' 'Action failed; retry or run nobrand doctor')"
     fi
     menu_pause
   done
 }
 
 show_performance_menu() {
-  msg ""
-  t '【性能与网络】' '[Performance and network]'
-  msg '  1) 性能诊断（只读）'
-  msg '  2) 配置预设 Profile'
-  msg '  3) MTU'
-  msg '  4) BBR / FQ'
-  msg '  5) 多路复用 / Multiplexing 与握手 / Handshake'
-  msg '  6) 流量模式 / Traffic Pattern'
-  msg '  7) 低熵模式 / Low Entropy'
-  msg '  8) 带宽限制状态'
-  msg '  9) Mieru 版本通道'
-  msg ' 10) 清理并恢复本项目 tc 规则'
+  msg '  1) 网络诊断（只读）'
+  msg '  2) BBR / FQ'
   msg '  0) 返回'
   local choice=""
-  read_tty choice "$(t '请选择 [0-10]: ' 'Choose [0-10]: ')" || return 2
-  case "$(printf '%s' "$choice" | tr -d '[:space:]')" in
-    1) ACTION=perf ;;
-    2) ACTION="profile-config" ;;
-    3) ACTION="mtu-config" ;;
-    4) ACTION="bbr-config" ;;
-    5) ACTION="client-modes-config" ;;
-    6) ACTION="traffic-config" ;;
-    7) ACTION="low-entropy-config" ;;
-    8) ACTION="rate-status" ;;
-    9) ACTION="version-channel" ;;
-    10) ACTION="rate-restore" ;;
-    0) return 2 ;;
-    *) warn "$(t '无效选择' 'Invalid choice')"; return 1 ;;
-  esac
+  read_tty choice '请选择 [0-2]: ' || return 2
+  case "$choice" in 1) ACTION=perf ;; 2) ACTION=bbr-config ;; 0) return 2 ;; *) return 1 ;; esac
 }
 
 show_service_menu() {
@@ -196,50 +103,16 @@ show_service_menu() {
 }
 
 show_backup_menu() {
-  msg ""
-  t '【备份 / 恢复】' '[Backup / restore]'
-  msg '  1) 备份用户状态'
-  msg '  2) 从备份恢复'
-  msg '  3) 导出用户状态 JSON'
-  msg '  4) 导入用户状态 JSON'
-  msg '  5) 批量导出客户端配置'
-  msg '  0) 返回'
-  local choice=""
-  read_tty choice "$(t '请选择 [0-5]: ' 'Choose [0-5]: ')" || return 2
-  case "$(printf '%s' "$choice" | tr -d '[:space:]')" in
-    1) ACTION="user-backup" ;;
-    2) ACTION="user-restore" ;;
-    3) ACTION="user-export" ;;
-    4) ACTION="user-import" ;;
-    5) ACTION="user-export-clients" ;;
-    0) return 2 ;;
-    *) warn "$(t '无效选择' 'Invalid choice')"; return 1 ;;
-  esac
+  t '完整新架构备份：nobrand backup create；恢复：nobrand backup restore --file PATH。' \
+    'Back up the native architecture with nobrand backup create; restore with nobrand backup restore --file PATH.'
+  return 2
 }
 
 show_menu() {
-  if [ "${DRY_RUN:-0}" -ne 1 ] \
-     && [ "${MENU_SCRIPTS_READY:-0}" -eq 0 ] \
-     && mita_installed; then
-    if [ "${NOBRAND_MANAGER_SESSION_ACTIVE:-0}" -eq 1 ]; then
-      nb_lifecycle_lock_acquire || return 1
-      nobrand_menu_state_current || { nb_lifecycle_lock_release; return 2; }
-    fi
-    if mita_installed; then
-      ensure_management_scripts || true
-      MENU_SCRIPTS_READY=1
-    fi
-    [ "${NOBRAND_MANAGER_SESSION_ACTIVE:-0}" -ne 1 ] || nb_lifecycle_lock_release
-  fi
-  load_install_state 2>/dev/null || true
-  local installed="no" users="-" selected_rc=0 profile_text="-" version_text=""
-  if mita_installed; then installed="yes"; fi
-  if [ "$installed" = yes ]; then
-    users="$(users_count 2>/dev/null || echo 0)"
-    profile_text="$(profile_label)"
-    version_text="$(installed_version 2>/dev/null || printf '-')"
-  else
-    version_text="$(t '未安装' 'not installed')"
+  local installed="no" users="-" selected_rc=0 profile_text="native" version_text="v0.3.0-rc.4"
+  if nb_splicore_installed; then
+    installed=yes
+    users="$(nb_splicore_call protocol --protocol mieru --operation status | jq '[.nodes[]?] | length')"
   fi
   msg ''
   t '========== NoBrand-OneClick / Mieru ==========' \
@@ -250,10 +123,10 @@ show_menu() {
     "Status: $([ "$installed" = yes ] && printf 'installed' || printf 'not installed')"
   t "用户: ${users}" "Users: ${users}"
   t "配置预设 / Profile: ${profile_text}" "Profile: ${profile_text}"
-  t "Mieru 版本: ${version_text}" "Mieru Version: ${version_text}"
+  t "运行时版本: ${version_text}" "Runtime Version: ${version_text}"
   msg ''
   if [ "$installed" = yes ]; then
-    msg '  1) 修复安装'
+    msg '  1) 添加节点'
   else
     msg '  1) 新装 / 安装'
   fi
@@ -261,9 +134,9 @@ show_menu() {
   msg '  3) 用户管理'
   msg '  4) 性能与网络'
   if [ "$installed" = yes ]; then
-    msg '  5) 重新配置'
+    msg '  5) 调整节点配置（使用显式命令参数）'
   else
-    msg '  5) 重新配置（需先安装）'
+    msg '  5) 调整节点配置（使用显式命令参数）'
   fi
   msg '  6) 服务管理'
   msg '  7) 备份 / 恢复'
@@ -290,7 +163,7 @@ show_menu() {
       show_performance_menu || selected_rc=$?
       [ "$selected_rc" -eq 0 ] || return 1
       ;;
-    5) ACTION=reconfigure ;;
+    5) nobrand_usage; return 1 ;;
     6)
       show_service_menu || selected_rc=$?
       [ "$selected_rc" -eq 0 ] || return 1
@@ -331,39 +204,14 @@ nobrand_menu_selection_clear() {
 nobrand_menu_selection_current() {
   local scope="${NOBRAND_MENU_SELECTION_SCOPE:-}" selected_id="${NOBRAND_MENU_SELECTION_ID:-}"
   local selected_name="${NOBRAND_MENU_SELECTION_NAME:-}" expected_hash="${NOBRAND_MENU_SELECTION_HASH:-}"
-  local path="" ids="" id="" name="" matching_id="" matches=0 current_hash=""
+  local path="${NOBRAND_STATE_DIR}/splicore/current/desired.json" current_hash
   [ -n "$scope" ] || return 0
-  [ -n "$selected_id" ] && [ -n "$selected_name" ] && [ -n "$expected_hash" ] || return 1
-  case "$scope" in
-    snell)
-      path="$(snell_state_path "$selected_id")" || return 1
-      ids="$(snell_instance_ids)" || return 1
-      ;;
-    vless-reality)
-      path="$(reality_state_file "$selected_id")" || return 1
-      ids="$(reality_instance_ids)" || return 1
-      ;;
-    tuic)
-      path="$(tuic_state_file "$selected_id")" || return 1
-      ids="$(tuic_instance_ids)" || return 1
-      ;;
-    *) return 1 ;;
-  esac
+  [ "$scope" = splicore ] && [ -n "$selected_id" ] && [ -n "$selected_name" ] && [ -n "$expected_hash" ] || return 1
   [ -f "$path" ] && [ ! -L "$path" ] || return 1
   current_hash="$(sha256sum <"$path" | cut -d' ' -f1)" || return 1
   [ "$current_hash" = "$expected_hash" ] || return 1
-  while IFS= read -r id; do
-    [ -n "$id" ] || continue
-    case "$scope" in
-      snell) name="$(snell_state_field "$id" name 2>/dev/null || true)" ;;
-      vless-reality) name="$(reality_state_field "$id" name 2>/dev/null || true)" ;;
-      tuic) name="$(tuic_state_field "$id" name 2>/dev/null || true)" ;;
-    esac
-    [ "$name" = "$selected_name" ] || continue
-    matches=$((matches + 1))
-    matching_id="$id"
-  done <<<"$ids"
-  [ "$matches" -eq 1 ] && [ "$matching_id" = "$selected_id" ]
+  jq -e --arg id "$selected_id" --arg name "$selected_name" \
+    '.nodes[] | select(.id==$id and (.id==$name or .client.name==$name))' "$path" >/dev/null
 }
 
 nobrand_menu_selection_record() {
@@ -484,55 +332,21 @@ nobrand_menu_run() {
 }
 
 snell_menu_select_instance() {
-  local id name major count=0 only_name="" choice="" selected_id="" prompt=""
-  nobrand_menu_selection_clear
-  msg ''
-  msg 'Snell 节点:'
-  while IFS= read -r id; do
-    [ -n "$id" ] || continue
-    name="$(snell_state_field "$id" name)"
-    major="$(snell_state_field "$id" version)"
-    printf '  - %s (v%s, %s)\n' "$name" "$major" "$id"
-    count=$((count + 1))
-    only_name="$name"
-  done < <(snell_instance_ids)
-  [ "$count" -gt 0 ] || { warn 'Snell 尚无节点'; return 1; }
-  prompt="$(t '输入节点名: ' 'Enter node name: ')"
-  [ "$count" -ne 1 ] || prompt="$(t "输入节点名 [${only_name}]: " "Enter node name [${only_name}]: ")"
-  read_tty choice "$prompt" || return 1
-  if [ -z "$choice" ]; then
-    [ "$count" -eq 1 ] || { warn '存在多个节点，请输入要操作的节点名'; return 1; }
-    choice="$only_name"
-  fi
-  selected_id="$(snell_find_id_by_name "$choice")" \
-    || { warn '节点名不存在'; return 1; }
-  nobrand_menu_selection_record snell "$selected_id" "$choice" "$(snell_state_path "$selected_id")" \
-    || { warn '节点状态已变化，请重新选择'; return 1; }
-  SNELL_NAME="$choice"
+  nb_splicore_menu_select snell
 }
 
 snell_menu_install_version() {
   local version="$1"
-  SNELL_VERSION="$version" SNELL_VERSION_CLI=1 SNELL_NAME="" SNELL_PSK=""
-  SNELL_QUIC_PROXY="" SNELL_QUIC_CLI=0
+  SNELL_VERSION="$version" SNELL_NAME="" SNELL_PSK=""
+  SNELL_QUIC_PROXY=""
   PORT="" PORT_CLI=0 ADVERTISE_HOST="" ADVERTISE_PORT="" ADVERTISE_CLI=0 ADVERTISE_AUTO_REQUESTED=0
   YES=0 SNELL_ACTION=install
   nobrand_menu_run nobrand_run_snell_action
 }
 
 snell_menu_set_quic() {
-  local choice=""
-  snell_menu_select_instance || return 0
-  msg '  1) 关闭 QUIC Proxy Mode [默认 / 推荐兼容]'
-  msg '  2) 启用 QUIC Proxy Mode [开放同号 UDP]'
-  read_tty choice "$(t '请选择 [1-2]: ' 'Choose [1-2]: ')" || choice=""
-  case "$choice" in
-    1) SNELL_QUIC_PROXY=off ;;
-    2) SNELL_QUIC_PROXY=on ;;
-    *) warn '无效选择'; return 0 ;;
-  esac
-  SNELL_QUIC_CLI=1 YES=0 SNELL_ACTION="set-quic"
-  nobrand_menu_run nobrand_run_snell_action
+  t '当前版本不支持 Snell QUIC Proxy Mode；保持关闭。TCP 与普通 UDP 转发可用。' \
+    'Snell QUIC Proxy Mode is unsupported and remains off. TCP and ordinary UDP relay are available.'
 }
 
 snell_menu_service() {
@@ -562,10 +376,10 @@ snell_menu_loop() {
     msg '  1) 安装 Snell v5 [推荐]'
     msg '  2) 安装 Snell v4 [兼容]'
     msg '  3) 查看 Snell 节点'
-    msg '  4) QUIC 设置'
+    msg '  4) QUIC 支持范围'
     msg '  5) 修改展示端点 / Display Endpoint'
     msg '  6) 服务管理'
-    msg '  7) 升级官方 Runtime'
+    msg '  7) 检查运行时更新'
     msg '  8) Doctor / 诊断'
     msg '  9) 删除节点'
     msg '  0) 返回'
@@ -608,7 +422,7 @@ hysteria2_menu_loop() {
   trap - ERR
   while true; do
     msg ''
-    msg '========== Hysteria2 / Xray-core =========='
+    msg '========== Hysteria2 + Salamander =========='
     msg '  1) 安装 / 重新部署'
     msg '  2) 查看节点'
     msg '  3) 修改展示端点 / Display Endpoint'
@@ -616,7 +430,7 @@ hysteria2_menu_loop() {
     msg '  5) 启动'
     msg '  6) 停止'
     msg '  7) 重启'
-    msg '  8) 升级 NoBrand 独立 Xray-core'
+    msg '  8) 验证 / 升级固定运行时'
     msg '  9) Doctor / 诊断'
     msg ' 10) 删除 Hysteria2'
     msg '  0) 返回'
@@ -667,7 +481,7 @@ vless_sudoku_menu_loop() {
     msg '  7) 重启'
     msg '  8) Doctor / 诊断'
     msg '  9) 配置冒烟测试 / Smoke'
-    msg ' 10) 升级共享 Xray Runtime'
+    msg ' 10) 验证 / 升级固定运行时'
     msg ' 11) 删除'
     msg '  0) 返回'
     read_tty choice "$(t '请选择 [0-11]: ' 'Choose [0-11]: ')" || return 0
@@ -705,27 +519,7 @@ vless_sudoku_menu_loop() {
 }
 
 reality_menu_select_instance() {
-  local id name choice="" count=0 only_name="" selected_id="" prompt=""
-  nobrand_menu_selection_clear
-  while IFS= read -r id; do
-    name="$(reality_state_field "$id" name)"
-    printf '  - %s (%s)\n' "$name" "$id"
-    count=$((count + 1))
-    only_name="$name"
-  done < <(reality_instance_ids)
-  [ "$count" -gt 0 ] || { warn 'VLESS REALITY 尚无实例'; return 1; }
-  prompt='请输入 VLESS REALITY 实例名称: '
-  [ "$count" -ne 1 ] || prompt="请输入 VLESS REALITY 实例名称 [${only_name}]: "
-  read_tty choice "$prompt" || return 1
-  if [ -z "$choice" ]; then
-    [ "$count" -eq 1 ] || { warn '存在多个实例，请输入要操作的实例名称'; return 1; }
-    choice="$only_name"
-  fi
-  selected_id="$(reality_find_id_by_name "$choice")" \
-    || { warn 'VLESS REALITY 实例不存在'; return 1; }
-  nobrand_menu_selection_record vless-reality "$selected_id" "$choice" "$(reality_state_file "$selected_id")" \
-    || { warn 'VLESS REALITY 实例状态已变化，请重新选择'; return 1; }
-  VLESS_REALITY_NAME="$choice"
+  nb_splicore_menu_select vless-reality
 }
 
 vless_reality_menu_loop() {
@@ -737,22 +531,21 @@ vless_reality_menu_loop() {
     msg 'Public Ingress：推荐；Mapped / Dedicated：允许，但会提示警告'
     msg '  1) 安装新实例'
     msg '  2) 查看节点 / URI'
-    msg '  3) 导出 Xray / Mihomo / sing-box'
+    msg '  3) 导出新 URI / 客户端配置'
     msg '  4) 修改展示端点 / Display Endpoint'
     msg '  5) 状态'
     msg '  6) 启动'
     msg '  7) 停止'
     msg '  8) 重启'
     msg '  9) Doctor / 诊断'
-    msg ' 10) 升级共享 Xray Runtime'
+    msg ' 10) 验证 / 升级固定运行时'
     msg ' 11) 删除实例'
     msg '  0) 返回'
     read_tty choice "$(t '请选择 [0-11]: ' 'Choose [0-11]: ')" || return 0
     case "$choice" in
       1)
-        PORT="" PORT_CLI=0 VLESS_REALITY_NAME="" VLESS_REALITY_TARGET="" VLESS_REALITY_TARGET_CLI=0
+        PORT="" PORT_CLI=0 VLESS_REALITY_NAME="" VLESS_REALITY_TARGET=""
         VLESS_REALITY_TARGET_PORT="$NOBRAND_REALITY_DEFAULT_CAMOUFLAGE_PORT" \
-          VLESS_REALITY_TARGET_PORT_CLI=0 VLESS_REALITY_FINGERPRINT=chrome VLESS_REALITY_SPIDER_X=/
         ADVERTISE_HOST="" ADVERTISE_PORT="" ADVERTISE_CLI=0 ADVERTISE_AUTO_REQUESTED=0
         INGRESS_PROFILE="" INGRESS_PROFILE_CLI=0 YES=0
         read_tty VLESS_REALITY_NAME '实例名称 [primary]: ' || VLESS_REALITY_NAME=""
@@ -771,8 +564,7 @@ vless_reality_menu_loop() {
       3) reality_menu_select_instance && { VLESS_REALITY_ACTION="export"; nobrand_menu_run nobrand_run_vless_reality_action; } ;;
       4)
         if reality_menu_select_instance; then
-          INGRESS_PROFILE_ID="$(reality_state_field "$(reality_find_id_by_name "$VLESS_REALITY_NAME")" ingress_profile_id)"
-          PORT="$(reality_state_field "$(reality_find_id_by_name "$VLESS_REALITY_NAME")" listen_port)"
+          PORT="$NOBRAND_SPLICORE_MENU_PORT"
           ADVERTISE_HOST="" ADVERTISE_PORT="" ADVERTISE_CLI=0 ADVERTISE_AUTO_REQUESTED=0
           nb_collect_advertise_endpoint_interactive 'VLESS REALITY' "$PORT"
           VLESS_REALITY_ACTION=set-endpoint
@@ -801,27 +593,7 @@ vless_reality_menu_loop() {
 }
 
 tuic_menu_select_instance() {
-  local id name choice="" count=0 only_name="" selected_id="" prompt=""
-  nobrand_menu_selection_clear
-  while IFS= read -r id; do
-    name="$(tuic_state_field "$id" name)"
-    printf '  - %s (%s)\n' "$name" "$id"
-    count=$((count + 1))
-    only_name="$name"
-  done < <(tuic_instance_ids)
-  [ "$count" -gt 0 ] || { warn 'TUIC 尚无实例'; return 1; }
-  prompt='请输入 TUIC 实例名称: '
-  [ "$count" -ne 1 ] || prompt="请输入 TUIC 实例名称 [${only_name}]: "
-  read_tty choice "$prompt" || return 1
-  if [ -z "$choice" ]; then
-    [ "$count" -eq 1 ] || { warn '存在多个实例，请输入要操作的实例名称'; return 1; }
-    choice="$only_name"
-  fi
-  selected_id="$(tuic_find_id_by_name "$choice")" \
-    || { warn 'TUIC 实例不存在'; return 1; }
-  nobrand_menu_selection_record tuic "$selected_id" "$choice" "$(tuic_state_file "$selected_id")" \
-    || { warn 'TUIC 实例状态已变化，请重新选择'; return 1; }
-  TUIC_NAME="$choice"
+  nb_splicore_menu_select tuic
 }
 
 tuic_menu_loop() {
@@ -829,7 +601,7 @@ tuic_menu_loop() {
   trap - ERR
   while true; do
     msg ''
-    msg '========== TUIC v5 / 官方 sing-box Runtime =========='
+    msg '========== TUIC v5 / Splicore =========='
     msg '  1) 安装 TUIC v5 实例'
     msg '  2) 查看 / 导出用户节点'
     msg '  3) 用户管理（列出 / 添加 / 删除 / 轮换凭据）'
@@ -838,7 +610,7 @@ tuic_menu_loop() {
     msg '  6) 启动'
     msg '  7) 停止'
     msg '  8) 重启'
-    msg '  9) 升级官方 sing-box Runtime'
+    msg '  9) 验证 / 升级统一 Splicore Runtime'
     msg ' 10) Doctor / 诊断'
     msg ' 11) 卸载实例'
     msg '  0) 返回'
@@ -874,7 +646,11 @@ tuic_menu_loop() {
       4)
         tuic_menu_select_instance || continue
         ADVERTISE_HOST="" ADVERTISE_PORT="" ADVERTISE_CLI=0 ADVERTISE_AUTO_REQUESTED=0
-        nb_collect_advertise_endpoint_interactive 'TUIC v5' "$(tuic_state_field "$(tuic_find_id_by_name "$TUIC_NAME")" listen_port)"
+        if nb_splicore_installed; then
+          nb_collect_advertise_endpoint_interactive 'TUIC v5' "$NOBRAND_SPLICORE_MENU_PORT"
+        else
+          nb_collect_advertise_endpoint_interactive 'TUIC v5' "$NOBRAND_SPLICORE_MENU_PORT"
+        fi
         TUIC_ACTION="set-endpoint"; nobrand_menu_run nobrand_run_tuic_action
         ;;
       5|6|7|8)
@@ -1643,8 +1419,8 @@ nobrand_menu_loop() {
     msg ''
     msg '  1) Mieru'
     msg '  2) Snell v4 / v5'
-    msg '  3) Hysteria2（Xray-core）'
-    msg '  4) TUIC v5（官方 sing-box Runtime）'
+    msg '  3) Hysteria2 + Salamander'
+    msg '  4) TUIC v5'
     msg '  5) VLESS REALITY + Vision（TCP；推荐 Public Ingress）'
     msg '  6) VLESS + FinalMask + Sudoku（TCP）'
     msg '  7) SSH Tunnel（现有 OpenSSH）'

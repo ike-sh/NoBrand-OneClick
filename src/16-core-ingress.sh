@@ -286,7 +286,7 @@ nb_prepare_ingress_deployment() {
   case "$capability" in
     not-applicable)
       INGRESS_ENFORCEMENT_RESOLVED=not-applicable
-      INGRESS_ENFORCEMENT_METHOD=system-ssh
+      INGRESS_ENFORCEMENT_METHOD="system-ssh"
       INGRESS_LISTEN_HOST=0.0.0.0
       return 0
       ;;
@@ -521,18 +521,6 @@ nb_strict_firewall_commit_candidate() {
   rm -f "$old"
   [ "$rollback_failed" -eq 0 ] || warn '严格 Ingress 防火墙回滚失败；请立即运行诊断 / Doctor'
   return 1
-}
-
-nb_strict_firewall_remove_owner() {
-  local owner="$1" candidate
-  candidate="$(mktemp_file .ingress-firewall-remove)" || return 1
-  nb_strict_firewall_current_or_empty "$candidate" || { rm -f "$candidate"; return 1; }
-  jq --arg owner "$owner" '.rules|=map(select(.owner!=$owner))' "$candidate" >"${candidate}.next" \
-    && mv -f "${candidate}.next" "$candidate" \
-    && nb_strict_firewall_commit_candidate "$candidate"
-  local rc=$?
-  rm -f "$candidate" "${candidate}.next"
-  return "$rc"
 }
 
 nb_strict_firewall_rule_owned() {
@@ -789,12 +777,10 @@ nb_ingress_add() {
 
 nb_ingress_profile_reference_rows() {
   local profile_id="$1"
-  NOBRAND_SNELL_STATE_DIR="$NOBRAND_SNELL_STATE_DIR" NOBRAND_HY2_STATE_FILE="$NOBRAND_HY2_STATE_FILE" \
-  NOBRAND_VLESS_STATE_FILE="$NOBRAND_VLESS_STATE_FILE" NOBRAND_TUIC_STATE_DIR="$NOBRAND_TUIC_STATE_DIR" \
-  NOBRAND_REALITY_STATE_DIR="$NOBRAND_REALITY_STATE_DIR" \
+  NOBRAND_VLESS_STATE_FILE="$NOBRAND_VLESS_STATE_FILE" \
   NOBRAND_SSH_STATE_FILE="$NOBRAND_SSH_STATE_FILE" NOBRAND_FORWARD_STATE_FILE="$NOBRAND_FORWARD_STATE_FILE" \
-  MITA_USERS_STATE="$MITA_USERS_STATE" python3 - "$profile_id" <<'PY'
-import glob, json, os, sys
+  NOBRAND_SPLICORE_DESIRED="${NOBRAND_STATE_DIR}/splicore/current/desired.json" python3 - "$profile_id" <<'PY'
+import json, os, sys
 profile = sys.argv[1]
 def load(path):
     try: return json.load(open(path, encoding="utf-8"))
@@ -803,18 +789,12 @@ def emit(owner, value):
     if not value: return
     if profile == "*": print(str(value) + "|" + owner)
     elif value == profile: print(owner)
-for path in glob.glob(os.path.join(os.environ.get("NOBRAND_SNELL_STATE_DIR", ""), "*.json")):
-    state=load(path)
-    if state: emit("snell:" + str(state.get("instance_id") or path), state.get("ingress_profile_id"))
-for env, owner in (("NOBRAND_HY2_STATE_FILE","hy2:default"),("NOBRAND_VLESS_STATE_FILE","vless-sudoku:default")):
-    state=load(os.environ.get(env,""))
-    if state: emit(owner, state.get("ingress_profile_id"))
-for path in glob.glob(os.path.join(os.environ.get("NOBRAND_TUIC_STATE_DIR", ""), "*", "state.json")):
-    state=load(path)
-    if state: emit("tuic:" + str(state.get("instance_id") or path), state.get("ingress_profile_id"))
-for path in glob.glob(os.path.join(os.environ.get("NOBRAND_REALITY_STATE_DIR", ""), "*", "state.json")):
-    state=load(path)
-    if state: emit("vless-reality:" + str(state.get("instance_id") or path), state.get("ingress_profile_id"))
+state=load(os.environ.get("NOBRAND_VLESS_STATE_FILE", ""))
+if state: emit("vless-sudoku:default", state.get("ingress_profile_id"))
+state=load(os.environ.get("NOBRAND_SPLICORE_DESIRED", ""))
+if state:
+    for node in state.get("nodes", []):
+        emit("splicore:" + node["id"], node.get("ingress", {}).get("profile_id"))
 state=load(os.environ.get("NOBRAND_SSH_STATE_FILE", ""))
 if state:
     emit("ssh-tunnel:policy", state.get("ingress_profile_id"))
@@ -824,10 +804,7 @@ state=load(os.environ.get("NOBRAND_FORWARD_STATE_FILE", ""))
 if state:
     for rule in state.get("rules") or []:
         emit("forward:" + str(rule.get("rule_id")), rule.get("ingress_profile_id"))
-state=load(os.environ.get("MITA_USERS_STATE", ""))
-if state:
-    for user in state.get("users") or []:
-        emit("mieru:" + str(user.get("instance_id") or user.get("name")), user.get("ingress_profile_id"))
+
 PY
 }
 
@@ -1117,8 +1094,7 @@ nb_ingress_show() {
 
 nb_ingress_owner_capability() {
   case "$1" in
-    mieru:*) printf firewall ;;
-    snell:*|hy2:*|vless-sudoku:*|vless-reality:*|tuic:*) printf native-bind ;;
+    splicore:*|vless-sudoku:*) printf native-bind ;;
     forward:*)
       if [ "$(nb_owner_ingress_method "$1" 2>/dev/null || true)" = address-match ]; then
         printf address-match
@@ -1137,12 +1113,13 @@ nb_ingress_owner_capability() {
 nb_ingress_apply_owner() {
   local owner="$1"
   case "$owner" in
-    mieru:*) mieru_apply_ingress_enforcement "${owner#mieru:}" ;;
-    snell:*) snell_apply_ingress_enforcement "${owner#snell:}" ;;
-    hy2:*) hysteria2_apply_ingress_enforcement ;;
+    splicore:*)
+      local profile_id
+      profile_id="$(nb_owner_ingress_profile_id "$owner")" || return 1
+      nb_prepare_ingress_deployment "$profile_id" native-bind || return 1
+      NOBRAND_SPLICORE_LISTEN="$INGRESS_LISTEN_HOST" nb_splicore_call protocol --protocol "$(jq -r --arg id "${owner#splicore:}" '.nodes[]|select(.id==$id)|.protocol' "${NOBRAND_STATE_DIR}/splicore/current/desired.json")" --operation set-listen --selector "${owner#splicore:}"
+      ;;
     vless-sudoku:*) vless_sudoku_apply_ingress_enforcement ;;
-    vless-reality:*) reality_apply_ingress_enforcement "${owner#vless-reality:}" ;;
-    tuic:*) tuic_apply_ingress_enforcement "${owner#tuic:}" ;;
     forward:*) forward_apply_ingress_enforcement "${owner#forward:}" ;;
     ssh-tunnel:*) return 0 ;;
     *) return 1 ;;
@@ -1321,6 +1298,14 @@ nb_ingress_doctor() {
 }
 
 nobrand_run_ingress_action() {
+  if nb_splicore_installed; then
+    case "${INGRESS_ACTION:-list}" in
+      modify|delete|apply)
+        printf '[错误] Splicore 节点的入口变更需要显式 canonical 配置事务；拒绝调用旧 Core 的入口重建路径。\n' >&2
+        return 1
+        ;;
+    esac
+  fi
   if [ "${INGRESS_ACTION:-list}" = add ]; then
     nb_ingress_prepare_add_request || return 1
   fi

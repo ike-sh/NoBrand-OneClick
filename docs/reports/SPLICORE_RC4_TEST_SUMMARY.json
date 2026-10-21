@@ -1,0 +1,88 @@
+{
+  "result": "PASS",
+  "bash_acceptance_entrypoints": 28,
+  "entrypoints": [
+    "tests/test_splicore_runtime.sh",
+    "tests/test_splicore_legacy_refusal.sh",
+    "tests/test_splicore_fresh.sh",
+    "tests/test_splicore_shell_surface.sh",
+    "tests/test_splicore_rc4_contract.sh",
+    "tests/test_architecture_audit.sh",
+    "tests/test_repository_sanitization.sh",
+    "tests/test_schema_v3.sh",
+    "tests/test_common_port.sh",
+    "tests/test_ingress_profiles.sh",
+    "tests/test_ingress_interactive.sh",
+    "tests/test_ingress_enforcement.sh",
+    "tests/test_ingress_enforcement_transaction.sh",
+    "tests/test_forward.sh",
+    "tests/test_forward_transaction.sh",
+    "tests/test_forward_sysctl.sh",
+    "tests/test_forward_ownership.sh",
+    "tests/test_ssh_tunnel.sh",
+    "tests/test_ssh_tunnel_transaction.sh",
+    "tests/test_vless_sudoku_golden.sh",
+    "tests/test_vless_sudoku_encryption_absence.sh",
+    "tests/test_vless_sudoku_lifecycle.sh",
+    "tests/test_cli.sh",
+    "tests/test_menu.sh",
+    "tests/test_menu_lifecycle_lock_scope.sh",
+    "tests/test_menu_instance_selection.sh",
+    "tests/test_version_consistency.sh",
+    "tests/test_localization.sh"
+  ],
+  "python_native_transactions": {
+    "tests": 27,
+    "result": "PASS",
+    "skipped": 0
+  },
+  "python_fresh_policy": {
+    "tests": 10,
+    "result": "PASS",
+    "skipped": 0
+  },
+  "public_rc4_runtime": {
+    "checks": 42,
+    "result": "PASS",
+    "scope": "Linux amd64 temporary loopback; local process supervisor"
+  },
+  "shell_syntax": {
+    "files": 111,
+    "result": "PASS"
+  },
+  "shellcheck": "PASS (source model, both installers, scripts and all test files)",
+  "build_check": "PASS",
+  "historical_reports": {
+    "count": 16,
+    "sha256_unchanged": true
+  },
+  "code_hashes": {
+    "runtime/splicore.py": "9e87893eec4aa606fa82212dcbfbccbbc85bc7596d6c61b05744a921cb255e61",
+    "runtime/splicore-launch.py": "e0438940d64712b0dde1434dad3b978834174d5b81b6dfb9230c23c0b4328706",
+    "runtime/splicore-release.json": "0d7cc97b20661ad457cd484a3ed5081ba4d2a2e9b05964c254cd001f6c8ace80",
+    "install-nobrand.sh": "7522055a07b34c4957bb07bf53769f0dd31bb23d923c154b0810148107fc1d15",
+    "dist/install-nobrand.sh": "7522055a07b34c4957bb07bf53769f0dd31bb23d923c154b0810148107fc1d15"
+  },
+  "optional_checks_not_run": [
+    "real Sudoku Xray validator (outside native rc.4 campaign; no NOBRAND_XRAY_TEST_BIN)",
+    "default runner --runtime stage (the separate public rc.4 campaign passed)"
+  ],
+  "qualification_limits": {
+    "native_systemd": "PENDING",
+    "openrc": "PENDING",
+    "arm64_runtime": "BUILD ONLY / NOT CERTIFIED",
+    "nftables_port_range": "PENDING / NOT RUN"
+  },
+  "git": {
+    "branch": "main",
+    "head": "f98cf70e7159c07826101676a4a08394f0a203f9",
+    "main_head": "f98cf70e7159c07826101676a4a08394f0a203f9",
+    "index": "EMPTY",
+    "stage": "NONE",
+    "commit": "NONE",
+    "push": "NONE",
+    "tag": "NONE",
+    "release": "NONE",
+    "freeze": false
+  }
+}

@@ -14,7 +14,8 @@ export NOBRAND_LIB_DIR="$fixture/lib"
 export NOBRAND_LIFECYCLE_DIR="$fixture/nobrand-oneclick-lifecycle"
 export NOBRAND_LIFECYCLE_LOCK_FILE="$fixture/run/nobrand-oneclick/lifecycle.lock"
 export NOBRAND_TEST_MODE=1
-mkdir -p "$fixture/run" "$NOBRAND_STATE_DIR/snell/instances"
+export NOBRAND_SYSTEM_ROOT="$fixture/system"
+mkdir -p "$fixture/run" "$NOBRAND_STATE_DIR/splicore/generations/fixture"
 source_installer
 # The generated installer may lag the source during a focused test.
 # shellcheck disable=SC1091
@@ -25,16 +26,18 @@ source "$TEST_ROOT/src/90-ui.sh"
 source "$TEST_ROOT/src/99-main.sh"
 trap - ERR
 
-snell_id=saaaaaaaaaaaaaaaa
-jq -n --arg id "$snell_id" --arg name '测试-节点甲' \
-  '{instance_id:$id,version:5,name:$name}' \
-  >"$NOBRAND_SNELL_STATE_DIR/$snell_id.json"
+jq -n '{architecture:"splicore-native",owner:"nobrand-splicore-v1",schema:1,config_schema:1,
+ nodes:[{id:"fixture",protocol:"snell",client:{name:"测试-节点甲"},document:{listener:{host:"127.0.0.1",port:31001}}}]}' \
+ >"$NOBRAND_STATE_DIR/splicore/generations/fixture/desired.json"
+ln -s generations/fixture "$NOBRAND_STATE_DIR/splicore/current"
+nb_splicore_call() { printf '%s\n' '{"nodes":[{"id":"fixture","name":"测试-节点甲","listener":{"port":31001}}]}'; }
 
 # Only replace installation/environment setup. main(), the menus, and flock
 # are the real implementations in this two-process fixture.
 nb_validate_authoritative_state_boundary() { NOBRAND_INSTALL_STATE=CURRENT_COMPLETE; }
 nb_classify_installation_state() { printf CURRENT_COMPLETE; }
 nobrand_manager_bootstrap() { return 0; }
+nobrand_manager_installation_valid() { return 0; }
 ensure_manager_state_layout() { return 0; }
 nobrand_ssh_confirmation_pending() { return 1; }
 nobrand_doctor() { printf 'DOCTOR_PASS\n'; }
@@ -284,11 +287,11 @@ pass 'Mieru action acquires and releases lifecycle lock'
     user_choice_index=$((user_choice_index + 1))
     case "$user_choice_index" in
       1) printf -v "$1" 1 ;;
-      2) printf -v "$1" 18 ;;
+      2) printf -v "$1" 0 ;;
       *) return 1 ;;
     esac
   }
-  do_user_list() {
+  nb_splicore_protocol() {
     assert_eq 1 "$NOBRAND_LIFECYCLE_LOCK_HELD" 'Mieru user action lock depth'
     assert_eq 1 "${NOBRAND_LIFECYCLE_LOCK_FLOOR:-0}" 'Mieru user child lock floor'
     if flock -n "$NOBRAND_LIFECYCLE_LOCK_FILE" -c true; then
@@ -296,7 +299,7 @@ pass 'Mieru action acquires and releases lifecycle lock'
     fi
     : >"$fixture/mieru-user-action"
   }
-  user_menu_pause() {
+  unused_pause_fixture() {
     flock -n "$NOBRAND_LIFECYCLE_LOCK_FILE" -c true \
       || fail 'Mieru user menu pause held lifecycle lock'
   }
@@ -304,7 +307,7 @@ pass 'Mieru action acquires and releases lifecycle lock'
   do_user_manage
   rc=$?
   set -e
-  assert_eq 3 "$rc" 'Mieru user submenu returns to main menu'
+  assert_eq 0 "$rc" 'Mieru user submenu returns to main menu'
 ) >"$fixture/mieru-user-action.out" 2>&1 || fail 'Mieru user submenu action failed'
 [ -e "$fixture/mieru-user-action" ] || fail 'Mieru user action was not dispatched'
 flock -n "$NOBRAND_LIFECYCLE_LOCK_FILE" -c true || fail 'Mieru user submenu retained lock'

@@ -22,6 +22,8 @@ source "${SOURCE_ROOT}/src/16-core-ingress.sh"
 source "${SOURCE_ROOT}/src/17-core-endpoint.sh"
 # shellcheck source=src/18-core-nodes.sh
 source "${SOURCE_ROOT}/src/18-core-nodes.sh"
+# shellcheck source=src/19-splicore.sh
+source "${SOURCE_ROOT}/src/19-splicore.sh"
 # shellcheck source=src/20-platform-mieru.sh
 source "${SOURCE_ROOT}/src/20-platform-mieru.sh"
 # shellcheck source=src/21-platform-xray-hy2.sh

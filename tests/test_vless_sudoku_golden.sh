@@ -102,7 +102,7 @@ if [ -n "${NOBRAND_XRAY_TEST_BIN:-}" ]; then
     || fail 'real Xray rejected golden VLESS Sudoku client config'
   printf '[PASS] VLESS Sudoku golden server/client validated by the same real Xray runtime\n'
 else
-  printf '[SKIP] real Xray validation inside golden test (covered by --runtime)\n'
+  printf '[SKIP] optional real Sudoku Xray validation (set NOBRAND_XRAY_TEST_BIN; outside rc.4 campaign)\n'
 fi
 
 pass 'VLESS FinalMask/Sudoku canonical server, client JSON, and share link golden'

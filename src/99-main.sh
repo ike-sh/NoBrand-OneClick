@@ -26,8 +26,7 @@ nobrand_recovery_action_allowed() {
   nobrand_action_is_ssh_confirmation && return 0
   case "$state:$action" in
     CURRENT_PARTIAL_INSTALL:install|CURRENT_PARTIAL_REPAIR:install|\
-      CURRENT_PARTIAL_UNINSTALL:install|CURRENT_PARTIAL_UNINSTALL:nobrand-uninstall|\
-      LEGACY_SUPPORTED:install)
+      CURRENT_PARTIAL_UNINSTALL:install|CURRENT_PARTIAL_UNINSTALL:nobrand-uninstall)
       return 0
       ;;
   esac
@@ -40,14 +39,6 @@ nobrand_recovery_action_allowed() {
       [ "$(nb_lifecycle_field FORMAT)" = nobrand-lifecycle-v2 ] \
         && [ "$(nb_lifecycle_mutation_started)" = 0 ] || return 1
     fi
-    return 0
-  fi
-  if [ "$state:$action" = CURRENT_PARTIAL_REPAIR:reconfigure ] \
-     && [ "${NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE:-}" = mieru ] \
-     && nb_lifecycle_tx_valid \
-     && [ "$(nb_lifecycle_field STATUS)" = in-progress ] \
-     && [ "$(nb_lifecycle_field OPERATION)" = repair ] \
-     && [ "$(nb_lifecycle_scope)" = mieru ]; then
     return 0
   fi
   if [ "$state:$action" = CURRENT_PARTIAL_CONFIGURE:nobrand-ingress ] \
@@ -119,41 +110,6 @@ nobrand_set_scoped_recovery_action() {
   case "$scope" in
     manager) ACTION=nobrand-manager-bootstrap ;;
     ingress) ACTION=nobrand-ingress-recover ;;
-    mieru)
-      format="$(nb_lifecycle_field FORMAT 2>/dev/null || true)"
-      operation="$(nb_lifecycle_field OPERATION 2>/dev/null || true)"
-      phase="$(nb_lifecycle_field LAST_COMPLETED_PHASE 2>/dev/null || true)"
-      mutation_started="$(nb_lifecycle_mutation_started 2>/dev/null || true)"
-      if [ "$format" = nobrand-lifecycle-v2 ] && [ "$mutation_started" = 0 ]; then
-        # Nothing changed, so the install dispatcher may safely clear this
-        # record without needing to infer whether the lost request was install
-        # or reconfigure.
-        ACTION=install
-      elif [ "$operation" = repair ]; then
-        case "$phase" in
-          runtime-ready|state-committed|ready-to-validate)
-            # These phases belong to repair-install or are validation-only; the
-            # install dispatcher will never recollect when state is committed.
-            ACTION=install
-            ;;
-          *)
-            warn "$(t \
-              'Mieru 修复记录无法区分重装与重新配置，且未保存原参数。请显式执行 nobrand mieru install 或 nobrand mieru reconfigure。' \
-              'The Mieru repair record cannot distinguish reinstall from reconfigure and did not store the original request. Explicitly run nobrand mieru install or nobrand mieru reconfigure.')"
-            return 1
-            ;;
-        esac
-      elif [ "$operation" = install ]; then
-        ACTION=install
-      else
-        [ "$format" != nobrand-lifecycle-v1 ] || ACTION=install
-        [ -n "${ACTION:-}" ] || return 1
-      fi
-      ;;
-    snell) ACTION=nobrand-snell; SNELL_ACTION=install ;;
-    hy2) ACTION=nobrand-hy2; HY2_ACTION=install ;;
-    tuic) ACTION=nobrand-tuic; TUIC_ACTION=install ;;
-    vless-reality) ACTION=nobrand-vless-reality; VLESS_REALITY_ACTION=install ;;
     vless-sudoku) ACTION=nobrand-vless-sudoku; VLESS_SUDOKU_ACTION=install ;;
     ssh-tunnel) ACTION=nobrand-ssh-tunnel; SSH_TUNNEL_ACTION=install ;;
     forward)
@@ -276,6 +232,22 @@ main() {
     nobrand-version) nobrand_version; return 0 ;;
     nobrand-help) nobrand_usage; return 0 ;;
   esac
+  nb_splicore_legacy_preflight || return 1
+  # The primary runtime has its own persistent generation transaction and uses
+  # the same lifecycle lock. Route before any legacy repair/download branch.
+  if nobrand_ssh_confirmation_pending; then
+    case "${ACTION:-}" in
+      nobrand-runtime|nobrand-snell|nobrand-tuic|nobrand-hy2|nobrand-vless-reality|install|upgrade|reconfigure)
+        nobrand_pending_ssh_confirmation_notice
+        return 1
+        ;;
+    esac
+  fi
+  local runtime_rc=0
+  nb_splicore_route_main || runtime_rc=$?
+  if [ "${NOBRAND_SPLICORE_HANDLED:-0}" -eq 1 ]; then
+    return "$runtime_rc"
+  fi
   # Explicit protocol commands may dispatch mutations directly, so retain the
   # process lock across their common state boundary and dispatcher. A no-arg
   # manager launch is different: bootstrap must install dependencies (including
@@ -288,10 +260,13 @@ main() {
     nb_lifecycle_lock_acquire || return 1
     main_lifecycle_lock=1
   fi
+  if nb_splicore_installed && [ -z "$ACTION" ] && ! nobrand_manager_installation_valid; then
+    nobrand_install_manager_script || return 1
+  fi
   nb_validate_authoritative_state_boundary
   case "$NOBRAND_INSTALL_STATE" in
     CURRENT_PARTIAL_INSTALL|CURRENT_PARTIAL_REPAIR|CURRENT_PARTIAL_CONFIGURE|\
-      CURRENT_PARTIAL_UNINSTALL|LEGACY_SUPPORTED)
+      CURRENT_PARTIAL_UNINSTALL)
       nb_install_state_notice "$NOBRAND_INSTALL_STATE"
       ;;
     CURRENT_COMPLETE)
@@ -314,7 +289,7 @@ main() {
   fi
   case "$NOBRAND_INSTALL_STATE" in
     CURRENT_PARTIAL_INSTALL|CURRENT_PARTIAL_REPAIR|CURRENT_PARTIAL_CONFIGURE|\
-      CURRENT_PARTIAL_UNINSTALL|LEGACY_SUPPORTED)
+      CURRENT_PARTIAL_UNINSTALL)
       if ! nobrand_recovery_action_allowed "$NOBRAND_INSTALL_STATE" "$ACTION"; then
         nobrand_recovery_action_refused "$NOBRAND_INSTALL_STATE"
         [ "$main_lifecycle_lock" -eq 0 ] || nb_lifecycle_lock_release
@@ -322,11 +297,6 @@ main() {
       fi
       ;;
   esac
-  if [ -z "$ACTION" ]; then
-    case "$NOBRAND_INSTALL_STATE" in
-      LEGACY_SUPPORTED) ACTION=install ;;
-    esac
-  fi
   if [ -z "$ACTION" ]; then
     case "$NOBRAND_INSTALL_STATE" in
       CURRENT_PARTIAL_INSTALL|CURRENT_PARTIAL_REPAIR|CURRENT_PARTIAL_CONFIGURE|\
@@ -404,63 +374,16 @@ main() {
     [ "$main_lifecycle_lock" -eq 0 ] || nb_lifecycle_lock_release
     return 0
   fi
-  if [ "${DRY_RUN:-0}" -ne 1 ] \
-     && [ "$(id -u 2>/dev/null || echo 1)" -eq 0 ] \
-     && nb_schema_v3_file_valid \
-     && is_mita_elf_binary "$MITA_BIN"; then
-    repair_mita_binary_paths 2>/dev/null || true
-  fi
+  # Legacy runtime recovery belongs to explicit restore/recovery operations.
   if [ "$main_lifecycle_lock" -eq 1 ] && nobrand_action_opens_interactive_menu; then
     NOBRAND_MENU_EXPECTED_STATE="$NOBRAND_INSTALL_STATE"
     nb_lifecycle_lock_release
     main_lifecycle_lock=0
   fi
   case "$ACTION" in
-    install) do_install ;;
-    reconfigure) do_reconfigure ;;
-    upgrade) do_upgrade ;;
-    uninstall) do_uninstall ;;
-    status) do_status ;;
-    client-config|show) do_client_config ;;
-    mtu-config) do_mtu_config ;;
-    start) do_start ;;
-    stop) do_stop ;;
-    restart) do_restart ;;
-    user-list) do_user_list ;;
-    user-add) do_user_add ;;
-    user-del) do_user_del ;;
-    user-show) do_user_show ;;
     user-manage) do_user_manage ;;
-    user-set-endpoint) do_user_set_endpoint ;;
-    user-set-quota) do_user_set_quota ;;
-    user-set-expire) do_user_set_expire ;;
-    user-enable) do_user_enable ;;
-    user-disable) do_user_disable ;;
-    user-scan) do_user_scan ;;
-    user-quota-reset)
-      if [ "${YES:-0}" -eq 1 ]; then
-        do_user_quota_reset force
-      else
-        do_user_quota_reset
-      fi
-      ;;
-    user-set-rate) do_user_set_rate ;;
-    rate-status) do_rate_status ;;
-    rate-restore) do_rate_restore ;;
-    user-usage) do_user_usage ;;
-    user-export-clients) do_user_export_clients ;;
-    user-backup) do_user_backup ;;
-    user-restore) do_user_restore ;;
-    user-export) do_user_export ;;
-    user-import) do_user_import ;;
-    doctor) do_doctor ;;
     perf) do_perf ;;
-    profile-config) do_profile_config ;;
-    client-modes-config) do_tuning_config client-modes ;;
-    traffic-config) do_tuning_config traffic ;;
-    low-entropy-config) do_tuning_config low-entropy ;;
     bbr-config) do_bbr_config ;;
-    version-channel) do_version_channel_config ;;
     nobrand-status) nobrand_status ;;
     nobrand-nodes) nobrand_nodes ;;
     nobrand-doctor) nobrand_doctor ;;

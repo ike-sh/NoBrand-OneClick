@@ -4,6 +4,1914 @@
 # Do not edit this generated file directly.
 # Run scripts/build.sh after modifying src/.
 
+nb_splicore_python() {
+  python3 - "$@" <<'NOBRAND_SPLICORE_PY'
+import json
+RELEASE = json.loads(r'''
+{
+  "repository": "ike-sh/Splicore",
+  "version": "v0.3.0-rc.4",
+  "commit": "2634ea50d19623591c5db63329a288862726db74",
+  "checksum_asset": "SHA256SUMS",
+  "qualification": "Release Candidate / Experimental",
+  "rollback_releases": {},
+  "capabilities": {
+    "snell": {
+      "managed": true,
+      "fresh_install": "v4/v5; QUIC disabled"
+    },
+    "mieru": {
+      "managed": true,
+      "fresh_install": "TCP/UDP/BOTH; traffic off; no quota, expiry or rate"
+    },
+    "tuic": {
+      "managed": true,
+      "fresh_install": "v5; verified non-CA leaf and explicit CA"
+    },
+    "hysteria2": {
+      "managed": true,
+      "salamander": true,
+      "gecko": {
+        "core": "SUPPORTED / EXPERIMENTAL",
+        "nobrand_surface": "NOT EXPOSED"
+      },
+      "udp_port_hopping": {
+        "core": "SUPPORTED",
+        "nobrand_surface": "NOT EXPOSED"
+      },
+      "linux_server_port_range": {
+        "core": "SUPPORTED",
+        "nobrand_surface": "NOT EXPOSED",
+        "qualification": "PENDING EXTERNAL QUALIFICATION; nftables and CAP_NET_ADMIN required"
+      },
+      "fresh_install": "new private CA and server leaf; verified client trust; native Salamander"
+    },
+    "vless-reality": {
+      "managed": true,
+      "core_vision": true,
+      "core_flow_none": true,
+      "local_tunnel_guard": true,
+      "fresh_install": "raw TCP + Vision + native protected destination"
+    },
+    "vless-sudoku": {
+      "managed": false,
+      "requires_external_xray": true,
+      "scope": "existing specialized pinned Xray exception"
+    }
+  },
+  "assets": {
+    "amd64": {
+      "name": "splicore-v0.3.0-rc.4-linux-amd64.tar.gz",
+      "sha256": "9dd1941c817143d18ea1c892a5fc13266c1b209600576946504a9d3c98c62161",
+      "binary_sha256": "0a347f06f0d1a17ef37edd779826ad79739217b65f80bf39dc6077f115ac175f",
+      "qualification": "Experimental; external runtime qualification pending"
+    },
+    "arm64": {
+      "name": "splicore-v0.3.0-rc.4-linux-arm64.tar.gz",
+      "sha256": "5b5e39bd8e6ef373ebc00e7e3a8a688ce09d0369dc2c4ecfab06ed535d948b64",
+      "binary_sha256": "85ec863d21707ac309a4c7a64b3b7228eb34bb0405379db6b569d8d550032a4c",
+      "qualification": "BUILD ONLY; runtime qualification pending"
+    }
+  }
+}
+''')
+LAUNCHER = r'''
+"""Single exec launcher: own one daemon and clear only a proven dead socket."""
+import errno
+import fcntl
+import os
+from pathlib import Path
+import socket
+import stat
+
+generation = Path(__file__).resolve().parent
+guard = os.open(str(generation / "daemon.lock"), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
+os.set_inheritable(guard, True)
+control = generation / "control.sock"
+try:
+    before = control.lstat()
+except FileNotFoundError:
+    before = None
+if before is not None:
+    if not stat.S_ISSOCK(before.st_mode) or before.st_uid != os.geteuid():
+        raise SystemExit("refuse foreign control socket entry")
+    with socket.socket(socket.AF_UNIX) as probe:
+        probe.settimeout(1)
+        try:
+            probe.connect(str(control))
+        except OSError as error:
+            if error.errno != errno.ECONNREFUSED:
+                raise SystemExit("control socket is not proven stale")
+        else:
+            raise SystemExit("daemon is already active")
+    after = control.lstat()
+    if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+        raise SystemExit("control socket changed during startup")
+    control.unlink()
+os.umask(0o077)
+binary = str(generation / "splicore")
+os.execv(binary, [binary, "run", "--config", str(generation / "bootstrap.yaml")])
+'''
+"""NoBrand's single-daemon adapter. Embedded into the standalone installer.
+
+Only public CLI/API operations are used. Canonical NoBrand intent is independent
+of Splicore's SQLite store. No protocol implementation or direct SQL access.
+"""
+import argparse
+import base64
+import secrets
+import contextlib
+import copy
+import datetime
+import fcntl
+import hashlib
+import io
+import ipaddress
+import json
+import os
+from pathlib import Path, PurePosixPath
+import platform
+import re
+import shutil
+import signal
+import socket
+import ssl
+import stat
+import struct
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+import uuid
+from urllib.parse import quote
+
+try:
+    RELEASE
+except NameError:
+    RELEASE = json.loads(Path(__file__).with_name("splicore-release.json").read_text())
+try:
+    LAUNCHER
+except NameError:
+    LAUNCHER = Path(__file__).with_name("splicore-launch.py").read_text()
+
+
+class Failure(Exception):
+    def __init__(self, category, detail):
+        self.category = category
+        super().__init__(detail)
+
+
+LEGACY_NOTICE = """Legacy NoBrand multi-core installation detected.
+Automatic in-place migration is not supported by this version.
+No changes were made.
+
+Recommended:
+1. Back up current client information.
+2. Remove the legacy installation using the matching legacy NoBrand version.
+3. Perform a clean installation.
+4. Import/use the newly generated client profiles."""
+
+
+def require(condition, category, detail):
+    if not condition:
+        raise Failure(category, detail)
+
+
+def load(path):
+    def unique(pairs):
+        out = {}
+        for key, value in pairs:
+            require(key not in out, "CONFIG_INVALID", "duplicate JSON key")
+            out[key] = value
+        return out
+    return json.loads(Path(path).read_text(encoding="utf-8"), object_pairs_hook=unique)
+
+
+def sync_dir(path):
+    fd = os.open(str(path), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def atomic(path, data, mode=0o600):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    require(not path.is_symlink(), "CONFIG_INVALID", "refuse symlink destination")
+    fd, name = tempfile.mkstemp(prefix=".candidate-", dir=str(path.parent))
+    try:
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, "wb") as out:
+            out.write(data if isinstance(data, bytes) else data.encode("utf-8"))
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(name, path)
+        sync_dir(path.parent)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
+def save(path, value):
+    atomic(path, json.dumps(value, indent=2, sort_keys=True) + "\n")
+
+
+def sha(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def remove_file(path):
+    try:
+        Path(path).unlink()
+    except FileNotFoundError:
+        pass
+
+
+def within(path, root):
+    try:
+        return os.path.commonpath([str(Path(path).resolve()), str(Path(root).resolve())]) == str(Path(root).resolve())
+    except ValueError:
+        return False
+
+
+def command(args, category="CONFIG_INVALID", timeout=30, ok=True, env=None):
+    try:
+        result = subprocess.run([str(a) for a in args], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                timeout=timeout, check=False, env=env)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise Failure(category, "external command unavailable or timed out") from exc
+    if ok:
+        # Core CLI errors are redacted by its public contract. Only expose the
+        # bounded typed error line; never echo stdout, documents or argv.
+        message = result.stderr.decode("utf-8", errors="replace").strip()
+        safe_error = message if len(message) <= 300 and re.fullmatch(r"[a-z_]+: [A-Za-z0-9 ,./()_-]+", message) else "external command rejected"
+        require(result.returncode == 0, category, safe_error)
+    return result
+
+
+def arch(value=None):
+    normalized = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}
+    require((value or platform.machine()) in normalized, "ARCH_UNSUPPORTED", "unsupported architecture")
+    return normalized[value or platform.machine()]
+
+
+def inspect_archive(path, entry, sums):
+    lines = [line.split() for line in sums.splitlines()]
+    matches = [parts[0] for parts in lines if len(parts) == 2 and parts[1] == entry["name"]]
+    require(len(matches) == 1 and re.fullmatch(r"[0-9a-fA-F]{64}", matches[0] or ""),
+            "CHECKSUM_MISMATCH", "missing, duplicate or malformed exact SHA256SUMS entry")
+    require(matches[0].lower() == entry["sha256"] == sha(path),
+            "CHECKSUM_MISMATCH", "archive does not match official checksum and immutable pin")
+    with tarfile.open(path, "r:gz") as archive:
+        members, names, size = archive.getmembers(), set(), 0
+        require(len(members) <= 512, "ARCHIVE_INVALID", "too many archive entries")
+        for member in members:
+            name = member.name
+            require(name and not PurePosixPath(name).is_absolute() and "\\" not in name and ":" not in name
+                    and all(p not in ("", ".", "..") for p in name.rstrip("/").split("/"))
+                    and name not in names and (member.isfile() or member.isdir()),
+                    "ARCHIVE_INVALID", "unsafe archive entry")
+            names.add(name)
+            root_file = name in {"splicore", "LICENSE", "NOTICE.md", "THIRD_PARTY_NOTICES.md"}
+            require((root_file and member.isfile()) or name.startswith("licenses/third-party/")
+                    or (member.isdir() and name.rstrip("/") in {"licenses", "licenses/third-party"}),
+                    "ARCHIVE_INVALID", "unexpected archive entry")
+            size += member.size
+            require(0 <= member.size and size <= 128 * 1024 * 1024, "ARCHIVE_INVALID", "archive size limit")
+        require("splicore" in names, "ARCHIVE_INVALID", "missing binary")
+        with archive.extractfile("splicore") as src:
+            header = src.read(20)
+        require(len(header) == 20 and header[:6] == b"\x7fELF\x02\x01"
+                and struct.unpack_from("<H", header, 18)[0] == (62 if "amd64" in entry["name"] else 183),
+                "BINARY_IDENTITY", "wrong executable architecture")
+
+
+def download(url, path, proxy=""):
+    require(url.startswith("https://github.com/"), "NETWORK", "unapproved release URL")
+    target = url
+    if proxy:
+        require(proxy.startswith("https://") and not any(c.isspace() for c in proxy),
+                "NETWORK", "GitHub proxy requires an HTTPS prefix")
+        target = proxy.rstrip("/") + "/" + url
+    result = command(["curl", "--fail", "--silent", "--show-error", "--location",
+                      "--write-out", "%{http_code}",
+                      "--proto", "=https", "--proto-redir", "=https", "--connect-timeout", "15",
+                      "--max-time", "180", "--retry", "2", "--output", path, target],
+                     "NETWORK", timeout=600, ok=False)
+    if result.returncode:
+        category = "HTTP" if result.returncode == 22 else "NETWORK"
+        if result.returncode == 22 and result.stdout.strip() == b"404":
+            category = "ASSET_NOT_FOUND"
+        raise Failure(category, "pinned Splicore release download failed")
+
+
+def binary_identity(binary, target_arch, release=None):
+    release = release or RELEASE
+    result = command([binary, "version", "--json"], "BINARY_IDENTITY")
+    identity = json.loads(result.stdout)
+    require(identity.get("product") == "Splicore" and identity.get("version") == release["version"]
+            and identity.get("commit") == release["commit"] and identity.get("dirty") is False
+            and identity.get("platform") == "linux/" + target_arch,
+            "BINARY_IDENTITY", "exact release identity differs")
+    return identity
+
+
+def artifact(destination, directory=None, proxy="", target_arch=None):
+    target_arch = target_arch or arch()
+    require(target_arch in RELEASE["assets"], "ARCH_UNSUPPORTED", "unsupported architecture")
+    entry = RELEASE["assets"][target_arch]
+    with tempfile.TemporaryDirectory(prefix="nb-splicore-download-") as tmp:
+        staging = Path(tmp)
+        archive, sums = staging / entry["name"], staging / RELEASE["checksum_asset"]
+        if directory:
+            source = Path(directory)
+            require((source / entry["name"]).is_file(), "ASSET_NOT_FOUND", "pinned archive missing")
+            require((source / RELEASE["checksum_asset"]).is_file(), "CHECKSUM_MISMATCH", "official SHA256SUMS missing")
+            shutil.copyfile(source / entry["name"], archive)
+            shutil.copyfile(source / RELEASE["checksum_asset"], sums)
+        else:
+            base = "https://github.com/" + RELEASE["repository"] + "/releases/download/" + RELEASE["version"] + "/"
+            download(base + entry["name"], archive, proxy)
+            download(base + RELEASE["checksum_asset"], sums, proxy)
+        inspect_archive(archive, entry, sums.read_text(encoding="ascii"))
+        candidate = staging / "splicore"
+        with tarfile.open(archive, "r:gz") as package:
+            with package.extractfile("splicore") as src:
+                atomic(candidate, src.read(), 0o700)
+        require(sha(candidate) == entry["binary_sha256"], "BINARY_IDENTITY", "extracted binary differs from release pin")
+        identity = binary_identity(candidate, target_arch)
+        atomic(destination, candidate.read_bytes(), 0o700)
+    return {"version": RELEASE["version"], "architecture": target_arch,
+            "archive_sha256": entry["sha256"], "binary_sha256": sha(destination),
+            "identity": identity, "qualification": entry["qualification"]}
+
+
+def identifier(value):
+    require(isinstance(value, str) and re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}", value),
+            "CONFIG_INVALID", "invalid node ID")
+    return value
+
+
+def inspect_backup_archive(path):
+    """Reject unsafe entries before any generic product tar extraction."""
+    names, total, registry = set(), 0, None
+    with tarfile.open(path, "r:gz") as archive:
+        for member in archive:
+            name = member.name.rstrip("/")
+            require(name and not PurePosixPath(name).is_absolute() and "\\" not in name and ":" not in name
+                    and all(p not in ("", ".", "..") for p in name.split("/"))
+                    and name not in names and (member.isfile() or member.isdir()),
+                    "ARCHIVE_INVALID", "unsafe backup entry before extraction")
+            require(name == "manifest.txt" or name in ("state", "config") or name.startswith(("state/", "config/")),
+                    "ARCHIVE_INVALID", "unexpected product backup root")
+            names.add(name)
+            total += member.size
+            require(len(names) <= 20000 and 0 <= member.size and total <= 1024 * 1024 * 1024,
+                    "ARCHIVE_INVALID", "product backup size/count limit")
+            if name == "state/state.json":
+                require(member.isfile() and member.size <= 1024 * 1024, "ARCHIVE_INVALID", "invalid architecture marker")
+                registry = json.loads(archive.extractfile(member).read())
+    require({"manifest.txt", "state", "config"}.issubset(names), "ARCHIVE_INVALID", "incomplete product backup")
+    require(isinstance(registry, dict) and registry.get("architecture") == "splicore-native",
+            "UNSUPPORTED_LEGACY_INSTALLATION", LEGACY_NOTICE)
+    require(not any(name.startswith(("state/mieru/", "state/snell/", "state/tuic/", "state/hysteria2/",
+                                    "state/vless-reality/", "config/hysteria2/", "config/vless-reality/")) for name in names),
+            "UNSUPPORTED_LEGACY_INSTALLATION", LEGACY_NOTICE)
+
+
+def keys(value, allowed, context):
+    require(isinstance(value, dict) and not set(value).difference(allowed),
+            "CONFIG_INVALID", "unknown fields in " + context +
+            (": " + ", ".join(sorted(set(value).difference(allowed))) if isinstance(value, dict) else ""))
+
+
+def multiplex(value):
+    value = value.lower().replace("multiplexing_", "", 1)
+    require(value in ("off", "low", "middle", "high", "default"), "CONFIG_INVALID", "invalid Mieru multiplexing")
+    return value
+
+
+def handshake(value):
+    value = {"no-wait": "HANDSHAKE_NO_WAIT", "standard": "HANDSHAKE_STANDARD"}.get(value, value)
+    require(value in ("HANDSHAKE_NO_WAIT", "HANDSHAKE_STANDARD"), "CONFIG_INVALID", "invalid Mieru handshake mode")
+    return value
+
+
+def tls_check(tls):
+    keys(tls, {"server_name", "certificate_file", "private_key_file", "ca_certificate"}, "TLS")
+    require(all(isinstance(tls.get(k), str) and tls[k] for k in
+                ("server_name", "certificate_file", "private_key_file", "ca_certificate")),
+            "CONFIG_INVALID", "TLS requires certificate/key paths, SNI and explicit CA")
+    certificate, key = Path(tls["certificate_file"]), Path(tls["private_key_file"])
+    require(certificate.is_file() and key.is_file() and not key.is_symlink(),
+            "CONFIG_INVALID", "TLS files unavailable")
+    require(stat.S_IMODE(key.stat().st_mode) & 0o077 == 0
+            and stat.S_IMODE(key.parent.stat().st_mode) & 0o077 == 0,
+            "CONFIG_INVALID", "TLS key and immediate parent require private permissions")
+    with tempfile.TemporaryDirectory(prefix="nb-splicore-tls-") as tmp:
+        ca = Path(tmp) / "ca.pem"
+        atomic(ca, tls["ca_certificate"])
+        try:
+            ipaddress.ip_address(tls["server_name"])
+            verify_name = "-verify_ip"
+        except ValueError:
+            verify_name = "-verify_hostname"
+        command(["openssl", "verify", "-CAfile", ca, "-purpose", "sslserver", verify_name,
+                 tls["server_name"], certificate], "CONFIG_INVALID")
+        text = command(["openssl", "x509", "-in", certificate, "-noout", "-text"]).stdout
+        require(b"CA:TRUE" not in text, "CAPABILITY_UNSUPPORTED", "rc.4 requires a non-CA TLS leaf")
+        if b"X509v3 Key Usage:" in text:
+            require(b"Digital Signature" in text.split(b"X509v3 Key Usage:", 1)[1].splitlines()[1],
+                    "CONFIG_INVALID", "TLS leaf KeyUsage must allow digitalSignature")
+        cert_key = command(["openssl", "x509", "-in", certificate, "-noout", "-pubkey"]).stdout
+        private_key = command(["openssl", "pkey", "-in", key, "-pubout"]).stdout
+        require(cert_key == private_key, "CONFIG_INVALID", "certificate/private key mismatch")
+
+
+def hysteria_obfs(settings):
+    """NoBrand exposes plain/Salamander; other rc.4 capabilities stay explicit."""
+    stream = settings.get("stream_transport")
+    if stream is None:
+        return {"type": "none"}
+    keys(stream, {"kind", "hysteria"}, "HY2 stream_transport")
+    require(stream.get("kind") == "hysteria", "CONFIG_INVALID", "HY2 requires hysteria transport")
+    transport = stream.get("hysteria", {"version": 2})
+    keys(transport, {"version", "obfs"}, "NoBrand HY2 transport (Gecko/UDP hopping core support is not exposed)")
+    require(type(transport.get("version")) is int and transport["version"] == 2,
+            "CONFIG_INVALID", "HY2 transport version must be 2")
+    obfs = transport.get("obfs", {"type": "none"})
+    keys(obfs, {"type", "password"}, "HY2 obfs")
+    require(obfs.get("type") in ("none", "salamander"), "CAPABILITY_UNSUPPORTED",
+            "NoBrand exposes none/salamander; rc.4 Gecko is supported experimental but not exposed")
+    if obfs["type"] == "none":
+        require(not obfs.get("password"), "CONFIG_INVALID", "plain HY2 cannot carry an obfs password")
+    else:
+        require(isinstance(obfs.get("password"), str) and 1 <= len(obfs["password"].encode()) <= 1024,
+                "CONFIG_INVALID", "Salamander requires a nonempty obfs password (1..1024 bytes)")
+    return obfs
+
+
+def dns_name(value):
+    require(isinstance(value, str) and 1 <= len(value) <= 253
+            and all(re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", part)
+                    for part in value.split(".")), "CONFIG_INVALID", "invalid cover DNS name")
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        return value
+    raise Failure("CONFIG_INVALID", "cover SNI requires a DNS name")
+
+
+def reality_keypair():
+    with tempfile.TemporaryDirectory(prefix="nb-reality-key-") as directory:
+        pem = Path(directory) / "key.pem"
+        command(["openssl", "genpkey", "-algorithm", "X25519", "-out", pem])
+        private = command(["openssl", "pkey", "-in", pem, "-outform", "DER"]).stdout[-32:]
+        public = command(["openssl", "pkey", "-in", pem, "-pubout", "-outform", "DER"]).stdout[-32:]
+        return tuple(base64.urlsafe_b64encode(value).decode().rstrip("=") for value in (private, public))
+
+
+def available_tcp_port(desired):
+    reserved = {n["document"]["listener"]["port"] for n in desired["nodes"]}
+    reserved.update(n["guard"]["listen"]["port"] for n in desired["nodes"] if n.get("guard"))
+    for _ in range(32):
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            port = listener.getsockname()[1]
+        if port not in reserved:
+            return port
+    raise Failure("PORT_CONFLICT", "cannot reserve a local guard port")
+
+
+def reality_check(node, document):
+    settings = document.get("settings", {})
+    keys(settings, {"security", "flow", "transport", "packet_encoding", "stream_transport", "reality"}, "REALITY settings")
+    require(settings.get("security") == "reality" and settings.get("flow") in ("none", "xtls-rprx-vision")
+            and settings.get("transport") == "tcp" and settings.get("packet_encoding") == "xudp"
+            and settings.get("stream_transport", {"kind": "tcp"}) == {"kind": "tcp"},
+            "CAPABILITY_UNSUPPORTED", "REALITY requires raw TCP; Vision over HTTP transports is unsupported")
+    reality = settings.get("reality", {})
+    keys(reality, {"server_name", "server_names", "public_key", "short_ids", "target"}, "REALITY")
+    guard = node.get("guard", {})
+    keys(guard, {"id", "listen", "target", "approved_sni"}, "local tunnel guard")
+    require(str(uuid.UUID(guard.get("id", ""))) == guard.get("id") and uuid.UUID(guard["id"]).version == 4,
+            "CONFIG_INVALID", "guard ID must be canonical UUID v4")
+    listen, target = guard.get("listen", {}), guard.get("target", {})
+    for endpoint in (listen, target):
+        keys(endpoint, {"host", "port"}, "guard endpoint")
+        require(type(endpoint.get("port")) is int and 1 <= endpoint["port"] <= 65535,
+                "CONFIG_INVALID", "invalid guard endpoint port")
+    require(listen.get("host") in ("127.0.0.1", "::1") and reality.get("target") == listen
+            and listen != target, "CONFIG_INVALID", "REALITY must target its loopback guard")
+    dns_name(target.get("host"))
+    dns_name(reality.get("server_name"))
+    approved = guard.get("approved_sni", [])
+    names = reality.get("server_names", [reality["server_name"]])
+    require(isinstance(approved, list) and 1 <= len(approved) <= 16 and len(set(approved)) == len(approved)
+            and set(names) == set(approved) and reality["server_name"] in approved,
+            "CONFIG_INVALID", "guard admission must match the configured handshake names")
+    for name in approved:
+        dns_name(name)
+    secret = document.get("server_secret", {})
+    keys(secret, {"private_key"}, "server secret")
+    require(isinstance(secret.get("private_key"), str) and len(secret["private_key"]) == 43,
+            "CONFIG_INVALID", "REALITY requires a private server key")
+
+
+def guard_mutations(desired):
+    mutations, rules, listeners, ids = [], [], set(), set()
+    for node in desired["nodes"]:
+        if node["protocol"] != "vless-reality" or not node.get("enabled", True):
+            continue
+        reality_check(node, node["document"])
+        guard = node["guard"]
+        identity = guard["id"]
+        address = (guard["listen"]["host"], guard["listen"]["port"])
+        require(identity not in ids and address not in listeners, "PORT_CONFLICT", "duplicate guard identity/listener")
+        ids.add(identity)
+        listeners.add(address)
+        mutations.append({"resource": "local-inbound", "action": "create", "local_inbound": {
+            "id": identity, "name": "NoBrand cover " + node["id"], "kind": "tunnel", "listen": guard["listen"],
+            "tunnel": {"target": guard["target"], "network": "tcp"},
+            "sniffing": {"enabled": True, "protocols": ["tls"], "route_only": True}}})
+        for suffix, match, action in (("allow", {"local_inbounds": [identity], "sniffed_domains": guard["approved_sni"]}, "direct"),
+                                      ("reject", {"local_inbounds": [identity]}, "reject")):
+            rule_id = uuid.UUID(bytes=hashlib.sha256((identity + suffix).encode()).digest()[:16], version=4)
+            rules.append({"id": str(rule_id), "name": "NoBrand guard " + suffix,
+                          "match": match, "action": {"kind": action}})
+    if mutations:
+        # Each generation owns a new, empty Core database. This is its complete
+        # network graph; ordinary authenticated payloads retain direct routing.
+        mutations.append({"resource": "network", "action": "replace", "network": {
+            "route": {"rules": rules}, "rule_sets": [], "policy_groups": [], "dns_servers": [],
+            "dns_rules": [], "dns": {"enabled": False}}})
+    return mutations
+
+
+def render(desired, validate_tls=True):
+    keys(desired, {"schema", "owner", "nodes", "source", "architecture", "splicore_version", "config_schema"}, "desired state")
+    require(desired.get("schema") == 1 and desired.get("architecture") == "splicore-native"
+            and desired.get("config_schema") == 1 and desired.get("owner") == "nobrand-splicore-v1"
+            and isinstance(desired.get("nodes"), list), "CONFIG_INVALID", "invalid NoBrand runtime authority")
+    documents, names, occupied = [], set(), []
+    for node in desired["nodes"]:
+        keys(node, {"id", "protocol", "enabled", "document", "client", "guard", "options", "ingress"}, "node")
+        name = identifier(node.get("id"))
+        require(name not in names, "CONFIG_INVALID", "duplicate node ID")
+        names.add(name)
+        require(type(node.get("enabled", True)) is bool, "CONFIG_INVALID", "enabled must be boolean")
+        ingress = node.get("ingress", {})
+        keys(ingress, {"profile_id"}, "ingress association")
+        require(isinstance(ingress.get("profile_id", ""), str), "CONFIG_INVALID", "invalid ingress profile")
+        protocol = node.get("protocol")
+        capability = RELEASE["capabilities"].get(protocol, {})
+        require(capability.get("managed", False), "CAPABILITY_UNSUPPORTED",
+                capability.get("integration_blocker", "protocol/security policy is not qualified by rc.4"))
+        options = node.get("options", {})
+        keys(options, {"traffic_pattern", "low_entropy", "quota_mb", "expire_at", "bandwidth_mbps",
+                       "quic_proxy_enabled", "obfs", "ingress_enforcement"}, "capability options")
+        require(options.get("traffic_pattern", "off") in ("off", "none")
+                and options.get("low_entropy", "off") in ("off", "LOW_ENTROPY_MODE_OFF")
+                and options.get("quota_mb", 0) == 0 and not options.get("expire_at")
+                and options.get("bandwidth_mbps", 0) == 0
+                and not options.get("quic_proxy_enabled") and (protocol == "hysteria2" or not options.get("obfs"))
+                and options.get("ingress_enforcement", "native") == "native",
+                "CAPABILITY_UNSUPPORTED", "stored protocol/accounting/security option has no rc.4 equivalent")
+        document = copy.deepcopy(node.get("document"))
+        require(isinstance(document, dict), "CONFIG_INVALID", "managed document required")
+        keys(document, {"schema", "name", "account_name", "listener", "display_endpoint", "settings", "users", "psk", "server_secret"}, "managed document")
+        require(document.get("schema") == 1, "CONFIG_INVALID", "managed document schema")
+        document["name"] = "nb-" + name
+        listener = document.get("listener", {})
+        keys(listener, {"host", "port"}, "listener")
+        require(isinstance(listener.get("port"), int) and 1 <= listener["port"] <= 65535,
+                "CONFIG_INVALID", "invalid listener port")
+        endpoint = document.get("display_endpoint", {})
+        keys(endpoint, {"host", "port"}, "display endpoint")
+        require(isinstance(endpoint.get("host"), str) and endpoint["host"]
+                and endpoint["host"] not in ("0.0.0.0", "::")
+                and not any(c.isspace() or ord(c) < 32 for c in endpoint["host"])
+                and type(endpoint.get("port")) is int and 1 <= endpoint["port"] <= 65535,
+                "CONFIG_INVALID", "invalid display endpoint")
+        try:
+            address = ipaddress.ip_address(listener.get("host", ""))
+        except ValueError as exc:
+            raise Failure("CONFIG_INVALID", "listener requires an IP address") from exc
+        settings = document.get("settings", {})
+        transport = "tcp" if protocol in ("snell", "vless-reality") else "udp"
+        if protocol == "mieru":
+            keys(settings, {"transport", "mtu", "multiplex"}, "Mieru settings")
+            transport = settings.get("transport")
+            require(transport in ("tcp", "udp"), "CONFIG_INVALID", "BOTH requires two mapped inbounds")
+        elif protocol == "snell":
+            keys(settings, {"version"}, "Snell settings")
+            require(settings.get("version") in (4, 5) and isinstance(document.get("psk"), str)
+                    and re.fullmatch(r"[A-Za-z0-9_+/=-]{12,128}", document["psk"]),
+                    "CAPABILITY_UNSUPPORTED", "stored Snell PSK/version outside rc.4 domain; rotation required explicitly")
+            document["account_name"] = "nb-" + name
+        elif protocol == "vless-reality":
+            reality_check(node, document)
+        else:
+            allowed = {"tls", "stream_transport"} if protocol == "hysteria2" else {"version", "tls", "congestion_control", "udp_relay_mode", "zero_rtt_handshake"}
+            keys(settings, allowed, protocol + " settings")
+            if protocol == "hysteria2":
+                obfs = hysteria_obfs(settings)
+                require(not options.get("obfs") or options["obfs"] == obfs["type"],
+                        "CONFIG_INVALID", "stored HY2 obfs option does not match the native document")
+            if validate_tls:
+                tls_check(settings.get("tls", {}))
+        if protocol != "snell":
+            users = document.get("users")
+            require(isinstance(users, list) and 1 <= len(users) <= 16, "CONFIG_INVALID", "rc.4 supports 1..16 users per inbound")
+            for index, user in enumerate(users):
+                keys(user, {"account_name", "username", "uuid", "password"}, "managed user")
+                # Internal account identity is independent of wire credentials.
+                user["account_name"] = "nb-" + name + "-" + str(index)
+                if protocol == "vless-reality":
+                    require(str(uuid.UUID(user.get("uuid", ""))) == user.get("uuid"), "CONFIG_INVALID", "invalid VLESS UUID")
+                else:
+                    require(isinstance(user.get("password"), str) and user["password"], "CONFIG_INVALID", "credentials must be explicit")
+        for previous_transport, previous_address, previous_port in occupied:
+            overlap = address == previous_address or address.is_unspecified or previous_address.is_unspecified
+            # Conservatively reserve wildcard IPv6 against IPv4 too.
+            require(not (transport == previous_transport and listener["port"] == previous_port and overlap),
+                    "PORT_CONFLICT", "overlapping desired listeners")
+        occupied.append((transport, address, listener["port"]))
+        if not node.get("enabled", True):
+            continue
+        documents.append((name, "vless" if protocol == "vless-reality" else protocol, document))
+    require(len(documents) <= 64, "CONFIG_INVALID", "rc.4 inbound limit exceeded")
+    guard_mutations(desired)
+    for node in desired["nodes"]:
+        if node.get("guard"):
+            port = node["guard"]["listen"]["port"]
+            require(not any(t == "tcp" and p == port for t, _a, p in occupied),
+                    "PORT_CONFLICT", "guard overlaps a protocol listener")
+    return documents
+
+
+def empty():
+    return {"schema": 1, "owner": "nobrand-splicore-v1", "nodes": [], "source": "fresh",
+            "architecture": "splicore-native", "splicore_version": RELEASE["version"], "config_schema": 1}
+
+
+def redacted_plan(desired):
+    nodes, blockers = [], []
+    for node in desired["nodes"]:
+        try:
+            documents = render(dict(empty(), nodes=[node]))
+            nodes.extend({"id": name, "protocol": protocol, "listener": doc["listener"]}
+                         for name, protocol, doc in documents)
+        except Failure as exc:
+            blockers.append({"id": node.get("id"), "category": exc.category, "detail": str(exc)})
+    if not blockers:
+        try:
+            render(desired)
+        except Failure as exc:
+            blockers.append({"category": exc.category, "detail": str(exc)})
+    return {"target": RELEASE["version"], "nodes": nodes, "blockers": blockers,
+            "architecture": "splicore-native",
+            "rollback": "previous Splicore generation; first install returns to not installed",
+            "external_runtime_qualification": "PENDING"}
+
+
+def leaf_fingerprint(tls):
+    pem = Path(tls["certificate_file"]).read_text()
+    leaf = re.search(r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", pem, flags=re.S)
+    require(leaf, "CONFIG_INVALID", "TLS leaf unavailable for explicit client pin")
+    return hashlib.sha256(ssl.PEM_cert_to_DER_cert(leaf.group())).hexdigest()
+
+
+def client_profiles(node):
+    protocol, document = node["protocol"], node["document"]
+    settings, endpoint = document["settings"], document["display_endpoint"]
+    host, port = endpoint["host"], endpoint["port"]
+    name = node.get("client", {}).get("name") or node["id"]
+    out = {"id": node["id"], "protocol": protocol}
+    if protocol == "snell":
+        # Public rc.4 ClientVersion(5)=4: native v5 admits v4 TCP/UDP
+        # clients while QUIC Proxy Mode stays unavailable.
+        wire = 4
+        out["server_version"], out["client_wire_version"] = settings["version"], wire
+        out["surge"] = "{} = snell, {}, {}, psk = {}, version = {}".format(name, host, port, document["psk"], wire)
+        out["sing_box"] = {"type": "snell", "tag": name, "server": host, "server_port": port, "version": wire, "psk": document["psk"]}
+        out["mihomo"] = ("- name: " + json.dumps(name) + "\n  type: snell\n  server: " + json.dumps(host)
+                          + "\n  port: " + str(port) + "\n  psk: " + json.dumps(document["psk"])
+                          + "\n  version: " + str(wire) + "\n  udp: true\n")
+    elif protocol == "hysteria2":
+        password = document["users"][0]["password"]
+        sni = settings["tls"]["server_name"]
+        obfs = hysteria_obfs(settings)
+        address = "[" + host + "]" if ":" in host else host
+        fingerprint = leaf_fingerprint(settings["tls"])
+        out["uri"] = ("hysteria2://" + quote(password, safe="") + "@" + address + ":" + str(port)
+                      + "?sni=" + quote(sni, safe="") + "&alpn=h3&insecure=1&pinSHA256=" + fingerprint)
+        outbound = {"type": "hysteria2", "tag": "NoBrand-Hysteria2", "server": host, "server_port": port,
+                    "password": password, "tls": {"enabled": True, "server_name": sni, "insecure": False,
+                    "certificate": settings["tls"]["ca_certificate"], "alpn": ["h3"]}}
+        mihomo = ("- name: NoBrand-Hysteria2\n  type: hysteria2\n  server: " + json.dumps(host)
+                  + "\n  port: " + str(port) + "\n  password: " + json.dumps(password)
+                  + "\n  sni: " + json.dumps(sni) + "\n  alpn: [h3]\n  skip-cert-verify: false\n  fingerprint: "
+                  + json.dumps(fingerprint) + "\n  udp: true\n")
+        if obfs["type"] == "salamander":
+            outbound["obfs"] = copy.deepcopy(obfs)
+            out["uri"] += "&obfs=salamander&obfs-password=" + quote(obfs["password"], safe="")
+            mihomo += "  obfs: salamander\n  obfs-password: " + json.dumps(obfs["password"]) + "\n"
+        out["uri"] += "#" + quote("NoBrand-Hysteria2", safe="")
+        out.update(sing_box=outbound, mihomo=mihomo)
+        out["trust"] = {"sing_box": "explicit CA and hostname", "mihomo": "SHA256 leaf pin",
+                        "uri": "pinSHA256 is mandatory; PKI bypass is bounded by this explicit pin"}
+    elif protocol == "vless-reality":
+        reality = settings["reality"]
+        user = document["users"][0]
+        address = "[" + host + "]" if ":" in host else host
+        flow = settings["flow"]
+        out["uri"] = ("vless://" + user["uuid"] + "@" + address + ":" + str(port)
+            + "?encryption=none&security=reality&type=tcp&flow=" + quote(flow, safe="")
+            + "&sni=" + quote(reality["server_name"], safe="") + "&fp=chrome&pbk=" + reality["public_key"]
+            + "&sid=" + reality["short_ids"][0] + "#" + quote(name, safe=""))
+        proxy = {"name": name, "type": "vless", "server": host, "port": port, "uuid": user["uuid"],
+                 "tls": True, "servername": reality["server_name"], "client-fingerprint": "chrome",
+                 "reality-opts": {"public-key": reality["public_key"], "short-id": reality["short_ids"][0]},
+                 "network": "tcp", "udp": flow == "none"}
+        if flow != "none":
+            proxy["flow"] = flow
+        # JSON flow objects are valid YAML; retain the usual proxies envelope.
+        out["mihomo"] = "proxies:\n  - " + json.dumps(proxy) + "\n"
+        out["xray"] = {"protocol": "vless", "settings": {"vnext": [{"address": host, "port": port,
+            "users": [{"id": user["uuid"], "encryption": "none", "flow": flow}]}]}, "streamSettings": {
+            "network": "tcp", "security": "reality", "realitySettings": {"serverName": reality["server_name"],
+            "fingerprint": "chrome", "publicKey": reality["public_key"], "shortId": reality["short_ids"][0]}}}
+    elif protocol == "mieru":
+        user = document["users"][0]
+        profile = node.get("client", {}).get("profile", {})
+        handshake = node.get("client", {}).get("handshake_mode") or profile.get("HANDSHAKE_MODE", "HANDSHAKE_NO_WAIT")
+        mux, transport = "MULTIPLEXING_" + settings.get("multiplex", "off").upper(), settings["transport"].upper()
+        address = "[" + host + "]" if ":" in host else host
+        out["uri"] = ("mierus://" + quote(user["username"], safe="") + ":" + quote(user["password"], safe="") + "@" + address
+                      + "?handshake-mode=" + handshake + "&mtu=" + str(settings["mtu"]) + "&multiplexing=" + mux
+                      + "&port=" + str(port) + "&profile=default&protocol=" + transport)
+        try:
+            ipaddress.ip_address(host)
+            ip, domain = host, ""
+        except ValueError:
+            ip, domain = "", host
+        out["mieru"] = {"profiles": [{"profileName": "default", "user": {"name": user["username"], "password": user["password"]},
+                        "servers": [{"ipAddress": ip, "domainName": domain, "portBindings": [{"port": port, "protocol": transport}]}],
+                        "mtu": settings["mtu"], "multiplexing": {"level": mux}, "handshakeMode": handshake}],
+                        "activeProfile": "default", "rpcPort": 8964, "socks5Port": 1080, "loggingLevel": "INFO",
+                        "socks5ListenLAN": False, "httpProxyPort": 8080, "httpProxyListenLAN": False}
+        out["mihomo"] = ("proxies:\n  - name: mieru-mita-" + transport.lower() + "\n    type: mieru\n    server: " + json.dumps(host)
+                         + "\n    port: " + str(port) + "\n    transport: " + transport + "\n    udp: true\n    username: " + json.dumps(user["username"])
+                         + "\n    password: " + json.dumps(user["password"]) + "\n    multiplexing: " + mux + "\n    handshake-mode: " + handshake + "\n")
+    elif protocol == "tuic":
+        profiles = []
+        names = node.get("client", {}).get("user_names", [])
+        if not names and node.get("client", {}).get("users"):
+            names = [u["name"] for u in node["client"]["users"]]
+        for index, user in enumerate(document["users"]):
+            username = names[index] if index < len(names) else str(index)
+            tag = "nobrand-tuic-" + username
+            outbound = {"type": "tuic", "tag": tag, "server": host, "server_port": port,
+                        "uuid": user["uuid"], "password": user["password"], "congestion_control": settings.get("congestion_control", "cubic"),
+                        "udp_relay_mode": settings.get("udp_relay_mode", "native"), "zero_rtt_handshake": settings.get("zero_rtt_handshake", False),
+                        "tls": {"enabled": True, "server_name": settings["tls"]["server_name"], "insecure": False,
+                                "certificate": settings["tls"]["ca_certificate"], "alpn": ["h3"]}}
+            mihomo = ("proxies:\n  - name: " + json.dumps(tag) + "\n    type: tuic\n    server: " + json.dumps(host)
+                      + "\n    port: " + str(port) + "\n    uuid: " + json.dumps(user["uuid"])
+                      + "\n    password: " + json.dumps(user["password"]) + "\n    sni: " + json.dumps(settings["tls"]["server_name"])
+                      + "\n    alpn: [h3]\n    skip-cert-verify: false\n    fingerprint: " + json.dumps(leaf_fingerprint(settings["tls"]))
+                      + "\n    congestion-controller: " + outbound["congestion_control"]
+                      + "\n    udp-relay-mode: " + outbound["udp_relay_mode"]
+                      + "\n    reduce-rtt: " + str(outbound["zero_rtt_handshake"]).lower() + "\n    max-udp-relay-packet-size: 1400\n")
+            profiles.append({"user": username, "mihomo": mihomo, "sing_box": {"log": {"level": "warn", "timestamp": True},
+                             "inbounds": [{"type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1", "listen_port": 1080}],
+                             "outbounds": [outbound], "route": {"final": tag}}})
+        out["profiles"] = profiles
+        out["uri"] = None  # No standardized TUIC v5 URI is invented.
+    return out
+
+
+class Service:
+    """One canonical supervisor. Fixture adapter is explicit and never auto-selected."""
+    def __init__(self, adapter, generation, fixture=None):
+        self.adapter, self.generation, self.fixture = adapter, generation, fixture
+        require(adapter in ("systemd", "openrc", "process", "fixture"), "SERVICE_START", "unsupported init system")
+        require(adapter != "fixture" or fixture, "SERVICE_START", "fixture driver missing")
+        self.child = None
+        self.log = None
+
+    def call(self, action, name="nobrand-splicore", ok=True):
+        require(name == "nobrand-splicore", "SERVICE_START", "service outside Splicore ownership")
+        if self.adapter == "fixture":
+            args = [self.fixture, action, name, str(self.generation)]
+        elif self.adapter == "systemd":
+            unit = name if name.endswith((".timer", ".service")) else name + ".service"
+            if action == "reload-manager":
+                args = ["systemctl", "daemon-reload"]
+            elif action == "enabled":
+                args = ["systemctl", "is-enabled", "--quiet", unit]
+            elif action == "active":
+                args = ["systemctl", "is-active", "--quiet", unit]
+            else:
+                args = ["systemctl", action, unit]
+        elif self.adapter == "openrc":
+            if action == "reload-manager":
+                return True
+            if action in ("enable", "disable", "enabled"):
+                if action == "enabled":
+                    return (Path("/etc/runlevels/default") / name).exists()
+                args = ["rc-update", "add" if action == "enable" else "del", name, "default"]
+            else:
+                args = ["rc-service", name, "status" if action == "active" else action]
+        else:
+            require(name == "nobrand-splicore", "SERVICE_START", "process probe cannot control legacy services")
+            if action in ("enable", "disable", "reload-manager"):
+                return True
+            if action in ("enabled", "active"):
+                return self.child is not None and self.child.poll() is None
+            if action == "stop":
+                if self.child is not None and self.child.poll() is None:
+                    self.child.terminate()
+                    try:
+                        self.child.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        self.child.kill()
+                        self.child.wait(timeout=5)
+                if self.log:
+                    self.log.close()
+                    self.log = None
+                return True
+            if action == "start":
+                self.log = (self.generation / "daemon.log").open("ab")
+                self.child = subprocess.Popen([sys.executable, str(self.generation / "launch.py")],
+                                              stdout=self.log, stderr=self.log, close_fds=True)
+                return True
+            raise Failure("SERVICE_START", "unsupported local probe operation")
+        result = command(args, "SERVICE_START", timeout=45, ok=ok)
+        return result.returncode == 0
+
+
+class Runtime:
+    def __init__(self, root=None, adapter=None, fixture=None):
+        self.state = Path(root or os.environ.get("NOBRAND_STATE_DIR", "/var/lib/nobrand-oneclick"))
+        self.config = Path(os.environ.get("NOBRAND_CONFIG_DIR", "/etc/nobrand-oneclick"))
+        self.lib = Path(os.environ.get("NOBRAND_LIB_DIR", "/usr/local/lib/nobrand-oneclick"))
+        self.lifecycle = Path(os.environ.get("NOBRAND_LIFECYCLE_DIR", "/var/lib/nobrand-oneclick-lifecycle"))
+        self.home = self.state / "splicore"
+        self.generations = self.home / "generations"
+        self.current = self.home / "current"
+        self.previous = self.home / "previous"
+        self.transaction = self.lifecycle / "splicore-transaction.json"
+        self.adapter = adapter or ("systemd" if Path("/run/systemd/system").is_dir() else "openrc" if Path("/sbin/openrc").exists() else "")
+        self.fixture = fixture
+        require(self.adapter != "fixture" or os.environ.get("NOBRAND_SPLICORE_FIXTURE") == "1",
+                "SERVICE_START", "fixture adapter requires explicit isolated test environment")
+
+    def safe(self):
+        for root in (self.state, self.config, self.lib, self.lifecycle):
+            require(root.is_absolute() and len(root.parts) >= 3 and root != Path("/"), "CONFIG_INVALID", "unsafe runtime root")
+            for part in (root, *root.parents):
+                require(not part.is_symlink(), "CONFIG_INVALID", "symlink in managed root")
+        for path in (self.home, self.generations, self.config / "splicore", self.config / "splicore/tls"):
+            require(not path.is_symlink(), "CONFIG_INVALID", "managed directory replaced by symlink")
+        registry = self.state / "state.json"
+        if registry.exists():
+            record = load(registry)
+            require(record.get("schema_version") == 3 and record.get("ownership") == "nobrand-v3"
+                    and record.get("project") == "NoBrand-OneClick", "CONFIG_INVALID", "NoBrand authority is ambiguous or foreign")
+        elif self.state.exists():
+            # These are product namespaces; legacy markers are read-only refusals.
+            allowed = {"splicore", "mieru", "snell", "tuic", "hysteria2", "vless-reality", "vless-sudoku",
+                       "forward", "ssh", "ssh-tunnel", "ingress", "ingress.json", "ingress-firewall.json", "backups", "firewall-owned.bindings"}
+            require(all(p.name in allowed for p in self.state.iterdir()), "CONFIG_INVALID", "unmarked state contains foreign data")
+
+    @contextlib.contextmanager
+    def locked(self):
+        self.refuse_legacy()
+        self.safe()
+        self.lifecycle.mkdir(parents=True, exist_ok=True, mode=0o700)
+        lock = Path(os.environ.get("NOBRAND_LIFECYCLE_LOCK_FILE", str(self.lifecycle / "splicore.lock")
+                                   if self.adapter in ("process", "fixture") else "/run/nobrand-oneclick/lifecycle.lock"))
+        lock.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        require(not lock.is_symlink(), "CONFIG_INVALID", "unsafe lock path")
+        # Menu actions may already hold the canonical Bash lifecycle guard on
+        # descriptor 7. Reuse that open file description instead of deadlocking.
+        inherited = False
+        try:
+            inherited = os.path.samefile("/proc/self/fd/7", lock)
+        except OSError:
+            pass
+        with (os.fdopen(os.dup(7), "a") if inherited else lock.open("a")) as out:
+            os.chmod(lock, 0o600)
+            try:
+                fcntl.flock(out, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise Failure("LOCKED", "another runtime transaction is active") from exc
+            yield
+
+    def target(self, link):
+        if not link.is_symlink():
+            require(not link.exists(), "CONFIG_INVALID", "runtime pointer must be an owned symlink")
+            return None
+        candidate = link.resolve()
+        require(candidate.parent == self.generations.resolve() and candidate.is_dir(),
+                "CONFIG_INVALID", "runtime pointer escapes managed generations")
+        return candidate
+
+    def point(self, link, target):
+        self.home.mkdir(parents=True, exist_ok=True, mode=0o700)
+        require(target.parent == self.generations and target.is_dir(), "CONFIG_INVALID", "unsafe generation")
+        tmp = self.home / (".link-" + uuid.uuid4().hex)
+        try:
+            tmp.symlink_to("generations/" + target.name, target_is_directory=True)
+            os.replace(tmp, link)
+            sync_dir(self.home)
+        finally:
+            if tmp.is_symlink():
+                tmp.unlink()
+
+    def desired(self):
+        current = self.target(self.current)
+        return load(current / "desired.json") if current else empty()
+
+    def legacy_present(self):
+        # Only namespaces and service names owned by NoBrand, never PATH names.
+        paths = [self.state / name for name in (
+            "mieru/install-state.env", "mieru/users.json", "mieru/.installed", "hysteria2/state.json",
+            "tuic/runtime.json", "snell/instances", "tuic/instances", "vless-reality/instances")]
+        paths += [self.config / "hysteria2/config.json", self.config / "vless-reality/instances"]
+        paths += [self.lib / name for name in ("bin/mita", "bin/sing-box", "bin/hysteria", "mieru-instance-run")]
+        if not (self.state / "vless-sudoku/state.json").is_file():
+            paths.append(self.lib / "bin/xray")
+        system = Path(os.environ.get("NOBRAND_SYSTEM_ROOT", "/"))
+        paths.append(Path(os.environ.get("NOBRAND_LEGACY_MIERU_STATE_DIR", str(system / "var/lib/mita-oneclick"))))
+        for folder, patterns in ((system / "etc/systemd/system", ("nobrand-mieru*.service", "nobrand-mieru*.timer",
+                                  "nobrand-snell*.service", "nobrand-tuic*.service", "nobrand-vless-reality*.service",
+                                  "nobrand-hysteria2.service")),
+                                 (system / "etc/init.d", ("nobrand-mieru*", "nobrand-snell*", "nobrand-tuic*",
+                                                      "nobrand-vless-reality*", "nobrand-hysteria2"))):
+            for pattern in patterns:
+                paths.extend(folder.glob(pattern))
+        if any(path.exists() or path.is_symlink() for path in paths):
+            return True
+        if self.current.exists() or self.current.is_symlink():
+            intent = self.current / "desired.json" if self.current.is_symlink() else self.current
+            marker, expected = ("architecture", "splicore-native") if self.current.is_symlink() else ("owner", "nobrand-splicore-pointer-v1")
+            if not intent.is_file() or load(intent).get(marker) != expected:
+                return True
+        registry = self.state / "state.json"
+        return (registry.exists() or registry.is_symlink()) and (
+            registry.is_symlink() or load(registry).get("architecture") != "splicore-native")
+
+    def refuse_legacy(self):
+        require(not self.legacy_present(), "UNSUPPORTED_LEGACY_INSTALLATION", LEGACY_NOTICE)
+
+    def port_pairs(self, desired):
+        result = set()
+        for node in desired["nodes"]:
+            protocol, doc = node["protocol"], node["document"]
+            transport = doc["settings"]["transport"] if protocol == "mieru" else "tcp" if protocol in ("snell", "vless-reality") else "udp"
+            result.add(transport.upper() + "|" + str(doc["listener"]["port"]))
+        return result
+
+    def firewall(self, action, pairs):
+        if not pairs or self.adapter == "process":
+            return
+        if self.adapter == "fixture":
+            Service(self.adapter, self.target(self.current) or self.home, self.fixture).call("firewall-" + action)
+            return
+        source = os.environ.get("NOBRAND_SPLICORE_MANAGER_SOURCE", "")
+        require(source and Path(source).is_file(), "CONFIG_INVALID", "standalone NoBrand manager source required for firewall ownership adapter")
+        require(action in ("open", "close"), "CONFIG_INVALID", "firewall action")
+        script = ('manager=$1; bindings=$2; set --; MITA_SOURCE_ONLY=1; source "$manager"; '
+                  + 'nb_firewall_' + action + '_pairs "$bindings"')
+        command(["bash", "-c", script, "nobrand-firewall", source, "\n".join(sorted(pairs))], "FIREWALL", timeout=60)
+
+    def check_external_ports(self, desired):
+        reservations = []
+        sudoku = self.state / "vless-sudoku/state.json"
+        if sudoku.exists():
+            old = load(sudoku)
+            reservations.append("TCP|" + str(old["listen_port"]))
+        forwarding = self.state / "forward/state.json"
+        if forwarding.exists():
+            for rule in load(forwarding).get("rules", []):
+                for transport in (["TCP", "UDP"] if str(rule.get("protocol")).upper() == "BOTH" else [str(rule.get("protocol")).upper()]):
+                    reservations.append(transport + "|" + str(rule.get("listen_port")))
+        require(not self.port_pairs(desired).intersection(reservations), "PORT_CONFLICT", "port belongs to retained Sudoku or forwarding state")
+
+    def owned_firewall_pairs(self):
+        result = set()
+        for path in (self.state / "firewall-owned.bindings", self.state / "mieru/firewall-owned.bindings"):
+            if path.exists():
+                for line in path.read_text().splitlines():
+                    fields = line.split("|")
+                    if len(fields) == 3 and fields[1] in ("tcp", "udp") and fields[2].isdigit():
+                        result.add(fields[1].upper() + "|" + fields[2])
+        return result
+
+    def verify_installed_binary(self, generation):
+        metadata = load(generation / "artifact.json")
+        release = RELEASE if metadata["version"] == RELEASE["version"] else RELEASE.get("rollback_releases", {}).get(metadata["version"])
+        require(release and release.get("version") == metadata["version"], "BINARY_IDENTITY", "generation release is not an approved rollback pin")
+        digest = sha(generation / "splicore")
+        require(metadata["binary_sha256"] == digest,
+                "BINARY_IDENTITY", "installed binary or version changed")
+        if self.adapter != "fixture":
+            require(digest == release["assets"][metadata["architecture"]]["binary_sha256"],
+                    "BINARY_IDENTITY", "binary does not match immutable release pin")
+        binary_identity(generation / "splicore", metadata["architecture"], release)
+        return metadata
+
+    def adopt_snapshot(self):
+        """Recreate only owned pointers/units after the existing product restore.
+
+        All product state/config rollback remains owned by that transaction.
+        Archive binaries are checked against a digest derived from verified
+        public archives before any executable is invoked.
+        """
+        with self.locked():
+            for link in (self.current, self.previous):
+                if link.is_file() and not link.is_symlink():
+                    pointer = load(link)
+                    require(pointer.get("owner") == "nobrand-splicore-pointer-v1", "CONFIG_INVALID", "invalid backup runtime pointer")
+                    generation = self.generations / identifier(pointer["generation"])
+                    self.verify_installed_binary(generation)
+                    self.point(link, generation)
+            current = self.target(self.current)
+            require(current, "CONFIG_INVALID", "missing restored generation")
+            self.verify_installed_binary(current)
+            render(load(current / "desired.json"))
+            require(stat.S_IMODE((current / "runtime/master.key").stat().st_mode) & 0o077 == 0,
+                    "CONFIG_INVALID", "restored master key is not private")
+            atomic(current / "bootstrap.yaml", self.bootstrap_text(current))
+            atomic(current / "launch.py", LAUNCHER, 0o700)
+            command([current / "splicore", "validate", current / "bootstrap.yaml"])
+            self.install_unit()
+            Service(self.adapter, current, self.fixture).call("reload-manager")
+            return {"result": "snapshot-adopted", "external_runtime_qualification": "PENDING"}
+
+    def rollback(self):
+        with self.locked():
+            self.recover()
+            old, current = self.target(self.previous), self.target(self.current)
+            require(current, "ROLLBACK", "no installed generation to roll back")
+            require(old, "ROLLBACK", "no previous known-good Splicore generation")
+            service = Service(self.adapter, current, self.fixture)
+            tx = {"owner": "nobrand-splicore-v1", "adapter": self.adapter, "candidate": current.name,
+                  "old": old.name, "active": service.call("active", ok=False),
+                  "enabled": service.call("enabled", ok=False),
+                  "unit_backup": self.unit_path().read_text() if self.unit_path().exists() else None}
+            self.checkpoint(tx, "ROLLING_BACK")
+            self.restore_transaction(tx)
+            self.point(self.previous, current)
+            return {"result": "rolled-back", "generation": old.name}
+
+    def prune_generations(self):
+        # Keep current, previous, and any generation referenced by recovery.
+        protected = {p for p in (self.target(self.current), self.target(self.previous)) if p}
+        if self.transaction.exists():
+            tx = load(self.transaction)
+            for field in ("candidate", "old", "previous"):
+                if tx.get(field):
+                    protected.add(self.generations / identifier(tx[field]))
+        for path in self.generations.iterdir():
+            require(not path.is_symlink() and path.is_dir() and re.fullmatch(r"g[0-9a-f]{32}", path.name)
+                    and (path / "artifact.json").is_file(), "CONFIG_INVALID", "unknown generation; cleanup requires review")
+            if path not in protected:
+                shutil.rmtree(path)
+
+    def restore(self, archive_path, artifacts=None, proxy=""):
+        self.refuse_legacy()
+        with tempfile.TemporaryDirectory(prefix="nb-splicore-restore-") as directory:
+            staging = Path(directory)
+            with tarfile.open(archive_path, "r:gz") as archive:
+                members, names, total = archive.getmembers(), set(), 0
+                require(len(members) <= 512, "ARCHIVE_INVALID", "backup entry limit")
+                for member in members:
+                    name = member.name
+                    require(member.isfile() and not PurePosixPath(name).is_absolute() and "\\" not in name
+                            and ":" not in name and all(p not in ("", ".", "..") for p in name.split("/"))
+                            and name not in names, "ARCHIVE_INVALID", "unsafe backup entry")
+                    names.add(name)
+                    total += member.size
+                    require(total <= 256 * 1024 * 1024, "ARCHIVE_INVALID", "backup size limit")
+                require({"desired.json", "artifact.json", "runtime/master.key"}.issubset(names), "ARCHIVE_INVALID", "incomplete backup")
+                # Never execute the archived binary; reverify public artifacts.
+                for name in ("desired.json", "runtime/master.key"):
+                    with archive.extractfile(name) as src:
+                        atomic(staging / name, src.read())
+            desired = load(staging / "desired.json")
+            desired["source"] = "backup-restore"
+            render(desired)
+            return self.deploy(desired, artifacts, proxy, key_material=(staging / "runtime/master.key").read_bytes())
+
+    def stop(self):
+        with self.locked():
+            self.recover()
+            current = self.target(self.current)
+            require(current, "SERVICE_START", "runtime not installed")
+            Service(self.adapter, current, self.fixture).call("stop")
+            return {"result": "stopped"}
+
+    def backup(self, destination, unified=False):
+        with self.locked():
+            self.recover()
+            current = self.target(self.current)
+            require(current, "CONFIG_INVALID", "runtime not installed")
+            self.verify_installed_binary(current)
+            service = Service(self.adapter, current, self.fixture)
+            active = service.call("active", ok=False)
+            if active:
+                service.call("stop")
+            try:
+                destination = Path(destination)
+                require(not destination.exists() and not destination.is_symlink(), "CONFIG_INVALID", "backup destination already exists")
+                destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                with tempfile.NamedTemporaryFile(dir=str(destination.parent), prefix=".backup-", delete=False) as out:
+                    temporary = Path(out.name)
+                try:
+                    with tarfile.open(temporary, "w:gz") as archive:
+                        if unified:
+                            text = ("project=NoBrand-OneClick\nversion=" + os.environ.get("SCRIPT_VERSION", "3.2.6")
+                                    + "\nschema_version=3\nownership=nobrand-v3\ncontents=state,config\n")
+                            info = tarfile.TarInfo("manifest.txt")
+                            info.size, info.mode = len(text.encode()), 0o600
+                            archive.addfile(info, io.BytesIO(text.encode()))
+                            for label, root in (("state", self.state), ("config", self.config)):
+                                if not root.exists():
+                                    info = tarfile.TarInfo(label)
+                                    info.type, info.mode = tarfile.DIRTYPE, 0o700
+                                    archive.addfile(info)
+                                    continue
+                                archive.add(root, arcname=label, recursive=False)
+                                for path in sorted(root.rglob("*")):
+                                    if path == temporary or path == destination or within(path, self.state / "backups"):
+                                        continue
+                                    name = label + "/" + str(path.relative_to(root))
+                                    if path in (self.current, self.previous) and path.is_symlink():
+                                        target = self.target(path)
+                                        data = json.dumps({"owner": "nobrand-splicore-pointer-v1", "generation": target.name}).encode()
+                                        info = tarfile.TarInfo(name)
+                                        info.size, info.mode = len(data), 0o600
+                                        archive.addfile(info, io.BytesIO(data))
+                                    elif stat.S_ISSOCK(path.lstat().st_mode) and within(path, self.home):
+                                        continue
+                                    else:
+                                        require(not path.is_symlink() and (path.is_file() or path.is_dir()),
+                                                "CONFIG_INVALID", "unsupported entry in product backup")
+                                        archive.add(path, arcname=name, recursive=False)
+                        else:
+                            for path in sorted(current.rglob("*")):
+                                require(not path.is_symlink(), "CONFIG_INVALID", "symlink in runtime backup")
+                                if path.is_file():
+                                    archive.add(path, arcname=str(path.relative_to(current)), recursive=False)
+                    os.chmod(temporary, 0o600)
+                    with temporary.open("rb") as out:
+                        os.fsync(out.fileno())
+                    os.replace(temporary, destination)
+                    sync_dir(destination.parent)
+                finally:
+                    remove_file(temporary)
+            finally:
+                if active:
+                    service.call("start")
+            return {"result": "backup-created", "database_and_key": "included"}
+
+    def certificate(self, name, sni):
+        self.refuse_legacy()
+        require(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]{0,252}", sni), "CONFIG_INVALID", "invalid TLS SNI")
+        parent = self.config / "splicore/tls"
+        parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        target = parent / identifier(name)
+        require(not target.exists(), "CONFIG_INVALID", "certificate directory already exists; explicit certificate reuse required")
+        with tempfile.TemporaryDirectory(prefix=".tls-", dir=str(parent)) as directory:
+            work = Path(directory)
+            ca, ca_key = work / "ca.pem", work / "ca.key"
+            cert, key, csr = work / "certificate.pem", work / "private.key", work / "leaf.csr"
+            ca_config = work / "ca.cnf"
+            atomic(ca_config, "[req]\ndistinguished_name=dn\nprompt=no\nx509_extensions=v3_ca\n"
+                   "[dn]\nCN=NoBrand local CA\n[v3_ca]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\n")
+            command(["openssl", "req", "-new", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256",
+                     "-nodes", "-days", "3650", "-config", ca_config, "-extensions", "v3_ca",
+                     "-keyout", ca_key, "-out", ca])
+            command(["openssl", "req", "-new", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256",
+                     "-nodes", "-subj", "/CN=" + sni, "-keyout", key, "-out", csr])
+            extension = work / "leaf.ext"
+            try:
+                ipaddress.ip_address(sni)
+                san = "IP:"
+            except ValueError:
+                dns_name(sni)
+                san = "DNS:"
+            atomic(extension, "basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nsubjectAltName=" + san + sni + "\nextendedKeyUsage=serverAuth\n")
+            command(["openssl", "x509", "-req", "-in", csr, "-CA", ca, "-CAkey", ca_key, "-CAcreateserial",
+                     "-days", "825", "-extfile", extension, "-out", cert])
+            target.mkdir(mode=0o700)
+            atomic(target / cert.name, cert.read_bytes() + ca.read_bytes())
+            atomic(target / key.name, key.read_bytes())
+            atomic(target / ca.name, ca.read_bytes())
+        return {"server_name": sni, "certificate_file": str(target / "certificate.pem"),
+                "private_key_file": str(target / "private.key"), "ca_certificate": (target / "ca.pem").read_text()}
+
+    def protocol(self, protocol, operation, selector="", artifacts=None, proxy="", preview=False):
+        self.refuse_legacy()
+        created_tls = None
+        aliases = {"client-config": "show", "user-del": "remove", "users": "user-list", "user-set-endpoint": "set-endpoint"}
+        operation = aliases.get(operation, operation)
+        if protocol == "mieru" and operation == "user-add":
+            operation = "install"
+        installed = self.target(self.current)
+        if operation in ("status", "doctor", "menu"):
+            result = {"core": "Splicore", "version": RELEASE["version"], "protocol": protocol,
+                      "architecture": "splicore-native", "nodes": [],
+                      "installed": bool(installed), "qualification": RELEASE["qualification"]}
+            if installed:
+                result["version"] = load(installed / "artifact.json")["version"]
+                result["nodes"] = [{"id": n["id"], "enabled": n.get("enabled", True),
+                                     "name": n.get("client", {}).get("name") or n["id"],
+                                     "listener": n["document"]["listener"]} for n in self.desired()["nodes"] if n["protocol"] == protocol]
+                if operation == "doctor":
+                    result.update(self.health(installed))
+            return result
+        desired = self.desired()
+        matching = [node for node in desired["nodes"] if node["protocol"] == protocol
+                    and (not selector or node["id"] == selector or node.get("client", {}).get("name") == selector
+                         or node.get("client", {}).get("pair") == selector
+                         or (protocol == "mieru" and node["document"].get("users", [{}])[0].get("username") == selector))]
+        if operation in ("show", "export", "user-show", "user-list"):
+            require(matching, "CONFIG_INVALID", "node not found")
+            if operation == "user-list":
+                return {"nodes": [{"id": n["id"], "enabled": n.get("enabled", True),
+                                   "users": n.get("client", {}).get("user_names") or [u.get("username", "") for u in n["document"].get("users", [])]} for n in matching]}
+            return {"client_profiles": [client_profiles(n) for n in matching]}
+        if operation in ("upgrade", "upgrade-runtime"):
+            return redacted_plan(desired) if preview else self.deploy(desired, artifacts, proxy)
+        if operation == "install":
+            require(not matching, "CONFIG_INVALID", "node already exists; use explicit reconfigure")
+            env = os.environ
+            label = selector or env.get("USERNAME", "") or "primary"
+            require(len(label) <= 64 and not any(ord(c) < 32 or c == "|" for c in label), "CONFIG_INVALID", "invalid node name")
+            name = "n" + hashlib.sha256((protocol + "\0" + label).encode()).hexdigest()[:16]
+            port = int(env.get("PORT") or 0)
+            require(port > 0, "CONFIG_INVALID", "--port is required")
+            display_host = env.get("ADVERTISE_HOST") or env.get("NOBRAND_SPLICORE_AUTO_HOST", "")
+            require(display_host and display_host not in ("0.0.0.0", "::"), "CONFIG_INVALID", "an explicit or detected display host is required")
+            document = {"schema": 1, "listener": {"host": env.get("NOBRAND_SPLICORE_LISTEN", "0.0.0.0"), "port": port},
+                        "display_endpoint": {"host": display_host, "port": int(env.get("ADVERTISE_PORT") or port)}}
+            node = {"id": name, "protocol": protocol, "enabled": True, "client": {"name": label}, "document": document}
+            if env.get("NOBRAND_SPLICORE_INGRESS_ID"):
+                node["ingress"] = {"profile_id": env["NOBRAND_SPLICORE_INGRESS_ID"]}
+            if protocol == "snell":
+                document.update({"settings": {"version": int(env.get("SNELL_VERSION", "5"))},
+                                 "psk": env.get("SNELL_PSK") or uuid.uuid4().hex})
+                node["options"] = {"quic_proxy_enabled": env.get("SNELL_QUIC_PROXY", "off") in ("on", "true", "1")}
+            elif protocol == "mieru":
+                require(env.get("PROTOCOL", "TCP").upper() in ("TCP", "UDP", "BOTH"), "CONFIG_INVALID", "invalid Mieru transport")
+                document.update({"settings": {"transport": "tcp" if env.get("PROTOCOL", "TCP").upper() == "BOTH" else env.get("PROTOCOL", "TCP").lower(),
+                                               "mtu": int(env.get("MTU", "1400")), "multiplex": multiplex(env.get("MULTIPLEXING", "off"))},
+                                 "users": [{"username": env.get("USERNAME") or name, "password": env.get("PASSWORD") or uuid.uuid4().hex}]})
+                node["options"] = {"traffic_pattern": env.get("TRAFFIC_PATTERN", "conservative"),
+                                   "low_entropy": env.get("LOW_ENTROPY_MODE", "LOW_ENTROPY_MODE_OFF"),
+                                   "quota_mb": int(env.get("USER_QUOTA_MB") or 0), "expire_at": env.get("USER_EXPIRE", ""),
+                                   "bandwidth_mbps": int(env.get("USER_BANDWIDTH_MBPS") or 0)}
+                require(env.get("USER_PACKAGE", "") in ("", "unlimited", "custom"), "CAPABILITY_UNSUPPORTED", "quota packages are unsupported by rc.4")
+                node["client"].update({"handshake_mode": handshake(env.get("HANDSHAKE_MODE", "HANDSHAKE_NO_WAIT")),
+                                         "transport": env.get("PROTOCOL", "TCP").upper(), "pair": name})
+                if env.get("PROTOCOL", "TCP").upper() == "BOTH":
+                    pair = copy.deepcopy(node)
+                    pair["id"] += "-udp"
+                    pair["document"]["settings"]["transport"] = "udp"
+                    pair["document"]["listener"]["port"] += 1
+                    pair["document"]["display_endpoint"]["port"] += 1
+                    desired["nodes"].append(pair)
+            elif protocol == "vless-reality":
+                cover = env.get("VLESS_REALITY_TARGET") or "www.microsoft.com"
+                cover_port = int(env.get("VLESS_REALITY_TARGET_PORT") or 443)
+                guard_port = available_tcp_port(desired)
+                node["guard"] = {"id": str(uuid.uuid4()), "listen": {"host": "127.0.0.1", "port": guard_port},
+                                 "target": {"host": cover, "port": cover_port}, "approved_sni": [cover]}
+                private, public = reality_keypair()
+                document.update({"settings": {"security": "reality", "flow": "xtls-rprx-vision",
+                    "transport": "tcp", "packet_encoding": "xudp", "stream_transport": {"kind": "tcp"},
+                    "reality": {"public_key": public, "short_ids": [secrets.token_hex(8)],
+                                "server_name": cover, "target": node["guard"]["listen"]}},
+                    "server_secret": {"private_key": private}, "users": [{"uuid": str(uuid.uuid4())}]})
+            elif protocol == "hysteria2":
+                require(not preview, "CONFIG_INVALID", "fresh HY2 preview requires a supplied canonical file with TLS paths")
+                tls = self.certificate(name, env.get("HY2_SNI") or "bing.com")
+                created_tls = Path(tls["certificate_file"]).parent
+                document.update({"settings": {"tls": tls,
+                                               "stream_transport": {"kind": "hysteria", "hysteria": {"version": 2,
+                                                   "obfs": {"type": "salamander", "password": uuid.uuid4().hex}}}},
+                                 "users": [{"password": uuid.uuid4().hex}]})
+                node["options"] = {"obfs": "salamander"}
+            else:
+                require(protocol == "tuic", "CAPABILITY_UNSUPPORTED", "unsupported protocol")
+                require(not preview, "CONFIG_INVALID", "fresh TUIC preview requires a supplied canonical file with TLS paths")
+                document.update({"settings": {"version": 5, "congestion_control": "cubic", "udp_relay_mode": "native",
+                                               "zero_rtt_handshake": False, "tls": self.certificate(name, env.get("TUIC_SNI") or "www.microsoft.com")},
+                                 "users": [{"uuid": str(uuid.uuid4()), "password": uuid.uuid4().hex}]})
+                created_tls = Path(document["settings"]["tls"]["certificate_file"]).parent
+                node["client"]["user_names"] = [env.get("TUIC_USER") or "primary"]
+            desired["nodes"].append(node)
+        else:
+            require(matching and (selector or len(matching) == 1 or operation in ("uninstall", "start", "stop", "restart")),
+                    "CONFIG_INVALID", "select a node by name")
+            node = matching[0]
+            if operation in ("remove", "uninstall"):
+                for member in matching:
+                    desired["nodes"].remove(member)
+            elif operation in ("start", "stop", "restart", "user-enable", "user-disable"):
+                for member in matching:
+                    member["enabled"] = operation not in ("stop", "user-disable")
+            elif protocol == "tuic" and operation in ("user-add", "user-delete", "user-rotate"):
+                client = node.setdefault("client", {})
+                original_names = [u["name"] for u in client.get("users", [])]
+                names = client.setdefault("user_names", original_names or [str(i) for i in range(len(node["document"]["users"]))])
+                name = os.environ.get("TUIC_USER", "")
+                require(name, "CONFIG_INVALID", "--user is required")
+                if operation == "user-add":
+                    require(name not in names, "CONFIG_INVALID", "user already exists")
+                    names.append(name)
+                    node["document"]["users"].append({"uuid": str(uuid.uuid4()), "password": uuid.uuid4().hex})
+                else:
+                    require(name in names, "CONFIG_INVALID", "user not found")
+                    index = names.index(name)
+                    if operation == "user-delete":
+                        require(len(names) > 1, "CONFIG_INVALID", "remove the node to delete its last user")
+                        names.pop(index)
+                        node["document"]["users"].pop(index)
+                    else:
+                        node["document"]["users"][index] = {"uuid": str(uuid.uuid4()), "password": uuid.uuid4().hex}
+            elif operation == "set-endpoint":
+                require(os.environ.get("ADVERTISE_HOST"), "CONFIG_INVALID", "explicit display host required")
+                base_port = min(n["document"]["listener"]["port"] for n in matching)
+                for member in matching:
+                    member["document"]["display_endpoint"] = {"host": os.environ["ADVERTISE_HOST"],
+                        "port": int(os.environ.get("ADVERTISE_PORT") or base_port) + member["document"]["listener"]["port"] - base_port}
+            elif operation == "set-listen":
+                for member in matching:
+                    member["document"]["listener"]["host"] = os.environ.get("NOBRAND_SPLICORE_LISTEN", "")
+            elif protocol == "mieru" and operation in ("reconfigure", "profile-config", "mtu-config", "client-modes-config", "traffic-config", "low-entropy-config"):
+                env = os.environ
+                profile = env.get("PROFILE_CLI") == "1" and env.get("PROFILE", "custom") != "custom"
+                requested = any(env.get(k) == "1" for k in ("PROFILE_CLI", "MTU_CLI", "MULTIPLEXING_CLI", "HANDSHAKE_CLI", "TRAFFIC_CLI", "LOW_ENTROPY_CLI"))
+                require(requested, "CONFIG_INVALID", "supply explicit --profile, --mtu, --multiplexing, --handshake-mode or --traffic-pattern")
+                require(not profile or all(n["document"]["settings"]["transport"] == env.get("PROTOCOL", "TCP").lower() for n in matching),
+                        "CAPABILITY_UNSUPPORTED", "profile transport change requires an explicit canonical listener transaction")
+                require(env.get("PASSWORD_CLI") != "1" and env.get("PORT_CLI") != "1" and env.get("PROTOCOL_CLI") != "1"
+                        and env.get("ADVERTISE_CLI") != "1", "CAPABILITY_UNSUPPORTED", "listener/credential changes require an explicit canonical file; display changes use set-endpoint")
+                for member in matching:
+                    settings = member["document"]["settings"]
+                    options = member.setdefault("options", {})
+                    if profile or env.get("MTU_CLI") == "1":
+                        settings["mtu"] = int(env.get("MTU", "1400"))
+                    if profile or env.get("MULTIPLEXING_CLI") == "1":
+                        settings["multiplex"] = multiplex(env.get("MULTIPLEXING", "off"))
+                    if profile or env.get("HANDSHAKE_CLI") == "1":
+                        member.setdefault("client", {})["handshake_mode"] = handshake(env.get("HANDSHAKE_MODE", "HANDSHAKE_NO_WAIT"))
+                    if profile or env.get("TRAFFIC_CLI") == "1":
+                        options["traffic_pattern"] = env.get("TRAFFIC_PATTERN", "conservative")
+                    if profile or env.get("LOW_ENTROPY_CLI") == "1":
+                        options["low_entropy"] = env.get("LOW_ENTROPY_MODE", "LOW_ENTROPY_MODE_OFF")
+            elif protocol == "snell" and operation == "set-quic":
+                require(os.environ.get("SNELL_QUIC_PROXY", "off") == "off", "CAPABILITY_UNSUPPORTED", "Snell QUIC is not exposed by rc.4")
+                for member in matching:
+                    member.setdefault("options", {})["quic_proxy_enabled"] = False
+            else:
+                raise Failure("CAPABILITY_UNSUPPORTED", "operation needs an explicit supported desired-state change; no legacy fallback")
+        if preview:
+            return redacted_plan(desired)
+        try:
+            outcome = self.deploy(desired, artifacts, proxy, force=operation == "restart",
+                                  expected_generation=installed.name if installed else "")
+        except BaseException:
+            # Only remove material minted by this request after a completed
+            # rollback. Unfinished recovery may still need the candidate TLS.
+            terminal = not self.transaction.exists() or load(self.transaction).get("phase") in ("COMMITTED", "ROLLED_BACK")
+            referenced = any(str(created_tls) in (p / "desired.json").read_text()
+                             for p in (self.target(self.current), self.target(self.previous)) if p) if created_tls else False
+            if created_tls and terminal and not referenced:
+                shutil.rmtree(created_tls)
+            raise
+        if operation == "install":
+            outcome["client_profiles"] = [client_profiles(n) for n in desired["nodes"] if n["id"] in (name, name + "-udp")]
+        return outcome
+
+    def uninstall(self, purge=False):
+        with self.locked():
+            self.recover()
+            current = self.target(self.current)
+            cleanup_debt = []
+            if current:
+                service = Service(self.adapter, current, self.fixture)
+                service.call("stop")
+                service.call("disable")
+                path = self.unit_path()
+                if path.exists():
+                    require(not path.is_symlink() and "# NoBrand-owned Splicore v1" in path.read_text(),
+                            "CONFIG_INVALID", "refuse foreign service unit")
+                    path.unlink()
+                    service.call("reload-manager")
+                self.current.unlink()
+                try:
+                    self.firewall("close", self.port_pairs(load(current / "desired.json")))
+                except (Failure, OSError):
+                    cleanup_debt.append("owned firewall bindings")
+            if purge and self.home.exists():
+                self.safe()
+                require(self.home.parent == self.state and self.home.name == "splicore", "CONFIG_INVALID", "unsafe purge path")
+                for path in self.generations.iterdir() if self.generations.exists() else []:
+                    require(path.is_dir() and not path.is_symlink() and (path / "artifact.json").is_file(),
+                            "CONFIG_INVALID", "unknown data in generation directory")
+                shutil.rmtree(self.home)
+                if self.transaction.exists():
+                    self.transaction.unlink()
+                tls = self.config / "splicore/tls"
+                if tls.exists():
+                    require(not tls.is_symlink(), "CONFIG_INVALID", "unsafe owned TLS directory")
+                    shutil.rmtree(tls)
+            return {"result": "purged" if purge else "uninstalled", "retained_state": not purge, "cleanup_debt": cleanup_debt}
+
+    def unit_path(self):
+        override = os.environ.get("NOBRAND_SPLICORE_UNIT")
+        if self.adapter == "fixture":
+            return self.home / "fixture.service"
+        return Path(override) if override else Path("/etc/systemd/system/nobrand-splicore.service" if self.adapter == "systemd" else "/etc/init.d/nobrand-splicore")
+
+    def bootstrap_text(self, generation):
+        return ("schema: 1\nstate_directory: " + json.dumps(str(generation / "runtime"))
+                + "\nkey_file: " + json.dumps(str(generation / "runtime/master.key"))
+                + "\napi:\n  unix_socket: " + json.dumps(str(generation / "control.sock")) + "\n")
+
+    def service_text(self):
+        current = self.current
+        python = shutil.which("python3")
+        require(python and not any(c.isspace() for c in python), "SERVICE_START", "python3 unavailable for owned launcher")
+        require(not any(c.isspace() or c in '\"$%`\\' for c in str(current)), "CONFIG_INVALID", "unit path contains unsupported characters")
+        if self.adapter == "systemd":
+            return ("# NoBrand-owned Splicore v1\n[Unit]\nDescription=NoBrand Splicore\nAfter=network-online.target\nWants=network-online.target\n"
+                    "\n[Service]\nType=simple\nUser=root\nGroup=root\nUMask=0077\n"
+                    f"WorkingDirectory={current}\nExecStart={python} {current}/launch.py\n"
+                    "Restart=on-failure\nRestartSec=3\nLimitNOFILE=1048576\nNoNewPrivileges=true\nPrivateTmp=true\n"
+                    "ProtectSystem=strict\nProtectHome=read-only\n"
+                    f"ReadWritePaths={self.home}\n\n[Install]\nWantedBy=multi-user.target\n")
+        return ("#!/sbin/openrc-run\n# NoBrand-owned Splicore v1\nname=\"NoBrand Splicore\"\n"
+                f"command=\"{python}\"\ncommand_args=\"{current}/launch.py\"\n"
+                "command_user=\"root:root\"\nsupervisor=\"supervise-daemon\"\nrespawn_delay=3\n"
+                "respawn_max=0\nstart_stop_daemon_args=\"--umask 0077\"\n"
+                "depend() { need net; }\n")
+
+    def install_unit(self):
+        if self.adapter == "process":
+            return
+        path = self.unit_path()
+        require(not path.is_symlink(), "CONFIG_INVALID", "service unit is a symlink")
+        if path.exists():
+            require("# NoBrand-owned Splicore v1" in path.read_text(), "CONFIG_INVALID", "refuse foreign service unit")
+        atomic(path, self.service_text(), 0o644 if self.adapter == "systemd" else 0o755)
+
+    def validate(self, generation, documents):
+        binary = generation / "splicore"
+        command([binary, "validate", generation / "bootstrap.yaml"])
+        for name, protocol, document in documents:
+            path = generation / "documents" / (name + ".json")
+            save(path, document)
+            command([binary, "inbound", "validate", "--protocol", protocol, "--file", path])
+        if self.adapter != "fixture" and guard_mutations(load(generation / "desired.json")):
+            # Native client validation is a control API operation. Use a private
+            # temporary daemon with its client runtime stopped: no public or
+            # guard listeners, no production pointers, no service cutover.
+            with tempfile.TemporaryDirectory(prefix="sc-check-") as directory:
+                work = Path(directory)
+                (work / "runtime").mkdir(mode=0o700)
+                atomic(work / "runtime/master.key", (generation / "runtime/master.key").read_bytes())
+                atomic(work / "bootstrap.yaml", self.bootstrap_text(work))
+                with (work / "validation.log").open("wb") as log:
+                    child = subprocess.Popen([str(binary), "run", "--config", str(work / "bootstrap.yaml")], stdout=log, stderr=log)
+                    try:
+                        deadline = time.monotonic() + 10
+                        while not (work / "control.sock").exists():
+                            require(child.poll() is None and time.monotonic() < deadline,
+                                    "CONFIG_INVALID", "native validation daemon unavailable")
+                            time.sleep(.05)
+                        command([binary, "client", "stop", "--config", work / "bootstrap.yaml"])
+                        self.apply_guards(work, binary, load(generation / "desired.json"))
+                        for name, protocol, _document in documents:
+                            command([binary, "inbound", "plan", "--protocol", protocol, "--config", work / "bootstrap.yaml",
+                                     "--file", generation / "documents" / (name + ".json")])
+                    finally:
+                        child.terminate()
+                        try:
+                            child.wait(timeout=10)
+                        except subprocess.TimeoutExpired:
+                            child.kill()
+                            child.wait(timeout=5)
+
+    def apply_guards(self, generation, binary, desired):
+        bootstrap = generation / "bootstrap.yaml"
+        for index, mutation in enumerate(guard_mutations(desired)):
+            path, plan = generation / ("guard-" + str(index) + ".json"), generation / "plan.json"
+            save(path, mutation)
+            result = command([binary, "client", "plan", "--config", bootstrap, "--file", path], ok=False)
+            require(result.returncode == 0, "CONFIG_INVALID", "native " + mutation["resource"] + " plan rejected")
+            atomic(plan, result.stdout)
+            try:
+                command([binary, "client", "apply", "--config", bootstrap, "--file", path, "--plan", plan])
+            finally:
+                remove_file(plan)
+
+    def port_preflight(self, desired, old):
+        def bindings(graph):
+            result = set()
+            for node in graph["nodes"]:
+                if not node.get("enabled", True):
+                    continue
+                protocol, doc = node["protocol"], node["document"]
+                transport = doc["settings"]["transport"] if protocol == "mieru" else (
+                    "tcp" if protocol in ("snell", "vless-reality") else "udp")
+                result.add((transport, doc["listener"]["host"], doc["listener"]["port"]))
+                if node.get("guard"):
+                    result.add(("tcp", node["guard"]["listen"]["host"], node["guard"]["listen"]["port"]))
+            return result
+        existing = bindings(load(old / "desired.json")) if old else set()
+        for transport, host, port in bindings(desired) - existing:
+            with socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET,
+                               socket.SOCK_STREAM if transport == "tcp" else socket.SOCK_DGRAM) as listener:
+                try:
+                    listener.bind((host, port))
+                except OSError as exc:
+                    raise Failure("PORT_CONFLICT", "requested listener address/port is unavailable") from exc
+
+    def apply_documents(self, generation, documents, service):
+        deadline = time.monotonic() + 15
+        control = generation / "control.sock"
+        while not control.exists():
+            require(time.monotonic() < deadline, "SERVICE_START", "control socket did not appear")
+            if service.adapter == "process":
+                require(service.child.poll() is None, "SERVICE_START", "isolated daemon exited")
+            time.sleep(0.05)
+        binary, bootstrap = generation / "splicore", generation / "bootstrap.yaml"
+        desired = load(generation / "desired.json")
+        self.apply_guards(generation, binary, desired)
+        if guard_mutations(desired):
+            command([binary, "client", "start", "--config", bootstrap])
+        for name, protocol, document in documents:
+            path, plan = generation / "documents" / (name + ".json"), generation / "plan.json"
+            result = command([binary, "inbound", "plan", "--protocol", protocol, "--config", bootstrap, "--file", path])
+            atomic(plan, result.stdout)
+            try:
+                command([binary, "inbound", "apply", "--protocol", protocol, "--config", bootstrap, "--file", path, "--plan", plan])
+            finally:
+                remove_file(plan)
+        self.health(generation, documents, record=True)
+
+    def health(self, generation, documents=None, record=False):
+        documents = documents if documents is not None else render(load(generation / "desired.json"))
+        result = command([generation / "splicore", "inbound", "list", "--config", generation / "bootstrap.yaml"], "HEALTH")
+        items = json.loads(result.stdout)["items"]
+        require(len(items) == len(documents) and all(i.get("health") == "healthy" for i in items), "HEALTH", "inbound health/count differs")
+        expected = {d[2]["name"] for d in documents}
+        require({item["inbound"]["name"] for item in items} == expected, "HEALTH", "inbound identity differs")
+        mapping = {}
+        for name, protocol, document in documents:
+            inbound = next(item["inbound"] for item in items if item["inbound"]["name"] == document["name"])
+            require(len(inbound.get("listeners", [])) == 1 and inbound["listeners"][0]["endpoint"] == document["listener"],
+                    "HEALTH", "listener identity differs")
+            mapping[name] = inbound["id"]
+        if record:
+            save(generation / "resource-map.json", mapping)
+        guards = guard_mutations(load(generation / "desired.json"))
+        if guards:
+            client = json.loads(command([generation / "splicore", "client", "status", "--config",
+                                         generation / "bootstrap.yaml"], "HEALTH").stdout)
+            require(client.get("health") == "healthy" and client["state"]["enabled"],
+                    "HEALTH", "native local guard runtime is not healthy")
+            expected_guards = [m["local_inbound"] for m in guards if m["resource"] == "local-inbound"]
+            actual = client["state"]["local_inbounds"]
+            require(len(actual) == len(expected_guards) and all(
+                any(a["id"] == e["id"] and a["listen"] == e["listen"] and a.get("tunnel") == e["tunnel"]
+                    and a.get("sniffing") == e["sniffing"] for a in actual) for e in expected_guards)
+                and client["state"]["network"]["route"]["rules"] == guards[-1]["network"]["route"]["rules"],
+                "HEALTH", "native local guard or routing differs from desired intent")
+        return {"inbound_count": len(items), "health": "healthy", "local_tunnel_guards": len(guards) - 1 if guards else 0,
+                "traffic_qualification": "PENDING"}
+
+    def checkpoint(self, tx, phase):
+        tx["phase"] = phase
+        save(self.transaction, tx)
+
+    def restore_transaction(self, tx):
+        candidate = self.generations / tx["candidate"]
+        old = self.generations / tx["old"] if tx.get("old") else None
+        if old:
+            self.verify_installed_binary(old)
+        service = Service(tx["adapter"], candidate, self.fixture)
+        require(service.call("stop", ok=False), "ROLLBACK", "candidate stop failed; recovery record retained")
+        if old:
+            self.point(self.current, old)
+        elif self.current.is_symlink():
+            self.current.unlink()
+            sync_dir(self.home)
+        if "previous" in tx:
+            if tx.get("previous"):
+                self.point(self.previous, self.generations / tx["previous"])
+            elif self.previous.is_symlink():
+                self.previous.unlink()
+        if tx.get("unit_backup") is not None:
+            atomic(self.unit_path(), tx["unit_backup"], 0o644 if self.adapter == "systemd" else 0o755)
+        elif self.adapter != "process" and self.unit_path().exists():
+            require("# NoBrand-owned Splicore v1" in self.unit_path().read_text(), "ROLLBACK", "foreign service unit during rollback")
+            self.unit_path().unlink()
+        service.call("reload-manager")
+        # A first install may have no unit to disable after its removal.
+        if old or self.unit_path().exists() or self.adapter in ("process", "fixture"):
+            require(service.call("enable" if tx.get("enabled") else "disable", ok=False), "ROLLBACK", "restore enabled state failed")
+        if old and tx.get("active"):
+            service.generation = old
+            service.call("start")
+            if self.adapter != "fixture":
+                self.wait_health(old)
+        registry = self.state / "state.json"
+        if tx.get("registry_backup") is not None:
+            atomic(registry, tx["registry_backup"])
+        elif tx.get("registry_created"):
+            remove_file(registry)
+        self.firewall("close", set(tx.get("opened_ports", [])))
+        self.checkpoint(tx, "ROLLED_BACK")
+
+    def wait_health(self, generation):
+        end = time.monotonic() + 15
+        while True:
+            try:
+                return self.health(generation)
+            except Failure:
+                require(time.monotonic() < end, "HEALTH", "runtime did not recover")
+                time.sleep(0.1)
+
+    def recover(self):
+        if not self.transaction.exists():
+            return {"recovery": "not-needed"}
+        tx = load(self.transaction)
+        require(tx.get("owner") == "nobrand-splicore-v1" and tx.get("adapter") == self.adapter,
+                "ROLLBACK", "transaction owner/init mismatch")
+        for field in ("candidate", "old"):
+            if tx.get(field):
+                identifier(tx[field])
+        if tx["phase"] not in ("COMMITTED", "ROLLED_BACK"):
+            self.restore_transaction(tx)
+        return {"recovery": load(self.transaction)["phase"]}
+
+    def deploy(self, desired, artifacts=None, proxy="", force=False, probe=False, key_material=None, expected_generation=None):
+        self.refuse_legacy()
+        self.safe()
+        desired = copy.deepcopy(desired)
+        desired["splicore_version"] = RELEASE["version"]
+        documents = render(desired)
+        self.check_external_ports(desired)
+        require(not probe or self.adapter == "process", "CONFIG_INVALID", "local probe requires process adapter")
+        require(self.adapter != "process" or probe, "SERVICE_START", "process adapter is only a temporary validation probe")
+        require(self.adapter in ("systemd", "openrc", "fixture", "process"), "SERVICE_START", "systemd/OpenRC unavailable")
+        if self.adapter in ("systemd", "openrc"):
+            require(os.geteuid() == 0, "SERVICE_START", "service installation requires root")
+        with self.locked():
+            self.recover()
+            old = self.target(self.current)
+            require(expected_generation is None or expected_generation == (old.name if old else ""),
+                    "STATE_CHANGED", "runtime changed since request was collected; retry with current state")
+            require(not probe or old is None, "CONFIG_INVALID", "probe requires an empty private runtime root")
+            if old and load(old / "artifact.json")["version"] == RELEASE["version"] and desired == load(old / "desired.json") and not force and key_material is None:
+                self.verify_installed_binary(old)
+                service = Service(self.adapter, old, self.fixture)
+                active = service.call("active", ok=False)
+                if active and self.adapter != "fixture":
+                    self.health(old)
+                return {"result": "same-version-no-op", "version": RELEASE["version"], "active": active}
+            self.generations.mkdir(parents=True, exist_ok=True, mode=0o700)
+            generation = self.generations / ("g" + uuid.uuid4().hex)
+            generation.mkdir(mode=0o700)
+            candidate_service = Service(self.adapter, generation, self.fixture)
+            tx = None
+            try:
+                if old and not artifacts and load(old / "artifact.json")["version"] == RELEASE["version"]:
+                    metadata = self.verify_installed_binary(old)
+                    atomic(generation / "splicore", (old / "splicore").read_bytes(), 0o700)
+                    binary_identity(generation / "splicore", metadata["architecture"])
+                else:
+                    metadata = artifact(generation / "splicore", artifacts, proxy)
+                save(generation / "artifact.json", metadata)
+                save(generation / "desired.json", desired)
+                (generation / "runtime").mkdir(mode=0o700)
+                atomic(generation / "bootstrap.yaml", self.bootstrap_text(generation))
+                atomic(generation / "launch.py", LAUNCHER, 0o700)
+                if key_material is not None:
+                    atomic(generation / "runtime/master.key", key_material)
+                elif old:
+                    shutil.copyfile(old / "runtime/master.key", generation / "runtime/master.key")
+                    os.chmod(generation / "runtime/master.key", 0o600)
+                else:
+                    command([generation / "splicore", "key", "init", "--file", generation / "runtime/master.key"])
+                os.chmod(generation / "runtime/master.key", 0o600)
+                require(len(str(generation / "control.sock").encode()) < 104, "CONFIG_INVALID", "runtime root exceeds Unix socket path limit")
+                self.validate(generation, documents)
+                self.port_preflight(desired, old)
+                unit = self.unit_path()
+                require(self.adapter == "process" or not unit.exists() or (
+                    not unit.is_symlink() and "# NoBrand-owned Splicore v1" in unit.read_text()),
+                    "CONFIG_INVALID", "refuse foreign service unit before cutover")
+                prior_ports = self.port_pairs(load(old / "desired.json")) if old else set()
+                added_ports = self.port_pairs(desired) - prior_ports
+                tx = {"owner": "nobrand-splicore-v1", "adapter": self.adapter,
+                      "candidate": generation.name, "old": old.name if old else None,
+                      "previous": self.target(self.previous).name if self.target(self.previous) else None,
+                      "active": candidate_service.call("active", ok=False),
+                      "enabled": candidate_service.call("enabled", ok=False),
+                      "unit_backup": unit.read_text() if self.adapter != "process" and unit.exists() else None,
+                      "registry_backup": (self.state / "state.json").read_text() if (self.state / "state.json").exists() else None,
+                      "registry_created": not (self.state / "state.json").exists(),
+                      "opened_ports": sorted(added_ports - self.owned_firewall_pairs())}
+                self.checkpoint(tx, "VALIDATED")
+                self.checkpoint(tx, "STOPPING")
+                if tx["active"]:
+                    candidate_service.call("stop")
+                self.checkpoint(tx, "STOPPED")
+                self.install_unit()
+                self.point(self.current, generation)
+                candidate_service.call("reload-manager")
+                self.checkpoint(tx, "STARTING")
+                candidate_service.call("start")
+                if self.adapter != "fixture":
+                    self.apply_documents(generation, documents, candidate_service)
+                else:
+                    # Fixture driver must explicitly validate its expected graph.
+                    candidate_service.call("verify")
+                self.firewall("open", added_ports)
+                self.checkpoint(tx, "VERIFIED")
+                if probe:
+                    candidate_service.call("stop")
+                    candidate_service.call("start")
+                    self.wait_health(generation)
+                    candidate_service.child.kill()
+                    candidate_service.child.wait(timeout=10)
+                    candidate_service.call("stop")
+                    candidate_service.call("start")
+                    self.wait_health(generation)
+                    candidate_service.call("stop")
+                    self.current.unlink()
+                    self.checkpoint(tx, "ROLLED_BACK")
+                    return {"result": "local-probe-pass", "inbounds": len(documents), "traffic_qualification": "PENDING",
+                            "local_process_restart": "PASS", "local_process_crash_database_recovery": "PASS"}
+                candidate_service.call("enable")
+                if old:
+                    self.point(self.previous, old)
+                registry = load(self.state / "state.json") if (self.state / "state.json").exists() else {
+                    "schema_version": 3, "ownership": "nobrand-v3", "project": "NoBrand-OneClick", "author": "ike"}
+                registry.update(architecture="splicore-native", splicore_version=RELEASE["version"], config_schema=1)
+                save(self.state / "state.json", registry)
+                self.checkpoint(tx, "COMMITTED")
+                cleanup_debt = []
+                try:
+                    self.firewall("close", prior_ports - self.port_pairs(desired))
+                except (Failure, OSError):
+                    cleanup_debt.append("retired firewall bindings")
+                try:
+                    self.prune_generations()
+                except (Failure, OSError):
+                    cleanup_debt.append("old generations")
+                return {"result": "committed", "inbounds": len(documents), "traffic_qualification": "PENDING", "cleanup_debt": cleanup_debt}
+            except BaseException:
+                if tx and tx.get("phase") != "COMMITTED":
+                    try:
+                        self.restore_transaction(tx)
+                    except (Failure, OSError) as exc:
+                        raise Failure("ROLLBACK", "restore failed; persistent transaction retained for recover") from exc
+                raise
+            finally:
+                if self.adapter == "process":
+                    candidate_service.call("stop", ok=False)
+                if tx is None or probe or tx.get("phase") == "ROLLED_BACK":
+                    shutil.rmtree(generation)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="NoBrand Splicore runtime manager (pinned RC)")
+    parser.add_argument("action", choices=["inspect-backup", "capabilities", "status", "doctor", "render", "apply", "probe", "recover", "unit", "plan",
+                                           "rollback", "backup", "restore", "adopt-snapshot", "stop", "start", "restart", "uninstall", "purge", "protocol"])
+    parser.add_argument("--file", type=Path)
+    parser.add_argument("--artifacts", type=Path)
+    parser.add_argument("--proxy", default=os.environ.get("NOBRAND_GITHUB_PROXY", ""))
+    parser.add_argument("--adapter", choices=["systemd", "openrc", "process", "fixture"])
+    parser.add_argument("--fixture-driver", type=Path)
+    parser.add_argument("--force", action="store_true")
+    parser.add_argument("--protocol")
+    parser.add_argument("--operation")
+    parser.add_argument("--selector", default="")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--unified", action="store_true")
+    parser.add_argument("--version", default=RELEASE["version"])
+    args = parser.parse_args(argv)
+    require(args.version == RELEASE["version"], "BINARY_IDENTITY", "version change requires a reviewed release manifest; no implicit downgrade/latest")
+    runtime = Runtime(adapter=args.adapter, fixture=args.fixture_driver)
+    runtime.refuse_legacy()
+    runtime.safe()
+    if args.action == "inspect-backup":
+        require(args.file, "ARCHIVE_INVALID", "--file product backup is required")
+        inspect_backup_archive(args.file)
+        result = {"result": "archive-safe-for-extraction"}
+    elif args.action == "capabilities":
+        result = {"version": RELEASE["version"], "qualification": RELEASE["qualification"], "capabilities": RELEASE["capabilities"]}
+    elif args.action in ("render", "apply", "probe", "plan"):
+        require(args.file or args.action == "plan", "CONFIG_INVALID", "--file canonical desired state is required")
+        desired = load(args.file) if args.file else runtime.desired()
+        if args.action in ("render", "plan"):
+            # Render writes only to stdout by explicit operator request. Plan is redacted.
+            result = {"documents": [{"id": name, "protocol": protocol, "document": doc} for name, protocol, doc in render(desired)]} if args.action == "render" else redacted_plan(desired)
+            if args.action == "plan" and result["blockers"]:
+                print(json.dumps(result, indent=2))
+                return 1
+        else:
+            result = runtime.deploy(desired, args.artifacts, args.proxy, args.force, args.action == "probe")
+    elif args.action == "protocol":
+        result = runtime.protocol(args.protocol, args.operation, args.selector, args.artifacts, args.proxy, args.dry_run)
+    elif args.action == "rollback":
+        result = runtime.rollback()
+    elif args.action == "backup":
+        require(args.file, "CONFIG_INVALID", "--file backup destination required")
+        result = runtime.backup(args.file, args.unified)
+    elif args.action == "restore":
+        require(args.file, "CONFIG_INVALID", "--file backup source required")
+        result = runtime.restore(args.file, args.artifacts, args.proxy)
+    elif args.action == "adopt-snapshot":
+        result = runtime.adopt_snapshot()
+    elif args.action in ("stop", "uninstall", "purge"):
+        result = runtime.stop() if args.action == "stop" else runtime.uninstall(args.action == "purge")
+    elif args.action in ("start", "restart"):
+        with runtime.locked():
+            runtime.recover()
+            current = runtime.target(runtime.current)
+            require(current, "SERVICE_START", "runtime not installed")
+            service = Service(runtime.adapter, current, runtime.fixture)
+            if args.action == "restart":
+                service.call("stop")
+            service.call("start")
+            result = runtime.wait_health(current)
+    elif args.action == "recover":
+        with runtime.locked():
+            result = runtime.recover()
+    elif args.action == "unit":
+        require(runtime.adapter in ("systemd", "openrc"), "SERVICE_START", "specify supported init system")
+        print(runtime.service_text(), end="")
+        return 0
+    else:
+        current = runtime.target(runtime.current)
+        result = {"architecture": "Splicore Native", "architecture_marker": "splicore-native", "core": "Splicore", "version": RELEASE["version"], "qualification": RELEASE["qualification"],
+                  "installed": bool(current), "external_runtime_qualification": "PENDING"}
+        if current:
+            metadata = load(current / "artifact.json")
+            result.update({"version": metadata["version"], "pinned_target": RELEASE["version"], "architecture": metadata["architecture"], "generation": current.name,
+                           "architecture_qualification": RELEASE["assets"][metadata["architecture"]]["qualification"],
+                           "protocols": sorted({n["protocol"] for n in load(current / "desired.json")["nodes"]})})
+            result["nodes"] = [{"id": n["id"], "name": n.get("client", {}).get("name") or n["id"],
+                                "protocol": n["protocol"], "enabled": n.get("enabled", True),
+                                "listener": n["document"]["listener"], "display_endpoint": n["document"]["display_endpoint"]}
+                               for n in load(current / "desired.json")["nodes"] if not args.protocol or n["protocol"] == args.protocol]
+            result["active"] = Service(runtime.adapter, current, runtime.fixture).call("active", ok=False)
+            if args.action == "doctor":
+                runtime.verify_installed_binary(current)
+                result.update(runtime.health(current))
+    print(json.dumps(result, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    os.umask(0o077)
+    def interrupted(_signum, _frame):
+        raise Failure("INTERRUPTED", "transaction interrupted; rollback/recovery required")
+    for sig in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, interrupted)
+    try:
+        sys.exit(main())
+    except Failure as exc:
+        print(json.dumps({"result": "FAIL", "category": exc.category, "detail": str(exc)}), file=sys.stderr)
+        sys.exit(1)
+    except tarfile.TarError:
+        print(json.dumps({"result": "FAIL", "category": "ARCHIVE_INVALID", "detail": "invalid archive"}), file=sys.stderr)
+        sys.exit(1)
+    except (OSError, ValueError, KeyError, TypeError):
+        print(json.dumps({"result": "FAIL", "category": "CONFIG_INVALID", "detail": "invalid external state or operation"}), file=sys.stderr)
+        sys.exit(1)
+NOBRAND_SPLICORE_PY
+}
+
 # The menu intentionally mutates globals inside isolated action subshells; the
 # parent only consumes exit codes, so SC2030/SC2031 are false positives here.
 # shellcheck disable=SC2030,SC2031
@@ -20,19 +1928,6 @@ SCRIPT_AUTHOR="ike"
 SCRIPT_NAME="NoBrand-OneClick"
 SCRIPT_REPO="ike-sh/NoBrand-OneClick"
 NOBRAND_SCHEMA_VERSION=3
-UPSTREAM_REPO="enfein/mieru"
-LAST_KNOWN_GOOD_MIERU_VERSION="3.36.0"
-# Retained as a source-compatible public constant for parity consumers.
-# shellcheck disable=SC2034
-TESTED_MIERU_VERSION="$LAST_KNOWN_GOOD_MIERU_VERSION"
-NOBRAND_MIERU_RELEASES_API="https://api.github.com/repos/${UPSTREAM_REPO}/releases"
-GITHUB_DL="https://github.com/${UPSTREAM_REPO}/releases/download"
-LAST_KNOWN_GOOD_MIERU_AMD64_DEB_SHA256="44622bea7fac732984ac6cf1189e555fd9add1969001e9b2d7cdea9416b5919a"
-LAST_KNOWN_GOOD_MIERU_ARM64_DEB_SHA256="a43dbc4d75dcb18978ea79b924ce859e2485af8b776dfc981b29a7b60644157c"
-LAST_KNOWN_GOOD_MIERU_AMD64_RPM_SHA256="9504eefed0009b79246c58f5e27a7a24ac2edb6c48710099eb53afde847e84a2"
-LAST_KNOWN_GOOD_MIERU_ARM64_RPM_SHA256="5cba9b07771998263447607212cf91bc2c7feb7ec51d96f026c788ff055e378a"
-LAST_KNOWN_GOOD_MIERU_AMD64_TAR_SHA256="d61f35c463f101580a108dd6b969e1a3dca1b84836332b2533302a62e70f04bb"
-LAST_KNOWN_GOOD_MIERU_ARM64_TAR_SHA256="12b811bc00364bed2188d6e13e38cb7e727d149e488a3805f8c97f3f7f6e3bd6"
 
 # NoBrand 3 has one authoritative product-state root. Lifecycle recovery
 # metadata and its process lock deliberately live beside, not below, that
@@ -63,72 +1958,29 @@ NOBRAND_INSTALL_SCRIPT_PATH="${NOBRAND_INSTALL_SCRIPT_PATH:-/usr/local/bin/insta
 NOBRAND_COMMAND_PATH="${NOBRAND_COMMAND_PATH:-/usr/local/bin/nobrand}"
 NOBRAND_SHORT_COMMAND_PATH="${NOBRAND_SHORT_COMMAND_PATH:-/usr/local/bin/nb}"
 NOBRAND_RELEASE_INSTALLER_URL="https://github.com/${SCRIPT_REPO}/releases/latest/download/install-nobrand.sh"
+# Read-only legacy detector paths; never installed or removed by this version.
 NOBRAND_LEGACY_MIERU_STATE_DIR="${NOBRAND_LEGACY_MIERU_STATE_DIR:-/var/lib/mita-oneclick}"
 
-# Mieru's official runtime remains named mita, but NoBrand always invokes the
-# explicit managed copy below. It is protocol runtime, never a management CLI.
 MITA_MANAGER_STATE_DIR="${MITA_MANAGER_STATE_DIR:-${NOBRAND_STATE_DIR}/mieru}"
-MITA_BIN="${MITA_BIN:-${NOBRAND_BIN_DIR}/mita}"
-MITA_REAL_BIN="${MITA_REAL_BIN:-${MITA_BIN}}"
-MITA_PACKAGE_BIN="${MITA_PACKAGE_BIN:-/usr/bin/mita}"
-MITA_MARKER="${MITA_MARKER:-${MITA_MANAGER_STATE_DIR}/.installed}"
-MITA_STATE="${MITA_STATE:-${MITA_MANAGER_STATE_DIR}/install-state.env}"
-MITA_PRESERVE_PACKAGE_MARKER="${MITA_PRESERVE_PACKAGE_MARKER:-${MITA_MANAGER_STATE_DIR}/preserve-preexisting-package}"
-MITA_PRESERVE_USER_MARKER="${MITA_PRESERVE_USER_MARKER:-${MITA_MANAGER_STATE_DIR}/preserve-preexisting-user}"
-MITA_PRESERVE_GROUP_MARKER="${MITA_PRESERVE_GROUP_MARKER:-${MITA_MANAGER_STATE_DIR}/preserve-preexisting-group}"
-MITA_PRESERVE_SHARED_MARKER="${MITA_PRESERVE_SHARED_MARKER:-${MITA_MANAGER_STATE_DIR}/preserve-preexisting-shared-runtime}"
-MITA_USERS_STATE="${MITA_USERS_STATE:-${MITA_MANAGER_STATE_DIR}/users.json}"
-MITA_USERS_LOCK="${MITA_USERS_LOCK:-${MITA_MANAGER_STATE_DIR}/users.lock}"
-MITA_USERS_CRON="${MITA_USERS_CRON:-/etc/cron.d/nobrand-mieru-users}"
-MITA_USERS_TIMER="${MITA_USERS_TIMER:-/etc/systemd/system/nobrand-mieru-users-scan.timer}"
-MITA_USERS_SERVICE="${MITA_USERS_SERVICE:-/etc/systemd/system/nobrand-mieru-users-scan.service}"
-MITA_USERS_LOG="${MITA_USERS_LOG:-/var/log/nobrand-mieru-users.log}"
-MITA_USERS_BACKUP_DIR="${MITA_USERS_BACKUP_DIR:-${MITA_MANAGER_STATE_DIR}/backups}"
-MITA_ADMIN_LOCK="${MITA_ADMIN_LOCK:-${MITA_MANAGER_STATE_DIR}/admin.lock}"
+MITA_ADMIN_LOCK="${MITA_ADMIN_LOCK:-${NOBRAND_LOCK_DIR}/admin.lock}"
 MITA_CLIENT_EXPORT_DIR="${MITA_CLIENT_EXPORT_DIR:-/root/nobrand-mieru-clients}"
-MITA_LOGROTATE_CONF="${MITA_LOGROTATE_CONF:-/etc/logrotate.d/nobrand-mieru}"
 MITA_FIREWALL_OWNED_STATE="${MITA_FIREWALL_OWNED_STATE:-${MITA_MANAGER_STATE_DIR}/firewall-owned.bindings}"
 MITA_FIREWALL_COMMENT="nobrand-mieru"
-MITA_METRICS_FILE="${MITA_METRICS_FILE:-/var/lib/mita/metrics.pb}"
 BBR_SYSCTL_CONF="${BBR_SYSCTL_CONF:-/etc/sysctl.d/mieru_tcp_bbr.conf}"
-BBR_STATE_FILE="${BBR_STATE_FILE:-${MITA_MANAGER_STATE_DIR}/bbr-owned.state}"
-BBR_BACKUP_FILE="${BBR_BACKUP_FILE:-${MITA_MANAGER_STATE_DIR}/bbr-sysctl.backup}"
-MITA_DEPLOYMENT_MODEL="isolated-v2"
-MITA_INSTANCES_DIR="${MITA_INSTANCES_DIR:-/etc/mita/instances}"
-MITA_INSTANCE_RUN_DIR="${MITA_INSTANCE_RUN_DIR:-/run/mita-instances}"
-MITA_INSTANCE_METRICS_DIR="${MITA_INSTANCE_METRICS_DIR:-/var/lib/mita/instances}"
+BBR_STATE_FILE="${BBR_STATE_FILE:-${NOBRAND_STATE_DIR}/bbr-owned.state}"
+BBR_BACKUP_FILE="${BBR_BACKUP_FILE:-${NOBRAND_STATE_DIR}/bbr-sysctl.backup}"
 MITA_INSTANCE_SYSTEMD_TEMPLATE="${MITA_INSTANCE_SYSTEMD_TEMPLATE:-/etc/systemd/system/nobrand-mieru@.service}"
-MITA_INSTANCE_TMPFILES="${MITA_INSTANCE_TMPFILES:-/etc/tmpfiles.d/nobrand-mieru.conf}"
-MITA_INSTANCE_OPENRC_PREFIX="${MITA_INSTANCE_OPENRC_PREFIX:-/etc/init.d/nobrand-mieru-}"
-MITA_INSTANCE_RUNNER="${MITA_INSTANCE_RUNNER:-${NOBRAND_LIB_DIR}/mieru-instance-run}"
-# 上游没有按用户清零指标的 API。isolated-v2 为每个用户挂载独立 metrics.pb，
-# calendar 因而可以只重置目标用户；password/days 旧方案不会真正清零，已禁用。
-QUOTA_RESET_METHOD="${QUOTA_RESET_METHOD:-metrics}"
 INSTALL_SCRIPT_PATH="${NOBRAND_INSTALL_SCRIPT_PATH}"
-NOBRAND_SNELL_STATE_DIR="${NOBRAND_SNELL_STATE_DIR:-${NOBRAND_STATE_DIR}/snell/instances}"
-NOBRAND_SNELL_CONFIG_DIR="${NOBRAND_SNELL_CONFIG_DIR:-${NOBRAND_CONFIG_DIR}/snell/instances}"
-NOBRAND_SNELL_RUNTIME_DIR="${NOBRAND_SNELL_RUNTIME_DIR:-${NOBRAND_BIN_DIR}/snell}"
 NOBRAND_SNELL_SYSTEMD_TEMPLATE="${NOBRAND_SNELL_SYSTEMD_TEMPLATE:-/etc/systemd/system/nobrand-snell@.service}"
-NOBRAND_SNELL_OPENRC_PREFIX="${NOBRAND_SNELL_OPENRC_PREFIX:-/etc/init.d/nobrand-snell-}"
-NOBRAND_SNELL_RUNNER="${NOBRAND_SNELL_RUNNER:-${NOBRAND_LIB_DIR}/snell-run}"
-SNELL_RELEASE_PAGE="https://kb.nssurge.com/surge-knowledge-base/release-notes/snell.md"
 
-NOBRAND_HY2_STATE_DIR="${NOBRAND_HY2_STATE_DIR:-${NOBRAND_STATE_DIR}/hysteria2}"
-NOBRAND_HY2_STATE_FILE="${NOBRAND_HY2_STATE_FILE:-${NOBRAND_HY2_STATE_DIR}/state.json}"
-NOBRAND_HY2_CONFIG_DIR="${NOBRAND_HY2_CONFIG_DIR:-${NOBRAND_CONFIG_DIR}/hysteria2}"
-NOBRAND_HY2_CONFIG_FILE="${NOBRAND_HY2_CONFIG_FILE:-${NOBRAND_HY2_CONFIG_DIR}/config.json}"
-NOBRAND_HY2_CERT_FILE="${NOBRAND_HY2_CERT_FILE:-${NOBRAND_HY2_CONFIG_DIR}/hysteria2-cert.pem}"
-NOBRAND_HY2_KEY_FILE="${NOBRAND_HY2_KEY_FILE:-${NOBRAND_HY2_CONFIG_DIR}/hysteria2-key.pem}"
 NOBRAND_XRAY_BIN="${NOBRAND_XRAY_BIN:-${NOBRAND_BIN_DIR}/xray}"
 NOBRAND_XRAY_ASSET_DIR="${NOBRAND_XRAY_ASSET_DIR:-${NOBRAND_LIB_DIR}/xray-assets}"
-NOBRAND_HY2_SERVICE_NAME="nobrand-hysteria2"
 NOBRAND_HY2_SYSTEMD_SERVICE="${NOBRAND_HY2_SYSTEMD_SERVICE:-/etc/systemd/system/nobrand-hysteria2.service}"
 NOBRAND_HY2_OPENRC_SERVICE="${NOBRAND_HY2_OPENRC_SERVICE:-/etc/init.d/nobrand-hysteria2}"
 TESTED_XRAY_VERSION="26.3.27"
 TESTED_XRAY_AMD64_SHA256="23cd9af937744d97776ee35ecad4972cf4b2109d1e0fe6be9930467608f7c8ae"
 TESTED_XRAY_ARM64_SHA256="4d30283ae614e3057f730f67cd088a42be6fdf91f8639d82cb69e48cde80413c"
 NOBRAND_XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/tags/v${TESTED_XRAY_VERSION}"
-NOBRAND_HY2_TAG="nobrand-hysteria2-in"
 
 NOBRAND_VLESS_STATE_DIR="${NOBRAND_VLESS_STATE_DIR:-${NOBRAND_STATE_DIR}/vless-sudoku}"
 NOBRAND_VLESS_STATE_FILE="${NOBRAND_VLESS_STATE_FILE:-${NOBRAND_VLESS_STATE_DIR}/state.json}"
@@ -140,55 +1992,10 @@ NOBRAND_VLESS_SYSTEMD_SERVICE="${NOBRAND_VLESS_SYSTEMD_SERVICE:-/etc/systemd/sys
 NOBRAND_VLESS_OPENRC_SERVICE="${NOBRAND_VLESS_OPENRC_SERVICE:-/etc/init.d/nobrand-vless-sudoku}"
 NOBRAND_VLESS_TAG="nobrand-vless-sudoku-in"
 
-# VLESS REALITY is an independent, named-instance product. It shares only the
-# private official Xray runtime with HY2 and VLESS/Sudoku; state, configs,
-# services, credentials, ports, firewall rows, and Ingress association are
-# isolated per instance.
-NOBRAND_REALITY_STATE_DIR="${NOBRAND_REALITY_STATE_DIR:-${NOBRAND_STATE_DIR}/vless-reality/instances}"
-NOBRAND_REALITY_CONFIG_DIR="${NOBRAND_REALITY_CONFIG_DIR:-${NOBRAND_CONFIG_DIR}/vless-reality/instances}"
 NOBRAND_REALITY_SYSTEMD_TEMPLATE="${NOBRAND_REALITY_SYSTEMD_TEMPLATE:-/etc/systemd/system/nobrand-vless-reality@.service}"
-NOBRAND_REALITY_OPENRC_PREFIX="${NOBRAND_REALITY_OPENRC_PREFIX:-/etc/init.d/nobrand-vless-reality-}"
-NOBRAND_REALITY_DEFENDER_PORT_MIN="${NOBRAND_REALITY_DEFENDER_PORT_MIN:-20000}"
-NOBRAND_REALITY_DEFENDER_PORT_MAX="${NOBRAND_REALITY_DEFENDER_PORT_MAX:-29999}"
-NOBRAND_REALITY_DEFENDER_DISPATCH_HOST="${NOBRAND_REALITY_DEFENDER_DISPATCH_HOST:-nobrand.invalid}"
-NOBRAND_REALITY_DEFAULT_CAMOUFLAGE_MODE="auto"
 NOBRAND_REALITY_DEFAULT_CAMOUFLAGE_PORT="443"
-NOBRAND_REALITY_MIN_CLIENT_VER="0.0.0"
-# This immutable release pool contains only Xray-OneClick discovery candidates
-# that passed the exact NoBrand v3.2 REALITY/Vision + loopback-defender stack on
-# Xray 26.3.27, Mihomo 1.19.30, and sing-box 1.13.20. Microsoft remains valid
-# as an explicit user target, but its authenticated REALITY gate failed and it
-# is intentionally absent from automatic selection.
-REALITY_AUTO_QUALIFIED_CANDIDATES=(
-  "www.abmindustriesgroup.com"
-  "www.oracle.com"
-  "www.ibm.com"
-  "www.amazon.com"
-  "www.samsung.com"
-  "www.nvidia.com"
-)
 
-# TUIC v5 is the only supported TUIC generation. The tested runtime is an
-# official, non-prerelease sing-box release; NoBrand never uses a system
-# sing-box binary or config.
-TUIC_PROTOCOL_VERSION=5
-TUIC_V5_SUPPORTED=true
-TUIC_V1_SUPPORTED=false
-TUIC_V2_SUPPORTED=false
-TUIC_V3_SUPPORTED=false
-TUIC_V4_SUPPORTED=false
-TESTED_SING_BOX_SERVER_VERSION="1.13.20"
-TESTED_SING_BOX_AMD64_SHA256="646bc01bf128c32a12eb50d8690e387bba7504da7b1d65c704bd53916e38595a"
-TESTED_SING_BOX_ARM64_SHA256="7f8187b1d1d30258cd4fa70892eaa232649f8f28b294078eeac719579e14cf42"
-TESTED_SING_BOX_AMD64_MUSL_SHA256="ea5c79f74d88db43b58debbd510aac03e8c9432ed6de51b34f67271dddb5d05e"
-TESTED_SING_BOX_ARM64_MUSL_SHA256="ab37923ee950695edf25733c10e7381b368ab9069617727be06ebd1b1b0e031a"
-NOBRAND_SING_BOX_RELEASE_API="https://api.github.com/repos/SagerNet/sing-box/releases"
-NOBRAND_SING_BOX_BIN="${NOBRAND_SING_BOX_BIN:-${NOBRAND_BIN_DIR}/sing-box}"
-NOBRAND_SING_BOX_RUNTIME_META="${NOBRAND_SING_BOX_RUNTIME_META:-${NOBRAND_STATE_DIR}/tuic/runtime.json}"
-NOBRAND_TUIC_STATE_DIR="${NOBRAND_TUIC_STATE_DIR:-${NOBRAND_STATE_DIR}/tuic/instances}"
-NOBRAND_TUIC_CONFIG_DIR="${NOBRAND_TUIC_CONFIG_DIR:-${NOBRAND_CONFIG_DIR}/tuic/instances}"
 NOBRAND_TUIC_SYSTEMD_TEMPLATE="${NOBRAND_TUIC_SYSTEMD_TEMPLATE:-/etc/systemd/system/nobrand-tuic@.service}"
-NOBRAND_TUIC_OPENRC_PREFIX="${NOBRAND_TUIC_OPENRC_PREFIX:-/etc/init.d/nobrand-tuic-}"
 
 # SSH Tunnel is a policy/account layer around the existing system sshd. It
 # owns no listener, host key, package, firewall entry, or administrator key.
@@ -230,32 +2037,12 @@ TESTED_REALM_AMD64_MUSL_SHA256="b1cc335547bea8bb2a88178bef12ec7f2363e36200e7ea1d
 TESTED_REALM_ARM64_MUSL_SHA256="f4c0318dd86854da483dcb7645b4f39cae2cc3f91c688fef969d53220b949488"
 PROTOCOL_FEATURE_FREEZE=true
 
-# Xray-OneClick 57-hysteria2.sh 的原始候选集合，顺序也是非交互默认语义。
-NOBRAND_HY2_SNI_CANDIDATES=(
-  "www.abmindustriesgroup.com"
-  "www.microsoft.com"
-  "www.oracle.com"
-  "www.ibm.com"
-  "www.amazon.com"
-  "www.samsung.com"
-  "www.nvidia.com"
-)
 # 多用户端口池：相对主端口偏移，或 IP 尾号段内扫描
 USER_PORT_POOL_START="${USER_PORT_POOL_START:-}"
 USER_PORT_POOL_END="${USER_PORT_POOL_END:-}"
 
 ACTION=""
 MENU_MODE=0
-MENU_SCRIPTS_READY=0
-MAIN_MENU_ACTIVE=0
-USER_MENU_HANDLED_RC=64
-UNINSTALL_CANCELLED=0
-UNINSTALL_PRESERVE_EXTERNAL=0
-UNINSTALL_PRESERVE_PACKAGE=0
-UNINSTALL_PRESERVE_USER=0
-UNINSTALL_PRESERVE_GROUP=0
-UNINSTALL_PRESERVE_SHARED=0
-MITA_REINSTALL_TRIED=0
 NOBRAND_INSTALL_STATE=""
 NOBRAND_LIFECYCLE_OPERATION=""
 NOBRAND_LIFECYCLE_SCOPE=""
@@ -280,53 +2067,33 @@ PORT=""
 PORT_RANGE=""
 PROTOCOL="TCP"
 PROTOCOL_CLI=0
-PROFILE="balanced"
+PROFILE="iplc"
 PROFILE_CLI=0
 ADVERTISE_HOST=""
 ADVERTISE_PORT=""
 ADVERTISE_CLI=0
 USERNAME=""
 PASSWORD=""
-USERNAME_CLI=0
 PASSWORD_CLI=0
 OP_USER=""
 MTU=1400
-MTU_POLICY="safe"
 MTU_REQUEST=""
 MTU_CLI=0
-MTU_AUTO_IFACE=""
-MTU_AUTO_LINK=""
-MTU_AUTO_FAMILY=""
-MTU_AUTO_OVERHEAD=""
 MULTIPLEXING="MULTIPLEXING_OFF"
 HANDSHAKE_MODE="HANDSHAKE_NO_WAIT"
 MULTIPLEXING_CLI=0
 HANDSHAKE_CLI=0
-TRAFFIC_PATTERN="conservative"
-TRAFFIC_SEED=""
+TRAFFIC_PATTERN="off"
 TRAFFIC_CLI=0
 LOW_ENTROPY_MODE="LOW_ENTROPY_MODE_OFF"
 LOW_ENTROPY_CLI=0
 MIERU_CHANNEL="stable"
 MIERU_CHANNEL_CLI=0
 MIERU_VERSION=""
-MIERU_VERSION_CLI=0
-MIERU_RUNTIME_RESOLVED_VERSION=""
-MIERU_RUNTIME_RESOLVED_ASSET=""
-MIERU_RUNTIME_RESOLVED_URL=""
-MIERU_RUNTIME_RESOLVED_CHECKSUM_URL=""
-MIERU_RUNTIME_RESOLVED_SHA256=""
-MIERU_RUNTIME_RESOLVED_CHANNEL=""
-MIERU_RUNTIME_RESOLUTION_FALLBACK=0
 PORT_CLI=0
-PORT_RANGE_CLI=0
-PORT_AUTO_SELECTED=0
 INGRESS_PROFILE=""
 INGRESS_PROFILE_CLI=0
 INGRESS_PROFILE_ID=""
-CLIENT_RPC_PORT=8964
-CLIENT_SOCKS5_PORT=1080
-CLIENT_HTTP_PORT=8080
 USER_DEL_NAME=""
 USER_SHOW_NAME=""
 USER_QUOTA_MB=""
@@ -336,14 +2103,7 @@ USER_EXPIRE=""
 USER_PACKAGE=""
 USER_BANDWIDTH_MBPS=""
 USER_RESTORE_FILE=""
-USER_EXPORT_FILE=""
-# 脚本只创建 clsact（缺失时）并维护自己记录的 filter；不删除或替换现有 qdisc。
 TC_IFACE="${TC_IFACE:-}"
-TC_OWNED_STATE="${TC_OWNED_STATE:-${MITA_MANAGER_STATE_DIR}/tc-owned.filters}"
-TC_PREF_MIN=42000
-TC_PREF_MAX=42999
-# 0=首次安装的短暂兼容路径；1=使用 users.json 管理用户专属实例。
-MULTI_USER_MODE=0
 
 NOBRAND_ARGS_HANDLED=0
 NOBRAND_PROTOCOL_FILTER=""
@@ -352,19 +2112,10 @@ NOBRAND_BACKUP_PATH=""
 SNELL_ACTION=""
 SNELL_NAME=""
 SNELL_VERSION="5"
-SNELL_VERSION_CLI=0
 SNELL_PSK=""
 SNELL_QUIC_PROXY=""
-SNELL_QUIC_CLI=0
-SNELL_RESOLVED_VERSION=""
-SNELL_RESOLVED_URL=""
-SNELL_RESOLVED_STATUS=""
-SNELL_RESOLVED_SHA256=""
 HY2_ACTION=""
 HY2_SNI=""
-HY2_AUTH=""
-HY2_OBFS=""
-HY2_LISTEN="0.0.0.0"
 VLESS_SUDOKU_ACTION=""
 VLESS_SUDOKU_UUID=""
 VLESS_SUDOKU_PASSWORD=""
@@ -373,12 +2124,7 @@ VLESS_SUDOKU_CLIENT_SOCKS_PORT="${VLESS_SUDOKU_CLIENT_SOCKS_PORT:-18080}"
 VLESS_REALITY_ACTION=""
 VLESS_REALITY_NAME=""
 VLESS_REALITY_TARGET=""
-VLESS_REALITY_TARGET_CLI=0
-VLESS_REALITY_CAMOUFLAGE_MODE="$NOBRAND_REALITY_DEFAULT_CAMOUFLAGE_MODE"
 VLESS_REALITY_TARGET_PORT="$NOBRAND_REALITY_DEFAULT_CAMOUFLAGE_PORT"
-VLESS_REALITY_TARGET_PORT_CLI=0
-VLESS_REALITY_FINGERPRINT="chrome"
-VLESS_REALITY_SPIDER_X="/"
 TUIC_ACTION=""
 TUIC_NAME=""
 TUIC_USER=""
@@ -386,10 +2132,6 @@ TUIC_SNI=""
 TUIC_CHANNEL="stable"
 TUIC_VERSION=""
 TUIC_USER_ACTION=""
-TUIC_RUNTIME_RESOLVED_VERSION=""
-TUIC_RUNTIME_RESOLVED_URL=""
-TUIC_RUNTIME_RESOLVED_SHA256=""
-TUIC_RUNTIME_RESOLVED_ASSET=""
 SSH_TUNNEL_ACTION=""
 SSH_TUNNEL_USER_ACTION=""
 SSH_TUNNEL_USER=""
@@ -491,104 +2233,18 @@ trap on_error ERR
 
 usage() {
   cat <<EOF
-用法：nobrand mieru <动作> [选项]
-
-NoBrand-OneClick Mieru 管理 ${SCRIPT_VERSION}
-上游项目：https://github.com/${UPSTREAM_REPO}
-支持系统：Debian/Ubuntu、RHEL/CentOS/Rocky、Alpine Linux
-
-执行 nobrand mieru 时显示交互菜单；非交互请指定动作：
-  --install           新装 mita（已安装时建议用 --reconfigure）
-  --reconfigure       修改端口 / 密码 / 协议（不重装二进制）
-  --upgrade           按保存的 stable/latest/pinned 通道升级 mita
-  --uninstall         卸载 mita
-  --status            查看运行状态与配置摘要
-  --client-config     查看节点链接并生成客户端 JSON（同 --show）
-  --mtu-config        随时调整 MTU，重启服务并重新输出节点配置
-  --start             启动服务（守护进程 + 代理）
-  --stop              停止服务
-  --restart           重启服务（守护进程异常时一键恢复）
-  --users / user-list 列出代理用户及专属实例端口
-  --user-add          添加用户（可配合 --user/--password/--port/--package/--advertise-host 等）
-  --user-del NAME     删除用户并释放端口
-  --user-show NAME    查看指定用户节点配置
-  --user-set-endpoint 设置展示入口：--user NAME --advertise-host IP --advertise-port PORT；或 --advertise-auto
-  --user-set-quota    设置套餐：--user NAME --quota-mb N --quota-days D
-  --user-set-expire   设置到期：--user NAME --expire YYYY-MM-DD|+Nd|0
-  --user-enable NAME  启用用户
-  --user-disable NAME 停用用户（从 mita 配置移除，端口保留）
-  --user-scan         扫描到期/日历月配额重置（供 cron/timer）
-  --user-quota-reset  手动触发日历月配额重置（可加 -y 强制）
-  --user-set-rate     设置专属实例双向限速：--user NAME --bandwidth Mbps（0=不限）
-  --rate-status       查看带宽配置和脚本拥有的 tc filter
-  --user-usage        查看 mita 用户流量/配额用量（mita get users/quotas）
-  --user-export-clients [DIR]  批量导出各用户客户端 JSON/链接
-  --user-backup       备份 users.json
-  --user-restore FILE 从备份恢复用户状态并应用配置与 tc 限速
-  --user-export [FILE] 导出用户状态 JSON（默认 stdout）
-  --user-import FILE  导入用户状态（覆盖前自动备份）
-  --doctor / verify   一键验收：服务/用户/配额/tc/定时任务
-  --perf              只读性能诊断（不会修改服务、内核、防火墙或 tc）
-  --profile-config    选择并应用配置预设
-
-安装选项：
-  --yes, -y           跳过确认
-  --port PORT         监听端口（1025-65535）；多用户时作为主用户端口
-  --port-range RANGE  已弃用；v2 专属实例要求每用户使用单端口
-  --protocol TCP|UDP|BOTH  传输协议（默认 TCP；BOTH 时 UDP 使用 PORT+1）
-  --profile NAME      配置预设：iplc|balanced|stealth|custom
-  --advertise-host HOST 客户端连接入口（IPv4/IPv6/域名；不修改服务端监听）
-  --advertise-port PORT 客户端配置展示的入口端口（仅展示，可使用 1-65535）
-  --advertise-auto    恢复自动探测公网 IP，并展示服务端监听端口
-  --mtu VALUE         MTU 策略/值：safe|auto|1280-1500（默认 safe=1400）
-  --traffic-pattern LV  流量伪装/抗 DPI：off|conservative|aggressive（默认 conservative）
-  --low-entropy MODE  低熵模式：off|56|48|40|32（性能优先默认 off；56 为需要时的低开销选择）
-  --multiplexing MODE  多路复用：off|low|middle|high（默认 off）
-  --handshake-mode MODE 握手：no-wait|standard（默认 no-wait）
-  --mieru-channel CHANNEL 版本通道：stable|latest（默认 stable）
-  --mieru-version VER 精确指定上游版本（高级；通道记为 pinned）
-  --user NAME         代理用户名（安装主用户 / user-add）
-  --password PASS     代理密码
-  --package NAME      套餐：unlimited|trial|standard|custom（user-add）
-  --quota-mb N        流量配额 MB（0=不限；写入 mita quotas）
-  --quota-days D      配额滚动窗口天数（默认 30；rolling 模式）
-  --quota-mode MODE   rolling|calendar（calendar=按月重置该用户专属指标）
-  --expire WHEN       到期：YYYY-MM-DD 或 +30d 或 0/never
-  --bandwidth Mbps    专属实例双向限速（0=不限）
-  --op-user USER      加入 mita 用户组的 Linux 用户
-  --enable-bbr        安装后启用 TCP BBR + FQ
-  --lang en           使用英文提示
-
-其它：
-  --dry-run           仅预览，不执行
-  --help, -h          显示帮助
-  --version           显示版本
-
-快捷命令（子命令不区分大小写）：
-  nobrand mieru                    打开 Mieru 菜单
-  nobrand mieru status             查看状态
-  nobrand mieru perf               只读性能诊断
-  nobrand mieru profile            选择配置预设
-  nobrand mieru reconfigure        重新配置
-  nobrand mieru show               查看节点链接
-  nobrand mieru mtu [auto|数值]    调整 MTU 并重新输出节点配置
-  nobrand mieru users              用户管理列表
-  nobrand mieru user-add --user a --password p
-  nobrand mieru user-add --user bob --advertise-host 203.0.113.10 --advertise-port 443
-  nobrand mieru user-del a
-  nobrand mieru restart            重启服务（start/stop 同理）
-
-一键安装（交互式，Debian/Ubuntu/CentOS 等）：
-  curl -fsSLO ${NOBRAND_RELEASE_INSTALLER_URL}
-  sudo bash install-nobrand.sh
-
-Alpine Linux（无 sudo，需先装 bash）：
-  apk add --no-cache bash curl
-  curl -fsSLO ${NOBRAND_RELEASE_INSTALLER_URL}
-  bash install-nobrand.sh
-
-非交互示例：
-  nobrand mieru install -y --port 2088 --advertise-auto --user alice --password 'secret'
+NoBrand-OneClick ${SCRIPT_VERSION} / Splicore v0.3.0-rc.4
+用法 / Usage: nobrand <protocol> <action> [options]
+协议 / Protocols: mieru, snell, hy2, tuic, vless-reality, vless-sudoku, ssh, forward
+Actions: install, show, status, doctor, start, stop, restart, uninstall
+Fresh install: --port PORT --advertise-host HOST -y
+Mieru: --protocol TCP|UDP|BOTH --user NAME --password VALUE --mtu 1400
+Snell: --version 4|5; QUIC Proxy Mode is unsupported.
+REALITY: --target COVER_HOST --target-port 443; native Vision and Local Tunnel Guard.
+HY2: --sni HOST; fresh TLS trust and Salamander credentials.
+Native state: nobrand runtime status|doctor|backup|restore|rollback
+Product backup: nobrand backup create|list|restore --file PATH
+Legacy multi-core in-place migration is NOT SUPPORTED. Use a clean installation.
 EOF
 }
 
@@ -601,10 +2257,6 @@ die() {
     return 1
   fi
   exit 1
-}
-
-bail() {
-  die "$@" || return 1
 }
 
 t() {
@@ -759,8 +2411,8 @@ parse_nobrand_snell_args() {
   SNELL_ACTION="${1:-menu}"
   [ "$#" -eq 0 ] || shift
   case "$SNELL_ACTION" in
-    v4|4) SNELL_ACTION=install; SNELL_VERSION=4; SNELL_VERSION_CLI=1 ;;
-    v5|5) SNELL_ACTION=install; SNELL_VERSION=5; SNELL_VERSION_CLI=1 ;;
+    v4|4) SNELL_ACTION=install; SNELL_VERSION=4; ;;
+    v5|5) SNELL_ACTION=install; SNELL_VERSION=5; ;;
     add|create) SNELL_ACTION=install ;;
     list|nodes) SNELL_ACTION=show ;;
     delete|uninstall) SNELL_ACTION=remove ;;
@@ -779,7 +2431,6 @@ parse_nobrand_snell_args() {
         ;;
       --version)
         SNELL_VERSION="${2:-}"
-        SNELL_VERSION_CLI=1
         [ -n "$SNELL_VERSION" ] || die "--version 需要 4 或 5"
         shift 2
         ;;
@@ -790,7 +2441,6 @@ parse_nobrand_snell_args() {
         ;;
       --quic)
         SNELL_QUIC_PROXY="${2:-}"
-        SNELL_QUIC_CLI=1
         [ -n "$SNELL_QUIC_PROXY" ] || die "--quic 需要 on 或 off"
         case "$SNELL_QUIC_PROXY" in
           on|off) ;;
@@ -913,14 +2563,12 @@ parse_nobrand_vless_reality_args() {
         VLESS_REALITY_TARGET="${2:-}"
         [ -n "$VLESS_REALITY_TARGET" ] && [[ "$VLESS_REALITY_TARGET" != --* ]] \
           || die "$1 需要公网主机名"
-        VLESS_REALITY_TARGET_CLI=1
         shift 2
         ;;
       --target-port)
         VLESS_REALITY_TARGET_PORT="${2:-}"
         [ -n "$VLESS_REALITY_TARGET_PORT" ] && [[ "$VLESS_REALITY_TARGET_PORT" != --* ]] \
           || die '--target-port 需要端口'
-        VLESS_REALITY_TARGET_PORT_CLI=1
         shift 2
         ;;
       *)
@@ -1223,6 +2871,11 @@ detect_nobrand_entry() {
       shift
       parse_nobrand_ingress_args "$@"
       ;;
+    runtime)
+      shift
+      NOBRAND_RUNTIME_ARGS=("$@")
+      ACTION="nobrand-runtime"; NOBRAND_ARGS_HANDLED=1
+      ;;
     manager)
       shift
       NOBRAND_MANAGER_ACTION="${1:-}"
@@ -1373,10 +3026,7 @@ while [ "$NOBRAND_ARGS_HANDLED" -eq 0 ] && [ $# -gt 0 ]; do
     --user-export)
       ACTION="user-export"
       if [ -n "${2:-}" ] && [[ "${2}" != --* ]]; then
-        USER_EXPORT_FILE="${2}"
         shift
-      else
-        USER_EXPORT_FILE=""
       fi
       ;;
     --user-import)
@@ -1418,7 +3068,6 @@ while [ "$NOBRAND_ARGS_HANDLED" -eq 0 ] && [ $# -gt 0 ]; do
             shift
             ;;
           user-export)
-            USER_EXPORT_FILE="${2}"
             shift
             ;;
           user-export-clients)
@@ -1449,7 +3098,6 @@ while [ "$NOBRAND_ARGS_HANDLED" -eq 0 ] && [ $# -gt 0 ]; do
       ;;
     --port-range)
       PORT_RANGE="${2:-}"
-      PORT_RANGE_CLI=1
       [ -n "$PORT_RANGE" ] || die "--port-range 需要端口段"
       shift
       ;;
@@ -1527,7 +3175,6 @@ while [ "$NOBRAND_ARGS_HANDLED" -eq 0 ] && [ $# -gt 0 ]; do
       ;;
     --mieru-version)
       MIERU_VERSION="${2:-}"
-      MIERU_VERSION_CLI=1
       MIERU_CHANNEL="pinned"
       MIERU_CHANNEL_CLI=1
       [ -n "$MIERU_VERSION" ] || die "--mieru-version 需要版本号"
@@ -1535,7 +3182,6 @@ while [ "$NOBRAND_ARGS_HANDLED" -eq 0 ] && [ $# -gt 0 ]; do
       ;;
     --user)
       USERNAME="${2:-}"
-      USERNAME_CLI=1
       [ -n "$USERNAME" ] && [[ "$USERNAME" != --* ]] || die "--user 需要用户名"
       shift
       ;;
@@ -2540,12 +4186,7 @@ nb_classify_installation_state() {
   if [ "$lifecycle_valid" -eq 1 ]; then
     case "$manager_version" in
       ''|3.2.*) ;;
-      3.0.*|3.1.*)
-        [ "$schema_valid" -eq 1 ] \
-          && [ "$(nb_lifecycle_field STATUS)" = in-progress ] \
-          && [ "$(nb_lifecycle_field OPERATION)" = repair ] \
-          || { printf 'AMBIGUOUS_OR_FOREIGN'; return 0; }
-        ;;
+      3.0.*|3.1.*) printf 'LEGACY_UNSUPPORTED'; return 0 ;;
       *) printf 'AMBIGUOUS_OR_FOREIGN'; return 0 ;;
     esac
   fi
@@ -2595,7 +4236,7 @@ nb_classify_installation_state() {
   fi
   if [ "$schema_valid" -eq 1 ]; then
     case "$manager_version" in
-      3.0.*|3.1.*) printf 'LEGACY_SUPPORTED' ;;
+      3.0.*|3.1.*) printf 'LEGACY_UNSUPPORTED' ;;
       3.2.*)
         if [ -n "$canonical_manager_version" ] \
            && [ "$manager_command_valid" -eq 1 ] \
@@ -2639,7 +4280,7 @@ nb_fail_legacy_state() {
   detected="$(nb_legacy_signature_version 2>/dev/null || printf unknown)"
   die "$(t \
     "检测到无法安全自动迁移的旧版 NoBrand 数据。检测版本: ${detected}；当前安装器: ${SCRIPT_VERSION}。为避免覆盖现有节点、密钥和凭据，安装已停止。请先备份并按升级/迁移说明处理。" \
-    "Unsupported legacy NoBrand data was detected (${detected}); installer ${SCRIPT_VERSION} stopped to avoid overwriting nodes, keys, or credentials. Back it up and follow the migration guidance.")" || return 1
+    "Unsupported legacy NoBrand data was detected (${detected}); installer ${SCRIPT_VERSION} stopped to avoid overwriting nodes, keys, or credentials. Use the matching legacy version to back up/remove it, then perform a clean installation.")" || return 1
 }
 
 nb_fail_ambiguous_state() {
@@ -2670,10 +4311,6 @@ nb_install_state_notice() {
       t '[提示] 检测到上一次 NoBrand-OneClick 卸载未完成。可重新运行安装器安全修复，或再次选择完整卸载继续清理剩余的 NoBrand 管理资源。' \
         '[Info] The previous NoBrand-OneClick uninstall was interrupted. Re-run the installer to repair safely, or choose full uninstall again to continue cleaning managed resources.'
       ;;
-    LEGACY_SUPPORTED)
-      t '[提示] 检测到兼容的 NoBrand 3.0/3.1 schema-v3 状态，将按当前安装器执行安全检查。' \
-        '[Info] Compatible NoBrand 3.0/3.1 schema-v3 state was detected and will be checked safely by the current installer.'
-      ;;
   esac
 }
 
@@ -2683,7 +4320,7 @@ nb_validate_authoritative_state_boundary() {
     LEGACY_UNSUPPORTED) nb_fail_legacy_state; return 1 ;;
     AMBIGUOUS_OR_FOREIGN) nb_fail_ambiguous_state; return 1 ;;
     CLEAN|CURRENT_COMPLETE|CURRENT_PARTIAL_INSTALL|CURRENT_PARTIAL_REPAIR|\
-      CURRENT_PARTIAL_CONFIGURE|CURRENT_PARTIAL_UNINSTALL|LEGACY_SUPPORTED) return 0 ;;
+      CURRENT_PARTIAL_CONFIGURE|CURRENT_PARTIAL_UNINSTALL) return 0 ;;
     *) nb_fail_ambiguous_state; return 1 ;;
   esac
 }
@@ -2692,7 +4329,7 @@ nb_write_schema_v3_file() {
   local tmp
   tmp="$(mktemp "${NOBRAND_REGISTRY_FILE}.tmp.XXXXXX")" || return 1
   if ! printf '%s\n' \
-      "{\"schema_version\":${NOBRAND_SCHEMA_VERSION},\"project\":\"NoBrand-OneClick\",\"ownership\":\"nobrand-v3\",\"author\":\"ike\"}" \
+      "{\"schema_version\":${NOBRAND_SCHEMA_VERSION},\"project\":\"NoBrand-OneClick\",\"ownership\":\"nobrand-v3\",\"author\":\"ike\",\"architecture\":\"splicore-native\",\"splicore_version\":\"v0.3.0-rc.4\",\"config_schema\":1}" \
       >"$tmp" \
     || ! chmod 0600 "$tmp" \
     || ! mv -f "$tmp" "$NOBRAND_REGISTRY_FILE"; then
@@ -2719,12 +4356,9 @@ ensure_manager_state_layout() {
     return 0
   fi
 
-  mkdir -p "$MITA_MANAGER_STATE_DIR" "$MITA_USERS_BACKUP_DIR" \
-    "$NOBRAND_BACKUP_DIR" "$NOBRAND_LOCK_DIR" || return 1
-  chmod 0700 "$MITA_MANAGER_STATE_DIR" "$MITA_USERS_BACKUP_DIR" \
-    "$NOBRAND_BACKUP_DIR" "$NOBRAND_LOCK_DIR" || return 1
-  chown root:root "$MITA_MANAGER_STATE_DIR" "$MITA_USERS_BACKUP_DIR" \
-    "$NOBRAND_BACKUP_DIR" "$NOBRAND_LOCK_DIR" 2>/dev/null || true
+  mkdir -p "$NOBRAND_BACKUP_DIR" "$NOBRAND_LOCK_DIR" || return 1
+  chmod 0700 "$NOBRAND_BACKUP_DIR" "$NOBRAND_LOCK_DIR" || return 1
+  chown root:root "$NOBRAND_BACKUP_DIR" "$NOBRAND_LOCK_DIR" 2>/dev/null || true
   chmod 0600 "$NOBRAND_REGISTRY_FILE" 2>/dev/null || return 1
 }
 
@@ -2815,22 +4449,6 @@ read_tty() {
   printf -v "$_var" '%s' "$_line"
 }
 
-read_tty_secret() {
-  local _var="$1"
-  local _prompt="${2:-}"
-  local _line=""
-  if [ -t 0 ]; then
-    read -r -s -p "$_prompt" _line || _line=""
-    printf '\n'
-  elif [ -r /dev/tty ]; then
-    read -r -s -p "$_prompt" _line </dev/tty || _line=""
-    printf '\n' >/dev/tty
-  else
-    return 1
-  fi
-  printf -v "$_var" '%s' "$_line"
-}
-
 confirm() {
   local prompt_zh="$1"
   local prompt_en="$2"
@@ -2907,115 +4525,8 @@ proto_lower() {
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
 }
 
-normalize_protocol() {
-  local v
-  v="$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]')"
-  case "$v" in
-    TCP|UDP|BOTH) printf '%s' "$v" ;;
-    DUAL|ALL|双协议) printf '%s' BOTH ;;
-    *) return 1 ;;
-  esac
-}
-
-protocols_for_mode() {
-  case "$PROTOCOL" in
-    BOTH) printf '%s\n' TCP UDP ;;
-    *) printf '%s\n' "$PROTOCOL" ;;
-  esac
-}
-
-protocol_label() {
-  local canonical_port=""
-  [ -z "${PORT:-}" ] || canonical_port="$(normalize_uint "$PORT" 2>/dev/null || printf '%s' "$PORT")"
-  case "$PROTOCOL" in
-    BOTH)
-      if [ -n "$PORT" ]; then
-        if [ "$LANG_ZH" -eq 1 ]; then
-          printf '%s' "TCP(${canonical_port}) + UDP($((canonical_port + 1)))"
-        else
-          printf '%s' "TCP(${canonical_port}) + UDP($((canonical_port + 1)))"
-        fi
-      else
-        if [ "$LANG_ZH" -eq 1 ]; then
-          printf '%s' 'TCP + UDP（同端口段）'
-        else
-          printf '%s' 'TCP + UDP (same port range)'
-        fi
-      fi
-      ;;
-    *) printf '%s' "$PROTOCOL" ;;
-  esac
-}
-
-port_for_protocol() {
-  local proto="$1" canonical_port
-  if [ -n "$PORT" ]; then
-    canonical_port="$(normalize_uint "$PORT")" || return 1
-    if [ "$PROTOCOL" = "BOTH" ] && [ "$proto" = "UDP" ]; then
-      printf '%s' "$((canonical_port + 1))"
-    else
-      printf '%s' "$canonical_port"
-    fi
-  else
-    printf '%s' "$PORT_RANGE"
-  fi
-}
-
-port_protocol_pairs() {
-  local proto p
-  while IFS= read -r proto; do
-    p="$(port_for_protocol "$proto")"
-    if [ -n "$PORT" ]; then
-      valid_port "$p" || die "$(t "双协议需要 ${PORT} 与 $((PORT + 1)) 均在 1025-65535" \
-        "Dual protocol requires ports ${PORT} and $((PORT + 1)) in 1025-65535")"
-    fi
-    printf '%s|%s\n' "$proto" "$p"
-  done < <(protocols_for_mode)
-}
-
-_state_kv() {
-  # 安全输出可被 source 还原的 KEY=VALUE：printf %q 处理空格/引号/$/# 等特殊字符
-  printf '%s=%s\n' "$1" "$(printf '%q' "${2-}")"
-}
-
 has_control_chars() {
   printf '%s' "${1-}" | LC_ALL=C grep -q '[[:cntrl:]]'
-}
-
-valid_proxy_identity_part() {
-  local value="${1-}"
-  [ -n "$value" ] || return 1
-  [ "$(printf '%s' "$value" | wc -c | tr -d '[:space:]')" -le 64 ] || return 1
-  ! has_control_chars "$value"
-}
-
-validate_proxy_credentials() {
-  local username="${1-${USERNAME:-}}"
-  local password="${2-${PASSWORD:-}}"
-  valid_proxy_identity_part "$username" || {
-    die "$(t '用户名必须为 1-64 字节且不能包含控制字符' \
-      'Username must be 1-64 bytes and contain no control characters')" || return 1
-  }
-  valid_proxy_identity_part "$password" || {
-    die "$(t '密码必须为 1-64 字节且不能包含控制字符' \
-      'Password must be 1-64 bytes and contain no control characters')" || return 1
-  }
-}
-
-json_escape() {
-  local value="${1-}"
-  value="${value//\\/\\\\}"
-  value="${value//\"/\\\"}"
-  value="${value//$'\b'/\\b}"
-  value="${value//$'\f'/\\f}"
-  value="${value//$'\n'/\\n}"
-  value="${value//$'\r'/\\r}"
-  value="${value//$'\t'/\\t}"
-  printf '%s' "$value"
-}
-
-json_string() {
-  printf '"%s"' "$(json_escape "${1-}")"
 }
 
 safe_filename_component() {
@@ -3027,67 +4538,6 @@ safe_filename_component() {
   fi
 }
 
-# /etc/mita 仅保存官方守护进程数据，必须允许 mita 写 server.conf.pb。
-# OneClick 的 root 管理状态全部位于独立的 root:root 0700 目录。
-harden_mita_permissions() {
-  run mkdir -p /etc/mita "$MITA_MANAGER_STATE_DIR" "$MITA_USERS_BACKUP_DIR" 2>/dev/null || true
-  if _has_user mita 2>/dev/null || id mita >/dev/null 2>&1; then
-    run chown mita:mita /etc/mita 2>/dev/null || true
-    run chmod 0750 /etc/mita 2>/dev/null || true
-  elif _has_group mita 2>/dev/null || getent group mita >/dev/null 2>&1; then
-    run chown root:mita /etc/mita 2>/dev/null || true
-    run chmod 0770 /etc/mita 2>/dev/null || true
-  else
-    run chmod 0750 /etc/mita 2>/dev/null || true
-  fi
-  run chown root:root "$MITA_MANAGER_STATE_DIR" "$MITA_USERS_BACKUP_DIR" 2>/dev/null || true
-  run chmod 0700 "$MITA_MANAGER_STATE_DIR" "$MITA_USERS_BACKUP_DIR" 2>/dev/null || true
-  # 敏感状态文件：root 读写即可（管理脚本以 root 运行）。
-  if [ -f "$MITA_STATE" ]; then
-    run chown root:root "$MITA_STATE" 2>/dev/null || true
-    run chmod 0600 "$MITA_STATE" 2>/dev/null || true
-  fi
-  if [ -f "$MITA_USERS_STATE" ]; then
-    run chown root:root "$MITA_USERS_STATE" 2>/dev/null || true
-    run chmod 0600 "$MITA_USERS_STATE" 2>/dev/null || true
-  fi
-  if [ -d "$MITA_INSTANCES_DIR" ]; then
-    run chown root:mita "$MITA_INSTANCES_DIR" 2>/dev/null || true
-    run chmod 0750 "$MITA_INSTANCES_DIR" 2>/dev/null || true
-  fi
-  if [ -d "$MITA_USERS_BACKUP_DIR" ]; then
-    find "$MITA_USERS_BACKUP_DIR" -type f -name 'users_*.json' -exec chmod 0600 {} \; 2>/dev/null || true
-  fi
-}
-
-install_logrotate_config() {
-  [ "${DRY_RUN:-0}" -eq 1 ] && return 0
-  [ -d /etc/logrotate.d ] || return 0
-  cat >"$MITA_LOGROTATE_CONF" <<EOF
-${MITA_USERS_LOG} {
-    weekly
-    rotate 8
-    compress
-    delaycompress
-    missingok
-    notifempty
-    create 0640 root root
-}
-
-/var/log/nobrand-mieru-*.log /var/log/nobrand-mieru-*.err {
-    weekly
-    rotate 8
-    compress
-    delaycompress
-    missingok
-    notifempty
-    copytruncate
-}
-EOF
-  chmod 0644 "$MITA_LOGROTATE_CONF" 2>/dev/null || true
-}
-
-# 管理写操作互斥锁（fd 8，引用计数可重入）
 admin_lock_acquire() {
   if [ "${DRY_RUN:-0}" -eq 1 ]; then
     _ADMIN_LOCK_HELD=$((${_ADMIN_LOCK_HELD:-0} + 1))
@@ -3124,191 +4574,6 @@ admin_lock_release() {
     flock -u 8 2>/dev/null || true
     exec 8>&-
   fi
-}
-
-save_install_state() {
-  STAGE="保存安装状态"
-  local state_tmp
-  profile_reconcile_metadata
-  MIERU_CHANNEL="$(normalize_mieru_channel "${MIERU_CHANNEL:-stable}" 2>/dev/null || printf stable)"
-  if [ "${DRY_RUN:-0}" -eq 1 ]; then
-    t "[演练] 保存安装状态: $MITA_STATE" "[dry-run] save install state: $MITA_STATE"
-    return 0
-  fi
-  run mkdir -p "$(dirname "$MITA_STATE")"
-  state_tmp="$(mktemp "${MITA_STATE}.XXXXXX" 2>/dev/null || mktemp_file .state)"
-  if ! {
-    _state_kv SCHEMA_VERSION "$NOBRAND_SCHEMA_VERSION"
-    _state_kv OWNERSHIP "nobrand-v3"
-    _state_kv PORT "$PORT"
-    _state_kv PORT_RANGE "$PORT_RANGE"
-    _state_kv PROTOCOL "$PROTOCOL"
-    _state_kv PROFILE "$PROFILE"
-    _state_kv ADVERTISE_HOST "$ADVERTISE_HOST"
-    _state_kv ADVERTISE_PORT "$ADVERTISE_PORT"
-    _state_kv MTU "$MTU"
-    _state_kv MTU_POLICY "$MTU_POLICY"
-    _state_kv USERNAME "$USERNAME"
-    _state_kv PASSWORD "$PASSWORD"
-    _state_kv TRAFFIC_PATTERN "$TRAFFIC_PATTERN"
-    _state_kv TRAFFIC_SEED "$TRAFFIC_SEED"
-    _state_kv LOW_ENTROPY_MODE "$LOW_ENTROPY_MODE"
-    _state_kv MULTIPLEXING "$MULTIPLEXING"
-    _state_kv HANDSHAKE_MODE "$HANDSHAKE_MODE"
-    _state_kv MIERU_CHANNEL "$MIERU_CHANNEL"
-    _state_kv MIERU_VERSION "$MIERU_VERSION"
-    _state_kv INSTALL_SCRIPT "$INSTALL_SCRIPT_PATH"
-    printf 'INSTALL_METHOD=nobrand-v3\n'
-  } >"$state_tmp"; then
-    rm -f "$state_tmp"
-    return 1
-  fi
-  if [ "$DRY_RUN" -eq 1 ]; then
-    t "[演练] chmod 0600 ${state_tmp}" "[dry-run] chmod 0600 ${state_tmp}"
-    t "[演练] mv -f ${state_tmp} ${MITA_STATE}" "[dry-run] mv -f ${state_tmp} ${MITA_STATE}"
-  else
-    if ! chmod 0600 "$state_tmp" || ! mv -f "$state_tmp" "$MITA_STATE"; then
-      rm -f "$state_tmp"
-      return 1
-    fi
-  fi
-  rm -f "$state_tmp"
-  harden_mita_permissions
-  run touch "$MITA_MARKER"
-}
-
-mita_v3_install_state_valid() {
-  local key
-  [ -f "$MITA_STATE" ] || return 1
-  grep -qx 'SCHEMA_VERSION=3' "$MITA_STATE" 2>/dev/null || return 1
-  grep -qx 'OWNERSHIP=nobrand-v3' "$MITA_STATE" 2>/dev/null || return 1
-  grep -qx 'INSTALL_METHOD=nobrand-v3' "$MITA_STATE" 2>/dev/null || return 1
-  for key in PORT PORT_RANGE PROTOCOL PROFILE ADVERTISE_HOST ADVERTISE_PORT MTU MTU_POLICY \
-    USERNAME PASSWORD TRAFFIC_PATTERN TRAFFIC_SEED LOW_ENTROPY_MODE MULTIPLEXING \
-    HANDSHAKE_MODE MIERU_CHANNEL MIERU_VERSION INSTALL_SCRIPT; do
-    grep -q "^${key}=" "$MITA_STATE" 2>/dev/null || return 1
-  done
-}
-
-mark_oneclick_install() {
-  run mkdir -p "$(dirname "$MITA_MARKER")"
-  run touch "$MITA_MARKER"
-  run chown root:root "$MITA_MARKER" 2>/dev/null || true
-  run chmod 0600 "$MITA_MARKER" 2>/dev/null || true
-}
-
-installed_by_oneclick() {
-  [ -f "$MITA_MARKER" ]
-}
-
-mita_package_is_installed() {
-  case "${1:-}" in
-    deb) dpkg-query -W -f='${db:Status-Abbrev}' mita 2>/dev/null | grep -q '^ii' ;;
-    rpm) rpm -q mita >/dev/null 2>&1 ;;
-    *) return 1 ;;
-  esac
-}
-
-# 首次接管前已存在的包/账号不属于 OneClick。使用独立所有权标记，
-# 不改变 install-state.env、users.json 或任何运行配置的 schema。
-record_preexisting_mita_resources() {
-  local pm="${1:-}" path
-  installed_by_oneclick && return 0
-  run mkdir -p "$MITA_MANAGER_STATE_DIR"
-  mita_package_is_installed "$pm" && run touch "$MITA_PRESERVE_PACKAGE_MARKER"
-  _has_user mita && run touch "$MITA_PRESERVE_USER_MARKER"
-  _has_group mita && run touch "$MITA_PRESERVE_GROUP_MARKER"
-  for path in /etc/mita /var/lib/mita /run/mita /var/run/mita /usr/bin/mita \
-    /etc/systemd/system/mita.service /lib/systemd/system/mita.service \
-    /usr/lib/systemd/system/mita.service /etc/init.d/mita; do
-    if [ -e "$path" ] || [ -L "$path" ]; then
-      run touch "$MITA_PRESERVE_SHARED_MARKER"
-      break
-    fi
-  done
-  run chmod 0600 "$MITA_PRESERVE_PACKAGE_MARKER" "$MITA_PRESERVE_USER_MARKER" \
-    "$MITA_PRESERVE_GROUP_MARKER" "$MITA_PRESERVE_SHARED_MARKER" 2>/dev/null || true
-}
-
-preexisting_mita_resources_recorded() {
-  [ -f "$MITA_PRESERVE_PACKAGE_MARKER" ] \
-    || [ -f "$MITA_PRESERVE_USER_MARKER" ] \
-    || [ -f "$MITA_PRESERVE_GROUP_MARKER" ] \
-    || [ -f "$MITA_PRESERVE_SHARED_MARKER" ]
-}
-
-load_install_state() {
-  local _cli_port="$PORT"
-  local _cli_port_range="$PORT_RANGE"
-  local _cli_protocol="$PROTOCOL"
-  local _cli_profile="$PROFILE"
-  local _cli_advertise_host="$ADVERTISE_HOST"
-  local _cli_advertise_port="$ADVERTISE_PORT"
-  local _cli_mtu="$MTU"
-  local _cli_mtu_policy="$MTU_POLICY"
-  local _cli_mtu_request="$MTU_REQUEST"
-  local _cli_user="$USERNAME"
-  local _cli_password="$PASSWORD"
-  local _cli_mieru_channel="$MIERU_CHANNEL"
-  local _cli_mieru_version="$MIERU_VERSION"
-  PORT=""
-  PORT_RANGE=""
-  PROTOCOL="TCP"
-  PROFILE=""
-  ADVERTISE_HOST=""
-  ADVERTISE_PORT=""
-  MIERU_CHANNEL=""
-  MIERU_VERSION=""
-  [ -f "$MITA_STATE" ] || return 0
-  state_file_is_secure "$MITA_STATE" || {
-    warn "$(t "拒绝读取权限不安全的安装状态: ${MITA_STATE}" \
-      "Refusing to read install state with unsafe ownership or permissions: ${MITA_STATE}")"
-    return 1
-  }
-  mita_v3_install_state_valid || {
-    warn "$(t "拒绝读取非 schema v3 的 Mieru 状态: ${MITA_STATE}" \
-      "Refusing to read non-schema-v3 Mieru state: ${MITA_STATE}")"
-    return 1
-  }
-  local _cli_tp="$TRAFFIC_PATTERN"
-  local _cli_le="$LOW_ENTROPY_MODE"
-  local _cli_mux="$MULTIPLEXING"
-  local _cli_hs="$HANDSHAKE_MODE"
-  # shellcheck disable=SC1090
-  source "$MITA_STATE" 2>/dev/null || true
-  PROFILE="$(normalize_profile "${PROFILE:-custom}" 2>/dev/null || printf 'custom')"
-  MIERU_CHANNEL="$(normalize_mieru_channel "${MIERU_CHANNEL:-stable}" 2>/dev/null || printf 'stable')"
-  # 命令行显式指定 --traffic-pattern 时优先，不被已保存状态覆盖
-  [ "${TRAFFIC_CLI:-0}" -eq 1 ] && TRAFFIC_PATTERN="$_cli_tp"
-  [ "${LOW_ENTROPY_CLI:-0}" -eq 1 ] && LOW_ENTROPY_MODE="$_cli_le"
-  [ "${MULTIPLEXING_CLI:-0}" -eq 1 ] && MULTIPLEXING="$_cli_mux"
-  [ "${HANDSHAKE_CLI:-0}" -eq 1 ] && HANDSHAKE_MODE="$_cli_hs"
-  [ "${PORT_CLI:-0}" -eq 1 ] && { PORT="$_cli_port"; PORT_RANGE=""; }
-  [ "${PORT_RANGE_CLI:-0}" -eq 1 ] && { PORT=""; PORT_RANGE="$_cli_port_range"; }
-  [ "${PROTOCOL_CLI:-0}" -eq 1 ] && PROTOCOL="$_cli_protocol"
-  [ "${PROFILE_CLI:-0}" -eq 1 ] && PROFILE="$_cli_profile"
-  if [ "${ADVERTISE_CLI:-0}" -eq 1 ]; then
-    ADVERTISE_HOST="$_cli_advertise_host"
-    ADVERTISE_PORT="$_cli_advertise_port"
-  fi
-  if [ "${MTU_CLI:-0}" -eq 1 ]; then
-    MTU="$_cli_mtu"
-    MTU_POLICY="$_cli_mtu_policy"
-    MTU_REQUEST="$_cli_mtu_request"
-  fi
-  [ "${USERNAME_CLI:-0}" -eq 1 ] && USERNAME="$_cli_user"
-  [ "${PASSWORD_CLI:-0}" -eq 1 ] && PASSWORD="$_cli_password"
-  if [ "${MIERU_CHANNEL_CLI:-0}" -eq 1 ]; then
-    MIERU_CHANNEL="$_cli_mieru_channel"
-  fi
-  if [ "${MIERU_VERSION_CLI:-0}" -eq 1 ]; then
-    MIERU_VERSION="$_cli_mieru_version"
-  fi
-  [ -z "${PORT:-}" ] || ! valid_port "$PORT" || PORT="$(normalize_uint "$PORT")"
-  [ -z "${ADVERTISE_PORT:-}" ] || ! valid_advertise_port "$ADVERTISE_PORT" \
-    || ADVERTISE_PORT="$(normalize_uint "$ADVERTISE_PORT")"
-  [ -z "${MTU:-}" ] || ! valid_mtu "$MTU" || MTU="$(normalize_uint "$MTU")"
-  return 0
 }
 
 # ---------- NoBrand Common Core: transport-aware 端口注册表与分配 ----------
@@ -3513,22 +4778,15 @@ nb_port_listener_pids() {
     | LC_ALL=C sort -u
 }
 
-# 输出 owner|transport|port|advertise_host|advertise_port。Mieru only reads
-# schema-v3 users.json under the authoritative NoBrand state root.
+# 输出 native/retained-feature owner|transport|port|advertise_host|advertise_port。
 nb_registry_rows() {
   command -v python3 >/dev/null 2>&1 || return 0
-  NOBRAND_SNELL_STATE_DIR="$NOBRAND_SNELL_STATE_DIR" \
-  NOBRAND_HY2_STATE_FILE="$NOBRAND_HY2_STATE_FILE" \
   NOBRAND_VLESS_STATE_FILE="$NOBRAND_VLESS_STATE_FILE" \
-  NOBRAND_REALITY_STATE_DIR="$NOBRAND_REALITY_STATE_DIR" \
-  NOBRAND_TUIC_STATE_DIR="$NOBRAND_TUIC_STATE_DIR" \
   NOBRAND_FORWARD_STATE_FILE="$NOBRAND_FORWARD_STATE_FILE" \
-  MITA_USERS_STATE="$MITA_USERS_STATE" \
+  NOBRAND_SPLICORE_DESIRED="${NOBRAND_STATE_DIR}/splicore/current/desired.json" \
   python3 - <<'PY'
-import glob
 import json
 import os
-import shlex
 
 def emit(owner, transport, port, host="", advertise_port=""):
     try:
@@ -3537,63 +4795,26 @@ def emit(owner, transport, port, host="", advertise_port=""):
         return
     print("%s|%s|%s|%s|%s" % (owner, transport.upper(), port, host or "", advertise_port or ""))
 
-snell_dir = os.environ.get("NOBRAND_SNELL_STATE_DIR", "")
-for path in sorted(glob.glob(os.path.join(snell_dir, "*.json"))):
-    try:
-        state = json.load(open(path, encoding="utf-8"))
-        file_id = os.path.basename(path)[:-5]
-        instance_id = str(state.get("instance_id") or "")
-        version = state.get("version")
-        if state.get("protocol") != "snell" or instance_id != file_id or version not in (4, 5):
-            continue
-        owner = "snell:" + instance_id
-        emit(owner, "TCP", state.get("listen_port"), state.get("advertise_host"), state.get("advertise_port"))
-        if version == 5 and state.get("managed_udp") is True:
-            emit(owner, "UDP", state.get("listen_port"), state.get("advertise_host"), state.get("advertise_port"))
-    except Exception:
-        continue
-
-hy2_path = os.environ.get("NOBRAND_HY2_STATE_FILE", "")
-if hy2_path and os.path.isfile(hy2_path):
-    try:
-        state = json.load(open(hy2_path, encoding="utf-8"))
-        emit("hy2:default", "UDP", state.get("listen_port"), state.get("advertise_host"), state.get("advertise_port"))
-    except Exception:
-        pass
+primary_path = os.environ.get("NOBRAND_SPLICORE_DESIRED", "")
+primary = bool(primary_path and os.path.isfile(primary_path))
+if primary:
+    state = json.load(open(primary_path, encoding="utf-8"))
+    if state.get("owner") != "nobrand-splicore-v1":
+        raise SystemExit(1)
+    for node in state["nodes"]:
+        doc = node["document"]
+        protocol = node["protocol"]
+        transport = doc["settings"]["transport"] if protocol == "mieru" else "TCP" if protocol in ("snell", "vless-reality") else "UDP"
+        emit(protocol + ":" + node["id"], transport, doc["listener"]["port"],
+             doc["display_endpoint"]["host"], doc["display_endpoint"]["port"])
+        if node.get("guard"):
+            emit("splicore-guard:" + node["id"], "TCP", node["guard"]["listen"]["port"])
 
 vless_path = os.environ.get("NOBRAND_VLESS_STATE_FILE", "")
 if vless_path and os.path.isfile(vless_path):
     try:
         state = json.load(open(vless_path, encoding="utf-8"))
         emit("vless-sudoku:default", "TCP", state.get("listen_port"),
-             state.get("advertise_host"), state.get("advertise_port"))
-    except Exception:
-        pass
-
-reality_dir = os.environ.get("NOBRAND_REALITY_STATE_DIR", "")
-for path in sorted(glob.glob(os.path.join(reality_dir, "*", "state.json"))):
-    try:
-        state = json.load(open(path, encoding="utf-8"))
-        instance_id = str(state.get("instance_id") or "")
-        if (state.get("schema_version") != 3 or state.get("ownership") != "nobrand-v3"
-                or state.get("protocol") != "vless-reality"
-                or os.path.basename(os.path.dirname(path)) != instance_id):
-            continue
-        emit("vless-reality:" + instance_id, "TCP", state.get("listen_port"),
-             state.get("advertise_host"), state.get("advertise_port"))
-    except Exception:
-        pass
-
-tuic_dir = os.environ.get("NOBRAND_TUIC_STATE_DIR", "")
-for path in sorted(glob.glob(os.path.join(tuic_dir, "*", "state.json"))):
-    try:
-        state = json.load(open(path, encoding="utf-8"))
-        instance_id = str(state.get("instance_id") or "")
-        if (state.get("schema_version") != 3 or state.get("ownership") != "nobrand-v3"
-                or state.get("protocol") != "tuic" or state.get("tuic_version") != 5
-                or os.path.basename(os.path.dirname(path)) != instance_id):
-            continue
-        emit("tuic:" + instance_id, "UDP", state.get("listen_port"),
              state.get("advertise_host"), state.get("advertise_port"))
     except Exception:
         pass
@@ -3617,22 +4838,7 @@ if forward_path and os.path.isfile(forward_path):
     except Exception:
         pass
 
-mita_users = os.environ.get("MITA_USERS_STATE", "")
-if mita_users and os.path.isfile(mita_users):
-    try:
-        state = json.load(open(mita_users, encoding="utf-8"))
-        protocol = str(state.get("protocol") or "TCP").upper()
-        for user in state.get("users") or []:
-            port = int(user.get("port"))
-            owner = "mieru:" + str(user.get("instance_id") or user.get("name") or port)
-            if protocol == "BOTH":
-                emit(owner, "TCP", port, user.get("advertise_host"), user.get("advertise_port"))
-                advertised = int(user.get("advertise_port") or port)
-                emit(owner, "UDP", port + 1, user.get("advertise_host"), advertised + 1)
-            else:
-                emit(owner, protocol, port, user.get("advertise_host"), user.get("advertise_port"))
-    except Exception:
-        pass
+
 PY
 }
 
@@ -4027,7 +5233,7 @@ nb_prepare_ingress_deployment() {
   case "$capability" in
     not-applicable)
       INGRESS_ENFORCEMENT_RESOLVED=not-applicable
-      INGRESS_ENFORCEMENT_METHOD=system-ssh
+      INGRESS_ENFORCEMENT_METHOD="system-ssh"
       INGRESS_LISTEN_HOST=0.0.0.0
       return 0
       ;;
@@ -4262,18 +5468,6 @@ nb_strict_firewall_commit_candidate() {
   rm -f "$old"
   [ "$rollback_failed" -eq 0 ] || warn '严格 Ingress 防火墙回滚失败；请立即运行诊断 / Doctor'
   return 1
-}
-
-nb_strict_firewall_remove_owner() {
-  local owner="$1" candidate
-  candidate="$(mktemp_file .ingress-firewall-remove)" || return 1
-  nb_strict_firewall_current_or_empty "$candidate" || { rm -f "$candidate"; return 1; }
-  jq --arg owner "$owner" '.rules|=map(select(.owner!=$owner))' "$candidate" >"${candidate}.next" \
-    && mv -f "${candidate}.next" "$candidate" \
-    && nb_strict_firewall_commit_candidate "$candidate"
-  local rc=$?
-  rm -f "$candidate" "${candidate}.next"
-  return "$rc"
 }
 
 nb_strict_firewall_rule_owned() {
@@ -4530,12 +5724,10 @@ nb_ingress_add() {
 
 nb_ingress_profile_reference_rows() {
   local profile_id="$1"
-  NOBRAND_SNELL_STATE_DIR="$NOBRAND_SNELL_STATE_DIR" NOBRAND_HY2_STATE_FILE="$NOBRAND_HY2_STATE_FILE" \
-  NOBRAND_VLESS_STATE_FILE="$NOBRAND_VLESS_STATE_FILE" NOBRAND_TUIC_STATE_DIR="$NOBRAND_TUIC_STATE_DIR" \
-  NOBRAND_REALITY_STATE_DIR="$NOBRAND_REALITY_STATE_DIR" \
+  NOBRAND_VLESS_STATE_FILE="$NOBRAND_VLESS_STATE_FILE" \
   NOBRAND_SSH_STATE_FILE="$NOBRAND_SSH_STATE_FILE" NOBRAND_FORWARD_STATE_FILE="$NOBRAND_FORWARD_STATE_FILE" \
-  MITA_USERS_STATE="$MITA_USERS_STATE" python3 - "$profile_id" <<'PY'
-import glob, json, os, sys
+  NOBRAND_SPLICORE_DESIRED="${NOBRAND_STATE_DIR}/splicore/current/desired.json" python3 - "$profile_id" <<'PY'
+import json, os, sys
 profile = sys.argv[1]
 def load(path):
     try: return json.load(open(path, encoding="utf-8"))
@@ -4544,18 +5736,12 @@ def emit(owner, value):
     if not value: return
     if profile == "*": print(str(value) + "|" + owner)
     elif value == profile: print(owner)
-for path in glob.glob(os.path.join(os.environ.get("NOBRAND_SNELL_STATE_DIR", ""), "*.json")):
-    state=load(path)
-    if state: emit("snell:" + str(state.get("instance_id") or path), state.get("ingress_profile_id"))
-for env, owner in (("NOBRAND_HY2_STATE_FILE","hy2:default"),("NOBRAND_VLESS_STATE_FILE","vless-sudoku:default")):
-    state=load(os.environ.get(env,""))
-    if state: emit(owner, state.get("ingress_profile_id"))
-for path in glob.glob(os.path.join(os.environ.get("NOBRAND_TUIC_STATE_DIR", ""), "*", "state.json")):
-    state=load(path)
-    if state: emit("tuic:" + str(state.get("instance_id") or path), state.get("ingress_profile_id"))
-for path in glob.glob(os.path.join(os.environ.get("NOBRAND_REALITY_STATE_DIR", ""), "*", "state.json")):
-    state=load(path)
-    if state: emit("vless-reality:" + str(state.get("instance_id") or path), state.get("ingress_profile_id"))
+state=load(os.environ.get("NOBRAND_VLESS_STATE_FILE", ""))
+if state: emit("vless-sudoku:default", state.get("ingress_profile_id"))
+state=load(os.environ.get("NOBRAND_SPLICORE_DESIRED", ""))
+if state:
+    for node in state.get("nodes", []):
+        emit("splicore:" + node["id"], node.get("ingress", {}).get("profile_id"))
 state=load(os.environ.get("NOBRAND_SSH_STATE_FILE", ""))
 if state:
     emit("ssh-tunnel:policy", state.get("ingress_profile_id"))
@@ -4565,10 +5751,7 @@ state=load(os.environ.get("NOBRAND_FORWARD_STATE_FILE", ""))
 if state:
     for rule in state.get("rules") or []:
         emit("forward:" + str(rule.get("rule_id")), rule.get("ingress_profile_id"))
-state=load(os.environ.get("MITA_USERS_STATE", ""))
-if state:
-    for user in state.get("users") or []:
-        emit("mieru:" + str(user.get("instance_id") or user.get("name")), user.get("ingress_profile_id"))
+
 PY
 }
 
@@ -4858,8 +6041,7 @@ nb_ingress_show() {
 
 nb_ingress_owner_capability() {
   case "$1" in
-    mieru:*) printf firewall ;;
-    snell:*|hy2:*|vless-sudoku:*|vless-reality:*|tuic:*) printf native-bind ;;
+    splicore:*|vless-sudoku:*) printf native-bind ;;
     forward:*)
       if [ "$(nb_owner_ingress_method "$1" 2>/dev/null || true)" = address-match ]; then
         printf address-match
@@ -4878,12 +6060,13 @@ nb_ingress_owner_capability() {
 nb_ingress_apply_owner() {
   local owner="$1"
   case "$owner" in
-    mieru:*) mieru_apply_ingress_enforcement "${owner#mieru:}" ;;
-    snell:*) snell_apply_ingress_enforcement "${owner#snell:}" ;;
-    hy2:*) hysteria2_apply_ingress_enforcement ;;
+    splicore:*)
+      local profile_id
+      profile_id="$(nb_owner_ingress_profile_id "$owner")" || return 1
+      nb_prepare_ingress_deployment "$profile_id" native-bind || return 1
+      NOBRAND_SPLICORE_LISTEN="$INGRESS_LISTEN_HOST" nb_splicore_call protocol --protocol "$(jq -r --arg id "${owner#splicore:}" '.nodes[]|select(.id==$id)|.protocol' "${NOBRAND_STATE_DIR}/splicore/current/desired.json")" --operation set-listen --selector "${owner#splicore:}"
+      ;;
     vless-sudoku:*) vless_sudoku_apply_ingress_enforcement ;;
-    vless-reality:*) reality_apply_ingress_enforcement "${owner#vless-reality:}" ;;
-    tuic:*) tuic_apply_ingress_enforcement "${owner#tuic:}" ;;
     forward:*) forward_apply_ingress_enforcement "${owner#forward:}" ;;
     ssh-tunnel:*) return 0 ;;
     *) return 1 ;;
@@ -5062,6 +6245,14 @@ nb_ingress_doctor() {
 }
 
 nobrand_run_ingress_action() {
+  if nb_splicore_installed; then
+    case "${INGRESS_ACTION:-list}" in
+      modify|delete|apply)
+        printf '[错误] Splicore 节点的入口变更需要显式 canonical 配置事务；拒绝调用旧 Core 的入口重建路径。\n' >&2
+        return 1
+        ;;
+    esac
+  fi
   if [ "${INGRESS_ACTION:-list}" = add ]; then
     nb_ingress_prepare_add_request || return 1
   fi
@@ -5106,45 +6297,22 @@ nobrand_run_ingress_action_unscoped() {
 # ---------- NoBrand Common Core: state、Endpoint、firewall/service adapters ----------
 
 nb_init_state_layout() {
-  if [ "${DRY_RUN:-0}" -eq 1 ]; then
-    t "[演练] 初始化 NoBrand 状态: $NOBRAND_STATE_DIR" \
-      "[dry-run] initialize NoBrand state: $NOBRAND_STATE_DIR"
-    return 0
-  fi
+  [ "${DRY_RUN:-0}" -ne 1 ] || return 0
+  nb_splicore_legacy_preflight || return 1
   ensure_manager_state_layout 1 || return 1
   mkdir -p "$NOBRAND_BACKUP_DIR" "$NOBRAND_LOCK_DIR" \
-    "$MITA_MANAGER_STATE_DIR" "$MITA_USERS_BACKUP_DIR" \
-    "$NOBRAND_SNELL_STATE_DIR" "$NOBRAND_HY2_STATE_DIR" \
-    "$NOBRAND_VLESS_STATE_DIR" "$NOBRAND_REALITY_STATE_DIR" "$NOBRAND_TUIC_STATE_DIR" \
+    "$NOBRAND_VLESS_STATE_DIR" "$NOBRAND_VLESS_CONFIG_DIR" \
     "$NOBRAND_SSH_STATE_DIR" "$NOBRAND_SSH_KEYS_DIR" "$NOBRAND_SSH_WATCHDOG_DIR" \
-    "$NOBRAND_FORWARD_STATE_DIR" \
-    "$NOBRAND_CONFIG_DIR" "$NOBRAND_SNELL_CONFIG_DIR" "$NOBRAND_HY2_CONFIG_DIR" \
-    "$NOBRAND_VLESS_CONFIG_DIR" "$NOBRAND_REALITY_CONFIG_DIR" "$NOBRAND_TUIC_CONFIG_DIR" "$NOBRAND_FORWARD_CONFIG_DIR" \
-    "$NOBRAND_SSH_CONFIG_DIR" "$NOBRAND_SSH_AUTHORIZED_KEYS_DIR" \
-    "$NOBRAND_SSH_ACCOUNT_MARKER_DIR" \
-    "$NOBRAND_BIN_DIR" "$NOBRAND_SNELL_RUNTIME_DIR" "$NOBRAND_LIB_DIR" \
-    || return 1
+    "$NOBRAND_FORWARD_STATE_DIR" "$NOBRAND_FORWARD_CONFIG_DIR" \
+    "$NOBRAND_SSH_CONFIG_DIR" "$NOBRAND_SSH_AUTHORIZED_KEYS_DIR" "$NOBRAND_SSH_ACCOUNT_MARKER_DIR" \
+    "$NOBRAND_BIN_DIR" || return 1
   chmod 0700 "$NOBRAND_STATE_DIR" "$NOBRAND_BACKUP_DIR" "$NOBRAND_LOCK_DIR" \
-    "$MITA_MANAGER_STATE_DIR" "$MITA_USERS_BACKUP_DIR" \
-    "$NOBRAND_SNELL_STATE_DIR" "$NOBRAND_HY2_STATE_DIR" \
-    "$NOBRAND_VLESS_STATE_DIR" "$NOBRAND_REALITY_STATE_DIR" "$NOBRAND_TUIC_STATE_DIR" \
+    "$NOBRAND_VLESS_STATE_DIR" "$NOBRAND_VLESS_CONFIG_DIR" \
     "$NOBRAND_SSH_STATE_DIR" "$NOBRAND_SSH_KEYS_DIR" "$NOBRAND_SSH_WATCHDOG_DIR" \
-    "$NOBRAND_FORWARD_STATE_DIR" \
-    "$NOBRAND_SNELL_CONFIG_DIR" "$NOBRAND_HY2_CONFIG_DIR" \
-    "$NOBRAND_VLESS_CONFIG_DIR" "$NOBRAND_REALITY_CONFIG_DIR" "$NOBRAND_TUIC_CONFIG_DIR" "$NOBRAND_FORWARD_CONFIG_DIR" \
-    "$NOBRAND_SSH_ACCOUNT_MARKER_DIR" || return 1
-  # sshd reads AuthorizedKeysFile after switching to the target identity. Keep
-  # the shared and SSH config roots traversable but not listable; every other
-  # protocol config directory and all secret/state directories remain 0700.
+    "$NOBRAND_FORWARD_STATE_DIR" "$NOBRAND_FORWARD_CONFIG_DIR" "$NOBRAND_SSH_ACCOUNT_MARKER_DIR" || return 1
   chmod 0711 "$NOBRAND_CONFIG_DIR" "$NOBRAND_SSH_CONFIG_DIR" || return 1
-  chmod 0755 "$NOBRAND_SSH_AUTHORIZED_KEYS_DIR" || return 1
-  # Protocol services can run as dedicated unprivileged users (Mieru uses the
-  # mita account). Runtime directories contain only managed executables/assets
-  # and must remain traversable; secrets stay in the 0700 state/config roots.
-  chmod 0755 "$NOBRAND_LIB_DIR" "$NOBRAND_BIN_DIR" "$NOBRAND_SNELL_RUNTIME_DIR" \
-    || return 1
-  nb_schema_v3_file_valid || return 1
-  chmod 0600 "$NOBRAND_REGISTRY_FILE" 2>/dev/null || return 1
+  chmod 0755 "$NOBRAND_SSH_AUTHORIZED_KEYS_DIR" "$NOBRAND_LIB_DIR" "$NOBRAND_BIN_DIR" || return 1
+  nb_schema_v3_file_valid && chmod 0600 "$NOBRAND_REGISTRY_FILE"
 }
 
 nb_atomic_install_file() {
@@ -5330,10 +6498,10 @@ nb_firewall_close_pairs() {
 }
 
 nb_firewall_binding_owned() {
-  local transport="$1" port="$2" proto tool
+  local transport="$1" port="$2" proto _tool row_proto row_port
   proto="$(printf '%s' "$transport" | tr '[:upper:]' '[:lower:]')"
   [ -f "$NOBRAND_FIREWALL_OWNED_STATE" ] || return 1
-  while IFS='|' read -r tool row_proto row_port; do
+  while IFS='|' read -r _tool row_proto row_port; do
     [ "$row_proto" = "$proto" ] && [ "$row_port" = "$port" ] && return 0
   done <"$NOBRAND_FIREWALL_OWNED_STATE"
   return 1
@@ -5390,6 +6558,11 @@ NoBrand-OneClick 3.2.6 — Multi-Ingress / Mieru / Snell v4-v5 / Hysteria2 / TUI
   nobrand status                  综合状态
   nobrand nodes [--protocol P]    查看全部或指定协议节点
   nobrand doctor                  综合诊断（默认不输出 secret）
+  nobrand runtime capabilities    查看固定 rc.4 的能力与限制
+  nobrand runtime status|doctor|plan|recover|rollback
+  nobrand runtime apply|render --file DESIRED.json
+  nobrand runtime backup|restore --file BACKUP.tar.gz
+  nobrand runtime start|stop|restart|uninstall|purge
   nobrand ingress list|doctor     查看入口配置或执行只读 Ingress Doctor
   nobrand ingress show PROFILE    查看入口配置
   nobrand ingress add             新增 public/mapped 入口配置
@@ -5404,20 +6577,14 @@ NoBrand-OneClick 3.2.6 — Multi-Ingress / Mieru / Snell v4-v5 / Hysteria2 / TUI
   nobrand mieru install|reconfigure|upgrade|uninstall|start|stop|restart
   nobrand mieru status|doctor|perf|show|users
   nobrand mieru user-add|user-del|user-show|user-set-endpoint
-  nobrand mieru user-set-quota|user-set-expire|user-enable|user-disable
-  nobrand mieru user-scan|user-quota-reset|user-set-rate|user-usage
-  nobrand mieru user-backup|user-restore|user-export|user-import|user-export-clients
   Mieru 参数: --port --protocol --profile --advertise-host --advertise-port --advertise-auto
     user-add 可在交互中选择自动/自定义展示入口；--advertise-host 可省略展示端口并继承新用户的有效端口。
     --ingress-profile PROFILE
     --mtu --traffic-pattern --low-entropy --multiplexing --handshake-mode
-    --mieru-channel --mieru-version --user --password --package --quota-mb
-    --quota-days --quota-mode --expire --bandwidth --op-user --enable-bbr --lang
 
-  nobrand snell install --name NAME [--version 5|4] [--port PORT] [--quic on|off]
+  nobrand snell install --name NAME [--version 5|4] [--port PORT] [--quic off]
       [--advertise-host HOST --advertise-port PORT | --advertise-auto] [-y]
   nobrand snell show|status|doctor|start|stop|restart|remove [--name NAME]
-  nobrand snell set-quic --name NAME --quic on|off [-y]
   nobrand snell set-endpoint --name NAME
       [--advertise-host HOST --advertise-port PORT | --advertise-auto]
 
@@ -5436,7 +6603,7 @@ NoBrand-OneClick 3.2.6 — Multi-Ingress / Mieru / Snell v4-v5 / Hysteria2 / TUI
   nobrand vless-reality install --name NAME [--target HOST] [--target-port PORT]
       [--ingress-profile PROFILE] [--port PORT]
       [--advertise-host HOST --advertise-port PORT | --advertise-auto] [-y]
-      默认伪装域名：从发行版验证池自动选择，并保存所选域名。
+      默认 cover 为 www.microsoft.com:443；可显式设置可用的 TLS 1.3 cover。
       显式域名会按原值使用；域名与伪装目标端口可分别配置。
       443 是默认伪装目标端口，不是公开 REALITY 监听端口。
   nobrand vless-reality show|export|status|doctor|start|stop|restart|remove [--name NAME]
@@ -5444,7 +6611,6 @@ NoBrand-OneClick 3.2.6 — Multi-Ingress / Mieru / Snell v4-v5 / Hysteria2 / TUI
       [--advertise-host HOST --advertise-port PORT | --advertise-auto]
 
   nobrand tuic install --name NAME --user USER [--port PORT] [--sni SNI]
-      [--channel stable|latest | --runtime-version VERSION]
       [--advertise-host HOST --advertise-port PORT | --advertise-auto] [-y]
   nobrand tuic start|stop|restart|status|doctor|show|export|set-endpoint|upgrade-runtime|uninstall
   nobrand tuic user add|delete|list|show|rotate --name NAME [--user USER]
@@ -5463,8 +6629,10 @@ NoBrand-OneClick 3.2.6 — Multi-Ingress / Mieru / Snell v4-v5 / Hysteria2 / TUI
 
 说明:
   - Snell 只支持 v5（默认/推荐）与 v4（兼容）。
-  - Snell v5 QUIC 默认关闭；--quic on 才让 NoBrand 管理同号 UDP firewall ownership。
-  - 官方 v5 runtime 即使 QUIC 关闭也可能监听同号 UDP；本地 socket 不等于公网 QUIC 已启用。
+  - 普通代理由一个固定 Splicore v0.3.0-rc.4 daemon 管理；Release Candidate / Experimental。
+  - 新架构要求 clean install；旧 multi-core 安装只检测并拒绝，不支持原地迁移或新版卸载。
+  - REALITY 使用原生 Local Tunnel Guard；HY2 使用新证书和独立 Salamander secret。
+  - Mieru 新装可用 --profile iplc 或 --traffic-pattern off；默认 traffic off；balanced/stealth 不支持。
   - Display Endpoint 只影响客户端输出，不创建 DNAT/IPLC 转发，也不改 listener。
   - --advertise-host 接受 IPv4、IPv6 或 ASCII DNS hostname；Host 与 Port 分别填写，配置时不要求域名解析成功。
   - Display Endpoint 不配置 VPS 系统出站 IP、默认路由或 policy routing。
@@ -5472,7 +6640,7 @@ NoBrand-OneClick 3.2.6 — Multi-Ingress / Mieru / Snell v4-v5 / Hysteria2 / TUI
   - VLESS Sudoku = plain VLESS + FinalMask(sudoku) + TCP。
   - VLESS REALITY = VLESS + TCP + REALITY + xtls-rprx-vision；public Profile 推荐，mapped 仅警告。
   - VLESS Encryption: NOT USED；不调用密钥生成子命令，不保存加密密钥。
-  - TUIC 只支持 v5：official sing-box、UDP/QUIC、每用户独立 UUID + password。
+  - TUIC 只支持 v5：Splicore、UDP/QUIC、每用户独立 UUID + password。
   - SSH Tunnel 复用现有 sshd；允许 -L/-D/-R TCP forwarding，不允许 shell/exec/TTY/SFTP/SCP。
   - SSH Tunnel 使用 AllowTcpForwarding=yes，因此可访问服务器自身可达的 TCP destinations；GatewayPorts=no。
   - SSH Tunnel 不拥有 sshd listener、SSH firewall、host keys 或 admin authentication。
@@ -5481,7 +6649,8 @@ NoBrand-OneClick 3.2.6 — Multi-Ingress / Mieru / Snell v4-v5 / Hysteria2 / TUI
   - Ingress 决定端口策略、展示默认值和入口身份；Linux 系统路由继续独立决定 Egress。
   - Ingress Profile 不修改网卡、地址、路由、ip rule、sysctl、SSH 或 provider mapping。
   - PROTOCOL_FEATURE_FREEZE=${PROTOCOL_FEATURE_FREEZE}（VLESS REALITY 是 3.2 最后一个协议功能）。
-  - Mieru 官方 runtime 仍名为 mita，但它不是管理命令；管理入口只有 nobrand/nb。
+  - 普通安装只下载固定 Splicore；FinalMask/Sudoku 保留已有专用 pinned Xray。
+  - FinalMask/Sudoku 仍使用独立 pinned Xray；Splicore 不管理 Xray。
   - v3 state 必须带 schema_version=3；旧 state 不读取、不导入、不删除。
   - 正式安装器: ${NOBRAND_RELEASE_INSTALLER_URL}
 EOF
@@ -5582,117 +6751,32 @@ nobrand_manager_upgrade() {
     "NoBrand unified manager installed/upgraded from the current exact installer to v${SCRIPT_VERSION}"
 }
 
-nb_mieru_instance_running() {
-  local instance_id="$1" transport="$2" port="$3" unit service
-  unit="nobrand-mieru@${instance_id}.service"
-  service="nobrand-mieru-${instance_id}"
-  nb_service_is_active "$unit" "$service" || return 1
-  case "$transport" in
-    BOTH) nb_port_is_listening TCP "$port" && nb_port_is_listening UDP "$((port + 1))" ;;
-    *) nb_port_is_listening "$transport" "$port" ;;
-  esac
-}
-
-# protocol|name|display endpoint|status|transport
-nb_mieru_node_rows() {
-  local instance_id name port protocol advertise_host advertise_port ingress_profile_id
-  local effective_host effective_port status
-  [ -s "$MITA_USERS_STATE" ] || return 0
-  command -v python3 >/dev/null 2>&1 || return 0
-  # Use a non-whitespace delimiter so empty custom endpoint fields keep their
-  # column positions before the trailing Profile association.
-  while IFS='|' read -r instance_id name port protocol advertise_host advertise_port ingress_profile_id; do
-    [ -n "$name" ] || continue
-    ingress_profile_id="${ingress_profile_id:-$NOBRAND_LEGACY_INGRESS_PROFILE_ID}"
-    if [ -n "$advertise_host" ]; then
-      effective_host="$advertise_host"
-    else
-      effective_host="$(nb_effective_advertise_host auto '' "$ingress_profile_id")"
-    fi
-    if [ -n "$advertise_port" ]; then
-      effective_port="$advertise_port"
-    else
-      effective_port="$(nb_effective_advertise_port auto '' "$port" "$ingress_profile_id")"
-    fi
-    status=Stopped
-    nb_mieru_instance_running "$instance_id" "$protocol" "$port" && status=Running
-    if [ "$protocol" = BOTH ]; then
-      printf 'Mieru/BOTH|%s|%s:%s (TCP), %s:%s (UDP)|%s|BOTH\n' \
-        "$name" "$effective_host" "$effective_port" "$effective_host" "$((effective_port + 1))" "$status"
-    else
-      printf 'Mieru/%s|%s|%s:%s|%s|%s\n' \
-        "$protocol" "$name" "$effective_host" "$effective_port" "$status" "$protocol"
-    fi
-  done < <(python3 - "$MITA_USERS_STATE" <<'PY'
-import json,sys
-try:
-    state=json.load(open(sys.argv[1], encoding="utf-8"))
-except Exception:
-    raise SystemExit(0)
-protocol=str(state.get("protocol") or "TCP").upper()
-for user in state.get("users") or []:
-    print("|".join(str(v or "") for v in (
-        user.get("instance_id"), user.get("name"), user.get("port"), protocol,
-        user.get("advertise_host"), user.get("advertise_port"),
-        user.get("ingress_profile_id"))))
-PY
-  )
-}
-
 nb_all_node_rows() {
-  local filter
-  filter="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
-  case "$filter" in
-    ""|all)
-      nb_mieru_node_rows
-      snell_node_rows
-      hysteria2_node_rows
-      tuic_node_rows
-      reality_node_rows
-      vless_sudoku_node_rows
-      ssh_tunnel_node_rows
-      forward_node_rows
-      ;;
-    mieru) nb_mieru_node_rows ;;
-    snell) snell_node_rows ;;
-    hy2|hysteria2) hysteria2_node_rows ;;
-    tuic) tuic_node_rows ;;
-    vless-reality|reality) reality_node_rows ;;
-    vless-sudoku|sudoku) vless_sudoku_node_rows ;;
-    vless) reality_node_rows; vless_sudoku_node_rows ;;
+  case "${1:-}" in
+    ""|all) vless_sudoku_node_rows; ssh_tunnel_node_rows; forward_node_rows ;;
+    vless-sudoku|sudoku|vless) vless_sudoku_node_rows ;;
     ssh|ssh-tunnel) ssh_tunnel_node_rows ;;
     forward|port-forward) forward_node_rows ;;
-    *) die "--protocol 只支持 mieru、snell、hy2、tuic、vless-reality、vless-sudoku、ssh、forward" ;;
+    mieru|snell|hy2|hysteria2|tuic|vless-reality|reality) return 0 ;;
+    *) return 1 ;;
   esac
 }
 
 nb_owner_ingress_profile_id() {
   local owner="$1" id
   case "$owner" in
-    snell:*) snell_state_field "${owner#snell:}" ingress_profile_id 2>/dev/null || true ;;
-    hy2:*) hysteria2_state_field ingress_profile_id 2>/dev/null || true ;;
+    splicore:*) jq -r --arg id "${owner#splicore:}" '.nodes[]|select(.id==$id)|.ingress.profile_id // empty' "${NOBRAND_STATE_DIR}/splicore/current/desired.json" ;;
     vless-sudoku:*) vless_sudoku_state_field ingress_profile_id 2>/dev/null || true ;;
-    vless-reality:*) reality_state_field "${owner#vless-reality:}" ingress_profile_id 2>/dev/null || true ;;
-    tuic:*) tuic_state_field "${owner#tuic:}" ingress_profile_id 2>/dev/null || true ;;
     forward:*)
       jq -r --arg id "${owner#forward:}" '.rules[]|select(.rule_id==$id)|.ingress_profile_id // empty' \
         "$NOBRAND_FORWARD_STATE_FILE" 2>/dev/null || true
-      ;;
-    mieru:*)
-      id="${owner#mieru:}"
-      jq -r --arg id "$id" '.users[]|select((.instance_id // .name // (.port|tostring))==$id)|.ingress_profile_id // empty' \
-        "$MITA_USERS_STATE" 2>/dev/null || true
       ;;
   esac
 }
 
 nb_owner_state_file() {
   case "$1" in
-    snell:*) snell_state_path "${1#snell:}" ;;
-    hy2:*) printf '%s' "$NOBRAND_HY2_STATE_FILE" ;;
     vless-sudoku:*) printf '%s' "$NOBRAND_VLESS_STATE_FILE" ;;
-    vless-reality:*) reality_state_file "${1#vless-reality:}" ;;
-    tuic:*) tuic_state_file "${1#tuic:}" ;;
     *) return 1 ;;
   esac
 }
@@ -5704,11 +6788,6 @@ nb_owner_ingress_enforcement() {
       id="${owner#forward:}"
       jq -r --arg id "$id" '.rules[]|select(.rule_id==$id)|.ingress_enforcement // "permissive"' \
         "$NOBRAND_FORWARD_STATE_FILE" 2>/dev/null
-      ;;
-    mieru:*)
-      id="${owner#mieru:}"
-      jq -r --arg id "$id" '.users[]|select((.instance_id // .name // (.port|tostring))==$id)|.ingress_enforcement // "permissive"' \
-        "$MITA_USERS_STATE" 2>/dev/null
       ;;
     ssh-tunnel:*) printf not-applicable ;;
     *) path="$(nb_owner_state_file "$owner")" && nb_ingress_state_enforcement "$path" ;;
@@ -5722,11 +6801,6 @@ nb_owner_ingress_method() {
       id="${owner#forward:}"
       jq -r --arg id "$id" '.rules[]|select(.rule_id==$id)|.ingress_enforcement_method // "wildcard"' \
         "$NOBRAND_FORWARD_STATE_FILE" 2>/dev/null
-      ;;
-    mieru:*)
-      id="${owner#mieru:}"
-      jq -r --arg id "$id" '.users[]|select((.instance_id // .name // (.port|tostring))==$id)|.ingress_enforcement_method // "wildcard"' \
-        "$MITA_USERS_STATE" 2>/dev/null
       ;;
     ssh-tunnel:*) printf system-ssh ;;
     *) path="$(nb_owner_state_file "$owner")" && nb_ingress_state_method "$path" ;;
@@ -5742,11 +6816,6 @@ nb_owner_ingress_local_address() {
       jq -r --arg id "$id" '.rules[]|select(.rule_id==$id)|.ingress_local_address // empty' \
         "$NOBRAND_FORWARD_STATE_FILE" 2>/dev/null
       ;;
-    mieru:*)
-      id="${owner#mieru:}"
-      jq -r --arg id "$id" '.users[]|select((.instance_id // .name // (.port|tostring))==$id)|.ingress_local_address // empty' \
-        "$MITA_USERS_STATE" 2>/dev/null
-      ;;
     ssh-tunnel:*) return 0 ;;
     *) path="$(nb_owner_state_file "$owner")" && nb_ingress_state_local_address "$path" "$profile_id" ;;
   esac
@@ -5756,7 +6825,6 @@ nb_owner_enabled() {
   local owner="$1" path id
   case "$owner" in
     forward:*) id="${owner#forward:}"; jq -r --arg id "$id" '.rules[]|select(.rule_id==$id)|.enabled' "$NOBRAND_FORWARD_STATE_FILE" 2>/dev/null ;;
-    mieru:*) id="${owner#mieru:}"; jq -r --arg id "$id" '.users[]|select((.instance_id // .name // (.port|tostring))==$id)|.enabled' "$MITA_USERS_STATE" 2>/dev/null ;;
     ssh-tunnel:*) printf true ;;
     *) path="$(nb_owner_state_file "$owner")" && jq -r '.enabled // true' "$path" 2>/dev/null ;;
   esac
@@ -5812,6 +6880,15 @@ nb_node_detail_rows() {
 }
 
 nobrand_nodes() {
+  if nb_splicore_installed; then
+    nb_splicore_call status --protocol "${NOBRAND_PROTOCOL_FILTER:-}" || return 1
+    local retained
+    for retained in vless-sudoku ssh forward; do
+      [ -z "${NOBRAND_PROTOCOL_FILTER:-}" ] || [ "$NOBRAND_PROTOCOL_FILTER" = "$retained" ] || continue
+      nb_all_node_rows "$retained"
+    done
+    return 0
+  fi
   local rows details protocol name endpoint status transport owner actual display ingress enforcement status_display
   rows="$(nb_all_node_rows "${NOBRAND_PROTOCOL_FILTER:-}")"
   nobrand_print_banner
@@ -5856,102 +6933,12 @@ nobrand_nodes() {
 }
 
 nobrand_status() {
-  local rows protocol _name _endpoint status _transport
-  local mieru_total=0 mieru_running=0 snell_total=0 snell_running=0 hy2_total=0 hy2_running=0
-  local tuic_total=0 tuic_running=0 ssh_total=0 ssh_ready=0
-  local forward_nft_total=0 forward_nft_healthy=0 forward_realm_total=0 forward_realm_healthy=0
-  local vless_total=0 vless_running=0 vless_port="" reality_total=0 reality_running=0
-  local ingress_id ingress_name ingress_type
-  local ingress_interface ingress_address ingress_policy ingress_host ingress_range
-  local label_installed label_users label_running label_instances label_port label_ready
-  local label_listener label_default_profile label_explicit_profiles
-  label_installed="$(t '已安装' 'Installed')"
-  label_users="$(t '用户数 / Users' 'Users')"
-  label_running="$(t '运行中' 'Running')"
-  label_instances="$(t '实例数 / Instances' 'Instances')"
-  label_port="$(t '端口 / Port' 'Port')"
-  label_ready="$(t '就绪' 'Ready')"
-  label_listener="$(t '监听归属 / Listener ownership' 'Listener ownership')"
-  label_default_profile="$(t '默认入口配置 / Default Profile' 'Default Profile')"
-  label_explicit_profiles="$(t '显式入口配置数 / Explicit profiles' 'Explicit profiles')"
-  rows="$(nb_all_node_rows)"
-  while IFS='|' read -r protocol _name _endpoint status _transport; do
-    case "$protocol" in
-      Mieru/*) mieru_total=$((mieru_total + 1)); [ "$status" != Running ] || mieru_running=$((mieru_running + 1)) ;;
-      Snell*) snell_total=$((snell_total + 1)); [ "$status" != Running ] || snell_running=$((snell_running + 1)) ;;
-      Hysteria2) hy2_total=$((hy2_total + 1)); [ "$status" != Running ] || hy2_running=$((hy2_running + 1)) ;;
-      'TUIC v5') tuic_total=$((tuic_total + 1)); [ "$status" != Running ] || tuic_running=$((tuic_running + 1)) ;;
-      'SSH Tunnel') ssh_total=$((ssh_total + 1)); [ "$status" != Ready ] || ssh_ready=$((ssh_ready + 1)) ;;
-      'Port Forward/nftables')
-        forward_nft_total=$((forward_nft_total + 1)); [ "$status" != Healthy ] || forward_nft_healthy=$((forward_nft_healthy + 1))
-        ;;
-      'Port Forward/realm')
-        forward_realm_total=$((forward_realm_total + 1)); [ "$status" != Healthy ] || forward_realm_healthy=$((forward_realm_healthy + 1))
-        ;;
-      VLESS/Sudoku)
-        vless_total=$((vless_total + 1))
-        [ "$status" != Running ] || vless_running=$((vless_running + 1))
-        vless_port="$(vless_sudoku_state_field listen_port 2>/dev/null || true)"
-        ;;
-      'VLESS REALITY')
-        reality_total=$((reality_total + 1))
-        [ "$status" != Running ] || reality_running=$((reality_running + 1))
-        ;;
-    esac
-  done <<<"$rows"
-  nobrand_print_banner
-  msg ""
-  printf 'Mieru\n  %s: %s\n  %s: %s\n  %s: %s/%s\n' \
-    "$label_installed" \
-    "$([ "$mieru_total" -gt 0 ] && t '已安装' 'yes' || t '未安装' 'no')" \
-    "$label_users" "$mieru_total" "$label_running" "$mieru_running" "$mieru_total"
-  printf 'Snell\n  %s: %s\n  %s: %s/%s\n' \
-    "$label_instances" "$snell_total" "$label_running" "$snell_running" "$snell_total"
-  printf 'Hysteria2\n  %s: %s\n  %s: %s\n' \
-    "$label_installed" \
-    "$([ "$hy2_total" -gt 0 ] && t '已安装' 'yes' || t '未安装' 'no')" \
-    "$label_running" \
-    "$([ "$hy2_running" -gt 0 ] && t '运行中' 'yes' || t '已停止' 'no')"
-  printf 'TUIC v5\n  %s: %s\n  %s: %s/%s\n' \
-    "$label_users" "$tuic_total" "$label_running" "$tuic_running" "$tuic_total"
-  printf 'VLESS/Sudoku\n  %s: %s\n  %s: %s\n  %s: %s\n' \
-    "$label_installed" \
-    "$([ "$vless_total" -gt 0 ] && t '已安装' 'yes' || t '未安装' 'no')" \
-    "$label_running" \
-    "$([ "$vless_running" -gt 0 ] && t '运行中' 'yes' || t '已停止' 'no')" \
-    "$label_port" "${vless_port:--}"
-  printf 'VLESS REALITY\n  %s: %s\n  %s: %s/%s\n' \
-    "$label_instances" "$reality_total" "$label_running" "$reality_running" "$reality_total"
-  printf '%s\n  %s: %s\n  %s: %s/%s\n  %s: %s\n' \
-    "$(t 'SSH 隧道 / SSH Tunnel' 'SSH Tunnel')" "$label_users" "$ssh_total" \
-    "$label_ready" "$ssh_ready" "$ssh_total" "$label_listener" \
-    "$(t '外部 sshd' 'external sshd')"
-  printf '%s\n  nftables: %s/%s %s\n  Realm: %s/%s %s\n' \
-    "$(t '端口转发 / Port Forward' 'Port Forward')" \
-    "$forward_nft_healthy" "$forward_nft_total" "$(t '正常' 'healthy')" \
-    "$forward_realm_healthy" "$forward_realm_total" "$(t '正常' 'healthy')"
-  msg "$(t '网络入口 / Ingress' 'Ingress')"
-  printf '  %s: %s\n  %s: %s\n' \
-    "$label_default_profile" \
-    "$(nb_ingress_profile_name "$(nb_ingress_default_profile_id 2>/dev/null || true)")" \
-    "$label_explicit_profiles" \
-    "$([ -s "$NOBRAND_INGRESS_STATE_FILE" ] && jq '.profiles|length' "$NOBRAND_INGRESS_STATE_FILE" 2>/dev/null || printf 0)"
-  if nb_ingress_state_valid; then
-    while IFS=$'\t' read -r ingress_id ingress_name ingress_type ingress_interface ingress_address ingress_policy ingress_host; do
-      ingress_range="$(nb_ingress_profile_auto_range "$ingress_id" 2>/dev/null | tr '|' '-' \
-        || t '手动' 'manual')"
-      if [ "$LANG_ZH" -eq 1 ]; then
-        printf '  %s: %s %s/%s, %s (%s), 展示=%s\n' \
-          "$ingress_name" "$ingress_type" "$ingress_interface" "$ingress_address" \
-          "$ingress_policy" "$ingress_range" "${ingress_host:--}"
-      else
-        printf '  %s: %s %s/%s, %s (%s), display=%s\n' \
-          "$ingress_name" "$ingress_type" "$ingress_interface" "$ingress_address" \
-          "$ingress_policy" "$ingress_range" "${ingress_host:--}"
-      fi
-    done < <(jq -r '.profiles[]|[.profile_id,.name,.type,.interface,.local_address,.port_policy,.display_host_default]|@tsv' \
-      "$NOBRAND_INGRESS_STATE_FILE")
-  fi
+  nb_splicore_legacy_preflight || return 1
+  nb_splicore_call status || return 1
+  if vless_sudoku_state_exists; then vless_sudoku_service_command status; fi
+  ssh_tunnel_status
+  [ ! -s "$NOBRAND_FORWARD_STATE_FILE" ] || forward_list_rules
+  return 0
 }
 
 nb_doctor_line() {
@@ -5960,84 +6947,14 @@ nb_doctor_line() {
   printf '[%s] %s\n' "$level" "$*"
 }
 
-nobrand_doctor_common() {
-  local failed=0 manager arch_value
-  [ "$(id -u 2>/dev/null || printf 1)" -eq 0 ] \
-    && nb_doctor_line PASS 'root' || { nb_doctor_line FAIL '需要 root'; failed=1; }
-  [ "$(uname -s 2>/dev/null || true)" = Linux ] \
-    && nb_doctor_line PASS 'Linux' || { nb_doctor_line FAIL '仅支持 Linux'; failed=1; }
-  arch_value="$(uname -m 2>/dev/null || printf unknown)"
-  case "$arch_value" in
-    x86_64|amd64|aarch64|arm64) nb_doctor_line PASS "arch=${arch_value}" ;;
-    *) nb_doctor_line WARN "arch=${arch_value}（Snell 可能不支持）" ;;
-  esac
-  [ -d "$NOBRAND_STATE_DIR" ] && [ -w "$NOBRAND_STATE_DIR" ] \
-    && nb_doctor_line PASS "状态目录可写 / state writable: $NOBRAND_STATE_DIR" \
-    || nb_doctor_line WARN "状态目录尚未初始化或不可写 / state unavailable: $NOBRAND_STATE_DIR"
-  command -v ss >/dev/null 2>&1 || command -v netstat >/dev/null 2>&1 \
-    && nb_doctor_line PASS '端口检测工具可用 / port tool available' \
-    || nb_doctor_line WARN '无 ss/netstat，将使用绑定探测 / bind probe'
-  if command -v ufw >/dev/null 2>&1; then
-    nb_doctor_line PASS 'firewall=ufw'
-  elif command -v firewall-cmd >/dev/null 2>&1; then
-    nb_doctor_line PASS 'firewall=firewalld'
-  elif command -v iptables >/dev/null 2>&1; then
-    nb_doctor_line PASS 'firewall=iptables'
-  elif command -v nft >/dev/null 2>&1; then
-    nb_doctor_line PASS 'firewall=nftables'
-  else
-    nb_doctor_line WARN '未检测到本地防火墙后端 / firewall backend'
-  fi
-  manager="$(nb_service_manager)"
-  [ "$manager" != none ] && nb_doctor_line PASS "service-manager=${manager}" \
-    || { nb_doctor_line FAIL '未检测到 systemd/OpenRC'; failed=1; }
-  if bbr_fq_active 2>/dev/null; then
-    nb_doctor_line PASS 'BBR/FQ 已启用 / active'
-  else
-    nb_doctor_line INFO 'BBR/FQ 未启用 / not active（可选）'
-  fi
-  return "$failed"
-}
-
 nobrand_doctor() {
+  nb_splicore_legacy_preflight || return 1
   local failed=0
-  nobrand_print_banner
-  msg ''
-  msg "$(t '公共核心 / Common Core' 'Common Core')"
-  nobrand_doctor_common || failed=1
-  msg ''
-  msg "$(t '网络入口 / Ingress（只读；不验证供应商映射）' \
-    'Ingress (read-only; does not verify provider mapping)')"
-  nb_ingress_doctor || failed=1
-  if mita_installed 2>/dev/null || [ -s "$MITA_USERS_STATE" ]; then
-    msg ''
-    msg 'Mieru'
-    do_doctor || failed=1
-  fi
-  msg ''
-  msg 'Snell'
-  snell_doctor_all || failed=1
-  msg ''
-  msg 'Hysteria2'
-  hysteria2_doctor || failed=1
-  msg ''
-  msg 'TUIC v5'
-  tuic_doctor_all || failed=1
-  msg ''
-  msg "$(t 'VLESS + FinalMask + Sudoku（TCP）' 'VLESS + FinalMask + Sudoku (TCP)')"
-  vless_sudoku_doctor || failed=1
-  msg ''
-  msg 'VLESS + TCP + REALITY + XTLS Vision'
-  reality_doctor_all || failed=1
-  msg ''
-  msg "$(t 'SSH 隧道 / SSH Tunnel（使用现有 OpenSSH）' 'SSH Tunnel (existing OpenSSH)')"
-  ssh_tunnel_doctor || failed=1
-  if [ -s "$NOBRAND_FORWARD_STATE_FILE" ]; then
-    msg ''
-    msg "$(t '端口转发 / Port Forward（nftables / Realm）' 'Port Forward (nftables / Realm)')"
-    forward_doctor || failed=1
-  fi
-  [ "$failed" -eq 0 ] || return 1
+  nb_splicore_call doctor || failed=1
+  if vless_sudoku_state_exists; then vless_sudoku_doctor || failed=1; fi
+  if ssh_tunnel_state_exists; then ssh_tunnel_doctor || failed=1; fi
+  [ ! -s "$NOBRAND_FORWARD_STATE_FILE" ] || forward_doctor || failed=1
+  return "$failed"
 }
 
 nb_backup_default_path() {
@@ -6206,7 +7123,7 @@ nobrand_backup_restore_transaction_valid_at() {
     0:0:0|0:1:0|1:0:0|1:1:1) ;;
     *) return 1 ;;
   esac
-  for path in state config ssh-external tuic-external forward-external; do
+  for path in state config ssh-external forward-external; do
     [ -d "$snapshot_dir/$path" ] \
       && [ ! -L "$snapshot_dir/$path" ] || return 1
   done
@@ -6343,7 +7260,7 @@ nobrand_backup_restore_transaction_prepare() {
   fi
   chown root:root "$snapshot" 2>/dev/null || true
   if ! mkdir "$snapshot/state" "$snapshot/config" "$snapshot/ssh-external" \
-      "$snapshot/tuic-external" "$snapshot/forward-external"; then
+      "$snapshot/forward-external"; then
     rm -rf -- "$prepare_dir"
     return 1
   fi
@@ -6370,7 +7287,6 @@ nobrand_backup_restore_transaction_prepare() {
   fi
   nobrand_backup_restore_prepare_checkpoint managed-roots-snapshotted
   if ! ssh_tunnel_snapshot_external_state "$snapshot/ssh-external" \
-     || ! tuic_snapshot_restore_side_effects "$snapshot/tuic-external" \
      || ! forward_snapshot_restore_side_effects "$snapshot/forward-external"; then
     rm -rf -- "$prepare_dir"
     return 1
@@ -6457,22 +7373,24 @@ nobrand_backup_restore_recover_applying() {
       "SSH watchdog rollback ownership is unresolved; the backup-restore snapshot is retained at: ${snapshot}")"
     return 75
   fi
+  # An imported primary graph may already be serving when a later acceptance
+  # fails. Quiesce it before replacing its database or generation directories.
+  if nb_splicore_installed; then
+    nb_splicore_call stop || return 1
+  fi
 
   # `applying` cannot have crossed the verified-root commit below, so no
   # runtime/external resource was touched. `runtime-applying` still has the
   # imported state needed for exact attempt cleanup. Never advance past it if
   # state-driven cleanup fails: a retry must see the same imported ownership.
   if [ "$status" = runtime-applying ]; then
-    tc_clear_owned_filters_strict "$TC_OWNED_STATE" 2>/dev/null \
-      || cleanup_failed=1
     if [ "$fresh_restore" -eq 1 ]; then
       nobrand_remove_fresh_restore_protocol_resources 2>/dev/null \
         || cleanup_failed=1
     fi
-    tuic_remove_restore_attempt_resources 2>/dev/null || cleanup_failed=1
     forward_remove_restore_attempt_resources 2>/dev/null || cleanup_failed=1
     if [ "$fresh_restore" -eq 1 ]; then
-      for cleanup_dir in "$NOBRAND_SNELL_RUNTIME_DIR" "$NOBRAND_BIN_DIR" "$NOBRAND_LIB_DIR"; do
+      for cleanup_dir in "$NOBRAND_BIN_DIR" "$NOBRAND_LIB_DIR"; do
         if [ -e "$cleanup_dir" ] || [ -L "$cleanup_dir" ]; then
           [ -d "$cleanup_dir" ] && [ ! -L "$cleanup_dir" ] \
             || cleanup_failed=1
@@ -6488,8 +7406,6 @@ nobrand_backup_restore_recover_applying() {
   fi
 
   if [ "$status" != applying ]; then
-    tuic_restore_side_effect_snapshot "$snapshot/tuic-external" 2>/dev/null \
-      || rollback_failed=1
     forward_restore_side_effect_snapshot "$snapshot/forward-external" 2>/dev/null \
       || rollback_failed=1
     ssh_tunnel_restore_external_snapshot \
@@ -6573,6 +7489,12 @@ nobrand_backup_restore_confirmation_finalize() {
 
 nobrand_backup_create() {
   local destination="${1:-}" stage archive_tmp
+  if nb_splicore_installed; then
+    [ -n "$destination" ] || destination="$(nb_backup_default_path)"
+    ssh_tunnel_backup_state_ready || return 1
+    nb_splicore_call backup --unified --file "$destination"
+    return $?
+  fi
   if nobrand_backup_restore_transaction_present; then
     die "$(t '存在尚未完成的备份恢复事务；拒绝创建可能误导的新备份' \
       'An unfinished backup-restore transaction exists; refusing to create a misleading new backup')"
@@ -6622,146 +7544,36 @@ nobrand_backup_list() {
 # manager-only installation therefore has to rebuild every runtime/service
 # from the restored state before it can start anything.
 nobrand_restore_protocol_runtimes() {
-  local id major need_snell4=0 need_snell5=0 pm
-  if users_state_exists && [ "$(users_count)" -gt 0 ]; then
-    load_install_state || return 1
-    pm="$(detect_pkg_manager)" || return 1
-    ensure_management_dependencies "$pm" || return 1
-    repair_mita_binary_paths || return 1
-    ensure_mita_account || return 1
-    install_instance_runtime || return 1
-  fi
-
-  while IFS= read -r id; do
-    [ -n "$id" ] || continue
-    snell_config_matches_state "$id" || return 1
-    major="$(snell_state_field "$id" version)"
-    case "$major" in
-      4) need_snell4=1 ;;
-      5) need_snell5=1 ;;
-      *) return 1 ;;
-    esac
-  done < <(snell_instance_ids)
-  if [ "$need_snell4" -eq 1 ] || [ "$need_snell5" -eq 1 ] \
-     || hysteria2_state_exists || vless_sudoku_state_exists \
-     || [ -n "$(reality_instance_ids)" ]; then
-    nobrand_prepare_common || return 1
-  fi
-  [ "$need_snell4" -eq 0 ] || snell_install_runtime 4 0 || return 1
-  [ "$need_snell5" -eq 0 ] || snell_install_runtime 5 0 || return 1
-  if [ "$need_snell4" -eq 1 ] || [ "$need_snell5" -eq 1 ]; then
-    snell_install_service_runtime || return 1
-    while IFS= read -r id; do
-      [ -n "$id" ] || continue
-      snell_ensure_openrc_service "$id" || return 1
-    done < <(snell_instance_ids)
-  fi
-
-  if hysteria2_state_exists || vless_sudoku_state_exists || [ -n "$(reality_instance_ids)" ]; then
-    nobrand_install_xray_runtime 0 || return 1
-    nobrand_xray_validate_managed_configs || return 1
-  fi
-  if hysteria2_state_exists; then
-    nobrand_write_hy2_service || return 1
+  nb_splicore_legacy_preflight || return 1
+  if [ -e "${NOBRAND_STATE_DIR}/splicore/current" ] || nb_splicore_installed; then
+    nb_splicore_call adopt-snapshot || return 1
   fi
   if vless_sudoku_state_exists; then
+    NOBRAND_XRAY_SPECIALIZED=1 nobrand_install_xray_runtime 0 || return 1
     nobrand_write_vless_sudoku_service || return 1
   fi
-  reality_restore_runtime || return 1
-  tuic_restore_runtime || return 1
-  forward_realm_restore_runtime || return 1
+  forward_realm_restore_runtime
 }
 
-# The only safe way to synthesize system identities/package resources during
-# a manager-only restore is to prove that those product-owned namespaces are
-# currently empty.  Existing installations use their normal transaction
-# snapshots instead and do not enter this path.
 nobrand_fresh_restore_runtime_preflight() {
-  local staged_state="$1" users_rel staged_users pm path
-  users_rel="${MITA_USERS_STATE#${NOBRAND_STATE_DIR}/}"
-  staged_users="${staged_state}/${users_rel}"
-  for path in \
-    "$NOBRAND_LIB_DIR" \
-    "$MITA_INSTANCE_SYSTEMD_TEMPLATE" "$MITA_INSTANCE_TMPFILES" \
-    "$NOBRAND_SNELL_SYSTEMD_TEMPLATE" "$NOBRAND_HY2_SYSTEMD_SERVICE" \
-    "$NOBRAND_VLESS_SYSTEMD_SERVICE" "$NOBRAND_REALITY_SYSTEMD_TEMPLATE" "$NOBRAND_TUIC_SYSTEMD_TEMPLATE" \
-    "$NOBRAND_REALM_SYSTEMD_SERVICE"; do
+  local staged_state="$1" path
+  # Archive ownership and architecture were checked before extraction.
+  [ -f "$staged_state/state.json" ] || return 1
+  for path in "$NOBRAND_LIB_DIR" "$NOBRAND_VLESS_SYSTEMD_SERVICE" "$NOBRAND_REALM_SYSTEMD_SERVICE"; do
     [ ! -e "$path" ] && [ ! -L "$path" ] || return 1
   done
-  if [ -s "$staged_users" ] && [ "$(jq '.users | length' "$staged_users" 2>/dev/null || printf 0)" -gt 0 ]; then
-    pm="$(detect_pkg_manager)" || return 1
-    ! mita_package_is_installed "$pm" || return 1
-    ! _has_user mita || return 1
-    ! _has_group mita || return 1
-    ! command -v mita >/dev/null 2>&1 || return 1
-    for path in /etc/mita /var/lib/mita /run/mita /var/run/mita /var/run/mita.sock; do
-      [ ! -e "$path" ] && [ ! -L "$path" ] || return 1
-    done
-  fi
 }
 
-# This cleanup is used only after the fresh-manager preflight above proved
-# that the affected package/accounts/units did not pre-exist.  It must run
-# while restored state still exists so every firewall and service identity is
-# available for exact cleanup.
 nobrand_remove_fresh_restore_protocol_resources() {
-  local id port pairs pm failed=0
-  if users_state_exists && [ "$(users_count)" -gt 0 ]; then
-    isolated_stop_all >/dev/null 2>&1 || failed=1
-    firewall_clear_all_owned >/dev/null 2>&1 || failed=1
-    pm="$(detect_pkg_manager 2>/dev/null || true)"
-    case "$pm" in
-      deb)
-        if dpkg-query -W mita >/dev/null 2>&1; then
-          dpkg -P mita >/dev/null 2>&1 || failed=1
-        fi
-        ;;
-      rpm)
-        if rpm -q mita >/dev/null 2>&1; then
-          rpm -e mita >/dev/null 2>&1 || failed=1
-        fi
-        ;;
-    esac
-    if ! ( UNINSTALL_PRESERVE_PACKAGE=0 UNINSTALL_PRESERVE_USER=0 \
-           UNINSTALL_PRESERVE_GROUP=0 UNINSTALL_PRESERVE_SHARED=0 \
-           remove_mita_common >/dev/null 2>&1 ); then
-      failed=1
-    fi
-    ! _has_user mita || failed=1
-    ! _has_group mita || failed=1
-  fi
-  nb_strict_firewall_clear_all >/dev/null 2>&1 || failed=1
-  rm -f "$NOBRAND_INGRESS_FIREWALL_STATE_FILE" "$NOBRAND_INGRESS_FIREWALL_RULESET"
-
-  while IFS= read -r id; do
-    [ -n "$id" ] || continue
-    pairs="$(snell_firewall_pairs "$id" 2>/dev/null || true)"
-    snell_remove_service "$id" >/dev/null 2>&1 || failed=1
-    [ -z "$pairs" ] || nb_firewall_close_pairs "$pairs" >/dev/null 2>&1 || failed=1
-  done < <(snell_instance_ids)
-  rm -f "$NOBRAND_SNELL_SYSTEMD_TEMPLATE" "$NOBRAND_SNELL_RUNNER" || failed=1
-  rm -rf -- "$NOBRAND_SNELL_RUNTIME_DIR" || failed=1
-
-  if hysteria2_state_exists; then
-    port="$(hysteria2_state_field listen_port 2>/dev/null || true)"
-    nobrand_remove_hy2_service >/dev/null 2>&1 || failed=1
-    [ -z "$port" ] || nb_firewall_close_pairs "UDP|${port}" >/dev/null 2>&1 || failed=1
-  fi
+  nb_splicore_legacy_preflight || return 1
+  local failed=0 port
+  if nb_splicore_installed; then nb_splicore_call purge || failed=1; fi
   if vless_sudoku_state_exists; then
     port="$(vless_sudoku_state_field listen_port 2>/dev/null || true)"
-    nobrand_remove_vless_sudoku_service >/dev/null 2>&1 || failed=1
-    [ -z "$port" ] || nb_firewall_close_pairs "TCP|${port}" >/dev/null 2>&1 || failed=1
+    nobrand_remove_vless_sudoku_service || failed=1
+    [ -z "$port" ] || nb_firewall_close_pairs "TCP|${port}" || failed=1
+    nobrand_remove_xray_runtime_files || failed=1
   fi
-  while IFS= read -r id; do
-    [ -n "$id" ] || continue
-    port="$(reality_state_field "$id" listen_port 2>/dev/null || true)"
-    reality_remove_service "$id" >/dev/null 2>&1 || failed=1
-    [ -z "$port" ] || nb_firewall_close_pairs "TCP|${port}" >/dev/null 2>&1 || failed=1
-  done < <(reality_instance_ids)
-  reality_remove_service_runtime_if_owned || failed=1
-  nobrand_remove_xray_runtime_files || failed=1
-  [ "$(nb_service_manager)" != systemd ] || systemctl daemon-reload >/dev/null 2>&1 || failed=1
-  rmdir "$NOBRAND_BIN_DIR" "$NOBRAND_LIB_DIR" 2>/dev/null || true
   return "$failed"
 }
 
@@ -6833,6 +7645,7 @@ nobrand_backup_restore() {
   local restore_failed=0 rollback_failed=0 managed_roots_restored=0
   local ssh_confirmation_pending=0 pending_operation="" pending_token=""
   local ssh_restore_rc=0
+  local primary_snapshot_active=0
   if nobrand_backup_restore_transaction_present; then
     if nobrand_backup_restore_transaction_valid; then
       die "$(t "存在尚未完成的备份恢复事务，恢复快照保留在: ${NOBRAND_BACKUP_RESTORE_SNAPSHOT_DIR}" \
@@ -6852,6 +7665,7 @@ nobrand_backup_restore() {
         'The current SSH policy is pending confirmation or incomplete; refusing to start backup restore')"
       return 1
     }
+  nb_splicore_call inspect-backup --file "$source" >/dev/null || return 1
   tar -tzf "$source" 2>/dev/null | awk '
     /^\// || /(^|\/)\.\.($|\/)/ { bad=1 }
     END { exit bad ? 1 : 0 }
@@ -6911,8 +7725,15 @@ nobrand_backup_restore() {
       }
     fi
   done
+  # A primary generation contains SQLite and a Unix socket. Snapshot only a
+  # stopped daemon, after all archive/ownership preflight has succeeded.
+  if nb_splicore_installed; then
+    primary_snapshot_active="$(nb_splicore_call status | jq -r 'if .active then 1 else 0 end')" || return 1
+    nb_splicore_call stop || return 1
+  fi
   if ! nobrand_backup_restore_transaction_prepare "$safe_state" "$safe_config" \
       "$state_root_created" "$config_root_created" "$fresh_manager_restore" applying; then
+    [ "$primary_snapshot_active" -ne 1 ] || nb_splicore_call start || return 1
     rm -rf -- "$stage"
     return 1
   fi
@@ -7138,19 +7959,15 @@ nobrand_uninstall_postcondition() {
       failed=1
     fi
   done
-  if mita_uninstall_ledger_active && mita_nobrand_specific_residue_present; then
-    warn '完整卸载验收发现 NoBrand 管理的 Mieru 残留'
-    failed=1
-  fi
   [ "$failed" -eq 0 ]
 }
 
 nobrand_uninstall_impl() {
-  local id port safe_state safe_config safe_lib pairs="" snell_pairs failed=0 had_mieru=0 saved_yes
+  nb_splicore_legacy_preflight || return 1
+  local port safe_state safe_config safe_lib pairs="" failed=0
   safe_state="$(nb_assert_safe_nobrand_root "$NOBRAND_STATE_DIR" NOBRAND_STATE_DIR)" || return 1
   safe_config="$(nb_assert_safe_nobrand_root "$NOBRAND_CONFIG_DIR" NOBRAND_CONFIG_DIR)" || return 1
   safe_lib="$(nb_assert_safe_nobrand_root "$NOBRAND_LIB_DIR" NOBRAND_LIB_DIR)" || return 1
-  mita_uninstall_target_present && had_mieru=1
   # Remove the externally shared sshd policy first. With the real watchdog this
   # is a two-phase operation: no other protocol is touched until a brand-new
   # administrator SSH session confirms that system access still works.
@@ -7163,6 +7980,9 @@ nobrand_uninstall_impl() {
       return 0
     fi
   fi
+  if nb_splicore_installed; then
+    nb_splicore_call purge || return 1
+  fi
   admin_lock_acquire || return 1
   if [ -s "$NOBRAND_FORWARD_STATE_FILE" ] || [ -s "$NOBRAND_REALM_RUNTIME_META" ] \
      || [ -e "$NOBRAND_REALM_SYSTEMD_SERVICE" ] || [ -e "$NOBRAND_REALM_OPENRC_SERVICE" ]; then
@@ -7171,35 +7991,11 @@ nobrand_uninstall_impl() {
        && nft list table "$NOBRAND_FORWARD_NFT_FAMILY" "$NOBRAND_FORWARD_NFT_TABLE" >/dev/null 2>&1; then
     forward_remove_owned_nft_table || failed=1
   fi
-  while IFS= read -r id; do
-    [ -n "$id" ] || continue
-    port="$(snell_state_field "$id" listen_port 2>/dev/null || true)"
-    snell_pairs="$(snell_firewall_pairs "$id" 2>/dev/null || true)"
-    snell_remove_service "$id" || failed=1
-    [ -z "$snell_pairs" ] || nb_firewall_close_pairs "$snell_pairs" || failed=1
-  done < <(snell_instance_ids)
-  if hysteria2_state_exists; then
-    port="$(hysteria2_state_field listen_port 2>/dev/null || true)"
-    nobrand_remove_hy2_service || failed=1
-    [ -z "$port" ] || nb_firewall_close_pairs "UDP|${port}" || failed=1
-  fi
   if vless_sudoku_state_exists; then
     port="$(vless_sudoku_state_field listen_port 2>/dev/null || true)"
     nobrand_remove_vless_sudoku_service || failed=1
     [ -z "$port" ] || nb_firewall_close_pairs "TCP|${port}" || failed=1
   fi
-  while IFS= read -r id; do
-    [ -n "$id" ] || continue
-    port="$(reality_state_field "$id" listen_port 2>/dev/null || true)"
-    reality_remove_service "$id" || failed=1
-    [ -z "$port" ] || nb_firewall_close_pairs "TCP|${port}" || failed=1
-  done < <(reality_instance_ids)
-  while IFS= read -r id; do
-    [ -n "$id" ] || continue
-    port="$(tuic_state_field "$id" listen_port 2>/dev/null || true)"
-    tuic_remove_service "$id" || failed=1
-    [ -z "$port" ] || nb_firewall_close_pairs "UDP|${port}" || failed=1
-  done < <(tuic_instance_ids)
   # 清理可能由失败事务留下、但仍明确记录为 NoBrand-owned 的 firewall rows。
   if [ -s "$NOBRAND_FIREWALL_OWNED_STATE" ]; then
     while IFS='|' read -r _tool proto row_port; do
@@ -7215,17 +8011,6 @@ nobrand_uninstall_impl() {
       'NoBrand service/firewall cleanup was incomplete; state was kept for retry')"
     return 1
   fi
-  case "$NOBRAND_SNELL_SYSTEMD_TEMPLATE" in
-    /etc/systemd/system/nobrand-snell@.service)
-      rm -f "$NOBRAND_SNELL_SYSTEMD_TEMPLATE" || failed=1
-      ;;
-  esac
-  case "$NOBRAND_TUIC_SYSTEMD_TEMPLATE" in
-    /etc/systemd/system/nobrand-tuic@.service)
-      rm -f "$NOBRAND_TUIC_SYSTEMD_TEMPLATE" || failed=1
-      ;;
-  esac
-  reality_remove_service_runtime_if_owned || failed=1
   [ "$(nb_service_manager)" != systemd ] \
     || systemctl daemon-reload 2>/dev/null || failed=1
   if [ "$failed" -ne 0 ]; then
@@ -7236,12 +8021,6 @@ nobrand_uninstall_impl() {
   fi
   admin_lock_release
 
-  if [ "$had_mieru" -eq 1 ]; then
-    saved_yes="$YES"
-    YES=1
-    UNINSTALL_CONTEXT=global do_uninstall || { YES="$saved_yes"; return 1; }
-    YES="$saved_yes"
-  fi
   nb_strict_firewall_clear_all || return 1
   rm -f "$NOBRAND_INGRESS_FIREWALL_STATE_FILE" "$NOBRAND_INGRESS_FIREWALL_RULESET"
   nb_lifecycle_checkpoint uninstall runtime-removed || return 1
@@ -7265,8 +8044,8 @@ nobrand_uninstall_impl() {
 }
 
 nobrand_uninstall() {
-  local state rc=0 mieru_ledger="" mieru_owned=0
-  local preserve_package=0 preserve_user=0 preserve_group=0 preserve_shared=0
+  nb_splicore_legacy_preflight || return 1
+  local state rc=0
   require_root || return 1
   if nobrand_backup_restore_transaction_present; then
     die "$(t '备份恢复事务尚未完成；请先通过修复流程完成 SSH 验收，拒绝卸载恢复证据' \
@@ -7281,7 +8060,7 @@ nobrand_uninstall() {
       return 0
       ;;
     CURRENT_COMPLETE|CURRENT_PARTIAL_INSTALL|CURRENT_PARTIAL_REPAIR|\
-      CURRENT_PARTIAL_CONFIGURE|LEGACY_SUPPORTED)
+      CURRENT_PARTIAL_CONFIGURE)
       nb_schema_v3_file_valid \
         || die '未检测到有效的 NoBrand schema v3 state，拒绝卸载未知资源'
       ;;
@@ -7306,7 +8085,7 @@ nobrand_uninstall() {
       return 0
       ;;
     CURRENT_COMPLETE|CURRENT_PARTIAL_INSTALL|CURRENT_PARTIAL_REPAIR|\
-      CURRENT_PARTIAL_CONFIGURE|LEGACY_SUPPORTED)
+      CURRENT_PARTIAL_CONFIGURE)
       if ! nb_schema_v3_file_valid; then
         nb_lifecycle_lock_release
         return 1
@@ -7319,33 +8098,11 @@ nobrand_uninstall() {
       return 1
       ;;
   esac
-  if mita_uninstall_ledger_active; then
-    mieru_owned="$(nb_lifecycle_field MIERU_OWNED)"
-    preserve_package="$(nb_lifecycle_field MIERU_PRESERVE_PACKAGE)"
-    preserve_user="$(nb_lifecycle_field MIERU_PRESERVE_USER)"
-    preserve_group="$(nb_lifecycle_field MIERU_PRESERVE_GROUP)"
-    preserve_shared="$(nb_lifecycle_field MIERU_PRESERVE_SHARED)"
-  else
-    mieru_ledger="$(mita_uninstall_ledger_capture)" || {
-      nb_lifecycle_lock_release
-      return 1
-    }
-    IFS='|' read -r mieru_owned preserve_package preserve_user preserve_group \
-      preserve_shared <<<"$mieru_ledger"
-  fi
-  case "$mieru_owned:$preserve_package:$preserve_user:$preserve_group:$preserve_shared" in
-    0:0:0:0:0|1:[01]:[01]:[01]:[01]) ;;
-    *)
-      nb_lifecycle_lock_release
-      return 1
-      ;;
-  esac
   nb_lifecycle_pre_mutation_snapshot || {
     nb_lifecycle_lock_release
     return 1
   }
-  nb_lifecycle_begin uninstall prepare "$mieru_owned" "$preserve_package" \
-    "$preserve_user" "$preserve_group" "$preserve_shared" 0 global || {
+  nb_lifecycle_begin uninstall prepare 0 0 0 0 0 0 global || {
     nb_lifecycle_pre_mutation_disarm
     nb_lifecycle_lock_release
     return 1
@@ -7400,227 +8157,273 @@ nobrand_uninstall() {
 }
 
 nobrand_stop_all_services() {
-  local id failed=0
-  if users_state_exists; then
-    isolated_stop_all >/dev/null 2>&1 || failed=1
-  fi
-  while IFS= read -r id; do
-    [ -n "$id" ] || continue
-    snell_service_action "$id" stop >/dev/null 2>&1 || failed=1
-  done < <(snell_instance_ids)
-  if hysteria2_state_exists; then
-    nobrand_hy2_service_action stop >/dev/null 2>&1 || failed=1
-  fi
-  if vless_sudoku_state_exists; then
-    nobrand_vless_sudoku_service_action stop >/dev/null 2>&1 || failed=1
-  fi
-  while IFS= read -r id; do
-    [ -n "$id" ] || continue
-    reality_service_action "$id" stop >/dev/null 2>&1 || failed=1
-  done < <(reality_instance_ids)
-  while IFS= read -r id; do
-    [ -n "$id" ] || continue
-    tuic_service_action "$id" stop >/dev/null 2>&1 || failed=1
-  done < <(tuic_instance_ids)
-  if [ -s "$NOBRAND_FORWARD_STATE_FILE" ] || [ -s "$NOBRAND_REALM_RUNTIME_META" ] \
-     || [ -e "$NOBRAND_REALM_SYSTEMD_SERVICE" ] || [ -e "$NOBRAND_REALM_OPENRC_SERVICE" ]; then
-    forward_realm_service_action stop >/dev/null 2>&1 || failed=1
-  fi
-  [ "$failed" -eq 0 ]
-}
-
-nobrand_start_enabled_services() {
-  local id enabled port pairs failed=0
-  nb_strict_firewall_restore_authoritative >/dev/null 2>&1 || failed=1
-  if users_state_exists && [ "$(users_count)" -gt 0 ]; then
-    if load_install_state \
-       && reconcile_isolated_instances >/dev/null 2>&1 \
-       && apply_tc_limits >/dev/null 2>&1; then
-      pairs="$(multi_user_port_protocol_pairs 2>/dev/null || true)"
-      [ -z "$pairs" ] || open_firewall_for_pairs "$pairs" >/dev/null 2>&1 || failed=1
-    else
-      failed=1
-    fi
-  fi
-  tuic_restore_runtime >/dev/null 2>&1 || {
-    [ -z "$(tuic_instance_ids)" ] || failed=1
-  }
-  while IFS= read -r id; do
-    [ -n "$id" ] || continue
-    enabled="$(snell_state_field "$id" enabled 2>/dev/null || printf false)"
-    [ "$enabled" = true ] || continue
-    port="$(snell_state_field "$id" listen_port)"
-    pairs="$(snell_firewall_pairs "$id")"
-    nb_firewall_open_pairs "$pairs" >/dev/null 2>&1 \
-      && snell_service_action "$id" start >/dev/null 2>&1 \
-      && snell_wait_for_required_listeners "$id" 25 || failed=1
-  done < <(snell_instance_ids)
-  if hysteria2_state_exists \
-     && [ "$(hysteria2_state_field enabled 2>/dev/null || printf false)" = true ]; then
-    port="$(hysteria2_state_field listen_port)"
-    nobrand_hy2_service_action start >/dev/null 2>&1 \
-      && hysteria2_running || failed=1
-  fi
-  if vless_sudoku_state_exists \
-     && [ "$(vless_sudoku_state_field enabled 2>/dev/null || printf false)" = true ]; then
-    port="$(vless_sudoku_state_field listen_port)"
-    nobrand_vless_sudoku_service_action start >/dev/null 2>&1 \
-      && vless_sudoku_running || failed=1
-  fi
-  while IFS= read -r id; do
-    [ -n "$id" ] || continue
-    enabled="$(reality_state_field "$id" enabled 2>/dev/null || printf false)"
-    [ "$enabled" = true ] || continue
-    port="$(reality_state_field "$id" listen_port)"
-    reality_install_service_runtime >/dev/null 2>&1 \
-      && reality_ensure_openrc_service "$id" >/dev/null 2>&1 \
-      && reality_config_matches_state "$id" \
-      && nobrand_xray_test_config "$(reality_config_file "$id")" \
-      && nb_firewall_open_pairs "TCP|${port}" >/dev/null 2>&1 \
-      && reality_service_action "$id" start >/dev/null 2>&1 \
-      && reality_running "$id" || failed=1
-  done < <(reality_instance_ids)
-  while IFS= read -r id; do
-    [ -n "$id" ] || continue
-    enabled="$(tuic_state_field "$id" enabled 2>/dev/null || printf false)"
-    [ "$enabled" = true ] || continue
-    port="$(tuic_state_field "$id" listen_port)"
-    tuic_install_service_runtime >/dev/null 2>&1 \
-      && tuic_ensure_openrc_service "$id" >/dev/null 2>&1 \
-      && tuic_validate_config "$(tuic_config_file "$id")" \
-      && nb_firewall_open_pairs "UDP|${port}" >/dev/null 2>&1 \
-      && tuic_service_action "$id" start >/dev/null 2>&1 \
-      && tuic_running "$id" || failed=1
-  done < <(tuic_instance_ids)
-  if [ -s "$NOBRAND_FORWARD_STATE_FILE" ]; then
-    forward_realm_restore_runtime >/dev/null 2>&1 \
-      && forward_apply_nft_state "$NOBRAND_FORWARD_STATE_FILE" >/dev/null 2>&1 \
-      && forward_realm_apply_state "$NOBRAND_FORWARD_STATE_FILE" >/dev/null 2>&1 || failed=1
-  fi
+  nb_splicore_legacy_preflight || return 1
+  local failed=0
+  if nb_splicore_installed; then nb_splicore_call stop || return 1; fi
+  if vless_sudoku_state_exists; then nobrand_vless_sudoku_service_action stop || failed=1; fi
+  if [ -s "$NOBRAND_FORWARD_STATE_FILE" ]; then forward_realm_service_action stop || failed=1; fi
   return "$failed"
 }
 
-install_self_script() {
-  STAGE="安装管理脚本"
-  local tmp src_real="" dest_real="" installed=0
-  tmp="$(mktemp_file .sh)"
-  # An unpublished development build must install the exact local artifact
-  # that is being executed. Released builds may fall back only to the latest
-  # GitHub Release asset; raw main is deliberately not an installation source.
-  if [ -n "${BASH_SOURCE[0]:-}" ] && [ -r "${BASH_SOURCE[0]}" ] \
-       && grep -qxF "SCRIPT_VERSION=\"${SCRIPT_VERSION}\"" "${BASH_SOURCE[0]}" 2>/dev/null; then
-    src_real="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null \
-      || realpath "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
-    dest_real="$(readlink -f "$INSTALL_SCRIPT_PATH" 2>/dev/null \
-      || realpath "$INSTALL_SCRIPT_PATH" 2>/dev/null || printf '%s' "$INSTALL_SCRIPT_PATH")"
-    if [ "$src_real" != "$dest_real" ]; then
-      run install -m 0755 "${BASH_SOURCE[0]}" "$INSTALL_SCRIPT_PATH"
-    else
-      run chmod 0755 "$INSTALL_SCRIPT_PATH"
+nobrand_start_enabled_services() {
+  nb_splicore_legacy_preflight || return 1
+  if nb_splicore_installed; then nb_splicore_call start || return 1; fi
+  if vless_sudoku_state_exists; then nobrand_vless_sudoku_service_action start || return 1; fi
+  forward_realm_restore_runtime
+}
+
+# shellcheck shell=bash
+# ---------- One NoBrand-owned Splicore artifact, daemon and transaction ----------
+# nb_splicore_python is embedded by scripts/build.sh from runtime/splicore.py.
+nb_splicore_legacy_notice() {
+  cat >&2 <<'NOBRAND_LEGACY_NOTICE'
+Legacy NoBrand multi-core installation detected.
+Automatic in-place migration is not supported by this version.
+No changes were made.
+
+Recommended:
+1. Back up current client information.
+2. Remove the legacy installation using the matching legacy NoBrand version.
+3. Perform a clean installation.
+4. Import/use the newly generated client profiles.
+NOBRAND_LEGACY_NOTICE
+}
+
+nb_splicore_json_marker() {
+  [ -f "$1" ] && command -v python3 >/dev/null 2>&1 || return 1
+  python3 - "$1" "$2" "$3" <<'NOBRAND_MARKER_PY'
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as stream:
+        data = json.load(stream)
+    valid = isinstance(data, dict) and data.get(sys.argv[2]) == sys.argv[3]
+except (OSError, ValueError):
+    valid = False
+sys.exit(0 if valid else 1)
+NOBRAND_MARKER_PY
+}
+
+nb_splicore_legacy_preflight() {
+  # Read only, dependency free, and before locks, packages, recovery or bootstrap.
+  local path registry="${NOBRAND_STATE_DIR}/state.json" system="${NOBRAND_SYSTEM_ROOT:-}"
+  local -a owned_paths=(
+    "${NOBRAND_STATE_DIR}/mieru/install-state.env" "${NOBRAND_STATE_DIR}/mieru/users.json"
+    "${NOBRAND_STATE_DIR}/mieru/.installed" "${NOBRAND_STATE_DIR}/hysteria2/state.json"
+    "${NOBRAND_STATE_DIR}/tuic/runtime.json" "${NOBRAND_STATE_DIR}/snell/instances"
+    "${NOBRAND_STATE_DIR}/tuic/instances" "${NOBRAND_STATE_DIR}/vless-reality/instances"
+    "${NOBRAND_CONFIG_DIR}/hysteria2/config.json" "${NOBRAND_CONFIG_DIR}/vless-reality/instances"
+    "${NOBRAND_LIB_DIR}/bin/mita" "${NOBRAND_LIB_DIR}/bin/sing-box"
+    "${NOBRAND_LIB_DIR}/bin/hysteria" "${NOBRAND_LIB_DIR}/mieru-instance-run"
+    "${NOBRAND_LEGACY_MIERU_STATE_DIR}"
+    "${MITA_INSTANCE_SYSTEMD_TEMPLATE}" "${NOBRAND_SNELL_SYSTEMD_TEMPLATE}"
+    "${NOBRAND_TUIC_SYSTEMD_TEMPLATE}" "${NOBRAND_REALITY_SYSTEMD_TEMPLATE}"
+    "${NOBRAND_HY2_SYSTEMD_SERVICE}" "${NOBRAND_HY2_OPENRC_SERVICE}"
+  )
+  for path in "${owned_paths[@]}" \
+    "${system}"/etc/systemd/system/nobrand-mieru*.service "${system}"/etc/systemd/system/nobrand-mieru*.timer \
+    "${system}"/etc/systemd/system/nobrand-snell@*.service "${system}"/etc/systemd/system/nobrand-tuic@*.service \
+    "${system}"/etc/systemd/system/nobrand-vless-reality@*.service \
+    "${system}"/etc/init.d/nobrand-mieru-* "${system}"/etc/init.d/nobrand-snell-* \
+    "${system}"/etc/init.d/nobrand-tuic-* "${system}"/etc/init.d/nobrand-vless-reality-*; do
+    case "$path" in /etc/*|/var/lib/mita-oneclick) path="${system}${path}" ;; esac
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      nb_splicore_legacy_notice
+      return 1
     fi
-    installed=1
-  elif [ -r "$INSTALL_SCRIPT_PATH" ] \
-       && grep -qxF "SCRIPT_VERSION=\"${SCRIPT_VERSION}\"" "$INSTALL_SCRIPT_PATH" 2>/dev/null; then
-    run chmod 0755 "$INSTALL_SCRIPT_PATH"
-    installed=1
-  elif curl -fsSL --connect-timeout 15 --max-time 60 "$NOBRAND_RELEASE_INSTALLER_URL" -o "$tmp" 2>/dev/null \
-       && grep -qxF "SCRIPT_VERSION=\"${SCRIPT_VERSION}\"" "$tmp"; then
-    run install -m 0755 "$tmp" "$INSTALL_SCRIPT_PATH"
-    installed=1
-  fi
-  rm -f "$tmp"
-  [ "$installed" -eq 1 ] || die "$(t '无法取得与当前版本一致的管理脚本，拒绝用其它版本覆盖' \
-    'Could not obtain the exact current manager version; refusing to overwrite with another version')"
-  nobrand_install_manager_script
-}
-
-ensure_management_scripts() {
-  STAGE="更新管理脚本"
-  install_self_script
-  repair_mita_binary_paths
-}
-
-# 重新下载官方包并安装，修复缺失的 mita 二进制（deb/rpm）。
-# 注意：oneclick 的 deb 来自 GitHub Release，并不在 apt 源里，
-# 所以 `apt install --reinstall mita` 必定失败；这里改为脚本自行重下重装。
-reinstall_mita_package() {
-  [ "${MITA_REINSTALL_TRIED:-0}" -eq 1 ] && return 1
-  MITA_REINSTALL_TRIED=1
-  command -v curl >/dev/null 2>&1 || return 1
-  local pm arch ver url tmp
-  pm="$(detect_pkg_manager 2>/dev/null || true)"
-  case "$pm" in
-    deb|rpm) ;;
-    *) return 1 ;;
-  esac
-  arch="$(detect_arch 2>/dev/null || true)"
-  [ -n "$arch" ] || return 1
-  load_install_state 2>/dev/null || true
-  if ! mieru_resolve_runtime "${MIERU_CHANNEL:-stable}" "${MIERU_VERSION:-}" "$pm" "$arch"; then
+  done
+  # The shared Xray binary is also owned by the existing Sudoku exception.
+  if { [ -e "$NOBRAND_XRAY_BIN" ] || [ -L "$NOBRAND_XRAY_BIN" ]; } \
+     && [ ! -f "$NOBRAND_VLESS_STATE_FILE" ]; then
+    nb_splicore_legacy_notice
     return 1
   fi
-  ver="$MIERU_RUNTIME_RESOLVED_VERSION"
-  warn "$(t "mita 二进制缺失，正在自动重新下载并安装 v${ver}（apt 源中没有该包）..." \
-    "mita binary missing; auto re-downloading and installing v${ver} (not in apt repo)...")"
-  url="$MIERU_RUNTIME_RESOLVED_URL"
-  tmp="$(mktemp_file)"
-  # 子 shell 包裹：download/install 内部的 die→exit 只会终止子 shell，不会杀掉主流程
-  if ( download_package "$url" "$tmp" \
-         "$MIERU_RUNTIME_RESOLVED_SHA256" \
-         "$MIERU_RUNTIME_RESOLVED_CHECKSUM_URL" \
-       && install_package "$tmp" "$pm" ) \
-     && mieru_assert_runtime_version "$ver"; then
-    rm -f "$tmp"
-    hash -r 2>/dev/null || true
-    return 0
-  fi
-  rm -f "$tmp"
-  return 1
-}
-
-# Debian/Ubuntu 专用自愈：SSH 断开会让 dpkg 停在半装状态，
-# 先 dpkg --configure -a 收尾，再恢复软链或重下重装。
-recover_deb_mita() {
-  command -v dpkg >/dev/null 2>&1 || return 1
-  # dpkg --configure -a 幂等：无中断时为空操作，有中断时完成收尾
-  configure_pending_deb_packages 2>/dev/null || true
-  local deb_bin
-  deb_bin="$(dpkg -L mita 2>/dev/null | grep '/bin/mita$' | head -n1)"
-  if [ -n "$deb_bin" ] && [ -x "$deb_bin" ] && [ ! -e /usr/bin/mita ]; then
-    run ln -sf "$deb_bin" /usr/bin/mita 2>/dev/null || true
-  fi
-  if is_mita_elf_binary "$MITA_PACKAGE_BIN"; then
-    refresh_managed_mita_runtime
-    return $?
-  fi
-  reinstall_mita_package && refresh_managed_mita_runtime
-}
-
-refresh_managed_mita_runtime() {
-  local package_bin="${1:-$MITA_PACKAGE_BIN}"
-  is_mita_elf_binary "$package_bin" || return 1
-  run install -d -o root -g root -m 0755 "$NOBRAND_LIB_DIR" "$NOBRAND_BIN_DIR"
-  run install -m 0755 "$package_bin" "$MITA_BIN"
-  is_mita_elf_binary "$MITA_BIN"
-}
-
-repair_mita_binary_paths() {
-  STAGE="修复 mita 二进制路径"
-  if ! is_mita_elf_binary "$MITA_BIN"; then
-    if is_mita_elf_binary "$MITA_PACKAGE_BIN"; then
-      refresh_managed_mita_runtime || return 1
-    elif command -v dpkg >/dev/null 2>&1; then
-      recover_deb_mita || warn "$(t 'mita 二进制自动修复未成功，请重新运行脚本并选择「升级」重新安装' \
-        'auto-repair failed; re-run the script and choose Upgrade to reinstall')"
-    else
-      reinstall_mita_package && refresh_managed_mita_runtime || warn "$(t \
-        'mita 二进制不可用，请执行 nobrand mieru upgrade 重新安装' \
-        'mita binary unavailable; run nobrand mieru upgrade to reinstall')"
+  if [ -e "$registry" ] || [ -L "$registry" ]; then
+    if [ -L "$registry" ] || ! nb_splicore_json_marker "$registry" architecture splicore-native; then
+      nb_splicore_legacy_notice
+      return 1
     fi
   fi
-  is_mita_elf_binary "$MITA_BIN"
-  hash -r 2>/dev/null || true
+  path="${NOBRAND_STATE_DIR}/splicore/current"
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    if [ -L "$path" ]; then
+      nb_splicore_json_marker "$path/desired.json" architecture splicore-native || { nb_splicore_legacy_notice; return 1; }
+    else
+      nb_splicore_json_marker "$path" owner nobrand-splicore-pointer-v1 || { nb_splicore_legacy_notice; return 1; }
+    fi
+  fi
 }
+
+nb_splicore_call() (
+  export NOBRAND_STATE_DIR NOBRAND_CONFIG_DIR NOBRAND_LIB_DIR NOBRAND_LIFECYCLE_DIR
+  export NOBRAND_LIFECYCLE_LOCK_FILE
+  export PORT ADVERTISE_HOST ADVERTISE_PORT USERNAME PASSWORD PROTOCOL MTU
+  export MULTIPLEXING HANDSHAKE_MODE TRAFFIC_PATTERN LOW_ENTROPY_MODE
+  export USER_QUOTA_MB USER_EXPIRE USER_BANDWIDTH_MBPS USER_PACKAGE
+  export PROFILE PROFILE_CLI MTU_CLI MULTIPLEXING_CLI HANDSHAKE_CLI TRAFFIC_CLI LOW_ENTROPY_CLI
+  export PROTOCOL_CLI PORT_CLI PASSWORD_CLI ADVERTISE_CLI
+  export SNELL_VERSION SNELL_PSK SNELL_QUIC_PROXY TUIC_SNI TUIC_USER HY2_SNI SCRIPT_VERSION
+  export VLESS_REALITY_TARGET VLESS_REALITY_TARGET_PORT NOBRAND_SPLICORE_LISTEN NOBRAND_SPLICORE_INGRESS_ID
+  NOBRAND_SPLICORE_MANAGER_SOURCE="$(nobrand_manager_source_path 2>/dev/null || true)"
+  export NOBRAND_SPLICORE_MANAGER_SOURCE
+  command -v python3 >/dev/null 2>&1 || {
+    printf '[错误] Splicore 管理需要 python3；请安装项目公共依赖。\n' >&2
+    return 1
+  }
+  nb_splicore_python "$@"
+)
+
+nb_splicore_installed() {
+  [ -L "${NOBRAND_STATE_DIR}/splicore/current" ] \
+    && [ -f "${NOBRAND_STATE_DIR}/splicore/current/desired.json" ] \
+    && LC_ALL=C grep -Eq '"architecture"[[:space:]]*:[[:space:]]*"splicore-native"' \
+      "${NOBRAND_STATE_DIR}/splicore/current/desired.json"
+}
+
+nb_splicore_protocol() {
+  nb_splicore_legacy_preflight || return 1
+  local protocol="$1" operation="$2" selector="${3:-}"
+  local -a runtime_options=()
+  if nobrand_ssh_confirmation_pending; then
+    nobrand_pending_ssh_confirmation_notice
+    return 1
+  fi
+  if [ "$protocol" = mieru ]; then
+    apply_requested_profile_preserving_cli || return 1
+    case "${MTU_REQUEST:-}" in
+      '') ;;
+      safe) MTU=1400 ;;
+      auto) printf '[错误] 请先确定 MTU，使用 1280-1500 的显式值。\n' >&2; return 1 ;;
+      *) valid_mtu "$MTU_REQUEST" || return 1; MTU="$MTU_REQUEST" ;;
+    esac
+  fi
+  if [ "$operation" = set-endpoint ] || [ "$operation" = user-set-endpoint ]; then
+    if [ "${ADVERTISE_CLI:-0}" -eq 0 ] && [ "${YES:-0}" -ne 1 ]; then
+      nb_collect_advertise_endpoint_interactive "$protocol" "${NOBRAND_SPLICORE_MENU_PORT:-443}" || return 1
+    fi
+  fi
+  if [ "$operation" = install ] || { [ "$protocol" = mieru ] && [ "$operation" = user-add ]; }; then
+    if [ "${DRY_RUN:-0}" -ne 1 ]; then
+      require_root || return 1
+      if ! command -v python3 >/dev/null 2>&1 || ! command -v openssl >/dev/null 2>&1 \
+         || ! command -v jq >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then
+        nobrand_prepare_common || return 1
+      fi
+    fi
+    if [ "$protocol" = mieru ]; then
+      [ "${MIERU_CHANNEL_CLI:-0}" -eq 0 ] || {
+        printf '[错误] 独立 Mita 版本选项不适用于固定的 Splicore；请使用 runtime --version。\n' >&2
+        return 1
+      }
+    fi
+    if [ "$protocol" = tuic ] && { [ "${TUIC_CHANNEL:-stable}" != stable ] || [ -n "${TUIC_VERSION:-}" ]; }; then
+      printf '[错误] 独立 sing-box 版本选项不适用于固定的 Splicore。\n' >&2
+      return 1
+    fi
+    if [ "${DRY_RUN:-0}" -ne 1 ]; then
+      nb_prepare_ingress_request || return 1
+      nb_prepare_ingress_deployment "$INGRESS_PROFILE_ID" native-bind || return 1
+      NOBRAND_SPLICORE_INGRESS_ID="$INGRESS_PROFILE_ID"
+      NOBRAND_SPLICORE_LISTEN="$INGRESS_LISTEN_HOST"
+      export NOBRAND_SPLICORE_LISTEN
+    fi
+    if [ "${YES:-0}" -ne 1 ] && [ "${DRY_RUN:-0}" -ne 1 ]; then
+      if [ -z "$selector" ]; then
+        read_tty selector "$(t '节点名 [primary]: ' 'Node name [primary]: ')" || return 1
+        selector="${selector:-primary}"
+      fi
+      if [ "$protocol" = mieru ] && [ "${PROFILE_CLI:-0}" -eq 0 ]; then
+        choose_profile_interactive || return 1
+      fi
+    fi
+    if [ -z "${PORT:-}" ] && [ "${DRY_RUN:-0}" -ne 1 ]; then
+      case "$protocol" in snell|mieru|vless-reality) PORT="$(nb_select_available_port TCP "$INGRESS_PROFILE_ID")" ;; *) PORT="$(nb_select_available_port UDP "$INGRESS_PROFILE_ID")" ;; esac
+      [ -n "$PORT" ] || return 1
+    fi
+    if [ -n "${PORT:-}" ]; then
+      nb_valid_port "$PORT" || return 1
+      if [ "${DRY_RUN:-0}" -ne 1 ]; then
+        nb_ingress_port_is_reserved "$INGRESS_PROFILE_ID" "$PORT" && return 1
+      fi
+    fi
+    if [ "${YES:-0}" -ne 1 ] && [ "${DRY_RUN:-0}" -ne 1 ] && [ "${ADVERTISE_CLI:-0}" -eq 0 ]; then
+      nb_collect_advertise_endpoint_interactive "$protocol" "$PORT" || return 1
+    fi
+    if [ "${ADVERTISE_AUTO_REQUESTED:-0}" -eq 1 ] && [ -z "${ADVERTISE_HOST:-}" ]; then
+      if [ "${DRY_RUN:-0}" -eq 1 ]; then
+        NOBRAND_SPLICORE_AUTO_HOST=preview.invalid
+      else
+        NOBRAND_SPLICORE_AUTO_HOST="$(public_ip)" || return 1
+      fi
+      export NOBRAND_SPLICORE_AUTO_HOST
+    fi
+  fi
+  [ "${DRY_RUN:-0}" -ne 1 ] || runtime_options+=(--dry-run)
+  [ -z "${NOBRAND_SPLICORE_ARTIFACTS:-}" ] || runtime_options+=(--artifacts "$NOBRAND_SPLICORE_ARTIFACTS")
+  nb_splicore_call protocol --protocol "$protocol" --operation "$operation" \
+    --selector "$selector" "${runtime_options[@]}" || return $?
+  if { [ "$operation" = install ] || [ "$operation" = user-add ]; } && [ "${DRY_RUN:-0}" -ne 1 ]; then
+    nobrand_install_manager_script || return 1
+  fi
+}
+
+nb_splicore_menu_select() {
+  local protocol="$1" data choice="" count only_name selected_id
+  nobrand_menu_selection_clear
+  data="$(nb_splicore_call protocol --protocol "$protocol" --operation status)" || return 1
+  printf '%s\n' "$data" | jq -r '.nodes[] | "  - \(.name) (\(.id))"'
+  count="$(printf '%s\n' "$data" | jq '.nodes | length')"
+  [ "$count" -gt 0 ] || { warn '尚无 Splicore 节点'; return 1; }
+  only_name="$(printf '%s\n' "$data" | jq -r '.nodes[0].name')"
+  read_tty choice "$(t '节点名: ' 'Node name: ')${only_name}" || return 1
+  if [ -z "$choice" ]; then
+    [ "$count" -eq 1 ] || return 1
+    choice="$only_name"
+  fi
+  selected_id="$(printf '%s\n' "$data" | jq -r --arg name "$choice" '.nodes[] | select(.name==$name or .id==$name) | .id')"
+  [ -n "$selected_id" ] && [[ "$selected_id" != *$'\n'* ]] || return 1
+  NOBRAND_SPLICORE_MENU_PORT="$(printf '%s\n' "$data" | jq -r --arg id "$selected_id" '.nodes[] | select(.id==$id) | .listener.port')"
+  export NOBRAND_SPLICORE_MENU_PORT
+  nobrand_menu_selection_record splicore "$selected_id" "$choice" "${NOBRAND_STATE_DIR}/splicore/current/desired.json" || return 1
+  case "$protocol" in snell) SNELL_NAME="$choice" ;; tuic) TUIC_NAME="$choice" ;; vless-reality) VLESS_REALITY_NAME="$choice" ;; esac
+}
+
+nb_splicore_route_main() {
+  # Consumed by main after this function returns.
+  # shellcheck disable=SC2034
+  NOBRAND_SPLICORE_HANDLED=1
+  case "${ACTION:-}" in
+    nobrand-runtime) nb_splicore_call "${NOBRAND_RUNTIME_ARGS[@]}" ;;
+    nobrand-snell)
+      [[ "${SNELL_ACTION:-menu}" != menu && "${SNELL_ACTION:-menu}" != help ]] || { NOBRAND_SPLICORE_HANDLED=0; return 0; }
+      nb_splicore_protocol snell "$SNELL_ACTION" "${SNELL_NAME:-}"
+      ;;
+    nobrand-tuic)
+      [[ "${TUIC_ACTION:-menu}" != menu && "${TUIC_ACTION:-menu}" != help ]] || { NOBRAND_SPLICORE_HANDLED=0; return 0; }
+      nb_splicore_protocol tuic "${TUIC_ACTION:-status}" "${TUIC_NAME:-}"
+      ;;
+    nobrand-hy2)
+      [[ "${HY2_ACTION:-menu}" != menu && "${HY2_ACTION:-menu}" != help ]] || { NOBRAND_SPLICORE_HANDLED=0; return 0; }
+      nb_splicore_protocol hysteria2 "$HY2_ACTION" hy2
+      ;;
+    nobrand-vless-reality)
+      [[ "${VLESS_REALITY_ACTION:-menu}" != menu && "${VLESS_REALITY_ACTION:-menu}" != help ]] || { NOBRAND_SPLICORE_HANDLED=0; return 0; }
+      nb_splicore_protocol vless-reality "$VLESS_REALITY_ACTION" "${VLESS_REALITY_NAME:-}"
+      ;;
+    install|reconfigure|upgrade|uninstall|start|stop|restart|user-add|user-del|user-show|user-list|user-enable|user-disable|user-set-endpoint|user-set-quota|user-set-expire|user-set-rate|user-scan|user-quota-reset|profile-config|traffic-config|low-entropy-config|client-modes-config|mtu-config|version-channel)
+      nb_splicore_protocol mieru "$ACTION" "${USERNAME:-${USER_DEL_NAME:-${USER_SHOW_NAME:-}}}"
+      ;;
+    status|doctor|client-config|show)
+      nb_splicore_protocol mieru "$ACTION" "${USERNAME:-${USER_SHOW_NAME:-}}"
+      ;;
+    user-manage) NOBRAND_SPLICORE_HANDLED=0 ;;
+    user-*|rate-status|rate-restore)
+      nb_splicore_protocol mieru "$ACTION" "${USERNAME:-}"
+      ;;
+    *) NOBRAND_SPLICORE_HANDLED=0 ;;
+  esac
+}
+
+# Native architecture: ordinary protocols use src/19-splicore.sh.
 
 service_manager() {
   if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
@@ -7630,364 +8433,6 @@ service_manager() {
   else
     echo none
   fi
-}
-
-detect_arch() {
-  STAGE="检测 CPU 架构"
-  local m
-  m="$(uname -m)"
-  case "$m" in
-    x86_64|amd64) echo amd64 ;;
-    aarch64|arm64) echo arm64 ;;
-    *) die "$(t "不支持的架构：${m}（仅 amd64/arm64）" "Unsupported arch: ${m} (amd64/arm64 only)")" ;;
-  esac
-}
-
-normalize_mieru_channel() {
-  case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
-    stable) printf 'stable' ;;
-    latest) printf 'latest' ;;
-    pinned|version|custom) printf 'pinned' ;;
-    *) return 1 ;;
-  esac
-}
-
-valid_mieru_version() {
-  [[ "${1:-}" =~ ^[0-9]+([.][0-9]+){2}([.-][0-9A-Za-z.]+)?$ ]]
-}
-
-mieru_stable_version() {
-  [[ "${1:-}" =~ ^[0-9]+[.][0-9]+[.][0-9]+$ ]]
-}
-
-mieru_runtime_asset_name() {
-  local version="$1" pm="$2" arch="$3"
-  valid_mieru_version "$version" || return 1
-  case "${pm}:${arch}" in
-    deb:amd64) printf 'mita_%s_amd64.deb' "$version" ;;
-    deb:arm64) printf 'mita_%s_arm64.deb' "$version" ;;
-    rpm:amd64) printf 'mita-%s-1.x86_64.rpm' "$version" ;;
-    rpm:arm64) printf 'mita-%s-1.aarch64.rpm' "$version" ;;
-    alpine:amd64) printf 'mita_%s_linux_amd64.tar.gz' "$version" ;;
-    alpine:arm64) printf 'mita_%s_linux_arm64.tar.gz' "$version" ;;
-    *) return 1 ;;
-  esac
-}
-
-mieru_last_known_good_digest() {
-  case "$1" in
-    mita_3.36.0_amd64.deb) printf '%s' "$LAST_KNOWN_GOOD_MIERU_AMD64_DEB_SHA256" ;;
-    mita_3.36.0_arm64.deb) printf '%s' "$LAST_KNOWN_GOOD_MIERU_ARM64_DEB_SHA256" ;;
-    mita-3.36.0-1.x86_64.rpm) printf '%s' "$LAST_KNOWN_GOOD_MIERU_AMD64_RPM_SHA256" ;;
-    mita-3.36.0-1.aarch64.rpm) printf '%s' "$LAST_KNOWN_GOOD_MIERU_ARM64_RPM_SHA256" ;;
-    mita_3.36.0_linux_amd64.tar.gz) printf '%s' "$LAST_KNOWN_GOOD_MIERU_AMD64_TAR_SHA256" ;;
-    mita_3.36.0_linux_arm64.tar.gz) printf '%s' "$LAST_KNOWN_GOOD_MIERU_ARM64_TAR_SHA256" ;;
-    *) return 1 ;;
-  esac
-}
-
-mieru_fetch_releases_metadata() {
-  local output="$1"
-  curl -fsSL --connect-timeout 15 --max-time 90 --retry 3 --retry-delay 2 --retry-all-errors \
-    -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' \
-    -H 'User-Agent: NoBrand-OneClick' "${NOBRAND_MIERU_RELEASES_API}?per_page=100" -o "$output"
-}
-
-mieru_fetch_tag_metadata() {
-  local version="$1" output="$2"
-  curl -fsSL --connect-timeout 15 --max-time 90 --retry 3 --retry-delay 2 --retry-all-errors \
-    -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' \
-    -H 'User-Agent: NoBrand-OneClick' "${NOBRAND_MIERU_RELEASES_API}/tags/v${version}" -o "$output"
-}
-
-mieru_reset_runtime_resolution() {
-  MIERU_RUNTIME_RESOLVED_VERSION=""
-  MIERU_RUNTIME_RESOLVED_ASSET=""
-  MIERU_RUNTIME_RESOLVED_URL=""
-  MIERU_RUNTIME_RESOLVED_CHECKSUM_URL=""
-  MIERU_RUNTIME_RESOLVED_SHA256=""
-  MIERU_RUNTIME_RESOLVED_CHANNEL=""
-  MIERU_RUNTIME_RESOLUTION_FALLBACK=0
-}
-
-mieru_apply_last_known_good_resolution() {
-  local channel="$1" pm="$2" arch="$3" version asset digest
-  version="$LAST_KNOWN_GOOD_MIERU_VERSION"
-  mieru_stable_version "$version" || return 1
-  asset="$(mieru_runtime_asset_name "$version" "$pm" "$arch")" || return 1
-  digest="$(mieru_last_known_good_digest "$asset")" || return 1
-  MIERU_RUNTIME_RESOLVED_VERSION="$version"
-  MIERU_RUNTIME_RESOLVED_ASSET="$asset"
-  MIERU_RUNTIME_RESOLVED_URL="${GITHUB_DL}/v${version}/${asset}"
-  MIERU_RUNTIME_RESOLVED_CHECKSUM_URL="${MIERU_RUNTIME_RESOLVED_URL}.sha256.txt"
-  MIERU_RUNTIME_RESOLVED_SHA256="$digest"
-  MIERU_RUNTIME_RESOLVED_CHANNEL="$channel"
-  # Resolver result fields are consumed by callers after this function returns.
-  # shellcheck disable=SC2034
-  MIERU_RUNTIME_RESOLUTION_FALLBACK=1
-  warn 'LATEST_RESOLUTION_FAILED' >&2
-  warn "USING_LAST_KNOWN_GOOD=${version}" >&2
-}
-
-mieru_resolve_runtime() {
-  local channel requested_version pm arch metadata release tag version asset checksum_asset
-  local asset_count checksum_count url checksum_url digest expected_prefix
-  channel="$(normalize_mieru_channel "${1:-stable}")" || return 1
-  requested_version="${2:-}"
-  pm="$3"
-  arch="$4"
-  mieru_reset_runtime_resolution
-  metadata="$(mktemp_file .mieru-release.json)" || return 1
-
-  case "$channel" in
-    stable|latest)
-      if ! mieru_fetch_releases_metadata "$metadata"; then
-        rm -f "$metadata"
-        mieru_apply_last_known_good_resolution "$channel" "$pm" "$arch"
-        return $?
-      fi
-      if ! release="$(jq -ce '
-          select(type == "array")
-          | [ .[]
-              | select(.draft == false and .prerelease == false)
-              | select((.tag_name | type) == "string")
-              | select(.tag_name | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))
-              | . + {nobrand_semver:(.tag_name[1:] | split(".") | map(tonumber))}
-            ]
-          | sort_by(.nobrand_semver)
-          | last
-          | select(type == "object")
-        ' "$metadata" 2>/dev/null)"; then
-        rm -f "$metadata"
-        return 1
-      fi
-      ;;
-    pinned)
-      valid_mieru_version "$requested_version" || { rm -f "$metadata"; return 1; }
-      if ! mieru_fetch_tag_metadata "$requested_version" "$metadata"; then
-        rm -f "$metadata"
-        return 1
-      fi
-      if ! release="$(jq -ce --arg tag "v${requested_version}" '
-          select(type == "object" and .draft == false and .tag_name == $tag)
-        ' "$metadata" 2>/dev/null)"; then
-        rm -f "$metadata"
-        return 1
-      fi
-      ;;
-  esac
-  rm -f "$metadata"
-  [ -n "$release" ] || return 1
-  tag="$(jq -r '.tag_name // empty' <<<"$release")"
-  version="${tag#v}"
-  if [ "$channel" = pinned ]; then
-    valid_mieru_version "$version" || return 1
-  else
-    mieru_stable_version "$version" || return 1
-  fi
-  asset="$(mieru_runtime_asset_name "$version" "$pm" "$arch")" || return 1
-  checksum_asset="${asset}.sha256.txt"
-  asset_count="$(jq -r --arg asset "$asset" \
-    'if (.assets | type) == "array" then [.assets[] | select(.name==$asset)] | length else 0 end' \
-    <<<"$release")"
-  checksum_count="$(jq -r --arg asset "$checksum_asset" \
-    'if (.assets | type) == "array" then [.assets[] | select(.name==$asset)] | length else 0 end' \
-    <<<"$release")"
-  [ "$asset_count" = 1 ] && [ "$checksum_count" = 1 ] || return 1
-  url="$(jq -r --arg asset "$asset" '.assets[] | select(.name==$asset) | .browser_download_url' <<<"$release")"
-  checksum_url="$(jq -r --arg asset "$checksum_asset" '.assets[] | select(.name==$asset) | .browser_download_url' <<<"$release")"
-  digest="$(jq -r --arg asset "$asset" '.assets[] | select(.name==$asset) | .digest // empty' <<<"$release")"
-  digest="${digest#sha256:}"
-  [[ "$digest" =~ ^[0-9a-fA-F]{64}$ ]] || return 1
-  digest="$(printf '%s' "$digest" | tr '[:upper:]' '[:lower:]')"
-  expected_prefix="${GITHUB_DL}/v${version}/"
-  [[ "$url" = "${expected_prefix}${asset}" ]] || return 1
-  [[ "$checksum_url" = "${expected_prefix}${checksum_asset}" ]] || return 1
-  if [ "$version" = "$LAST_KNOWN_GOOD_MIERU_VERSION" ]; then
-    [ "$digest" = "$(mieru_last_known_good_digest "$asset")" ] || return 1
-  fi
-  MIERU_RUNTIME_RESOLVED_VERSION="$version"
-  # Resolver result fields are consumed by callers after this function returns.
-  # shellcheck disable=SC2034
-  MIERU_RUNTIME_RESOLVED_ASSET="$asset"
-  MIERU_RUNTIME_RESOLVED_URL="$url"
-  MIERU_RUNTIME_RESOLVED_CHECKSUM_URL="$checksum_url"
-  MIERU_RUNTIME_RESOLVED_SHA256="$digest"
-  # shellcheck disable=SC2034
-  MIERU_RUNTIME_RESOLVED_CHANNEL="$channel"
-}
-
-mieru_channel_label() {
-  case "$(normalize_mieru_channel "${MIERU_CHANNEL:-stable}" 2>/dev/null || printf stable)" in
-    stable) t 'stable（官方最新稳定版）' 'stable (official latest stable)' ;;
-    latest) t 'latest（官方最新稳定版兼容名）' 'latest (official latest-stable alias)' ;;
-    pinned) t "pinned（固定版本 ${MIERU_VERSION:-未知}）" \
-      "pinned (${MIERU_VERSION:-unknown})" ;;
-  esac
-}
-
-mita_installed() {
-  # ^i[iUFH]: 已安装(ii) 或被中断的半装状态(iU/iF/iH)，后者也需进入修复流程
-  if command -v dpkg >/dev/null 2>&1 && dpkg -l mita 2>/dev/null | grep -qE '^i[iUFH]'; then
-    return 0
-  fi
-  if command -v rpm >/dev/null 2>&1 && rpm -q mita >/dev/null 2>&1; then
-    return 0
-  fi
-  [ -x "$MITA_REAL_BIN" ] && [ -f "$MITA_MARKER" ] && return 0
-  [ -x "$MITA_BIN" ] && [ -f "$MITA_MARKER" ] && return 0
-  command -v mita >/dev/null 2>&1
-}
-
-is_mita_elf_binary() {
-  [ -f "$1" ] || return 1
-  [ "$(head -c 4 "$1" 2>/dev/null || true)" = $'\x7fELF' ]
-}
-
-mita_real_bin() {
-  printf '%s' "$MITA_BIN"
-}
-
-mita_bin() {
-  printf '%s' "$MITA_BIN"
-}
-
-mieru_runtime_version() {
-  local binary="${1:-$(mita_bin)}" output
-  [ -x "$binary" ] || return 1
-  output="$("$binary" version 2>/dev/null | sed -n '1p')" || return 1
-  [[ "$output" =~ ^v?([0-9]+[.][0-9]+[.][0-9]+)([[:space:]]|$) ]] || return 1
-  printf '%s' "${BASH_REMATCH[1]}"
-}
-
-installed_version() {
-  mita_installed || return 1
-  mieru_runtime_version "$(mita_bin)"
-}
-
-mieru_assert_runtime_version() {
-  local expected="$1" actual
-  actual="$(mieru_runtime_version "${2:-$(mita_bin)}")" || return 1
-  [ "$actual" = "$expected" ] || {
-    warn "$(t "mita runtime 身份不匹配：期望 ${expected}，实际 ${actual}" \
-      "mita runtime identity mismatch: expected ${expected}, got ${actual}")"
-    return 1
-  }
-}
-
-mieru_runtime_snapshot() {
-  local snapshot
-  snapshot="$(mktemp_dir)" || return 1
-  if [ -f "$MITA_BIN" ] && [ ! -L "$MITA_BIN" ]; then
-    cp -p "$MITA_BIN" "$snapshot/mita" || { rm -rf -- "$snapshot"; return 1; }
-  else
-    : >"$snapshot/binary.absent"
-  fi
-  if [ -f "$MITA_MARKER" ] && [ ! -L "$MITA_MARKER" ]; then
-    cp -p "$MITA_MARKER" "$snapshot/marker" || { rm -rf -- "$snapshot"; return 1; }
-  else
-    : >"$snapshot/marker.absent"
-  fi
-  printf '%s' "$snapshot"
-}
-
-mieru_runtime_snapshot_valid() {
-  local snapshot="${1:-}"
-  [[ "$snapshot" = /tmp/mita.* || "$snapshot" = /tmp/mita_* ]] \
-    && [ -d "$snapshot" ] && [ ! -L "$snapshot" ]
-}
-
-mieru_runtime_rollback() {
-  local snapshot="$1" rc=0
-  mieru_runtime_snapshot_valid "$snapshot" || return 1
-  run install -d -o root -g root -m 0755 "$NOBRAND_BIN_DIR" "$(dirname "$MITA_MARKER")" || rc=1
-  if [ -f "$snapshot/mita" ]; then
-    run install -m 0755 "$snapshot/mita" "$MITA_BIN" || rc=1
-  elif [ -f "$snapshot/binary.absent" ]; then
-    run rm -f "$MITA_BIN" || rc=1
-  else
-    rc=1
-  fi
-  if [ -f "$snapshot/marker" ]; then
-    run install -m 0600 "$snapshot/marker" "$MITA_MARKER" || rc=1
-  elif [ -f "$snapshot/marker.absent" ]; then
-    run rm -f "$MITA_MARKER" || rc=1
-  else
-    rc=1
-  fi
-  rm -rf -- "$snapshot"
-  return "$rc"
-}
-
-mieru_runtime_commit() {
-  local snapshot="$1"
-  mieru_runtime_snapshot_valid "$snapshot" || return 1
-  rm -rf -- "$snapshot"
-}
-
-version_is_current() {
-  local current="$1"
-  local available="$2"
-  [ -n "$current" ] || return 1
-  [ "$(printf '%s\n%s' "$current" "$available" | sort -V | tail -n1)" = "$current" ]
-}
-
-download_package() {
-  local url="$1"
-  local dest="$2"
-  local pinned_sha256="${3:-}" checksum_url="${4:-${url}.sha256.txt}" actual
-  STAGE="下载安装包"
-  info "$(t "下载 ${url}" "Downloading ${url}")"
-  run curl -fL --connect-timeout 30 --retry 3 --retry-delay 2 -o "$dest" "$url"
-  [ -s "$dest" ] || die "$(t '下载文件为空' 'Downloaded file is empty')"
-  if [ -n "$pinned_sha256" ]; then
-    [[ "$pinned_sha256" =~ ^[0-9a-f]{64}$ ]] || return 1
-    actual="$(nobrand_sha256_file "$dest")" || return 1
-    [ "$actual" = "$pinned_sha256" ] \
-      || die "$(t '安装包与已解析 release digest 不一致' 'Package does not match the resolved release digest')"
-  fi
-  verify_package_sha256 "$dest" "$checksum_url" "$pinned_sha256"
-}
-
-verify_package_sha256() {
-  local file="$1"
-  local sha_url="$2"
-  local pinned_sha256="${3:-}"
-  [ "$DRY_RUN" -eq 1 ] && return 0
-  STAGE="校验安装包 SHA256"
-  local sha_file expected actual
-  sha_file="$(mktemp_file .txt)"
-  if ! curl -fsSL --connect-timeout 15 --max-time 30 "$sha_url" -o "$sha_file" 2>/dev/null; then
-    rm -f "$sha_file"
-    die "$(t "无法下载校验文件，已中止安装: ${sha_url}" \
-      "Checksum file unavailable; installation aborted: ${sha_url}")"
-    return 1
-  fi
-  expected="$(awk '{print $1}' "$sha_file" | head -n1)"
-  [[ "$expected" =~ ^[0-9A-Fa-f]{64}$ ]] || {
-    rm -f "$sha_file"
-    die "$(t '校验文件格式无效' 'Invalid checksum file')"
-    return 1
-  }
-  expected="$(printf '%s' "$expected" | tr '[:upper:]' '[:lower:]')"
-  [ -z "$pinned_sha256" ] || [ "$expected" = "$pinned_sha256" ] || {
-    rm -f "$sha_file"
-    die "$(t '校验清单与 release digest 不一致' 'Checksum manifest disagrees with the release digest')"
-    return 1
-  }
-  if command -v sha256sum >/dev/null 2>&1; then
-    actual="$(sha256sum "$file" | awk '{print $1}')"
-  elif command -v shasum >/dev/null 2>&1; then
-    actual="$(shasum -a 256 "$file" | awk '{print $1}')"
-  else
-    rm -f "$sha_file"
-    die "$(t '未找到 sha256sum/shasum，无法安全安装' \
-      'sha256sum/shasum not found; cannot install safely')"
-    return 1
-  fi
-  rm -f "$sha_file"
-  [ "$expected" = "$actual" ] || die "$(t '安装包 SHA256 校验失败' 'Package SHA256 verification failed')"
-  t '安装包 SHA256 校验通过' 'Package SHA256 verified'
 }
 
 install_alpine_deps() {
@@ -8033,184 +8478,6 @@ ensure_management_dependencies() {
         && command -v setpriv >/dev/null 2>&1 && command -v flock >/dev/null 2>&1 \
         && return 0
       install_alpine_deps
-      ;;
-  esac
-}
-
-ensure_mita_account() {
-  STAGE="创建 mita 用户"
-  if ! _has_group mita; then
-    if command -v groupadd >/dev/null 2>&1; then
-      run groupadd --system mita
-    else
-      run addgroup -S mita
-    fi
-  fi
-  if ! _has_user mita; then
-    if command -v useradd >/dev/null 2>&1; then
-      run useradd --system -g mita -s /sbin/nologin -d /var/lib/mita mita
-    else
-      run adduser -S -G mita -s /sbin/nologin -h /var/lib/mita mita
-    fi
-  fi
-  run mkdir -p /etc/mita /var/lib/mita /var/run/mita /run/mita
-  run chown -R mita:mita /etc/mita /var/lib/mita /var/run/mita /run/mita 2>/dev/null || true
-  run chmod 0750 /etc/mita
-  run chmod 0755 /var/lib/mita /var/run/mita /run/mita
-}
-
-package_service_guard_begin() {
-  local guard_dir
-  PACKAGE_SERVICE_GUARD_DIR=""
-  PACKAGE_SERVICE_GUARD_REAL_SYSTEMCTL=""
-  PACKAGE_SERVICE_GUARD_WAS_ACTIVE=0
-  [ "$(service_manager)" = systemd ] || return 0
-  PACKAGE_SERVICE_GUARD_REAL_SYSTEMCTL="$(type -P systemctl 2>/dev/null || true)"
-  if [ -z "$PACKAGE_SERVICE_GUARD_REAL_SYSTEMCTL" ] \
-     || [ ! -x "$PACKAGE_SERVICE_GUARD_REAL_SYSTEMCTL" ]; then
-    warn "$(t '无法定位真实 systemctl，已取消软件包安装' \
-      'Could not locate the real systemctl; package installation was cancelled')"
-    return 1
-  fi
-  if "$PACKAGE_SERVICE_GUARD_REAL_SYSTEMCTL" is-active --quiet mita.service 2>/dev/null; then
-    PACKAGE_SERVICE_GUARD_WAS_ACTIVE=1
-  fi
-  guard_dir="$(mktemp_dir)" || return 1
-  if ! cat >"${guard_dir}/systemctl" <<'EOF'
-#!/bin/sh
-real="${MITA_REAL_SYSTEMCTL:?}"
-action=""
-target=0
-for arg in "$@"; do
-    case "$arg" in
-        -*) continue ;;
-    esac
-    if [ -z "$action" ]; then
-        action="$arg"
-        continue
-    fi
-    case "$arg" in
-        mita|mita.service) target=1 ;;
-    esac
-done
-if [ "$target" -eq 1 ]; then
-    case "$action" in
-        enable|reenable|preset|start|restart|try-restart|reload|reload-or-restart|reload-or-try-restart)
-            exit 0
-            ;;
-    esac
-fi
-exec "$real" "$@"
-EOF
-  then
-    rm -rf -- "$guard_dir"
-    return 1
-  fi
-  if ! chmod 0700 "${guard_dir}/systemctl"; then
-    rm -rf -- "$guard_dir"
-    return 1
-  fi
-  PACKAGE_SERVICE_GUARD_DIR="$guard_dir"
-}
-
-package_service_guard_run() {
-  if [ -n "${PACKAGE_SERVICE_GUARD_DIR:-}" ]; then
-    (
-      export PATH="${PACKAGE_SERVICE_GUARD_DIR}:${PATH}"
-      export MITA_REAL_SYSTEMCTL="$PACKAGE_SERVICE_GUARD_REAL_SYSTEMCTL"
-      run "$@"
-    )
-  else
-    run "$@"
-  fi
-}
-
-package_service_guard_end() {
-  local guard_dir="${PACKAGE_SERVICE_GUARD_DIR:-}" restore_rc=0
-  if [ -n "$guard_dir" ]; then
-    case "$guard_dir" in
-      /tmp/mita.*|/tmp/mita_*) rm -rf -- "$guard_dir" || restore_rc=1 ;;
-      *)
-        warn "$(t '拒绝清理异常的软件包服务保护目录' \
-          'Refusing to remove an unexpected package-service guard directory')"
-        restore_rc=1
-        ;;
-    esac
-  fi
-  if [ "${PACKAGE_SERVICE_GUARD_WAS_ACTIVE:-0}" -eq 1 ] \
-     && ! run "$PACKAGE_SERVICE_GUARD_REAL_SYSTEMCTL" start mita.service >/dev/null 2>&1; then
-    warn "$(t 'mita.service 安装前正在运行，但软件包安装后无法恢复启动' \
-      'mita.service was active before installation but could not be restarted afterward')"
-    restore_rc=1
-  fi
-  PACKAGE_SERVICE_GUARD_DIR=""
-  PACKAGE_SERVICE_GUARD_REAL_SYSTEMCTL=""
-  PACKAGE_SERVICE_GUARD_WAS_ACTIVE=0
-  return "$restore_rc"
-}
-
-configure_pending_deb_packages() {
-  local configure_rc=0 guard_rc=0
-  package_service_guard_begin || return 1
-  package_service_guard_run dpkg --configure -a || configure_rc=1
-  package_service_guard_end || guard_rc=1
-  [ "$configure_rc" -eq 0 ] && [ "$guard_rc" -eq 0 ]
-}
-
-extract_mita_tarball() {
-  local tarball="$1"
-  STAGE="解压 mita 二进制"
-  local tmpdir bin
-  tmpdir="$(mktemp_dir)"
-  run tar -xzf "$tarball" -C "$tmpdir"
-  bin="$(find "$tmpdir" -type f -name mita | head -n1)"
-  [ -n "$bin" ] || die "$(t '压缩包中未找到 mita 二进制' 'mita binary not found in archive')"
-  run install -d -o root -g root -m 0755 "$NOBRAND_LIB_DIR" "$NOBRAND_BIN_DIR"
-  run install -m 0755 "$bin" "$MITA_BIN"
-  rm -rf "$tmpdir"
-  run touch "$MITA_MARKER"
-}
-
-install_package() {
-  local path="$1"
-  local pm="$2"
-  local install_rc=0 guard_rc=0
-  STAGE="安装软件包"
-  record_preexisting_mita_resources "$pm"
-  if ! package_service_guard_begin; then
-    die "$(t '无法安全准备 mita 软件包安装' \
-      'Could not safely prepare the mita package installation')" || return 1
-  fi
-  case "$pm" in
-    deb)
-      if ! package_service_guard_run dpkg -i "$path" \
-         && ! package_service_guard_run apt-get install -f -y; then
-        install_rc=1
-      fi
-      ;;
-    rpm)
-      package_service_guard_run rpm -Uvh --force "$path" || install_rc=1
-      ;;
-    alpine)
-      if ! install_alpine_deps \
-         || ! ensure_mita_account \
-         || ! extract_mita_tarball "$path"; then
-        install_rc=1
-      fi
-      ;;
-    *) install_rc=1 ;;
-  esac
-  package_service_guard_end || guard_rc=1
-  if [ "$install_rc" -ne 0 ] || [ "$guard_rc" -ne 0 ]; then
-    die "$(t 'mita 软件包安装或原服务状态恢复失败' \
-      'The mita package installation or previous service-state restoration failed')" || return 1
-  fi
-  case "$pm" in
-    deb|rpm)
-      refresh_managed_mita_runtime "$MITA_PACKAGE_BIN" \
-        || die "$(t '无法把官方 mita runtime 安装到 NoBrand 管理路径' \
-          'Could not install the official mita runtime into the NoBrand-managed path')"
-      mark_oneclick_install
       ;;
   esac
 }
@@ -8275,8 +8542,8 @@ nobrand_xray_version() {
 nobrand_xray_release_info() {
   local asset metadata version url digest expected
   asset="$(nobrand_xray_arch_asset)" || {
-    warn "$(t 'NoBrand HY2 的 Xray runtime 仅测试 amd64/arm64' \
-      'NoBrand HY2 Xray runtime is tested only on amd64/arm64')"
+    warn "$(t 'NoBrand Sudoku 的 Xray runtime 仅测试 amd64/arm64' \
+      'NoBrand Sudoku Xray runtime is tested only on amd64/arm64')"
     return 1
   }
   metadata="$(mktemp_file .json)" || return 1
@@ -8523,720 +8790,46 @@ nobrand_xray_test_config() {
 }
 
 nobrand_xray_validate_managed_configs() {
-  local binary="${1:-$NOBRAND_XRAY_BIN}" config id
-  for config in "$NOBRAND_HY2_CONFIG_FILE" "$NOBRAND_VLESS_CONFIG_FILE"; do
-    [ -f "$config" ] || continue
-    nobrand_xray_test_config "$config" "$binary" || return 1
-  done
-  while IFS= read -r id; do
-    [ -n "$id" ] || continue
-    config="$(reality_config_file "$id")"
-    [ -f "$config" ] || return 1
-    nobrand_xray_test_config "$config" "$binary" || return 1
-  done < <(reality_instance_ids)
+  [ ! -f "$NOBRAND_VLESS_CONFIG_FILE" ] || nobrand_xray_test_config "$NOBRAND_VLESS_CONFIG_FILE" "${1:-$NOBRAND_XRAY_BIN}"
 }
 
 nobrand_restore_xray_upgrade_snapshot() {
-  local snapshot="$1" had_runtime="$2" had_assets="$3" hy2_had_state="$4" vless_had_state="$5"
-  local hy2_was_active="$6" vless_was_active="$7" id
-  if [ "$had_runtime" -eq 1 ]; then
-    install -m 0755 "$snapshot/xray" "$NOBRAND_XRAY_BIN" || return 1
-  else
-    rm -f "$NOBRAND_XRAY_BIN"
-  fi
+  local snapshot="$1" had_runtime="$2" had_assets="$3" was_active="$4"
+  if [ "$had_runtime" = 1 ]; then install -m 0755 "$snapshot/xray" "$NOBRAND_XRAY_BIN" || return 1
+  else rm -f "$NOBRAND_XRAY_BIN"; fi
   nobrand_xray_asset_dir_safe || return 1
   rm -rf -- "$NOBRAND_XRAY_ASSET_DIR"
-  if [ "$had_assets" -eq 1 ]; then
-    cp -a "$snapshot/xray-assets" "$NOBRAND_XRAY_ASSET_DIR" || return 1
-  fi
-  if [ "$hy2_had_state" -eq 1 ]; then
-    cp -a "$snapshot/hy2-state" "$NOBRAND_HY2_STATE_FILE" || return 1
-  fi
-  if [ "$vless_had_state" -eq 1 ]; then
-    cp -a "$snapshot/vless-state" "$NOBRAND_VLESS_STATE_FILE" || return 1
-  fi
-  if [ -d "$snapshot/reality-states" ]; then
-    for id in "$snapshot/reality-states"/*.json; do
-      [ -f "$id" ] || continue
-      cp -a "$id" "$(reality_state_file "$(basename "$id" .json)")" || return 1
-    done
-  fi
-  if [ "$had_runtime" -eq 1 ]; then
-    [ "$hy2_was_active" -eq 0 ] \
-      || nobrand_hy2_service_action restart >/dev/null 2>&1 || true
-    [ "$vless_was_active" -eq 0 ] \
-      || nobrand_vless_sudoku_service_action restart >/dev/null 2>&1 || true
-    if [ -s "$snapshot/reality-active.ids" ]; then
-      while IFS= read -r id; do
-        [ -n "$id" ] || continue
-        reality_service_action "$id" restart >/dev/null 2>&1 || true
-      done <"$snapshot/reality-active.ids"
-    fi
-  else
-    [ "$hy2_was_active" -eq 0 ] \
-      || nobrand_hy2_service_action stop >/dev/null 2>&1 || true
-    [ "$vless_was_active" -eq 0 ] \
-      || nobrand_vless_sudoku_service_action stop >/dev/null 2>&1 || true
-    if [ -s "$snapshot/reality-active.ids" ]; then
-      while IFS= read -r id; do
-        [ -n "$id" ] || continue
-        reality_service_action "$id" stop >/dev/null 2>&1 || true
-      done <"$snapshot/reality-active.ids"
-    fi
-  fi
+  [ "$had_assets" = 0 ] || cp -a "$snapshot/xray-assets" "$NOBRAND_XRAY_ASSET_DIR" || return 1
+  [ ! -f "$snapshot/state" ] || cp -a "$snapshot/state" "$NOBRAND_VLESS_STATE_FILE" || return 1
+  [ "$was_active" = 0 ] || nobrand_vless_sudoku_service_action restart
 }
 
 nobrand_upgrade_xray_runtime() {
-  local snapshot had_runtime=0 had_assets=0 hy2_had_state=0 vless_had_state=0
-  local hy2_was_active=0 vless_was_active=0 hy2_port="" vless_port=""
-  local failed=0 id port state tmp runtime
-  nobrand_prepare_common
+  local snapshot had_runtime=0 had_assets=0 was_active=0 failed=0
+  vless_sudoku_state_exists || return 1
+  nobrand_prepare_common || return 1
   admin_lock_acquire || return 1
   snapshot="$(mktemp_dir)" || { admin_lock_release; return 1; }
-  mkdir -p "$snapshot/reality-states" || { rm -rf -- "$snapshot"; admin_lock_release; return 1; }
-  : >"$snapshot/reality-active.ids"
-  if [ -e "$NOBRAND_XRAY_BIN" ]; then
-    cp -a "$NOBRAND_XRAY_BIN" "$snapshot/xray" \
-      || { rm -rf -- "$snapshot"; admin_lock_release; return 1; }
-    had_runtime=1
+  if [ -f "$NOBRAND_XRAY_BIN" ]; then cp -a "$NOBRAND_XRAY_BIN" "$snapshot/xray" || failed=1; had_runtime=1; fi
+  if [ -d "$NOBRAND_XRAY_ASSET_DIR" ]; then cp -a "$NOBRAND_XRAY_ASSET_DIR" "$snapshot/xray-assets" || failed=1; had_assets=1; fi
+  cp -a "$NOBRAND_VLESS_STATE_FILE" "$snapshot/state" || failed=1
+  nobrand_vless_sudoku_service_active && was_active=1
+  if [ "$failed" = 0 ]; then
+    nobrand_install_xray_runtime 1 && nobrand_xray_validate_managed_configs || failed=1
+    if [ "$failed" = 0 ] && [ "$was_active" = 1 ]; then
+      nobrand_vless_sudoku_service_action restart && vless_sudoku_running || failed=1
+    fi
+    [ "$failed" != 0 ] || vless_sudoku_refresh_runtime_metadata || failed=1
   fi
-  if [ -d "$NOBRAND_XRAY_ASSET_DIR" ] && [ ! -L "$NOBRAND_XRAY_ASSET_DIR" ]; then
-    cp -a "$NOBRAND_XRAY_ASSET_DIR" "$snapshot/xray-assets" \
-      || { rm -rf -- "$snapshot"; admin_lock_release; return 1; }
-    had_assets=1
+  if [ "$failed" != 0 ]; then
+    nobrand_restore_xray_upgrade_snapshot "$snapshot" "$had_runtime" "$had_assets" "$was_active" || warn 'Sudoku runtime rollback failed'
   fi
-  if hysteria2_state_exists; then
-    cp -a "$NOBRAND_HY2_STATE_FILE" "$snapshot/hy2-state" \
-      || { rm -rf -- "$snapshot"; admin_lock_release; return 1; }
-    hy2_had_state=1
-    hy2_port="$(hysteria2_state_field listen_port)"
-  fi
-  if vless_sudoku_state_exists; then
-    cp -a "$NOBRAND_VLESS_STATE_FILE" "$snapshot/vless-state" \
-      || { rm -rf -- "$snapshot"; admin_lock_release; return 1; }
-    vless_had_state=1
-    vless_port="$(vless_sudoku_state_field listen_port)"
-  fi
-  nobrand_hy2_service_active && hy2_was_active=1
-  nobrand_vless_sudoku_service_active && vless_was_active=1
-  while IFS= read -r id; do
-    [ -n "$id" ] || continue
-    cp -a "$(reality_state_file "$id")" "$snapshot/reality-states/${id}.json" \
-      || { rm -rf -- "$snapshot"; admin_lock_release; return 1; }
-    reality_service_active "$id" && printf '%s\n' "$id" >>"$snapshot/reality-active.ids"
-  done < <(reality_instance_ids)
-
-  if ! nobrand_install_xray_runtime 1; then
-    failed=1
-  elif ! runtime="$(nobrand_xray_version 2>/dev/null)" \
-       || [ -z "$runtime" ] || [ "$runtime" != "$TESTED_XRAY_VERSION" ]; then
-    failed=1
-  elif [ "$hy2_was_active" -eq 1 ] \
-       && { ! nobrand_hy2_service_action restart \
-         || ! nb_wait_for_listener UDP "$hy2_port" 25; }; then
-    failed=1
-  elif [ "$vless_was_active" -eq 1 ] \
-       && { ! nobrand_vless_sudoku_service_action restart \
-         || ! nb_wait_for_listener TCP "$vless_port" 25; }; then
-    failed=1
-  else
-    while IFS= read -r id; do
-      [ -n "$id" ] || continue
-      port="$(reality_state_field "$id" listen_port)"
-      if ! reality_service_action "$id" restart \
-         || ! nb_wait_for_listener TCP "$port" 25 \
-         || ! reality_listener_owned_by_service "$id" "$port"; then
-        failed=1
-        break
-      fi
-    done <"$snapshot/reality-active.ids"
-  fi
-  if [ "$failed" -eq 0 ] \
-     && { ! hysteria2_refresh_runtime_metadata || ! vless_sudoku_refresh_runtime_metadata; }; then
-    failed=1
-  fi
-  if [ "$failed" -eq 0 ]; then
-    while IFS= read -r id; do
-      [ -n "$id" ] || continue
-      state="$(reality_state_file "$id")"; tmp="$(mktemp_file .reality-state)" || { failed=1; break; }
-      jq --arg runtime "$TESTED_XRAY_VERSION" --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-        '.runtime_version=$runtime | .updated_at=$updated' "$state" >"$tmp" \
-        && nb_atomic_install_file "$tmp" "$state" 0600 || failed=1
-      rm -f "$tmp"
-      [ "$failed" -eq 0 ] || break
-    done < <(reality_instance_ids)
-  fi
-  if [ "$failed" -eq 1 ]; then
-    nobrand_restore_xray_upgrade_snapshot "$snapshot" "$had_runtime" "$had_assets" \
-      "$hy2_had_state" "$vless_had_state" "$hy2_was_active" "$vless_was_active" \
-      || warn '共享 Xray runtime 回滚不完整；请立即运行 nobrand doctor'
-    rm -rf -- "$snapshot"
-    admin_lock_release
-    warn '共享 Xray 升级或活动服务验收失败，已恢复升级前 runtime/state'
-    return 1
-  fi
-
   rm -rf -- "$snapshot"
   admin_lock_release
-  t 'NoBrand 共享 Xray-core 升级完成；活动 HY2/VLESS Sudoku/VLESS REALITY 服务均已验收' \
-    'NoBrand shared Xray-core upgraded; active HY2/VLESS Sudoku/VLESS REALITY services passed acceptance'
+  return "$failed"
 }
 
-nobrand_write_hy2_service() {
-  local manager tmp
-  manager="$(nb_service_manager)"
-  case "$manager" in
-    systemd)
-      tmp="$(mktemp_file .service)" || return 1
-      cat >"$tmp" <<EOF
-# Managed by NoBrand-OneClick
-[Unit]
-Description=NoBrand Hysteria2 (Xray-core)
-Documentation=https://github.com/ike-sh/NoBrand-OneClick
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=${NOBRAND_HY2_CONFIG_DIR}
-ExecStart=${NOBRAND_XRAY_BIN} run -c ${NOBRAND_HY2_CONFIG_FILE}
-Restart=on-failure
-RestartSec=5
-LimitNOFILE=1048576
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=full
-ProtectHome=true
-ReadWritePaths=${NOBRAND_HY2_CONFIG_DIR} ${NOBRAND_HY2_STATE_DIR}
-
-[Install]
-WantedBy=multi-user.target
-EOF
-      grep -qF "ExecStart=${NOBRAND_XRAY_BIN} run -c ${NOBRAND_HY2_CONFIG_FILE}" "$tmp" \
-        || { rm -f "$tmp"; return 1; }
-      install -m 0644 "$tmp" "${NOBRAND_HY2_SYSTEMD_SERVICE}.new" \
-        && mv -f "${NOBRAND_HY2_SYSTEMD_SERVICE}.new" "$NOBRAND_HY2_SYSTEMD_SERVICE" \
-        || { rm -f "$tmp" "${NOBRAND_HY2_SYSTEMD_SERVICE}.new"; return 1; }
-      rm -f "$tmp"
-      systemctl daemon-reload
-      systemctl enable "$NOBRAND_HY2_SERVICE_NAME" >/dev/null 2>&1
-      ;;
-    openrc)
-      tmp="$(mktemp_file .openrc)" || return 1
-      cat >"$tmp" <<EOF
-#!/sbin/openrc-run
-# Managed by NoBrand-OneClick
-name="NoBrand Hysteria2"
-description="NoBrand Hysteria2 (Xray-core)"
-command="${NOBRAND_XRAY_BIN}"
-command_args="run -c ${NOBRAND_HY2_CONFIG_FILE}"
-command_background=true
-pidfile="/run/nobrand-hysteria2.pid"
-output_log="/var/log/nobrand-hysteria2.log"
-error_log="/var/log/nobrand-hysteria2.err"
-depend() { use net; after firewall; }
-EOF
-      install -m 0755 "$tmp" "${NOBRAND_HY2_OPENRC_SERVICE}.new" \
-        && mv -f "${NOBRAND_HY2_OPENRC_SERVICE}.new" "$NOBRAND_HY2_OPENRC_SERVICE" \
-        || { rm -f "$tmp" "${NOBRAND_HY2_OPENRC_SERVICE}.new"; return 1; }
-      rm -f "$tmp"
-      rc-update add "$NOBRAND_HY2_SERVICE_NAME" default >/dev/null 2>&1
-      ;;
-    *) return 1 ;;
-  esac
-}
-
-nobrand_hy2_service_action() {
-  local action="$1" manager
-  manager="$(nb_service_manager)"
-  case "$manager" in
-    systemd)
-      [ "$action" != restart ] || systemctl daemon-reload
-      systemctl "$action" "$NOBRAND_HY2_SERVICE_NAME"
-      ;;
-    openrc) rc-service "$NOBRAND_HY2_SERVICE_NAME" "$action" ;;
-    *) return 1 ;;
-  esac
-}
-
-nobrand_hy2_service_active() {
-  nb_service_is_active "$NOBRAND_HY2_SERVICE_NAME" "$NOBRAND_HY2_SERVICE_NAME"
-}
-
-nobrand_remove_hy2_service() {
-  local manager
-  manager="$(nb_service_manager)"
-  nobrand_hy2_service_action stop >/dev/null 2>&1 || true
-  case "$manager" in
-    systemd)
-      systemctl disable "$NOBRAND_HY2_SERVICE_NAME" >/dev/null 2>&1 || true
-      rm -f "$NOBRAND_HY2_SYSTEMD_SERVICE"
-      systemctl daemon-reload 2>/dev/null || true
-      ;;
-    openrc)
-      rc-update del "$NOBRAND_HY2_SERVICE_NAME" default >/dev/null 2>&1 || true
-      rm -f "$NOBRAND_HY2_OPENRC_SERVICE"
-      ;;
-  esac
-}
-
-# ---------- Surge official Snell runtime resolver / download / service ----------
-
-snell_arch_asset_name() {
-  case "${NOBRAND_TEST_ARCH:-$(uname -m)}" in
-    x86_64|amd64) printf 'amd64' ;;
-    aarch64|arm64) printf 'aarch64' ;;
-    *) return 1 ;;
-  esac
-}
-
-snell_platform_supported() {
-  local major="$1" arch
-  case "$major" in 4|5) ;; *) return 1 ;; esac
-  arch="$(snell_arch_asset_name)" || return 1
-  case "$arch" in amd64|aarch64) return 0 ;; esac
-}
-
-# 从 Surge 官方 Markdown 中解析对应 major/arch 的最新 asset。排序支持
-# beta -> RC -> GA，避免将 runtime 版本写死在产品源码中。
-snell_select_release_from_text() {
-  local major="$1" arch="$2" input rc
-  case "$major" in 4|5) ;; *) return 1 ;; esac
-  input="$(mktemp_file .md)" || return 1
-  cat >"$input" || { rm -f "$input"; return 1; }
-  python3 - "$major" "$arch" "$input" <<'PY'
-import re
-import sys
-
-major=int(sys.argv[1])
-arch=sys.argv[2]
-with open(sys.argv[3], encoding="utf-8") as source:
-    text=source.read()
-pattern=re.compile(r"https://dl\.nssurge\.com/snell/snell-server-v([^/\s]+)-linux-([A-Za-z0-9_]+)\.zip")
-
-def key(version):
-    match=re.fullmatch(r"(\d+(?:\.\d+)*)(.*)", version, re.I)
-    if not match:
-        return ((0,), 0, 0, version.lower())
-    numbers=tuple(int(part) for part in match.group(1).split('.'))
-    suffix=match.group(2).lower()
-    if not suffix:
-        stage, stage_no = 4, 0
-    elif suffix.startswith('rc'):
-        stage=3
-        found=re.search(r"\d+", suffix)
-        stage_no=int(found.group()) if found else 1
-    elif suffix.startswith('beta') or suffix.startswith('b'):
-        stage=2
-        found=re.search(r"\d+", suffix)
-        stage_no=int(found.group()) if found else 1
-    elif suffix.startswith('alpha') or suffix.startswith('a'):
-        stage=1
-        found=re.search(r"\d+", suffix)
-        stage_no=int(found.group()) if found else 1
-    else:
-        stage, stage_no = 0, 0
-    return (numbers, stage, stage_no, suffix)
-
-candidates=[]
-for match in pattern.finditer(text):
-    version, asset_arch = match.groups()
-    if asset_arch != arch:
-        continue
-    if not re.match(r"^%d(?:\.|$)" % major, version):
-        continue
-    url="https://dl.nssurge.com/snell/snell-server-v%s-linux-%s.zip" % (version, arch)
-    line_start=text.rfind("\n", 0, match.start()) + 1
-    line_end=text.find("\n", match.end())
-    if line_end < 0:
-        line_end=len(text)
-    same_line=text[line_start:line_end]
-    digest_match=re.search(r"(?i)(?<![0-9a-f])[0-9a-f]{64}(?![0-9a-f])", same_line)
-    digest=digest_match.group(0).lower() if digest_match else ""
-    candidates.append((key(version), version, url, digest))
-if not candidates:
-    raise SystemExit(1)
-_, version, url, digest=max(candidates)
-suffix=re.fullmatch(r"\d+(?:\.\d+)*(.*)", version, re.I).group(1).lower()
-if not suffix:
-    status="Stable"
-elif suffix.startswith("rc"):
-    status="RC"
-elif suffix.startswith("beta") or suffix.startswith("b"):
-    status="Beta"
-else:
-    status="Experimental"
-fields=[version, url, status]
-if digest:
-    fields.append(digest)
-print("\t".join(fields))
-PY
-  rc=$?
-  rm -f "$input"
-  return "$rc"
-}
-
-snell_resolve_release() {
-  local major="$1" arch page
-  case "$major" in 4|5) ;; *) return 1 ;; esac
-  arch="$(snell_arch_asset_name)" || return 1
-  page="$(mktemp_file .md)" || return 1
-  if ! curl -fsSL --connect-timeout 15 --max-time 90 \
-      --retry 3 --retry-delay 2 --retry-all-errors \
-      -H 'User-Agent: NoBrand-OneClick' "$SNELL_RELEASE_PAGE" -o "$page"; then
-    rm -f "$page"
-    return 1
-  fi
-  snell_select_release_from_text "$major" "$arch" <"$page"
-  local rc=$?
-  rm -f "$page"
-  return "$rc"
-}
-
-snell_runtime_path() {
-  case "$1" in 4|5) ;; *) return 1 ;; esac
-  printf '%s/snell-v%s' "$NOBRAND_SNELL_RUNTIME_DIR" "$1"
-}
-
-snell_runtime_metadata_path() {
-  case "$1" in 4|5) ;; *) return 1 ;; esac
-  printf '%s/snell-v%s.runtime.json' "$NOBRAND_SNELL_RUNTIME_DIR" "$1"
-}
-
-snell_runtime_reported_version() {
-  local binary="$1"
-  [ -x "$binary" ] || return 1
-  "$binary" --version 2>&1 \
-    | sed -nE 's/.*snell-server[[:space:]]+v([^[:space:]]+).*/\1/p' | head -n1
-}
-
-snell_runtime_release_version() {
-  local major="$1" metadata
-  metadata="$(snell_runtime_metadata_path "$major")"
-  if [ -s "$metadata" ] && jq -e '.release_version|type=="string" and length>0' "$metadata" >/dev/null 2>&1; then
-    jq -r .release_version "$metadata"
-  else
-    snell_runtime_reported_version "$(snell_runtime_path "$major")"
-  fi
-}
-
-snell_runtime_release_status() {
-  local major="$1" metadata
-  metadata="$(snell_runtime_metadata_path "$major")"
-  if [ -s "$metadata" ] && jq -e '.status|type=="string" and length>0' "$metadata" >/dev/null 2>&1; then
-    jq -r .status "$metadata"
-  else
-    printf Stable
-  fi
-}
-
-snell_generate_server_config() {
-  local output="$1" major="$2" listen_host="$3" listen_port="$4" psk="$5"
-  case "$major" in
-    4|5)
-      cat >"$output" <<EOF
-[snell-server]
-listen = ${listen_host}:${listen_port}
-psk = ${psk}
-ipv6 = false
-EOF
-      ;;
-    *) return 1 ;;
-  esac
-}
-
-snell_validate_runtime_config() {
-  local binary="$1" major="$2" psk="$3" port config log pid ready=0
-  port="$(nb_select_available_port TCP)" || return 1
-  config="$(mktemp_file .conf)" || return 1
-  log="$(mktemp_file .log)" || { rm -f "$config"; return 1; }
-  snell_generate_server_config "$config" "$major" 127.0.0.1 "$port" "$psk" \
-    || { rm -f "$config" "$log"; return 1; }
-  "$binary" -c "$config" 7>&- >"$log" 2>&1 &
-  pid=$!
-  local i=0
-  while [ "$i" -lt 10 ]; do
-    if nb_port_is_listening TCP "$port"; then ready=1; break; fi
-    kill -0 "$pid" 2>/dev/null || break
-    sleep 1
-    i=$((i + 1))
-  done
-  kill "$pid" >/dev/null 2>&1 || true
-  wait "$pid" >/dev/null 2>&1 || true
-  if [ "$ready" -ne 1 ]; then
-    sed -E 's/(psk[[:space:]]*=[[:space:]]*).*/\1***REDACTED***/I' "$log" >&2 || true
-    rm -f "$config" "$log"
-    return 1
-  fi
-  rm -f "$config" "$log"
-}
-
-snell_download_candidate() {
-  local major="$1" output="$2" release version url status status_display upstream_sha256
-  local temp candidate reported actual_archive_sha256
-  case "$major" in 4|5) ;; *) return 1 ;; esac
-  snell_platform_supported "$major" || {
-    warn "$(t "当前平台不支持 Snell v${major}" \
-      "Snell v${major} on this platform is unsupported")"
-    return 1
-  }
-  release="$(snell_resolve_release "$major")" || return 1
-  IFS=$'\t' read -r version url status upstream_sha256 <<<"$release"
-  case "$status" in
-    Stable) status_display='稳定版' ;;
-    RC) status_display='RC 候选版' ;;
-    Beta) status_display='Beta 测试版' ;;
-    Experimental) status_display='实验版' ;;
-    *) status_display="$status" ;;
-  esac
-  [[ "$url" = https://dl.nssurge.com/snell/snell-server-v*-linux-*.zip ]] || {
-    warn "$(t "拒绝非 Surge 官方 HTTPS Snell 资产: $url" \
-      "Refusing non-official Surge HTTPS Snell asset: $url")"
-    return 1
-  }
-  temp="$(mktemp_dir)" || return 1
-  if ! curl -fL --connect-timeout 15 --max-time 180 \
-      --retry 3 --retry-delay 2 --retry-all-errors \
-      -H 'User-Agent: NoBrand-OneClick' "$url" -o "$temp/snell.zip"; then
-    rm -rf -- "$temp"
-    return 1
-  fi
-  if [ -n "$upstream_sha256" ]; then
-    [[ "$upstream_sha256" =~ ^[0-9a-fA-F]{64}$ ]] || { rm -rf -- "$temp"; return 1; }
-    actual_archive_sha256="$(nobrand_sha256_file "$temp/snell.zip")" || { rm -rf -- "$temp"; return 1; }
-    [ "$actual_archive_sha256" = "$(printf '%s' "$upstream_sha256" | tr '[:upper:]' '[:lower:]')" ] \
-      || { warn "$(t 'Surge Snell 上游 SHA-256 不匹配' \
-        'Surge Snell upstream SHA-256 mismatch')"; rm -rf -- "$temp"; return 1; }
-  fi
-  if ! unzip -t "$temp/snell.zip" >/dev/null \
-     || ! unzip -qo "$temp/snell.zip" -d "$temp/unpacked"; then
-    rm -rf -- "$temp"
-    return 1
-  fi
-  candidate="$(find "$temp/unpacked" -type f -name snell-server | head -n1)"
-  [ -n "$candidate" ] && [ "$(head -c 4 "$candidate" 2>/dev/null || true)" = $'\x7fELF' ] \
-    || { rm -rf -- "$temp"; return 1; }
-  chmod 0755 "$candidate" || { rm -rf -- "$temp"; return 1; }
-  reported="$(snell_runtime_reported_version "$candidate" 2>/dev/null || true)"
-  [[ "$reported" = "$major".* ]] || { rm -rf -- "$temp"; return 1; }
-  install -m 0755 "$candidate" "$output" || { rm -rf -- "$temp"; return 1; }
-  SNELL_RESOLVED_VERSION="$version"
-  SNELL_RESOLVED_URL="$url"
-  SNELL_RESOLVED_STATUS="$status"
-  SNELL_RESOLVED_SHA256="$(nobrand_sha256_file "$candidate" 2>/dev/null || true)"
-  info "$(t \
-    "Surge 官方 Snell v${version}（${status_display}）已验证；sha256=${SNELL_RESOLVED_SHA256:-不可用}" \
-    "Surge official Snell v${version} (${status}) verified; sha256=${SNELL_RESOLVED_SHA256:-unavailable}")"
-  rm -rf -- "$temp"
-}
-
-snell_install_runtime() {
-  local major="$1" force="${2:-0}" destination metadata candidate backup="" metadata_backup=""
-  local had_old=0 had_metadata=0 test_psk metadata_tmp=""
-  case "$major" in 4|5) ;; *) return 1 ;; esac
-  destination="$(snell_runtime_path "$major")"
-  metadata="$(snell_runtime_metadata_path "$major")"
-  if [ -x "$destination" ] && [ "$force" -ne 1 ]; then
-    return 0
-  fi
-  candidate="$(mktemp_file .snell)" || return 1
-  if ! snell_download_candidate "$major" "$candidate"; then
-    rm -f "$candidate"
-    return 1
-  fi
-  test_psk="$(openssl rand -hex 16 2>/dev/null || printf '0123456789abcdef0123456789abcdef')"
-  if ! snell_validate_runtime_config "$candidate" "$major" "$test_psk"; then
-    rm -f "$candidate"
-    warn "$(t "Snell v${major} 官方 Runtime 验证失败" \
-      "Snell v${major} official runtime validation failed")"
-    return 1
-  fi
-  nb_lifecycle_mark_protocol_mutation_started "${NOBRAND_LIFECYCLE_SCOPE:-snell}" || {
-    rm -f "$candidate"
-    return 1
-  }
-  mkdir -p "$NOBRAND_SNELL_RUNTIME_DIR" || { rm -f "$candidate"; return 1; }
-  if [ -e "$destination" ]; then
-    backup="$(mktemp "${destination}.rollback.XXXXXX")" || { rm -f "$candidate"; return 1; }
-    rm -f "$backup"
-    mv "$destination" "$backup" || { rm -f "$candidate"; return 1; }
-    had_old=1
-  fi
-  if [ -e "$metadata" ]; then
-    metadata_backup="$(mktemp "${metadata}.rollback.XXXXXX")" || {
-      rm -f "$candidate"
-      [ "$had_old" -eq 0 ] || mv "$backup" "$destination" 2>/dev/null || true
-      return 1
-    }
-    cp -a "$metadata" "$metadata_backup" || {
-      rm -f "$candidate" "$metadata_backup"
-      [ "$had_old" -eq 0 ] || mv "$backup" "$destination" 2>/dev/null || true
-      return 1
-    }
-    had_metadata=1
-  fi
-  if ! install -m 0755 "$candidate" "${destination}.new" \
-     || ! mv -f "${destination}.new" "$destination" \
-     || ! snell_runtime_reported_version "$destination" >/dev/null; then
-    rm -f "$candidate" "${destination}.new" "$destination"
-    [ "$had_old" -eq 0 ] || mv "$backup" "$destination" 2>/dev/null || true
-    rm -f "$metadata_backup"
-    return 1
-  fi
-  metadata_tmp="$(mktemp_file .json)" || true
-  if [ -z "$metadata_tmp" ] \
-     || ! jq -n --arg major "$major" --arg release_version "$SNELL_RESOLVED_VERSION" \
-          --arg reported_version "$(snell_runtime_reported_version "$destination")" \
-          --arg status "$SNELL_RESOLVED_STATUS" --arg source_url "$SNELL_RESOLVED_URL" \
-          --arg sha256 "$SNELL_RESOLVED_SHA256" --arg installed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
-            {
-              major:($major|tonumber), release_version:$release_version,
-              reported_version:$reported_version, status:$status,
-              source_url:$source_url, sha256:$sha256, installed_at:$installed_at
-            }
-          ' >"$metadata_tmp" \
-     || ! nb_atomic_install_file "$metadata_tmp" "$metadata" 0600; then
-    rm -f "$candidate" "$metadata_tmp" "$destination"
-    [ "$had_old" -eq 0 ] || mv "$backup" "$destination" 2>/dev/null || true
-    if [ "$had_metadata" -eq 1 ]; then
-      mv -f "$metadata_backup" "$metadata" 2>/dev/null || true
-    else
-      rm -f "$metadata"
-    fi
-    return 1
-  fi
-  rm -f "$candidate" "$metadata_tmp" "$backup" "$metadata_backup"
-}
-
-snell_install_service_runtime() {
-  local manager tmp
-  manager="$(nb_service_manager)"
-  mkdir -p "$(dirname "$NOBRAND_SNELL_RUNNER")" || return 1
-  tmp="$(mktemp_file .runner)" || return 1
-  cat >"$tmp" <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-id="\${1:-}"
-[[ "\$id" =~ ^s[0-9a-f]{16}\$ ]] || exit 64
-state="${NOBRAND_SNELL_STATE_DIR}/\${id}.json"
-config="${NOBRAND_SNELL_CONFIG_DIR}/\${id}.conf"
-[ -r "\$state" ] && [ -r "\$config" ] || exit 66
-version="\$(jq -r '.version // empty' "\$state")"
-case "\$version" in 4|5) ;; *) exit 65 ;; esac
-exec "${NOBRAND_SNELL_RUNTIME_DIR}/snell-v\${version}" -c "\$config"
-EOF
-  install -m 0755 "$tmp" "${NOBRAND_SNELL_RUNNER}.new" \
-    && mv -f "${NOBRAND_SNELL_RUNNER}.new" "$NOBRAND_SNELL_RUNNER" \
-    || { rm -f "$tmp" "${NOBRAND_SNELL_RUNNER}.new"; return 1; }
-  rm -f "$tmp"
-  case "$manager" in
-    systemd)
-      tmp="$(mktemp_file .service)" || return 1
-      cat >"$tmp" <<EOF
-# Managed by NoBrand-OneClick
-[Unit]
-Description=NoBrand Snell instance %i
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=root
-ExecStart=${NOBRAND_SNELL_RUNNER} %i
-Restart=on-failure
-RestartSec=3
-LimitNOFILE=1048576
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=full
-ProtectHome=true
-ReadOnlyPaths=${NOBRAND_SNELL_CONFIG_DIR} ${NOBRAND_SNELL_STATE_DIR} ${NOBRAND_SNELL_RUNTIME_DIR}
-
-[Install]
-WantedBy=multi-user.target
-EOF
-      install -m 0644 "$tmp" "${NOBRAND_SNELL_SYSTEMD_TEMPLATE}.new" \
-        && mv -f "${NOBRAND_SNELL_SYSTEMD_TEMPLATE}.new" "$NOBRAND_SNELL_SYSTEMD_TEMPLATE" \
-        || { rm -f "$tmp" "${NOBRAND_SNELL_SYSTEMD_TEMPLATE}.new"; return 1; }
-      rm -f "$tmp"
-      systemctl daemon-reload
-      ;;
-    openrc) ;;
-    *) return 1 ;;
-  esac
-}
-
-snell_systemd_unit() { printf 'nobrand-snell@%s.service' "$1"; }
-snell_openrc_service() { printf 'nobrand-snell-%s' "$1"; }
-
-snell_ensure_openrc_service() {
-  local id="$1" path tmp
-  [ "$(nb_service_manager)" = openrc ] || return 0
-  [[ "$id" =~ ^s[0-9a-f]{16}$ ]] || return 1
-  path="${NOBRAND_SNELL_OPENRC_PREFIX}${id}"
-  tmp="$(mktemp_file .openrc)" || return 1
-  cat >"$tmp" <<EOF
-#!/sbin/openrc-run
-# Managed by NoBrand-OneClick
-name="NoBrand Snell ${id}"
-command="${NOBRAND_SNELL_RUNNER}"
-command_args="${id}"
-command_background=true
-pidfile="/run/nobrand-snell-${id}.pid"
-output_log="/var/log/nobrand-snell-${id}.log"
-error_log="/var/log/nobrand-snell-${id}.err"
-depend() { use net; after firewall; }
-EOF
-  install -m 0755 "$tmp" "${path}.new" && mv -f "${path}.new" "$path" \
-    || { rm -f "$tmp" "${path}.new"; return 1; }
-  rm -f "$tmp"
-}
-
-snell_service_action() {
-  local id="$1" action="$2" manager unit service
-  manager="$(nb_service_manager)"
-  unit="$(snell_systemd_unit "$id")"
-  service="$(snell_openrc_service "$id")"
-  case "$manager" in
-    systemd)
-      [ "$action" != restart ] || systemctl daemon-reload
-      [ "$action" != start ] && [ "$action" != restart ] \
-        || systemctl enable "$unit" >/dev/null 2>&1
-      systemctl "$action" "$unit"
-      ;;
-    openrc)
-      snell_ensure_openrc_service "$id" || return 1
-      [ "$action" != start ] && [ "$action" != restart ] \
-        || rc-update add "$service" default >/dev/null 2>&1
-      rc-service "$service" "$action"
-      ;;
-    *) return 1 ;;
-  esac
-}
-
-snell_service_active() {
-  local id="$1"
-  nb_service_is_active "$(snell_systemd_unit "$id")" "$(snell_openrc_service "$id")"
-}
-
-snell_remove_service() {
-  local id="$1" manager unit service
-  manager="$(nb_service_manager)"
-  unit="$(snell_systemd_unit "$id")"; service="$(snell_openrc_service "$id")"
-  snell_service_action "$id" stop >/dev/null 2>&1 || true
-  case "$manager" in
-    systemd) systemctl disable "$unit" >/dev/null 2>&1 || true ;;
-    openrc)
-      rc-update del "$service" default >/dev/null 2>&1 || true
-      rm -f "${NOBRAND_SNELL_OPENRC_PREFIX}${id}"
-      ;;
-  esac
-}
+# Ordinary protocol runtime and exports are managed by the native Splicore adapter.
 
 # ---------- NoBrand VLESS Sudoku isolated Xray service ----------
 
@@ -9341,612 +8934,9 @@ nobrand_remove_vless_sudoku_service() {
   esac
 }
 
-# ---------- official sing-box runtime and isolated TUIC services ----------
+# Ordinary protocol runtime and exports are managed by the native Splicore adapter.
 
-tuic_normalize_channel() {
-  case "${1:-stable}" in
-    stable|latest|pinned) printf '%s' "${1:-stable}" ;;
-    *) return 1 ;;
-  esac
-}
-
-tuic_runtime_asset_name() {
-  local version="$1" arch suffix=""
-  case "$(uname -m)" in
-    x86_64|amd64) arch=amd64 ;;
-    aarch64|arm64) arch=arm64 ;;
-    *) return 1 ;;
-  esac
-  [ ! -f /etc/alpine-release ] || suffix=-musl
-  printf 'sing-box-%s-linux-%s%s.tar.gz' "$version" "$arch" "$suffix"
-}
-
-tuic_tested_runtime_sha256() {
-  local asset="$1"
-  case "$asset" in
-    sing-box-1.13.20-linux-amd64.tar.gz) printf '%s' "$TESTED_SING_BOX_AMD64_SHA256" ;;
-    sing-box-1.13.20-linux-arm64.tar.gz) printf '%s' "$TESTED_SING_BOX_ARM64_SHA256" ;;
-    sing-box-1.13.20-linux-amd64-musl.tar.gz) printf '%s' "$TESTED_SING_BOX_AMD64_MUSL_SHA256" ;;
-    sing-box-1.13.20-linux-arm64-musl.tar.gz) printf '%s' "$TESTED_SING_BOX_ARM64_MUSL_SHA256" ;;
-    *) return 1 ;;
-  esac
-}
-
-tuic_valid_runtime_version() {
-  [[ "${1:-}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-}
-
-tuic_resolve_runtime() {
-  local channel version api response tag asset url digest stable_digest
-  channel="$(tuic_normalize_channel "${1:-stable}")" || return 1
-  version="${2:-}"
-  case "$channel" in
-    stable) version="$TESTED_SING_BOX_SERVER_VERSION"; api="${NOBRAND_SING_BOX_RELEASE_API}/tags/v${version}" ;;
-    latest) api="${NOBRAND_SING_BOX_RELEASE_API}/latest" ;;
-    pinned)
-      tuic_valid_runtime_version "$version" || return 1
-      api="${NOBRAND_SING_BOX_RELEASE_API}/tags/v${version}"
-      ;;
-  esac
-  response="$(curl -fsSL --connect-timeout 10 --max-time 60 \
-    -H 'Accept: application/vnd.github+json' -H 'User-Agent: NoBrand-OneClick' "$api")" || return 1
-  jq -e '.draft==false and .prerelease==false' <<<"$response" >/dev/null || return 1
-  tag="$(jq -r .tag_name <<<"$response")"
-  [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
-  version="${tag#v}"
-  asset="$(tuic_runtime_asset_name "$version")" || return 1
-  url="$(jq -r --arg asset "$asset" '.assets[] | select(.name==$asset) | .browser_download_url' \
-    <<<"$response" | head -n1)"
-  digest="$(jq -r --arg asset "$asset" '.assets[] | select(.name==$asset) | .digest // empty' \
-    <<<"$response" | head -n1)"
-  digest="${digest#sha256:}"
-  [ -n "$url" ] && [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
-  if [ "$channel" = stable ]; then
-    stable_digest="$(tuic_tested_runtime_sha256 "$asset")" || return 1
-    [ "$digest" = "$stable_digest" ] || return 1
-  fi
-  TUIC_RUNTIME_RESOLVED_VERSION="$version"
-  TUIC_RUNTIME_RESOLVED_URL="$url"
-  TUIC_RUNTIME_RESOLVED_SHA256="$digest"
-  TUIC_RUNTIME_RESOLVED_ASSET="$asset"
-}
-
-tuic_runtime_version() {
-  local binary="${1:-$NOBRAND_SING_BOX_BIN}"
-  [ -x "$binary" ] || return 1
-  "$binary" version 2>/dev/null | awk '$1=="sing-box" && $2=="version" {print $3; exit}'
-}
-
-tuic_download_runtime_candidate() {
-  local output="$1" channel="${2:-stable}" requested_version="${3:-}" archive extract_dir binary actual_sha actual_version
-  tuic_resolve_runtime "$channel" "$requested_version" || return 1
-  archive="$(mktemp_file .sing-box.tar.gz)" || return 1
-  extract_dir="$(mktemp_dir)" || return 1
-  curl -fL --connect-timeout 10 --max-time 300 -H 'User-Agent: NoBrand-OneClick' \
-    "$TUIC_RUNTIME_RESOLVED_URL" -o "$archive" || return 1
-  actual_sha="$(nobrand_sha256_file "$archive")" || return 1
-  [ "$actual_sha" = "$TUIC_RUNTIME_RESOLVED_SHA256" ] || {
-    warn "$(t '官方 sing-box 发布摘要不匹配' \
-      'official sing-box release digest mismatch')"
-    return 1
-  }
-  tar --no-same-owner -C "$extract_dir" -xzf "$archive" || return 1
-  binary="$(find "$extract_dir" -mindepth 2 -maxdepth 2 -type f -name sing-box -print -quit)"
-  [ -n "$binary" ] && [ -f "$binary" ] || return 1
-  install -m 0755 "$binary" "$output" || return 1
-  actual_version="$(tuic_runtime_version "$output")" || return 1
-  [ "$actual_version" = "$TUIC_RUNTIME_RESOLVED_VERSION" ] || return 1
-  rm -f "$archive"
-  rm -rf -- "$extract_dir"
-}
-
-tuic_generate_runtime_metadata() {
-  local output="$1" channel="$2" version="$3"
-  jq -n --arg version "$version" --arg channel "$channel" \
-    --arg asset "$TUIC_RUNTIME_RESOLVED_ASSET" --arg source "$TUIC_RUNTIME_RESOLVED_URL" \
-    --arg sha256 "$TUIC_RUNTIME_RESOLVED_SHA256" --arg installed "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
-    {ownership:"nobrand-v3",consumer:"tuic-v5",version:$version,channel:$channel,
-     asset:$asset,source_url:$source,sha256:$sha256,installed_at:$installed}
-  ' >"$output"
-}
-
-tuic_runtime_metadata_valid() {
-  local expected_version="${1:-}" expected_channel="${2:-}"
-  [ -s "$NOBRAND_SING_BOX_RUNTIME_META" ] || return 1
-  jq -e --arg version "$expected_version" --arg channel "$expected_channel" '
-    .ownership=="nobrand-v3" and .consumer=="tuic-v5"
-    and ($version=="" or .version==$version)
-    and ($channel=="" or .channel==$channel)
-    and (.sha256|test("^[0-9a-f]{64}$"))
-  ' "$NOBRAND_SING_BOX_RUNTIME_META" >/dev/null
-}
-
-tuic_snapshot_runtime_files() {
-  local snapshot="$1"
-  mkdir -p "$snapshot" || return 1
-  if [ -e "$NOBRAND_SING_BOX_BIN" ]; then
-    cp -a "$NOBRAND_SING_BOX_BIN" "$snapshot/binary" || return 1
-  else
-    : >"$snapshot/binary.absent" || return 1
-  fi
-  if [ -e "$NOBRAND_SING_BOX_RUNTIME_META" ]; then
-    cp -a "$NOBRAND_SING_BOX_RUNTIME_META" "$snapshot/metadata" || return 1
-  else
-    : >"$snapshot/metadata.absent" || return 1
-  fi
-}
-
-tuic_restore_runtime_files() {
-  local snapshot="$1"
-  if [ -e "$snapshot/binary" ]; then
-    mkdir -p "$(dirname "$NOBRAND_SING_BOX_BIN")" || return 1
-    nb_atomic_install_file "$snapshot/binary" "$NOBRAND_SING_BOX_BIN" 0755 || return 1
-  elif [ -f "$snapshot/binary.absent" ] && [ ! -L "$snapshot/binary.absent" ]; then
-    rm -f "$NOBRAND_SING_BOX_BIN" || return 1
-  else
-    return 1
-  fi
-  if [ -e "$snapshot/metadata" ]; then
-    mkdir -p "$(dirname "$NOBRAND_SING_BOX_RUNTIME_META")" || return 1
-    nb_atomic_install_file "$snapshot/metadata" "$NOBRAND_SING_BOX_RUNTIME_META" 0600 || return 1
-  elif [ -f "$snapshot/metadata.absent" ] && [ ! -L "$snapshot/metadata.absent" ]; then
-    rm -f "$NOBRAND_SING_BOX_RUNTIME_META" || return 1
-  else
-    return 1
-  fi
-}
-
-tuic_snapshot_restore_side_effects() {
-  local snapshot="$1"
-  mkdir -p "$snapshot/runtime" || return 1
-  tuic_snapshot_runtime_files "$snapshot/runtime" || return 1
-  if [ -e "$NOBRAND_TUIC_SYSTEMD_TEMPLATE" ]; then
-    cp -a "$NOBRAND_TUIC_SYSTEMD_TEMPLATE" "$snapshot/systemd-template" || return 1
-  else
-    : >"$snapshot/systemd-template.absent" || return 1
-  fi
-}
-
-tuic_remove_restore_attempt_resources() {
-  local id port failed=0
-  while IFS= read -r id; do
-    [ -n "$id" ] || continue
-    port="$(tuic_state_field "$id" listen_port 2>/dev/null || true)"
-    tuic_remove_service "$id" || failed=1
-    [ -z "$port" ] || nb_firewall_close_pairs "UDP|${port}" || failed=1
-  done < <(tuic_instance_ids)
-  [ "$failed" -eq 0 ]
-}
-
-tuic_restore_side_effect_snapshot() {
-  local snapshot="$1" failed=0
-  tuic_restore_runtime_files "$snapshot/runtime" || failed=1
-  if [ -e "$snapshot/systemd-template" ]; then
-    mkdir -p "$(dirname "$NOBRAND_TUIC_SYSTEMD_TEMPLATE")" || failed=1
-    cp -a "$snapshot/systemd-template" "$NOBRAND_TUIC_SYSTEMD_TEMPLATE" || failed=1
-  elif [ -f "$snapshot/systemd-template.absent" ] \
-       && [ ! -L "$snapshot/systemd-template.absent" ]; then
-    rm -f "$NOBRAND_TUIC_SYSTEMD_TEMPLATE" || failed=1
-  else
-    failed=1
-  fi
-  [ "$(nb_service_manager)" != systemd ] || systemctl daemon-reload >/dev/null 2>&1 || failed=1
-  [ "$failed" -eq 0 ]
-}
-
-tuic_install_runtime() {
-  local channel="${1:-stable}" requested_version="${2:-}" candidate snapshot metadata_tmp version
-  candidate="$(mktemp_file .sing-box)" || return 1
-  tuic_download_runtime_candidate "$candidate" "$channel" "$requested_version" || {
-    rm -f "$candidate"
-    return 1
-  }
-  snapshot="$(mktemp_dir)" || { rm -f "$candidate"; return 1; }
-  tuic_snapshot_runtime_files "$snapshot" || {
-    rm -f "$candidate"
-    rm -rf -- "$snapshot"
-    return 1
-  }
-  nb_lifecycle_mark_protocol_mutation_started "${NOBRAND_LIFECYCLE_SCOPE:-tuic}" || {
-    rm -f "$candidate"
-    rm -rf -- "$snapshot"
-    return 1
-  }
-  mkdir -p "$NOBRAND_BIN_DIR" "$(dirname "$NOBRAND_SING_BOX_RUNTIME_META")" || {
-    tuic_restore_runtime_files "$snapshot" || true
-    rm -f "$candidate"
-    rm -rf -- "$snapshot"
-    return 1
-  }
-  chmod 0755 "$NOBRAND_BIN_DIR" || {
-    tuic_restore_runtime_files "$snapshot" || true
-    rm -f "$candidate"
-    rm -rf -- "$snapshot"
-    return 1
-  }
-  if ! nb_atomic_install_file "$candidate" "$NOBRAND_SING_BOX_BIN" 0755; then
-    tuic_restore_runtime_files "$snapshot" || true
-    rm -f "$candidate"
-    rm -rf -- "$snapshot"
-    return 1
-  fi
-  version="$(tuic_runtime_version)" || {
-    tuic_restore_runtime_files "$snapshot" || true
-    rm -f "$candidate"
-    rm -rf -- "$snapshot"
-    return 1
-  }
-  metadata_tmp="$(mktemp_file .tuic-runtime-meta)" || {
-    tuic_restore_runtime_files "$snapshot" || true
-    rm -f "$candidate"
-    rm -rf -- "$snapshot"
-    return 1
-  }
-  tuic_generate_runtime_metadata "$metadata_tmp" "$channel" "$version" \
-    && nb_atomic_install_file "$metadata_tmp" "$NOBRAND_SING_BOX_RUNTIME_META" 0600 \
-     || {
-       tuic_restore_runtime_files "$snapshot" || true
-       rm -f "$candidate" "$metadata_tmp"
-       rm -rf -- "$snapshot"
-       return 1
-     }
-  rm -f "$candidate" "$metadata_tmp"
-  rm -rf -- "$snapshot"
-}
-
-tuic_validate_config() {
-  local config="$1" binary="${2:-$NOBRAND_SING_BOX_BIN}"
-  [ -x "$binary" ] && "$binary" check -c "$config" >/dev/null
-}
-
-tuic_systemd_unit() { printf 'nobrand-tuic@%s.service' "$1"; }
-tuic_openrc_service() { printf 'nobrand-tuic-%s' "$1"; }
-
-tuic_install_service_runtime() {
-  local manager tmp
-  manager="$(nb_service_manager)"
-  case "$manager" in
-    systemd)
-      tmp="$(mktemp_file .tuic-service)" || return 1
-      cat >"$tmp" <<EOF
-[Unit]
-Description=NoBrand TUIC v5 instance %i
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=${NOBRAND_SING_BOX_BIN} run -c ${NOBRAND_TUIC_CONFIG_DIR}/%i/config.json
-Restart=on-failure
-RestartSec=2
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectHome=true
-ProtectSystem=strict
-ReadOnlyPaths=${NOBRAND_TUIC_CONFIG_DIR} ${NOBRAND_SING_BOX_BIN}
-
-[Install]
-WantedBy=multi-user.target
-EOF
-      nb_atomic_install_file "$tmp" "$NOBRAND_TUIC_SYSTEMD_TEMPLATE" 0644 || return 1
-      systemctl daemon-reload
-      ;;
-    openrc) ;;
-    *) return 1 ;;
-  esac
-}
-
-tuic_ensure_openrc_service() {
-  local id="$1" path tmp
-  [ "$(nb_service_manager)" = openrc ] || return 0
-  path="${NOBRAND_TUIC_OPENRC_PREFIX}${id}"
-  tmp="$(mktemp_file .tuic-openrc)" || return 1
-  cat >"$tmp" <<EOF
-#!/sbin/openrc-run
-name="NoBrand TUIC v5 ${id}"
-command="${NOBRAND_SING_BOX_BIN}"
-command_args="run -c ${NOBRAND_TUIC_CONFIG_DIR}/${id}/config.json"
-command_background="yes"
-pidfile="/run/nobrand-tuic-${id}.pid"
-output_log="/var/log/nobrand-tuic-${id}.log"
-error_log="/var/log/nobrand-tuic-${id}.err"
-depend() { use net; after firewall; }
-EOF
-  nb_atomic_install_file "$tmp" "$path" 0755 || return 1
-  rc-update add "$(tuic_openrc_service "$id")" default >/dev/null 2>&1
-}
-
-tuic_service_action() {
-  local id="$1" action="$2" manager
-  manager="$(nb_service_manager)"
-  case "$manager" in
-    systemd)
-      [ "$action" != start ] || systemctl enable "$(tuic_systemd_unit "$id")" >/dev/null 2>&1
-      systemctl "$action" "$(tuic_systemd_unit "$id")"
-      ;;
-    openrc)
-      tuic_ensure_openrc_service "$id" || return 1
-      rc-service "$(tuic_openrc_service "$id")" "$action"
-      ;;
-    *) return 1 ;;
-  esac
-}
-
-tuic_service_active() {
-  local id="$1"
-  nb_service_is_active "$(tuic_systemd_unit "$id")" "$(tuic_openrc_service "$id")"
-}
-
-tuic_service_pid() {
-  local id="$1" manager pid_file
-  manager="$(nb_service_manager)"
-  case "$manager" in
-    systemd) systemctl show -p MainPID --value "$(tuic_systemd_unit "$id")" 2>/dev/null ;;
-    openrc)
-      pid_file="/run/nobrand-tuic-${id}.pid"
-      [ -s "$pid_file" ] && cat "$pid_file"
-      ;;
-  esac
-}
-
-tuic_listener_owned_by_service() {
-  local id="$1" port="$2" expected pid
-  expected="$(tuic_service_pid "$id" 2>/dev/null || true)"
-  [[ "$expected" =~ ^[0-9]+$ ]] && [ "$expected" -gt 1 ] || return 1
-  while IFS= read -r pid; do
-    [ "$pid" = "$expected" ] && return 0
-  done < <(nb_port_listener_pids UDP "$port")
-  return 1
-}
-
-tuic_remove_service() {
-  local id="$1" manager
-  manager="$(nb_service_manager)"
-  case "$manager" in
-    systemd)
-      systemctl disable --now "$(tuic_systemd_unit "$id")" >/dev/null 2>&1 || true
-      ;;
-    openrc)
-      rc-service "$(tuic_openrc_service "$id")" stop >/dev/null 2>&1 || true
-      rc-update del "$(tuic_openrc_service "$id")" default >/dev/null 2>&1 || true
-      rm -f "${NOBRAND_TUIC_OPENRC_PREFIX}${id}"
-      ;;
-  esac
-}
-
-# ---------- VLESS REALITY named-instance Xray services ----------
-
-reality_systemd_unit() { printf 'nobrand-vless-reality@%s.service' "$1"; }
-reality_openrc_service() { printf 'nobrand-vless-reality-%s' "$1"; }
-
-reality_systemd_template_owned() {
-  [ -f "$NOBRAND_REALITY_SYSTEMD_TEMPLATE" ] \
-    && grep -qxF '# Managed by NoBrand-OneClick' "$NOBRAND_REALITY_SYSTEMD_TEMPLATE" \
-    && grep -qxF "Environment=XRAY_LOCATION_ASSET=${NOBRAND_XRAY_ASSET_DIR}" \
-      "$NOBRAND_REALITY_SYSTEMD_TEMPLATE" \
-    && grep -qF "ExecStart=${NOBRAND_XRAY_BIN} run -c ${NOBRAND_REALITY_CONFIG_DIR}/%i/config.json" \
-      "$NOBRAND_REALITY_SYSTEMD_TEMPLATE"
-}
-
-reality_openrc_service_owned() {
-  local id="$1" path="${NOBRAND_REALITY_OPENRC_PREFIX}${1}"
-  [ -f "$path" ] \
-    && grep -qxF '# Managed by NoBrand-OneClick' "$path" \
-    && grep -qxF "export XRAY_LOCATION_ASSET=\"${NOBRAND_XRAY_ASSET_DIR}\"" "$path" \
-    && grep -qxF "command_args=\"run -c ${NOBRAND_REALITY_CONFIG_DIR}/${id}/config.json\"" "$path"
-}
-
-reality_remove_service_runtime_if_owned() {
-  if [ -e "$NOBRAND_REALITY_SYSTEMD_TEMPLATE" ]; then
-    reality_systemd_template_owned || {
-      warn "$(t \
-        "拒绝删除不属于 NoBrand 的 VLESS REALITY 服务模板: ${NOBRAND_REALITY_SYSTEMD_TEMPLATE}" \
-        "Refusing to remove unowned VLESS REALITY service template: ${NOBRAND_REALITY_SYSTEMD_TEMPLATE}")"
-      return 1
-    }
-    rm -f "$NOBRAND_REALITY_SYSTEMD_TEMPLATE" || return 1
-  fi
-}
-
-reality_install_service_runtime() {
-  local manager tmp
-  manager="$(nb_service_manager)"
-  case "$manager" in
-    systemd)
-      if [ -e "$NOBRAND_REALITY_SYSTEMD_TEMPLATE" ] \
-         && ! reality_systemd_template_owned; then
-        warn "$(t \
-          "拒绝替换不属于 NoBrand 的 VLESS REALITY 服务模板: ${NOBRAND_REALITY_SYSTEMD_TEMPLATE}" \
-          "Refusing to replace unowned VLESS REALITY service template: ${NOBRAND_REALITY_SYSTEMD_TEMPLATE}")"
-        return 1
-      fi
-      tmp="$(mktemp_file .reality-service)" || return 1
-      cat >"$tmp" <<EOF
-# Managed by NoBrand-OneClick
-[Unit]
-Description=NoBrand VLESS REALITY instance %i
-Documentation=https://github.com/ike-sh/NoBrand-OneClick
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=root
-Environment=XRAY_LOCATION_ASSET=${NOBRAND_XRAY_ASSET_DIR}
-ExecStart=${NOBRAND_XRAY_BIN} run -c ${NOBRAND_REALITY_CONFIG_DIR}/%i/config.json
-Restart=on-failure
-RestartSec=2
-LimitNOFILE=1048576
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectHome=true
-ProtectSystem=strict
-ReadOnlyPaths=${NOBRAND_REALITY_CONFIG_DIR} ${NOBRAND_XRAY_BIN} ${NOBRAND_XRAY_ASSET_DIR}
-
-[Install]
-WantedBy=multi-user.target
-EOF
-      grep -qF "ExecStart=${NOBRAND_XRAY_BIN} run -c ${NOBRAND_REALITY_CONFIG_DIR}/%i/config.json" "$tmp" \
-        && nb_atomic_install_file "$tmp" "$NOBRAND_REALITY_SYSTEMD_TEMPLATE" 0644 \
-        || { rm -f "$tmp"; return 1; }
-      rm -f "$tmp"
-      systemctl daemon-reload
-      ;;
-    openrc) ;;
-    *) return 1 ;;
-  esac
-}
-
-reality_ensure_openrc_service() {
-  local id="$1" path tmp
-  [ "$(nb_service_manager)" = openrc ] || return 0
-  path="${NOBRAND_REALITY_OPENRC_PREFIX}${id}"
-  if [ -e "$path" ] && ! reality_openrc_service_owned "$id"; then
-    warn "$(t "拒绝替换不属于 NoBrand 的 VLESS REALITY OpenRC 服务: ${path}" \
-      "Refusing to replace unowned VLESS REALITY OpenRC service: ${path}")"
-    return 1
-  fi
-  tmp="$(mktemp_file .reality-openrc)" || return 1
-  cat >"$tmp" <<EOF
-#!/sbin/openrc-run
-# Managed by NoBrand-OneClick
-name="NoBrand VLESS REALITY ${id}"
-command="${NOBRAND_XRAY_BIN}"
-command_args="run -c ${NOBRAND_REALITY_CONFIG_DIR}/${id}/config.json"
-export XRAY_LOCATION_ASSET="${NOBRAND_XRAY_ASSET_DIR}"
-command_background="yes"
-pidfile="/run/nobrand-vless-reality-${id}.pid"
-output_log="/var/log/nobrand-vless-reality-${id}.log"
-error_log="/var/log/nobrand-vless-reality-${id}.err"
-depend() { use net; after firewall; }
-EOF
-  nb_atomic_install_file "$tmp" "$path" 0755 || { rm -f "$tmp"; return 1; }
-  rm -f "$tmp"
-  rc-update add "$(reality_openrc_service "$id")" default >/dev/null 2>&1
-}
-
-reality_service_action() {
-  local id="$1" action="$2" manager
-  manager="$(nb_service_manager)"
-  case "$manager" in
-    systemd)
-      [ "$action" != start ] \
-        || systemctl enable "$(reality_systemd_unit "$id")" >/dev/null 2>&1
-      [ "$action" != restart ] || systemctl daemon-reload
-      systemctl "$action" "$(reality_systemd_unit "$id")"
-      ;;
-    openrc)
-      reality_ensure_openrc_service "$id" || return 1
-      rc-service "$(reality_openrc_service "$id")" "$action"
-      ;;
-    *) return 1 ;;
-  esac
-}
-
-reality_service_active() {
-  local id="$1"
-  nb_service_is_active "$(reality_systemd_unit "$id")" "$(reality_openrc_service "$id")"
-}
-
-reality_service_pid() {
-  local id="$1" manager pid_file
-  manager="$(nb_service_manager)"
-  case "$manager" in
-    systemd) systemctl show -p MainPID --value "$(reality_systemd_unit "$id")" 2>/dev/null ;;
-    openrc)
-      pid_file="/run/nobrand-vless-reality-${id}.pid"
-      [ -s "$pid_file" ] && cat "$pid_file"
-      ;;
-  esac
-}
-
-reality_listener_owned_by_service() {
-  local id="$1" port="$2" expected pid
-  expected="$(reality_service_pid "$id" 2>/dev/null || true)"
-  [[ "$expected" =~ ^[0-9]+$ ]] && [ "$expected" -gt 1 ] || return 1
-  while IFS= read -r pid; do
-    [ "$pid" = "$expected" ] && return 0
-  done < <(nb_port_listener_pids TCP "$port")
-  return 1
-}
-
-reality_defender_listener_loopback_only() {
-  local port="$1" details
-  details="$(nb_port_listener_details TCP "$port" 2>/dev/null || true)"
-  [ -n "$details" ] || return 1
-  printf '%s\n' "$details" | awk -v port="$port" -v expected="127.0.0.1:${port}" '
-    BEGIN { found=0 }
-    {
-      for (i=1; i<=NF; i++) {
-        if ($i ~ (":" port "$") ) {
-          if ($i != expected) exit 1
-          found=1
-          break
-        }
-      }
-    }
-    END { exit(found ? 0 : 1) }
-  '
-}
-
-reality_defender_listener_owned_by_service() {
-  local id="$1" port="$2"
-  reality_defender_listener_loopback_only "$port" \
-    && reality_listener_owned_by_service "$id" "$port"
-}
-
-reality_remove_service() {
-  local id="$1" manager
-  manager="$(nb_service_manager)"
-  case "$manager" in
-    systemd)
-      reality_systemd_template_owned || return 1
-      systemctl disable --now "$(reality_systemd_unit "$id")" >/dev/null 2>&1 || true
-      ;;
-    openrc)
-      reality_openrc_service_owned "$id" || return 1
-      rc-service "$(reality_openrc_service "$id")" stop >/dev/null 2>&1 || true
-      rc-update del "$(reality_openrc_service "$id")" default >/dev/null 2>&1 || true
-      rm -f "${NOBRAND_REALITY_OPENRC_PREFIX}${id}"
-      ;;
-  esac
-}
-
-random_token() {
-  if command -v openssl >/dev/null 2>&1; then
-    openssl rand -base64 12 | tr -dc 'a-zA-Z0-9' | head -c 10
-  else
-    date +%s | sha256sum | head -c 10
-  fi
-}
-
-random_port() {
-  local p
-  if command -v shuf >/dev/null 2>&1; then
-    p="$(shuf -i 1025-65535 -n 1)"
-  elif command -v awk >/dev/null 2>&1; then
-    p="$(awk 'BEGIN{srand(); print int(1025 + rand() * (65535 - 1025 + 1))}')"
-  else
-    p=$((1025 + RANDOM % (65535 - 1025 + 1)))
-  fi
-  printf '%s' "$p"
-}
-
-random_available_port() {
-  local p i
-  i=0
-  while [ "$i" -lt 256 ]; do
-    p="$(random_port)"
-    if port_available_for_mode "$p"; then
-      printf '%s' "$p"
-      return 0
-    fi
-    i=$((i + 1))
-  done
-  return 1
-}
+# Ordinary protocol runtime and exports are managed by the native Splicore adapter.
 
 normalize_uint() {
   local value="${1:-}"
@@ -9959,27 +8949,6 @@ normalize_uint() {
 
 # 取本机主用 IPv4：优先默认路由出口地址（ip route get 不发包，仅查路由表，
 # 内网无外网也可用），回退首个非回环地址。
-detect_local_ip() {
-  nb_detect_local_ipv4
-}
-
-# 由本机 IP 末位八位组推导端口基数 N*100（要求 N=1-254 且基数≥1025）；不可用返回非0
-derive_port_base() {
-  local ip
-  ip="$(detect_local_ip)"
-  nb_port_base_for_ip "$ip"
-}
-
-# 在 IP 尾号端口段内随机取一个可用端口：xx01-xx99（xx00 留给 SSH）；不可用返回非0。
-# BOTH 双协议时末两位上限取 98，避免 UDP=主端口+1 溢出到 xx00 或下一机器段。
-derive_port_from_ip() {
-  local base hi
-  base="$(derive_port_base)" || return 1
-  hi=99
-  [ "$PROTOCOL" = "BOTH" ] && hi=98
-  nb_scan_port_span "$((base + 1))" "$((base + hi))" port_available_for_mode
-}
-
 valid_port() {
   local p
   p="$(normalize_uint "${1:-}")" || return 1
@@ -9992,62 +8961,10 @@ valid_advertise_port() {
   [ "${#p}" -le 5 ] && [ "$p" -ge 1 ] && [ "$p" -le 65535 ]
 }
 
-validate_advertise_endpoint_values() {
-  local host="${1:-}" port="${2:-}" protocol="${3:-${PROTOCOL:-TCP}}"
-  if [ -z "$host" ] && [ -z "$port" ]; then
-    return 0
-  fi
-  [ -n "$host" ] && [ -n "$port" ] || {
-    warn "$(t '自定义客户端入口必须同时提供地址和端口' \
-      'Custom client entry requires both a host and a port')"
-    return 1
-  }
-  if ! nb_validate_advertise_endpoint "$host" "$port" "$protocol"; then
-    warn "$(t '客户端入口无效；请输入有效 IPv4、IPv6 或域名及 1-65535 端口（双协议主端口 ≤65534）' \
-      'Invalid client endpoint; use a valid IPv4, IPv6, or domain and port 1-65535 (dual main port <=65534)')"
-    return 1
-  fi
-}
-
-validate_advertise_endpoint() {
-  validate_advertise_endpoint_values "$ADVERTISE_HOST" "$ADVERTISE_PORT" "${PROTOCOL:-TCP}"
-}
-
 valid_mtu() {
   local value
   value="$(normalize_uint "${1:-}")" || return 1
   [ "${#value}" -le 4 ] && [ "$value" -ge 1280 ] && [ "$value" -le 1500 ]
-}
-
-valid_nonnegative_int32() {
-  local value="${1:-}" digits
-  [[ "$value" =~ ^0*([0-9]{1,10})$ ]] || return 1
-  digits="${BASH_REMATCH[1]}"
-  [ "$((10#$digits))" -le 2147483647 ]
-}
-
-valid_bandwidth_mbps() {
-  local value="${1:-}" digits
-  [[ "$value" =~ ^0*([0-9]{1,7})$ ]] || return 1
-  digits="${BASH_REMATCH[1]}"
-  [ "$((10#$digits))" -le 1000000 ]
-}
-
-normalize_mtu_policy() {
-  case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
-    safe|default|保守|安全) printf 'safe' ;;
-    auto|optimized|optimised|自动|优化) printf 'optimized' ;;
-    custom|manual|自定义|手动) printf 'custom' ;;
-    *) return 1 ;;
-  esac
-}
-
-mtu_policy_label() {
-  case "$(normalize_mtu_policy "${MTU_POLICY:-safe}" 2>/dev/null || true)" in
-    optimized) t '自动优化' 'Auto optimized' ;;
-    custom) t '自定义' 'Custom' ;;
-    *) t '安全默认' 'Safe default' ;;
-  esac
 }
 
 mtu_default_iface() {
@@ -10066,1810 +8983,11 @@ mtu_default_iface() {
   printf '%s' "$dev"
 }
 
-mtu_iface_value() {
-  local dev="${1:-}" value=""
-  [ -n "$dev" ] || return 1
-  if [ -r "/sys/class/net/${dev}/mtu" ]; then
-    value="$(tr -dc '0-9' <"/sys/class/net/${dev}/mtu" 2>/dev/null || true)"
-  fi
-  if ! [[ "$value" =~ ^[0-9]+$ ]] && command -v ip >/dev/null 2>&1; then
-    value="$(ip -o link show dev "$dev" 2>/dev/null \
-      | awk '{for(i=1;i<=NF;i++) if($i=="mtu"){print $(i+1); exit}}')"
-  fi
-  [[ "$value" =~ ^[0-9]+$ ]] || return 1
-  printf '%s' "$value"
-}
+# Ordinary protocol state and users are managed by runtime/splicore.py.
 
-mtu_route_family() {
-  local dev="${1:-}"
-  if command -v ip >/dev/null 2>&1 \
-     && ip route get 1.1.1.1 2>/dev/null \
-       | awk -v expected="$dev" '
-           { for (i=1; i<NF; i++) if ($i=="dev" && $(i+1)==expected) found=1 }
-           END { exit(found ? 0 : 1) }
-         '; then
-    printf 'IPv4'
-    return 0
-  fi
-  if command -v ip >/dev/null 2>&1 \
-     && ip -6 route get 2606:4700:4700::1111 2>/dev/null \
-       | awk -v expected="$dev" '
-           { for (i=1; i<NF; i++) if ($i=="dev" && $(i+1)==expected) found=1 }
-           END { exit(found ? 0 : 1) }
-         '; then
-    printf 'IPv6'
-    return 0
-  fi
-  printf 'unknown'
-}
+# Ordinary protocol state and users are managed by runtime/splicore.py.
 
-# 自动策略只对 UDP 数据报大小有直接收益；TCP 由流式分片控制，保持 1400。
-# mihomo 的 mieru 节点当前没有 mtu 字段，因此自动策略统一封顶 1400；
-# 只有明确使用支持同步 MTU 的官方客户端时，才建议手工配置 1401-1500。
-calculate_optimized_mtu() {
-  local candidate
-  MTU_AUTO_IFACE=""
-  MTU_AUTO_LINK=""
-  MTU_AUTO_FAMILY=""
-  MTU_AUTO_OVERHEAD=""
-  MTU_POLICY="optimized"
-  if [ "${PROTOCOL:-TCP}" = "TCP" ]; then
-    MTU=1400
-    MTU_AUTO_FAMILY="TCP"
-    return 0
-  fi
-  MTU_AUTO_IFACE="$(mtu_default_iface)"
-  MTU_AUTO_LINK="$(mtu_iface_value "$MTU_AUTO_IFACE" 2>/dev/null || true)"
-  if ! [[ "$MTU_AUTO_LINK" =~ ^[0-9]+$ ]]; then
-    MTU=1400
-    return 0
-  fi
-  MTU_AUTO_FAMILY="$(mtu_route_family "$MTU_AUTO_IFACE")"
-  case "$MTU_AUTO_FAMILY" in
-    IPv4) MTU_AUTO_OVERHEAD=28 ;;
-    *) MTU_AUTO_OVERHEAD=48 ;;
-  esac
-  candidate=$((MTU_AUTO_LINK - MTU_AUTO_OVERHEAD))
-  [ "$candidate" -gt 1400 ] && candidate=1400
-  [ "$candidate" -lt 1280 ] && candidate=1280
-  MTU="$candidate"
-}
-
-resolve_mtu_request() {
-  local raw="${MTU_REQUEST:-${MTU_POLICY:-safe}}" normalized=""
-  if [[ "$raw" =~ ^[0-9]+$ ]]; then
-    valid_mtu "$raw" || {
-      die "$(t '非法 MTU：必须为 1280-1500' 'Invalid MTU: expected 1280-1500')" || return 1
-    }
-    MTU="$(normalize_uint "$raw")"
-    MTU_POLICY="custom"
-    return 0
-  fi
-  normalized="$(normalize_mtu_policy "$raw" 2>/dev/null || true)"
-  case "$normalized" in
-    safe)
-      MTU=1400
-      MTU_POLICY="safe"
-      ;;
-    optimized)
-      calculate_optimized_mtu
-      ;;
-    custom)
-      valid_mtu "${MTU:-}" || {
-        die "$(t '自定义 MTU 必须为 1280-1500' 'Custom MTU must be 1280-1500')" || return 1
-      }
-      MTU_POLICY="custom"
-      ;;
-    *)
-      die "$(t '--mtu 仅支持 safe、auto 或 1280-1500' \
-        '--mtu accepts only safe, auto, or a value from 1280 to 1500')" || return 1
-      ;;
-  esac
-}
-
-print_mtu_selection() {
-  local family_label="${MTU_AUTO_FAMILY:-}"
-  [ "$family_label" != unknown ] || family_label="$(t '未知协议族' 'unknown family')"
-  t "已选 MTU: ${MTU}（$(mtu_policy_label)）" \
-    "Selected MTU: ${MTU} ($(mtu_policy_label))"
-  if [ "$MTU_POLICY" = "optimized" ]; then
-    if [ "${PROTOCOL:-TCP}" = "TCP" ]; then
-      t '  TCP 模式提高 MTU 没有明显收益，自动策略保持 1400' \
-        '  Raising MTU has little benefit in TCP mode; auto keeps 1400'
-    elif [ -n "$MTU_AUTO_LINK" ]; then
-      t "  检测: 网卡 ${MTU_AUTO_IFACE}，链路 MTU ${MTU_AUTO_LINK}，${family_label} 开销 ${MTU_AUTO_OVERHEAD}" \
-        "  Detected: ${MTU_AUTO_IFACE}, link MTU ${MTU_AUTO_LINK}, ${family_label} overhead ${MTU_AUTO_OVERHEAD}"
-    else
-      warn "$(t '未能读取出口链路 MTU，自动策略已回退到 1400' \
-        'Could not read egress link MTU; auto fell back to 1400')"
-    fi
-  fi
-  if [ "${PROTOCOL:-TCP}" = "TCP" ] && [ "$MTU" -gt 1400 ]; then
-    warn "$(t 'TCP 模式使用大于 1400 的 MTU 通常没有明显收益，并可能降低复杂网络路径的兼容性' \
-      'MTU above 1400 usually offers no clear benefit for TCP and may reduce path compatibility')"
-  fi
-  if [ "$MTU" -gt 1400 ]; then
-    warn "$(t 'mihomo 的 mieru 节点当前不能单独指定 MTU；大于 1400 仅建议用于可同步相同 MTU 的官方 mieru 客户端' \
-      'mihomo mieru proxies currently cannot set MTU; values above 1400 are recommended only with official mieru clients configured to the same MTU')"
-  fi
-}
-
-choose_mtu_interactive() {
-  local input="" def=1 custom=""
-  if [ "${MTU_CLI:-0}" -eq 1 ]; then
-    resolve_mtu_request || return 1
-    print_mtu_selection
-    return 0
-  fi
-  case "$(normalize_mtu_policy "${MTU_POLICY:-safe}" 2>/dev/null || true)" in
-    optimized) def=2 ;;
-    custom) def=3 ;;
-    *) def=1 ;;
-  esac
-  msg ""
-  t 'MTU 策略（与 multiplexing、handshake、traffic-pattern 无绑定关系）:' \
-    'MTU policy (independent of multiplexing, handshake, and traffic-pattern):'
-  t '  1) 安全默认 1400（推荐，跨网络兼容性最好）' \
-    '  1) Safe 1400 (recommended, best path compatibility)'
-  t '  2) 自动兼容（TCP 保持 1400；UDP/双协议按出口链路计算，兼容 mihomo，最大 1400）' \
-    '  2) Auto compatible (TCP stays 1400; UDP/dual uses egress link MTU, mihomo-safe max 1400)'
-  t '  3) 自定义 1280-1500' '  3) Custom 1280-1500'
-  read_tty input "$(t "请选择 [1-3，默认 ${def}]: " "Choose [1-3, default ${def}]: ")" || input=""
-  input="${input:-$def}"
-  case "$input" in
-    2)
-      MTU_REQUEST="auto"
-      resolve_mtu_request || return 1
-      ;;
-    3)
-      while true; do
-        custom=""
-        read_tty custom "$(t "自定义 MTU [${MTU}]: " "Custom MTU [${MTU}]: ")" || custom=""
-        custom="${custom:-$MTU}"
-        if valid_mtu "$custom"; then
-          MTU="$custom"
-          MTU_POLICY="custom"
-          break
-        fi
-        warn "$(t '请输入 1280-1500 的整数' 'Enter an integer from 1280 to 1500')"
-      done
-      ;;
-    *)
-      MTU=1400
-      MTU_POLICY="safe"
-      ;;
-  esac
-  print_mtu_selection
-}
-
-# ---------- 多用户（阶段1 端口；阶段2 套餐 quotas + 到期停用） ----------
-
-users_require_python() {
-  command -v python3 >/dev/null 2>&1 || die "$(t '多用户管理需要 python3' 'python3 required for multi-user management')"
-}
-
-users_log() {
-  local line quiet="${USERS_LOG_QUIET:-0}"
-  line="$(date '+%Y-%m-%d %H:%M:%S') $*"
-  printf '%s\n' "$line" >>"${MITA_USERS_LOG}" 2>/dev/null || true
-  [ "$quiet" = "1" ] || msg "$line" >&2
-}
-
-# 套餐模板 → 设置 USER_QUOTA_MB / USER_QUOTA_DAYS / 可选默认到期
-# unlimited: 0/0；trial: 10GB/7天；standard: 100GB/30天；custom: 用 CLI 值
-apply_user_package_defaults() {
-  local fill_missing="${1:-1}" pkg
-  pkg="$(printf '%s' "${USER_PACKAGE:-}" | tr '[:upper:]' '[:lower:]')"
-  case "$pkg" in
-    "")
-      ;;
-    unlimited|unlimit|none|0|无限)
-      USER_QUOTA_MB=0
-      USER_QUOTA_DAYS=0
-      USER_PACKAGE="unlimited"
-      ;;
-    trial|体验|test)
-      [ -n "${USER_QUOTA_MB}" ] || USER_QUOTA_MB=10240
-      [ -n "${USER_QUOTA_DAYS}" ] || USER_QUOTA_DAYS=7
-      [ -n "${USER_EXPIRE}" ] || USER_EXPIRE="+7d"
-      USER_PACKAGE="trial"
-      ;;
-    standard|std|标准|月包)
-      [ -n "${USER_QUOTA_MB}" ] || USER_QUOTA_MB=102400
-      [ -n "${USER_QUOTA_DAYS}" ] || USER_QUOTA_DAYS=30
-      [ -n "${USER_EXPIRE}" ] || USER_EXPIRE="+30d"
-      USER_PACKAGE="standard"
-      ;;
-    custom|自定义)
-      USER_PACKAGE="custom"
-      ;;
-    *)
-      warn "$(t "未知套餐 ${USER_PACKAGE}，忽略（可用 unlimited|trial|standard|custom）" \
-        "Unknown package ${USER_PACKAGE}; use unlimited|trial|standard|custom")"
-      USER_PACKAGE=""
-      return 1
-      ;;
-  esac
-  if [ "$fill_missing" = "1" ]; then
-    [ -n "${USER_QUOTA_DAYS}" ] || USER_QUOTA_DAYS=30
-    [ -n "${USER_QUOTA_MB}" ] || USER_QUOTA_MB=0
-  elif [ -n "${USER_QUOTA_MB}" ]; then
-    valid_nonnegative_int32 "$USER_QUOTA_MB" || return 1
-    if [ "$USER_QUOTA_MB" -eq 0 ]; then
-      USER_QUOTA_DAYS=0
-    else
-      [ -n "${USER_QUOTA_DAYS}" ] || USER_QUOTA_DAYS=30
-    fi
-  fi
-}
-
-# 解析到期：空/0/never → 空；+Nd → 今天+N天 YYYY-MM-DD；YYYY-MM-DD 原样
-parse_expire_date() {
-  local raw="$1" days
-  raw="$(printf '%s' "$raw" | tr -d '[:space:]')"
-  if [ -z "$raw" ] || [ "$raw" = "0" ] || [ "$raw" = "never" ] || [ "$raw" = "none" ] || [ "$raw" = "-" ]; then
-    printf ''
-    return 0
-  fi
-  if [[ "$raw" =~ ^\+([0-9]+)[dD]?$ ]]; then
-    days="${BASH_REMATCH[1]}"
-    if date -u -d "+${days} days" +%Y-%m-%d >/dev/null 2>&1; then
-      date -u -d "+${days} days" +%Y-%m-%d
-      return 0
-    fi
-    if date -u -v+"${days}"d +%Y-%m-%d >/dev/null 2>&1; then
-      date -u -v+"${days}"d +%Y-%m-%d
-      return 0
-    fi
-    # busybox / python fallback
-    if command -v python3 >/dev/null 2>&1; then
-      python3 -c "import datetime;print((datetime.date.today()+datetime.timedelta(days=int('${days}'))).isoformat())" 2>/dev/null
-      return $?
-    fi
-    warn "$(t "当前系统无法计算相对日期: $raw" "Cannot calculate relative date on this system: $raw")"
-    return 1
-  fi
-  if [[ "$raw" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
-    if [ "$(date -d "$raw" +%Y-%m-%d 2>/dev/null || true)" = "$raw" ]; then
-      printf '%s' "$raw"
-      return 0
-    fi
-    if command -v python3 >/dev/null 2>&1 \
-       && python3 -c 'import datetime,sys; datetime.date.fromisoformat(sys.argv[1])' "$raw" 2>/dev/null; then
-      printf '%s' "$raw"
-      return 0
-    fi
-    warn "$(t "无效日历日期: $raw" "Invalid calendar date: $raw")"
-    return 1
-  fi
-  warn "$(t "无法解析到期日: $raw（用 YYYY-MM-DD 或 +30d）" "Bad expire: $raw (use YYYY-MM-DD or +30d)")"
-  return 1
-}
-
-# 与 calendar 重置统一用本地日历日（与 mita 服务器本地时间一致）
-today_ymd() {
-  date +%Y-%m-%d 2>/dev/null || python3 -c 'import datetime;print(datetime.date.today().isoformat())'
-}
-
-quota_label() {
-  local mb="${1:-0}" days="${2:-0}"
-  if [ -z "$mb" ] || [ "$mb" = "0" ] || [ "$mb" = "null" ]; then
-    t '不限量' 'unlimited'
-    return
-  fi
-  if [ "$mb" -ge 1024 ] 2>/dev/null; then
-    t "$((mb / 1024))GB/${days:-30}天" "$((mb / 1024))GB/${days:-30}d"
-  else
-    t "${mb}MB/${days:-30}天" "${mb}MB/${days:-30}d"
-  fi
-}
-
-users_state_init_empty() {
-  if [ "${DRY_RUN:-0}" -eq 1 ]; then
-    t "[演练] 初始化用户状态: $MITA_USERS_STATE" \
-      "[dry-run] initialize users state: $MITA_USERS_STATE"
-    return 0
-  fi
-  run mkdir -p "$(dirname "$MITA_USERS_STATE")"
-  printf '{"version":2,"deployment_model":"%s","protocol":"%s","users":[]}\n' \
-    "$MITA_DEPLOYMENT_MODEL" "${PROTOCOL:-TCP}" >"$MITA_USERS_STATE"
-  run chmod 0600 "$MITA_USERS_STATE" 2>/dev/null || true
-}
-
-users_state_exists() {
-  [ -f "$MITA_USERS_STATE" ] && [ -s "$MITA_USERS_STATE" ]
-}
-
-users_tx_snapshot() {
-  local snapshot
-  snapshot="$(mktemp_file .users.json)" || return 1
-  if users_state_exists; then
-    cp -f "$MITA_USERS_STATE" "$snapshot" || { rm -f "$snapshot"; return 1; }
-  else
-    printf '%s\n' '__MITA_USERS_STATE_ABSENT__' >"$snapshot"
-  fi
-  chmod 0600 "$snapshot" 2>/dev/null || true
-  printf '%s' "$snapshot"
-}
-
-users_tx_commit() {
-  local snapshot="${1:-}"
-  [ -n "$snapshot" ] && prune_orphan_instances 2>/dev/null || true
-  [ -n "$snapshot" ] && rm -f "$snapshot" 2>/dev/null || true
-}
-
-users_tx_restore() {
-  local snapshot="${1:-}"
-  [ -f "$snapshot" ] || return 1
-  if grep -qx '__MITA_USERS_STATE_ABSENT__' "$snapshot" 2>/dev/null; then
-    rm -f "$MITA_USERS_STATE" 2>/dev/null || true
-    return 2
-  fi
-  run mkdir -p "$(dirname "$MITA_USERS_STATE")"
-  cp -f "$snapshot" "$MITA_USERS_STATE" || return 1
-  chmod 0600 "$MITA_USERS_STATE" 2>/dev/null || true
-  return 0
-}
-
-users_tx_rollback() {
-  local snapshot="${1:-}" reapply="${2:-0}" restored=0 restore_rc=0
-  [ -n "$snapshot" ] || return 0
-  # apply_users_config 失败时会自行消费快照；外层再次回滚应是安全空操作。
-  [ -f "$snapshot" ] || return 0
-  if users_tx_restore "$snapshot"; then
-    restored=1
-  else
-    restore_rc=$?
-    if [ "$restore_rc" -eq 2 ]; then
-      restored=2
-    else
-      warn "$(t '用户状态回滚失败，请从最近备份恢复' \
-        'Failed to roll back users state; restore the latest backup')"
-    fi
-  fi
-  if [ "$restored" -gt 0 ] && [ "$reapply" -eq 1 ] && mita_installed 2>/dev/null; then
-    MULTI_USER_MODE=1
-    if [ "$restored" -eq 2 ]; then
-      isolated_stop_all
-      apply_tc_limits 2>/dev/null || true
-    else
-      if ! reconcile_isolated_instances 2>/dev/null; then
-        warn "$(t '用户状态已回滚，但专属实例配置重新应用失败，请立即运行 Doctor / 诊断' \
-          'Users state was rolled back, but reapplying dedicated instances failed; run doctor now')"
-      fi
-      apply_tc_limits 2>/dev/null || warn "$(t '用户状态已回滚，但旧限速规则未能完全恢复' \
-        'Users state was rolled back, but previous rate filters were not fully restored')"
-    fi
-  fi
-  users_tx_commit "$snapshot"
-}
-
-users_count() {
-  users_state_exists || { printf '0'; return 0; }
-  command -v python3 >/dev/null 2>&1 || { printf '0'; return 0; }
-  python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(len(d.get("users") or []))' \
-    "$MITA_USERS_STATE" 2>/dev/null || printf '0'
-}
-
-users_rate_limited_count() {
-  users_state_exists || { printf '0'; return 0; }
-  command -v python3 >/dev/null 2>&1 || { printf '0'; return 0; }
-  python3 -c '
-import json,sys
-d=json.load(open(sys.argv[1]))
-print(sum(
-    1 for u in (d.get("users") or [])
-    if u.get("enabled", True) and int(u.get("bandwidth_mbps") or 0) > 0
-))
-' "$MITA_USERS_STATE" 2>/dev/null || printf '0'
-}
-
-users_deployment_model() {
-  users_state_exists || return 1
-  python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("deployment_model") or "")' \
-    "$MITA_USERS_STATE" 2>/dev/null
-}
-
-users_isolated_mode() {
-  [ "$(users_deployment_model 2>/dev/null || true)" = "$MITA_DEPLOYMENT_MODEL" ]
-}
-
-users_enabled_instance_rows() {
-  users_state_exists || return 1
-  python3 -c '
-import json,sys
-d=json.load(open(sys.argv[1]))
-for u in d.get("users") or []:
-    if not u.get("enabled", True):
-        continue
-    instance_id=str(u.get("instance_id") or "")
-    name=str(u.get("name") or "")
-    port=int(u.get("port") or 0)
-    if instance_id and name and port:
-        print(f"{instance_id}\t{name}\t{port}")
-' "$MITA_USERS_STATE" 2>/dev/null
-}
-
-users_all_instance_ids() {
-  users_state_exists || return 0
-  python3 -c '
-import json,sys
-d=json.load(open(sys.argv[1]))
-for u in d.get("users") or []:
-    instance_id=str(u.get("instance_id") or "")
-    if instance_id: print(instance_id)
-' "$MITA_USERS_STATE" 2>/dev/null | LC_ALL=C sort -u
-}
-
-instance_valid_id() {
-  local id="${1:-}"
-  [[ "$id" =~ ^u[0-9a-f]{16}$ ]]
-}
-
-instance_config_path() { printf '%s/%s/server.json' "$MITA_INSTANCES_DIR" "$1"; }
-instance_socket_path() { printf '%s/%s.sock' "$MITA_INSTANCE_RUN_DIR" "$1"; }
-instance_metrics_dir() { printf '%s/%s' "$MITA_INSTANCE_METRICS_DIR" "$1"; }
-instance_metrics_file() { printf '%s/%s/metrics.pb' "$MITA_INSTANCE_METRICS_DIR" "$1"; }
-instance_systemd_unit() { printf 'nobrand-mieru@%s.service' "$1"; }
-instance_openrc_service() { printf 'nobrand-mieru-%s' "$1"; }
-
-instance_cmd() {
-  local id="$1"
-  shift
-  instance_valid_id "$id" || return 1
-  env MITA_CONFIG_JSON_FILE="$(instance_config_path "$id")" \
-      MITA_UDS_PATH="$(instance_socket_path "$id")" \
-      "$(mita_bin)" "$@"
-}
-
-instance_wait_socket() {
-  local id="$1" timeout="${2:-30}" i=0 sock
-  sock="$(instance_socket_path "$id")"
-  while [ "$i" -lt "$timeout" ]; do
-    [ -S "$sock" ] && return 0
-    sleep 1
-    i=$((i + 1))
-  done
-  return 1
-}
-
-users_ensure_instance_ids() {
-  users_state_exists || return 1
-  users_py_locked '
-import hashlib,json,os
-path=os.environ["MITA_USERS_STATE"]
-d=json.load(open(path))
-used=set()
-for index,u in enumerate(d.get("users") or []):
-    current=str(u.get("instance_id") or "")
-    if current.startswith("u") and len(current)==17 \
-       and all(c in "0123456789abcdef" for c in current[1:]) and current not in used:
-        used.add(current)
-        continue
-    material="%s\0%s\0%s\0%s" % (
-        u.get("name") or "", u.get("created_at") or 0, u.get("port") or 0, index
-    )
-    salt=0
-    while True:
-        candidate="u"+hashlib.sha256((material+"\0"+str(salt)).encode()).hexdigest()[:16]
-        if candidate not in used:
-            break
-        salt += 1
-    u["instance_id"]=candidate
-    used.add(candidate)
-d["version"]=max(2,int(d.get("version") or 1))
-json.dump(d,open(path,"w"),indent=2)
-'
-}
-
-install_instance_runtime() {
-  local sm bin
-  sm="$(service_manager)"
-  bin="$(mita_real_bin)"
-  if [ "${DRY_RUN:-0}" -eq 1 ]; then
-    t "[演练] 安装隔离的 mita 实例运行环境（${sm}）" \
-      "[dry-run] install isolated mita instance runtime ($sm)"
-    return 0
-  fi
-  [ "$sm" != "none" ] || {
-    warn "$(t '专属实例模式需要 systemd 或 OpenRC' \
-      'Dedicated-instance mode requires systemd or OpenRC')"
-    return 1
-  }
-  run mkdir -p "$MITA_INSTANCES_DIR" "$MITA_INSTANCE_RUN_DIR" \
-    "$MITA_INSTANCE_METRICS_DIR" /usr/local/libexec /var/lib/mita || return 1
-  # 配置子目录/文件属于 mita，但父目录必须至少允许 mita 组穿越。
-  run chown root:mita "$MITA_INSTANCES_DIR" || return 1
-  run chown mita:mita "$MITA_INSTANCE_RUN_DIR" "$MITA_INSTANCE_METRICS_DIR" /var/lib/mita \
-    || return 1
-  run chmod 0750 "$MITA_INSTANCES_DIR" "$MITA_INSTANCE_RUN_DIR" "$MITA_INSTANCE_METRICS_DIR" \
-    || return 1
-
-  case "$sm" in
-    systemd)
-      run mkdir -p "$(dirname "$MITA_INSTANCE_TMPFILES")" || return 1
-      cat >"$MITA_INSTANCE_TMPFILES" <<EOF
-d ${MITA_INSTANCE_RUN_DIR} 0750 mita mita -
-EOF
-      run chmod 0644 "$MITA_INSTANCE_TMPFILES" || return 1
-      if command -v systemd-tmpfiles >/dev/null 2>&1; then
-        run systemd-tmpfiles --create "$MITA_INSTANCE_TMPFILES" || return 1
-      fi
-      cat >"$MITA_INSTANCE_SYSTEMD_TEMPLATE" <<EOF
-[Unit]
-Description=Mieru dedicated user instance %i
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=exec
-User=mita
-Group=mita
-Environment=MITA_CONFIG_JSON_FILE=${MITA_INSTANCES_DIR}/%i/server.json
-Environment=MITA_UDS_PATH=${MITA_INSTANCE_RUN_DIR}/%i.sock
-PrivateMounts=true
-BindPaths=${MITA_INSTANCE_METRICS_DIR}/%i:/var/lib/mita
-ExecStart=${bin} run
-Restart=on-failure
-RestartSec=2
-NoNewPrivileges=true
-
-[Install]
-WantedBy=multi-user.target
-EOF
-      run chmod 0644 "$MITA_INSTANCE_SYSTEMD_TEMPLATE" || return 1
-      run systemctl daemon-reload || return 1
-      ;;
-    openrc)
-      if ! command -v unshare >/dev/null 2>&1 \
-          || ! command -v mount >/dev/null 2>&1 \
-          || ! command -v setpriv >/dev/null 2>&1; then
-          warn "$(t 'OpenRC 专属实例需要 util-linux（unshare、mount、setpriv）' \
-            'OpenRC dedicated instances require util-linux (unshare, mount, setpriv)')"
-          return 1
-      fi
-      cat >"$MITA_INSTANCE_RUNNER" <<EOF
-#!/bin/sh
-set -eu
-id="\${1:-}"
-printf '%s' "\$id" | grep -Eq '^u[0-9a-f]{16}\$' || exit 64
-cfg="${MITA_INSTANCES_DIR}/\$id/server.json"
-sock="${MITA_INSTANCE_RUN_DIR}/\$id.sock"
-metrics="${MITA_INSTANCE_METRICS_DIR}/\$id"
-[ -r "\$cfg" ] && [ -d "\$metrics" ] || exit 66
-exec unshare --mount --propagation private sh -c '
-  set -eu
-  mount --bind "\$1" /var/lib/mita
-  exec setpriv --reuid=mita --regid=mita --init-groups \
-    env MITA_CONFIG_JSON_FILE="\$2" MITA_UDS_PATH="\$3" "\$4" run
-' sh "\$metrics" "\$cfg" "\$sock" "${bin}"
-EOF
-      run chmod 0755 "$MITA_INSTANCE_RUNNER" || return 1
-      ;;
-  esac
-}
-
-instance_ensure_openrc_service() {
-  local id="$1" svc
-  instance_valid_id "$id" || return 1
-  [ "$(service_manager)" = "openrc" ] || return 0
-  svc="${MITA_INSTANCE_OPENRC_PREFIX}${id}"
-  [ "${DRY_RUN:-0}" -eq 1 ] && {
-    t "[演练] 写入 OpenRC 实例服务: $svc" \
-      "[dry-run] write OpenRC instance service $svc"
-    return 0
-  }
-  cat >"$svc" <<EOF
-#!/sbin/openrc-run
-
-name="mita dedicated instance ${id}"
-description="Mieru dedicated user instance ${id}"
-command="${MITA_INSTANCE_RUNNER}"
-command_args="${id}"
-command_background="yes"
-pidfile="/run/nobrand-mieru-${id}.pid"
-output_log="/var/log/nobrand-mieru-${id}.log"
-error_log="/var/log/nobrand-mieru-${id}.err"
-respawn
-respawn_delay=5
-respawn_max=0
-
-depend() {
-  need net localmount
-  after firewall
-}
-
-start_pre() {
-  checkpath --directory --owner mita:mita --mode 0750 "${MITA_INSTANCE_RUN_DIR}" "${MITA_INSTANCE_METRICS_DIR}/${id}"
-  checkpath --file --owner mita:mita --mode 0640 "/var/log/nobrand-mieru-${id}.log" "/var/log/nobrand-mieru-${id}.err"
-}
-EOF
-  run chmod 0755 "$svc"
-}
-
-write_instance_config() {
-  local id="$1" name="$2" port="$3" full tmp final dir
-  instance_valid_id "$id" || return 1
-  [ -n "$name" ] && valid_port "$port" || return 1
-  full="$(write_server_config_multi)" || return 1
-  tmp="$(mktemp_file .instance.json)" || { rm -f "$full"; return 1; }
-  if ! _INSTANCE_PORT="$port" _INSTANCE_NAME="$name" _INSTANCE_PROTO="${PROTOCOL:-TCP}" \
-      python3 - "$MITA_USERS_STATE" "$full" "$tmp" <<'PY'
-import json, os, sys
-state_path, full_path, out_path = sys.argv[1:4]
-instance_port = int(os.environ["_INSTANCE_PORT"])
-name = os.environ["_INSTANCE_NAME"]
-proto = os.environ.get("_INSTANCE_PROTO", "TCP")
-state = json.load(open(state_path))
-full = json.load(open(full_path))
-user_state = next((
-    u for u in state.get("users") or []
-    if u.get("enabled", True) and str(u.get("name") or "") == name
-       and int(u.get("port") or 0) == instance_port
-), None)
-user_cfg = next((u for u in full.get("users") or [] if str(u.get("name") or "") == name), None)
-if user_state is None or user_cfg is None:
-    raise SystemExit(2)
-bindings = [{"port": instance_port, "protocol": "TCP" if proto == "BOTH" else proto}]
-if proto == "BOTH":
-    bindings.append({"port": instance_port + 1, "protocol": "UDP"})
-full["portBindings"] = bindings
-full["users"] = [user_cfg]
-json.dump(full, open(out_path, "w"), indent=2)
-PY
-  then
-    rm -f "$full" "$tmp"
-    return 1
-  fi
-  rm -f "$full"
-  dir="${MITA_INSTANCES_DIR}/${id}"
-  final="$(instance_config_path "$id")"
-  if [ "${DRY_RUN:-0}" -eq 1 ]; then
-    t "[演练] 安装专属实例配置: $final" \
-      "[dry-run] install dedicated config $final"
-    rm -f "$tmp"
-    return 0
-  fi
-  run mkdir -p "$dir" "$(instance_metrics_dir "$id")" "$MITA_INSTANCE_RUN_DIR" \
-    || { rm -f "$tmp"; return 1; }
-  run chown mita:mita "$dir" "$(instance_metrics_dir "$id")" "$MITA_INSTANCE_RUN_DIR" \
-    || { rm -f "$tmp"; return 1; }
-  run chmod 0750 "$dir" "$(instance_metrics_dir "$id")" "$MITA_INSTANCE_RUN_DIR" \
-    || { rm -f "$tmp"; return 1; }
-  install -o mita -g mita -m 0600 "$tmp" "${final}.new" \
-    || { rm -f "$tmp" "${final}.new"; return 1; }
-  mv -f "${final}.new" "$final" \
-    || { rm -f "$tmp" "${final}.new"; return 1; }
-  rm -f "$tmp"
-}
-
-instance_daemon_start() {
-  local id="$1" sm unit svc
-  instance_valid_id "$id" || return 1
-  sm="$(service_manager)"
-  case "$sm" in
-    systemd)
-      unit="$(instance_systemd_unit "$id")"
-      run systemctl enable "$unit" >/dev/null 2>&1
-      run systemctl restart "$unit"
-      ;;
-    openrc)
-      instance_ensure_openrc_service "$id"
-      svc="$(instance_openrc_service "$id")"
-      run rc-update add "$svc" default >/dev/null 2>&1 || true
-      run rc-service "$svc" restart 2>/dev/null || run rc-service "$svc" start
-      ;;
-    *) return 1 ;;
-  esac
-  instance_wait_socket "$id" 30
-}
-
-instance_daemon_stop() {
-  local id="$1" disable="${2:-0}" sm unit svc
-  instance_valid_id "$id" || return 1
-  instance_cmd "$id" stop >/dev/null 2>&1 || true
-  sm="$(service_manager)"
-  case "$sm" in
-    systemd)
-      unit="$(instance_systemd_unit "$id")"
-      run systemctl stop "$unit" >/dev/null 2>&1 || true
-      [ "$disable" -eq 1 ] && run systemctl disable "$unit" >/dev/null 2>&1 || true
-      ;;
-    openrc)
-      svc="$(instance_openrc_service "$id")"
-      run rc-service "$svc" stop >/dev/null 2>&1 || true
-      if [ "$disable" -eq 1 ]; then
-        run rc-update del "$svc" default >/dev/null 2>&1 || true
-        run rm -f "${MITA_INSTANCE_OPENRC_PREFIX}${id}"
-      fi
-      ;;
-  esac
-  run rm -f "$(instance_socket_path "$id")" 2>/dev/null || true
-}
-
-instance_log_tail() {
-  local id="$1" sm unit
-  instance_valid_id "$id" || return 0
-  sm="$(service_manager)"
-  case "$sm" in
-    systemd)
-      unit="$(instance_systemd_unit "$id")"
-      journalctl -u "$unit" -n 20 --no-pager 2>/dev/null >&2 || true
-      ;;
-    openrc)
-      tail -n 20 "/var/log/nobrand-mieru-${id}.err" \
-        "/var/log/nobrand-mieru-${id}.log" 2>/dev/null >&2 || true
-      ;;
-  esac
-}
-
-instance_start_proxy() {
-  local id="$1" status_out
-  if ! instance_daemon_start "$id"; then
-    instance_log_tail "$id"
-    return 1
-  fi
-  if ! instance_cmd "$id" start >/dev/null 2>&1; then
-    instance_log_tail "$id"
-    return 1
-  fi
-  sleep 1
-  status_out="$(instance_cmd "$id" status 2>/dev/null || true)"
-  if ! printf '%s' "$status_out" | grep -q 'status is "RUNNING"'; then
-    instance_log_tail "$id"
-    return 1
-  fi
-  mieru_instance_enforcement_valid "$id" 25 || return 1
-  return 0
-}
-
-mieru_instance_enforcement_valid() {
-  local id="$1" timeout="${2:-25}" row policy method address profile_id port proto bind_transport bind_port
-  row="$(jq -r --arg id "$id" '.users[]|select((.instance_id // "")==$id)|[
-    (.ingress_enforcement // "permissive"),(.ingress_enforcement_method // "wildcard"),
-    (.ingress_local_address // ""),(.ingress_profile_id // "legacy-default-route"),(.port|tostring)]|@tsv' \
-    "$MITA_USERS_STATE" 2>/dev/null || true)"
-  [ -n "$row" ] || return 1
-  IFS=$'\t' read -r policy method address profile_id port <<<"$row"
-  proto="$(jq -r '.protocol // "TCP"' "$MITA_USERS_STATE")"
-  if [ "$proto" = BOTH ]; then
-    while IFS='|' read -r bind_transport bind_port; do
-      nb_wait_for_enforced_listener "$policy" "$method" "$bind_transport" "$bind_port" \
-        "$address" "mieru:${id}" "$timeout" || return 1
-    done <<<"TCP|${port}"$'\n'"UDP|$((port + 1))"
-  else
-    nb_wait_for_enforced_listener "$policy" "$method" "$proto" "$port" \
-      "$address" "mieru:${id}" "$timeout"
-  fi
-}
-
-mieru_build_strict_firewall_candidate() {
-  local output="$1" current
-  current="$(mktemp_file .mieru-firewall-current)" || return 1
-  nb_strict_firewall_current_or_empty "$current" || { rm -f "$current"; return 1; }
-  python3 - "$current" "$MITA_USERS_STATE" "$output" <<'PY'
-import json,sys
-current_path,users_path,output_path=sys.argv[1:]
-current=json.load(open(current_path,encoding="utf-8"))
-users=json.load(open(users_path,encoding="utf-8"))
-rules=[r for r in current.get("rules") or [] if not str(r.get("owner") or "").startswith("mieru:")]
-proto=str(users.get("protocol") or "TCP").upper()
-for user in users.get("users") or []:
-    if not user.get("enabled",True) or str(user.get("ingress_enforcement") or "permissive")!="strict":
-        continue
-    if str(user.get("ingress_enforcement_method") or "")!="firewall":
-        raise SystemExit(2)
-    owner="mieru:"+str(user.get("instance_id") or "")
-    address=str(user.get("ingress_local_address") or "")
-    profile=str(user.get("ingress_profile_id") or "")
-    port=int(user.get("port") or 0)
-    bindings=[("TCP",port),("UDP",port+1)] if proto=="BOTH" else [(proto,port)]
-    for transport,binding_port in bindings:
-        rules.append({"owner":owner,"ingress_profile_id":profile,"transport":transport,
-                      "port":binding_port,"local_address":address})
-current["rules"]=sorted(rules,key=lambda r:(r["owner"],r["transport"],r["port"]))
-json.dump(current,open(output_path,"w",encoding="utf-8"),indent=2)
-PY
-  local rc=$?
-  rm -f "$current"
-  [ "$rc" -eq 0 ] && nb_strict_firewall_state_valid "$output"
-}
-
-mieru_reconcile_strict_firewall() {
-  local candidate
-  users_state_exists || return 0
-  candidate="$(mktemp_file .mieru-firewall-candidate)" || return 1
-  mieru_build_strict_firewall_candidate "$candidate" \
-    && nb_strict_firewall_commit_candidate "$candidate"
-  local rc=$?
-  rm -f "$candidate"
-  return "$rc"
-}
-
-# Protocol uninstall removes every strict-ingress rule owned by Mieru before
-# deleting users.json.  Filtering the authoritative owner namespace is more
-# robust than enumerating the current users: it also clears a managed orphan
-# left by an interrupted user transaction without touching another protocol.
-mieru_clear_strict_firewall() {
-  local candidate rc
-  candidate="$(mktemp_file .mieru-firewall-clear)" || return 1
-  nb_strict_firewall_current_or_empty "$candidate" \
-    && jq '.rules |= map(select((.owner | startswith("mieru:")) | not))' \
-      "$candidate" >"${candidate}.next" \
-    && mv -f "${candidate}.next" "$candidate" \
-    && nb_strict_firewall_commit_candidate "$candidate"
-  rc=$?
-  rm -f "$candidate" "${candidate}.next"
-  return "$rc"
-}
-
-mieru_apply_ingress_enforcement() {
-  local id="$1" profile_id candidate snapshot firewall_old firewall_existed=0 old_protocol rc=0
-  users_state_exists || return 1
-  profile_id="$(jq -r --arg id "$id" '.users[]|select((.instance_id // "")==$id)|.ingress_profile_id // empty' \
-    "$MITA_USERS_STATE")"
-  [ -n "$profile_id" ] || profile_id="$NOBRAND_LEGACY_INGRESS_PROFILE_ID"
-  nb_prepare_ingress_deployment "$profile_id" firewall || return 1
-  candidate="$(mktemp_file .mieru-ingress-users)" || return 1
-  snapshot="$(mktemp_dir)" || { rm -f "$candidate"; return 1; }
-  firewall_old="$snapshot/firewall.json"
-  cp -a "$MITA_USERS_STATE" "$snapshot/users.json" || rc=1
-  [ ! -e "$NOBRAND_INGRESS_FIREWALL_STATE_FILE" ] || firewall_existed=1
-  [ "$rc" -ne 0 ] || nb_strict_firewall_current_or_empty "$firewall_old" || rc=1
-  if [ "$rc" -eq 0 ]; then
-    jq --arg id "$id" --arg policy "$INGRESS_ENFORCEMENT_RESOLVED" \
-      --arg method "$INGRESS_ENFORCEMENT_METHOD" --arg address "$INGRESS_LOCAL_ADDRESS" '
-        (.users[]|select((.instance_id // "")==$id)) |=
-          (.ingress_enforcement=$policy|.ingress_enforcement_method=$method|.ingress_local_address=$address)
-      ' "$MITA_USERS_STATE" >"$candidate" || rc=1
-  fi
-  old_protocol="${PROTOCOL:-TCP}"
-  [ "$rc" -ne 0 ] || PROTOCOL="$(jq -r '.protocol // "TCP"' "$candidate")"
-  if [ "$rc" -eq 0 ]; then
-    nb_atomic_install_file "$candidate" "$MITA_USERS_STATE" 0600 \
-      && [ "${NOBRAND_TEST_INGRESS_SERVICE_FAIL:-0}" -eq 0 ] \
-      && reconcile_isolated_instances \
-      && [ "${NOBRAND_TEST_INGRESS_LISTENER_FAIL:-0}" -eq 0 ] || rc=1
-  fi
-  if [ "$rc" -ne 0 ]; then
-    nb_atomic_install_file "$snapshot/users.json" "$MITA_USERS_STATE" 0600 >/dev/null 2>&1 || true
-    PROTOCOL="$(jq -r '.protocol // "TCP"' "$MITA_USERS_STATE" 2>/dev/null || printf '%s' "$old_protocol")"
-    reconcile_isolated_instances >/dev/null 2>&1 || true
-    nb_strict_firewall_commit_candidate "$firewall_old" >/dev/null 2>&1 || true
-    [ "$firewall_existed" -eq 1 ] || rm -f "$NOBRAND_INGRESS_FIREWALL_STATE_FILE"
-  fi
-  PROTOCOL="$old_protocol"
-  rm -f "$candidate"
-  rm -rf -- "$snapshot"
-  return "$rc"
-}
-
-isolated_stop_all() {
-  local id
-  while IFS= read -r id; do
-    [ -n "$id" ] || continue
-    instance_daemon_stop "$id" 1 || true
-  done < <(
-    {
-      users_all_instance_ids 2>/dev/null || true
-      for id in "$MITA_INSTANCES_DIR"/*; do
-        [ -d "$id" ] || continue
-        basename "$id"
-      done
-    } | grep -E '^u[0-9a-f]{16}$' | LC_ALL=C sort -u || true
-  )
-}
-
-prune_orphan_instances() {
-  local id path all_ids candidates=""
-  all_ids="$(users_all_instance_ids 2>/dev/null || true)"
-  for path in "$MITA_INSTANCES_DIR"/* "$MITA_INSTANCE_METRICS_DIR"/*; do
-    [ -d "$path" ] || continue
-    id="$(basename "$path")"
-    instance_valid_id "$id" || continue
-    candidates="${candidates}${id}"$'\n'
-  done
-  while IFS= read -r id; do
-    [ -n "$id" ] || continue
-    grep -qxF "$id" <<<"$all_ids" && continue
-    instance_daemon_stop "$id" 1 || true
-    nb_strict_firewall_remove_owner "mieru:${id}" || true
-    run rm -rf "${MITA_INSTANCES_DIR:?}/${id}" "${MITA_INSTANCE_METRICS_DIR:?}/${id}"
-  done < <(printf '%s' "$candidates" | sed '/^[[:space:]]*$/d' | LC_ALL=C sort -u)
-}
-
-reconcile_isolated_instances() {
-  local id name port desired_ids="" existing_ids="" status_out
-  users_require_python || return 1
-  users_ensure_instance_ids || return 1
-  install_instance_runtime || return 1
-  mieru_reconcile_strict_firewall || return 1
-
-  while IFS=$'\t' read -r id name port; do
-    [ -n "$id" ] && [ -n "$name" ] && [ -n "$port" ] || continue
-    write_instance_config "$id" "$name" "$port" || return 1
-    instance_ensure_openrc_service "$id" || return 1
-    desired_ids="${desired_ids}${id}"$'\n'
-  done < <(users_enabled_instance_rows)
-  while IFS= read -r id; do
-    [ -n "$id" ] || continue
-    existing_ids="${existing_ids}${id}"$'\n'
-  done < <(
-    for id in "$MITA_INSTANCES_DIR"/*; do
-      [ -d "$id" ] || continue
-      basename "$id"
-    done | grep -E '^u[0-9a-f]{16}$' || true
-  )
-
-  while IFS= read -r id; do
-    [ -n "$id" ] || continue
-    if ! instance_start_proxy "$id"; then
-      warn "$(t "专属实例 ${id} 启动或验收失败" \
-        "Dedicated instance ${id} failed to start or verify")"
-      return 1
-    fi
-  done <<<"$desired_ids"
-
-  while IFS= read -r id; do
-    [ -n "$id" ] || continue
-    if ! grep -qxF "$id" <<<"$desired_ids"; then
-      instance_daemon_stop "$id" 1 || return 1
-    fi
-  done <<<"$existing_ids"
-
-  while IFS= read -r id; do
-    [ -n "$id" ] || continue
-    status_out="$(instance_cmd "$id" status 2>/dev/null || true)"
-    printf '%s' "$status_out" | grep -q 'status is "RUNNING"' || return 1
-  done <<<"$desired_ids"
-  return 0
-}
-
-ensure_isolated_deployment() {
-  users_isolated_mode || {
-    warn "$(t 'schema v3 Mieru 用户状态缺少 isolated-v2 标记，拒绝转换' \
-      'Schema-v3 Mieru user state lacks the isolated-v2 marker; refusing conversion')"
-    return 1
-  }
-  reconcile_isolated_instances
-}
-
-# 在 flock 下执行 python -c（$1=代码）；环境变量传参
-users_py_locked() {
-  users_require_python
-  if [ "${DRY_RUN:-0}" -eq 1 ]; then
-    t "[演练] 更新用户状态: $MITA_USERS_STATE" \
-      "[dry-run] update users state: $MITA_USERS_STATE"
-    return 0
-  fi
-  run mkdir -p "$(dirname "$MITA_USERS_STATE")" "$(dirname "$MITA_USERS_LOCK")"
-  local code="$1"
-  if command -v flock >/dev/null 2>&1; then
-    flock -w 30 "$MITA_USERS_LOCK" env MITA_USERS_STATE="$MITA_USERS_STATE" \
-      _U_NAME="${_U_NAME-}" _U_PASS="${_U_PASS-}" _U_PORT="${_U_PORT-}" _U_PROTO="${_U_PROTO-}" \
-      _U_QUOTA_MB="${_U_QUOTA_MB-}" _U_QUOTA_DAYS="${_U_QUOTA_DAYS-}" \
-      _U_QUOTA_MODE="${_U_QUOTA_MODE-}" \
-      _U_EXPIRE="${_U_EXPIRE-}" _U_PACKAGE="${_U_PACKAGE-}" _U_ENABLED="${_U_ENABLED-}" \
-      _U_BW="${_U_BW-}" _U_PRIMARY="${_U_PRIMARY-}" \
-      _U_ADVERTISE_HOST="${_U_ADVERTISE_HOST-}" _U_ADVERTISE_PORT="${_U_ADVERTISE_PORT-}" \
-      _U_INGRESS_PROFILE_ID="${_U_INGRESS_PROFILE_ID-}" \
-      _U_INGRESS_ENFORCEMENT="${_U_INGRESS_ENFORCEMENT-}" \
-      _U_INGRESS_ENFORCEMENT_METHOD="${_U_INGRESS_ENFORCEMENT_METHOD-}" \
-      _U_INGRESS_LOCAL_ADDRESS="${_U_INGRESS_LOCAL_ADDRESS-}" \
-      _U_DEPLOYMENT_MODEL="${_U_DEPLOYMENT_MODEL-}" \
-      python3 -c "$code"
-  else
-    MITA_USERS_STATE="$MITA_USERS_STATE" \
-      _U_NAME="${_U_NAME-}" _U_PASS="${_U_PASS-}" _U_PORT="${_U_PORT-}" _U_PROTO="${_U_PROTO-}" \
-      _U_QUOTA_MB="${_U_QUOTA_MB-}" _U_QUOTA_DAYS="${_U_QUOTA_DAYS-}" \
-      _U_QUOTA_MODE="${_U_QUOTA_MODE-}" \
-      _U_EXPIRE="${_U_EXPIRE-}" _U_PACKAGE="${_U_PACKAGE-}" _U_ENABLED="${_U_ENABLED-}" \
-      _U_BW="${_U_BW-}" _U_PRIMARY="${_U_PRIMARY-}" \
-      _U_ADVERTISE_HOST="${_U_ADVERTISE_HOST-}" _U_ADVERTISE_PORT="${_U_ADVERTISE_PORT-}" \
-      _U_INGRESS_PROFILE_ID="${_U_INGRESS_PROFILE_ID-}" \
-      _U_INGRESS_ENFORCEMENT="${_U_INGRESS_ENFORCEMENT-}" \
-      _U_INGRESS_ENFORCEMENT_METHOD="${_U_INGRESS_ENFORCEMENT_METHOD-}" \
-      _U_INGRESS_LOCAL_ADDRESS="${_U_INGRESS_LOCAL_ADDRESS-}" \
-      _U_DEPLOYMENT_MODEL="${_U_DEPLOYMENT_MODEL-}" \
-      python3 -c "$code"
-  fi
-}
-
-normalize_quota_mode() {
-  case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
-    calendar|cal|month|monthly|日历|月|自然月) printf 'calendar' ;;
-    rolling|roll|滚动) printf 'rolling' ;;
-    *) return 1 ;;
-  esac
-}
-
-current_year_month() {
-  date +%Y-%m 2>/dev/null || python3 -c 'import datetime;print(datetime.date.today().strftime("%Y-%m"))'
-}
-
-users_get_field() {
-  # users_get_field <name> <field>
-  local name="$1" field="$2"
-  users_state_exists || return 1
-  python3 -c '
-import json, sys
-name, field, path = sys.argv[1], sys.argv[2], sys.argv[3]
-d = json.load(open(path))
-for u in d.get("users") or []:
-    if u.get("name") == name:
-        v = u.get(field, "")
-        if field == "enabled":
-            print("1" if v is not False else "0")
-        else:
-            print(v if v is not None else "")
-        sys.exit(0)
-sys.exit(1)
-' "$name" "$field" "$MITA_USERS_STATE" 2>/dev/null
-}
-
-users_name_exists() {
-  local name="$1"
-  [ -n "$(users_get_field "$name" name 2>/dev/null || true)" ]
-}
-
-users_all_ports() {
-  users_state_exists || return 0
-  # 协议经 argv 传入
-  python3 -c '
-import json, sys, os
-d = json.load(open(sys.argv[1]))
-proto = (sys.argv[2] if len(sys.argv) > 2 else "") or os.environ.get("PROTOCOL", "TCP")
-for u in d.get("users") or []:
-    p = u.get("port")
-    if p is None:
-        continue
-    try:
-        p = int(p)
-    except Exception:
-        continue
-    print(p)
-    if proto == "BOTH":
-        print(p + 1)
-' "$MITA_USERS_STATE" "${PROTOCOL:-TCP}" 2>/dev/null
-}
-
-port_is_listening() {
-  local p="$1" proto="${2:-ANY}"
-  case "$proto" in
-    TCP|UDP) nb_port_is_listening "$proto" "$p" ;;
-    *) nb_port_is_listening TCP "$p" || nb_port_is_listening UDP "$p" ;;
-  esac
-}
-
-port_required_bindings() {
-  local p
-  p="$(normalize_uint "$1")" || return 1
-  case "${PROTOCOL:-TCP}" in
-    UDP) printf 'UDP|%s\n' "$p" ;;
-    BOTH)
-      printf 'TCP|%s\n' "$p"
-      printf 'UDP|%s\n' "$((p + 1))"
-      ;;
-    *) printf 'TCP|%s\n' "$p" ;;
-  esac
-}
-
-port_available_for_mode() {
-  local p="$1" binding proto bind_port profile_id="${INGRESS_PROFILE_ID:-$NOBRAND_LEGACY_INGRESS_PROFILE_ID}"
-  valid_port "$p" || return 1
-  if [ "${PROTOCOL:-TCP}" = "BOTH" ] && [ "$p" -ge 65535 ]; then
-    return 1
-  fi
-  while IFS='|' read -r proto bind_port; do
-    [ -n "$proto" ] && [ -n "$bind_port" ] || continue
-    nb_port_available_for_profile "$bind_port" "$proto" "$profile_id" || return 1
-  done < <(port_required_bindings "$p")
-  return 0
-}
-
-port_listener_details() {
-  local p="$1" only_proto="${2:-}" bindings proto bind_port flags line
-  command -v ss >/dev/null 2>&1 || return 0
-  if [ -n "$only_proto" ]; then
-    bindings="${only_proto}|${p}"
-  else
-    bindings="$(port_required_bindings "$p")"
-  fi
-  while IFS='|' read -r proto bind_port; do
-    [ -n "$proto" ] && [ -n "$bind_port" ] || continue
-    if nb_port_is_tail_base_reserved "$bind_port"; then
-      nb_describe_port_conflict "$proto" "$bind_port"
-      continue
-    fi
-    case "$proto" in
-      TCP) flags="-Hlntp" ;;
-      UDP) flags="-Hlnup" ;;
-      *) flags="-Hlntup" ;;
-    esac
-    while IFS= read -r line; do
-      [ -n "$line" ] && msg "  ${proto}/${bind_port}: ${line}"
-    done < <(ss "$flags" 2>/dev/null | awk -v port="$bind_port" '
-      {
-        for (i = 1; i <= NF; i++) {
-          if ($i ~ (":" port "$")) {
-            print
-            break
-          }
-        }
-      }
-    ')
-  done <<<"$bindings"
-}
-
-select_available_port() {
-  local selected="" profile_id="${INGRESS_PROFILE_ID:-$NOBRAND_LEGACY_INGRESS_PROFILE_ID}" bounds lo hi
-  if [ "${PROTOCOL:-TCP}" != BOTH ]; then
-    if [ "$profile_id" = "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ] \
-       && selected="$(derive_port_from_ip 2>/dev/null)" && [ -n "$selected" ]; then
-      printf '%s' "$selected"
-      return 0
-    fi
-    selected="$(nb_select_available_port "${PROTOCOL:-TCP}" "$profile_id")" || return 1
-    printf '%s' "$selected"
-    return 0
-  fi
-  if bounds="$(nb_ingress_profile_auto_range "$profile_id" 2>/dev/null)"; then
-    lo="${bounds%%|*}"; hi="${bounds#*|}"
-    [ "$hi" -le 65534 ] || hi=65534
-    if selected="$(nb_scan_port_span "$lo" "$hi" port_available_for_mode)"; then
-      printf '%s' "$selected"
-      return 0
-    fi
-  fi
-  [ "$profile_id" = "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ] || return 1
-  selected="$(random_available_port 2>/dev/null)" || return 1
-  [ -n "$selected" ] || return 1
-  printf '%s' "$selected"
-}
-
-ensure_install_port_available() {
-  local old_port="$PORT" replacement=""
-  port_available_for_mode "$PORT" && return 0
-  warn "$(t "端口 ${PORT} 与当前 ${PROTOCOL} 监听需求冲突" \
-    "Port ${PORT} conflicts with current ${PROTOCOL} listener requirements")"
-  port_listener_details "$PORT"
-  if [ "${PORT_AUTO_SELECTED:-0}" -eq 1 ]; then
-    replacement="$(select_available_port)" || {
-      die "$(t '未找到可用监听端口' 'No available listen port found')" || return 1
-    }
-    PORT="$replacement"
-    t "自动端口 ${old_port} 已被占用，改用 ${PORT}" \
-      "Auto-selected port ${old_port} became busy; switched to ${PORT}"
-    return 0
-  fi
-  die "$(t "指定端口 ${PORT} 已被占用，请换一个端口" \
-    "Requested port ${PORT} is already in use; choose another port")" || return 1
-}
-
-port_is_allocated() {
-  local p="$1" used
-  while IFS= read -r used; do
-    [ -n "$used" ] || continue
-    [ "$used" = "$p" ] && return 0
-  done < <(users_all_ports)
-  return 1
-}
-
-# 计算端口池起止（写入全局 _pool_lo _pool_hi）
-users_port_pool_bounds() {
-  if [ -n "${USER_PORT_POOL_START:-}" ] && [ -n "${USER_PORT_POOL_END:-}" ]; then
-    _pool_lo="$USER_PORT_POOL_START"
-    _pool_hi="$USER_PORT_POOL_END"
-    return 0
-  fi
-  local bounds profile_id="${INGRESS_PROFILE_ID:-$NOBRAND_LEGACY_INGRESS_PROFILE_ID}"
-  if bounds="$(nb_ingress_profile_auto_range "$profile_id" 2>/dev/null)"; then
-    _pool_lo="${bounds%%|*}"
-    _pool_hi="${bounds#*|}"
-    [ "${PROTOCOL:-TCP}" = "BOTH" ] && _pool_hi=$((_pool_hi - 1))
-    return 0
-  fi
-  [ "$profile_id" = "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ] \
-    || { die "$(t '所选 Ingress Profile 仅支持手动端口；请为新的 Mieru 用户指定 --port' \
-      'Selected ingress profile is manual-only; pass --port for the new Mieru user')"; return 1; }
-  # 无 IP 尾号时：主端口附近 或 默认 20000-29999
-  if [ -n "${PORT:-}" ] && valid_port "$PORT"; then
-    _pool_lo=$((PORT + 2))
-    _pool_hi=$((PORT + 200))
-    [ "$_pool_hi" -gt 65535 ] && _pool_hi=65535
-    [ "$_pool_lo" -lt 1025 ] && _pool_lo=1025
-    return 0
-  fi
-  _pool_lo=20000
-  _pool_hi=29999
-}
-
-allocate_user_port() {
-  # 可选参数: 首选端口；成功打印端口
-  local prefer="${1:-}" p step=1
-  [ "${PROTOCOL:-TCP}" = "BOTH" ] && step=2
-  if [ -n "$prefer" ]; then
-    valid_port "$prefer" || { die "$(t "非法端口: $prefer" "Invalid port: $prefer")" || return 1; }
-    prefer="$(normalize_uint "$prefer")"
-    if [ "$PROTOCOL" = "BOTH" ]; then
-      valid_port "$((prefer + 1))" || { die "$(t '双协议需要主端口 ≤65534' 'Dual protocol needs main port ≤65534')" || return 1; }
-    fi
-    if port_is_allocated "$prefer"; then
-      warn "$(t "端口 ${prefer} 已被其它用户占用" "Port ${prefer} already allocated")"
-      return 1
-    fi
-    if ! port_available_for_mode "$prefer"; then
-      warn "$(t "端口 ${prefer} 不满足 ${PROTOCOL} 监听需求" \
-        "Port ${prefer} is unavailable for ${PROTOCOL}")"
-      port_listener_details "$prefer"
-      return 1
-    fi
-    if [ "$PROTOCOL" = "BOTH" ] && port_is_allocated "$((prefer + 1))"; then
-      warn "$(t "UDP 端口 $((prefer + 1)) 不可用" "UDP port $((prefer + 1)) unavailable")"
-      return 1
-    fi
-    printf '%s' "$prefer"
-    return 0
-  fi
-  users_port_pool_bounds || return 1
-  p="$_pool_lo"
-  while [ "$p" -le "$_pool_hi" ]; do
-    if ! port_is_allocated "$p" && port_available_for_mode "$p"; then
-      if [ "$PROTOCOL" != "BOTH" ] || ! port_is_allocated "$((p + 1))"; then
-        printf '%s' "$p"
-        return 0
-      fi
-    fi
-    p=$((p + step))
-  done
-  die "$(t "端口池 ${_pool_lo}-${_pool_hi} 已满，请指定 --port 或扩大池" \
-    "Port pool ${_pool_lo}-${_pool_hi} exhausted; pass --port or enlarge pool")" || return 1
-}
-
-users_initialize_primary() {
-  # Fresh schema-v3 install: materialize the first dedicated user.
-  users_require_python
-  [ -n "${USERNAME:-}" ] || return 0
-  [ -n "${PORT:-}" ] || return 0
-  local primary_profile_id="${INGRESS_PROFILE_ID:-$NOBRAND_LEGACY_INGRESS_PROFILE_ID}"
-  nb_prepare_ingress_deployment "$primary_profile_id" firewall || return 1
-  admin_lock_acquire || return 1
-  if users_state_exists; then
-    local n
-    n="$(users_count)"
-    if [ "${n:-0}" -gt 0 ]; then
-      admin_lock_release
-      return 0
-    fi
-  fi
-  run mkdir -p "$(dirname "$MITA_USERS_STATE")"
-  if ! python3 -c '
-import hashlib, json, sys, time
-path, name, pwd, port, proto, advertise_host, advertise_port, deployment_model, ingress_profile_id, enforcement, method, local_address = sys.argv[1:13]
-port = int(port)
-advertise_port = int(advertise_port) if advertise_port else ""
-instance_id = "u" + hashlib.sha256(("%s\0%s" % (name, port)).encode()).hexdigest()[:16]
-d = {"version": 2, "deployment_model": deployment_model, "protocol": proto, "users": [{
-    "instance_id": instance_id,
-    "name": name,
-    "password": pwd,
-    "port": port,
-    "advertise_host": advertise_host,
-    "advertise_port": advertise_port,
-    "enabled": True,
-    "quota_mb": 0,
-    "quota_days": 0,
-    "quota_mode": "rolling",
-    "last_quota_reset": "",
-    "expire_at": "",
-    "package": "unlimited",
-    "bandwidth_mbps": 0,
-    "created_at": int(time.time()),
-    "updated_at": int(time.time()),
-    "ingress_profile_id": ingress_profile_id,
-    "ingress_enforcement": enforcement,
-    "ingress_enforcement_method": method,
-    "ingress_local_address": local_address,
-}]}
-json.dump(d, open(path, "w"), indent=2)
-  ' "$MITA_USERS_STATE" "$USERNAME" "$PASSWORD" "$PORT" "${PROTOCOL:-TCP}" \
-    "${ADVERTISE_HOST:-}" "${ADVERTISE_PORT:-}" "$MITA_DEPLOYMENT_MODEL" \
-    "$primary_profile_id" "$INGRESS_ENFORCEMENT_RESOLVED" "$INGRESS_ENFORCEMENT_METHOD" "$INGRESS_LOCAL_ADDRESS"
-  then
-    admin_lock_release
-    return 1
-  fi
-  run chmod 0600 "$MITA_USERS_STATE" 2>/dev/null || true
-  MULTI_USER_MODE=1
-  install_users_scheduler 2>/dev/null || true
-  admin_lock_release
-}
-
-users_sync_primary_globals() {
-  # 用状态库第一个启用用户填充 USERNAME/PASSWORD/PORT（兼容旧摘要）
-  users_state_exists || return 0
-  local line rest
-  line="$(python3 -c '
-import json, sys
-d = json.load(open(sys.argv[1]))
-for u in d.get("users") or []:
-    if u.get("enabled", True):
-        print("%s\t%s\t%s" % (u.get("name") or "", u.get("password") or "", u.get("port") or ""))
-        break
-' "$MITA_USERS_STATE" 2>/dev/null)" || return 0
-  [ -n "$line" ] || return 0
-  USERNAME="${line%%$'\t'*}"
-  rest="${line#*$'\t'}"
-  PASSWORD="${rest%%$'\t'*}"
-  PORT="${rest#*$'\t'}"
-  ADVERTISE_HOST="$(users_get_field "$USERNAME" advertise_host 2>/dev/null || true)"
-  ADVERTISE_PORT="$(users_get_field "$USERNAME" advertise_port 2>/dev/null || true)"
-  INGRESS_PROFILE_ID="$(users_get_field "$USERNAME" ingress_profile_id 2>/dev/null || true)"
-  [ -n "$INGRESS_PROFILE_ID" ] || INGRESS_PROFILE_ID="$NOBRAND_LEGACY_INGRESS_PROFILE_ID"
-  MULTI_USER_MODE=1
-}
-
-users_ensure_loaded() {
-  load_install_state
-  if users_state_exists && [ "$(users_count)" -gt 0 ]; then
-    MULTI_USER_MODE=1
-    users_sync_primary_globals
-    return 0
-  fi
-  return 0
-}
-
-users_add() {
-  local name="$1" password="$2" port_pref="${3:-}" port rc expire_at
-  local advertise_host="${4:-}" advertise_port="${5:-}"
-  local bw="${USER_BANDWIDTH_MBPS:-0}" qmode
-  users_require_python || return 1
-  nb_prepare_ingress_request || return 1
-  nb_prepare_ingress_deployment "$INGRESS_PROFILE_ID" firewall \
-    || die "$(t '所选 Ingress 的 Strict 本地地址无法通过防火墙为 Mieru 强制实施' \
-      'The selected Ingress strict local address cannot be firewall-enforced for Mieru')"
-  [ -n "$name" ] || { die "$(t '用户名不能为空' 'Username required')" || return 1; }
-  [ -n "$password" ] || password="$(random_token)"
-  validate_proxy_credentials "$name" "$password" || return 1
-  validate_advertise_endpoint_values "$advertise_host" "$advertise_port" "${PROTOCOL:-TCP}" || return 1
-  [ -z "$advertise_port" ] || advertise_port="$(normalize_uint "$advertise_port")"
-  valid_bandwidth_mbps "$bw" || {
-    warn "$(t '带宽必须是 0-1000000 Mbps 的整数' \
-      'Bandwidth must be an integer from 0 to 1000000 Mbps')"
-    return 1
-  }
-  apply_user_package_defaults || return 1
-  if ! valid_nonnegative_int32 "${USER_QUOTA_MB:-0}" \
-     || ! valid_nonnegative_int32 "${USER_QUOTA_DAYS:-0}"; then
-    warn "$(t '配额 MB/天数必须是 int32 范围内的非负整数' \
-      'Quota MB/days must be non-negative int32 values')"
-    return 1
-  fi
-  expire_at=""
-  if [ -n "${USER_EXPIRE:-}" ]; then
-    expire_at="$(parse_expire_date "$USER_EXPIRE")" || return 1
-  fi
-  load_install_state
-  if ! users_state_exists || [ "$(users_count)" -eq 0 ]; then
-    users_state_init_empty
-  fi
-  if users_name_exists "$name"; then
-    warn "$(t "用户已存在: $name" "User already exists: $name")"
-    return 1
-  fi
-  if ! port="$(allocate_user_port "$port_pref")"; then
-    return 1
-  fi
-  users_backup_now pre-add >/dev/null 2>&1 || true
-  qmode="$(normalize_quota_mode "${USER_QUOTA_MODE:-rolling}")" || {
-    warn "$(t '配额模式仅支持 rolling 或 calendar' \
-      'Quota mode must be rolling or calendar')"
-    return 1
-  }
-  # 套餐默认 rolling；显式 calendar 保留
-  [ -n "${USER_QUOTA_MODE:-}" ] || qmode="rolling"
-  _U_NAME="$name" _U_PASS="$password" _U_PORT="$port" _U_PROTO="${PROTOCOL:-TCP}"
-  _U_QUOTA_MB="${USER_QUOTA_MB:-0}" _U_QUOTA_DAYS="${USER_QUOTA_DAYS:-0}"
-  _U_QUOTA_MODE="$qmode"
-  _U_EXPIRE="${expire_at}" _U_PACKAGE="${USER_PACKAGE:-}" _U_BW="$bw"
-  _U_ADVERTISE_HOST="$advertise_host" _U_ADVERTISE_PORT="$advertise_port"
-  _U_INGRESS_PROFILE_ID="$INGRESS_PROFILE_ID"
-  _U_INGRESS_ENFORCEMENT="$INGRESS_ENFORCEMENT_RESOLVED"
-  _U_INGRESS_ENFORCEMENT_METHOD="$INGRESS_ENFORCEMENT_METHOD"
-  _U_INGRESS_LOCAL_ADDRESS="$INGRESS_LOCAL_ADDRESS"
-  set +e
-  users_py_locked '
-import json, os, time, sys, datetime, secrets
-path = os.environ["MITA_USERS_STATE"]
-name = os.environ["_U_NAME"]
-password = os.environ["_U_PASS"]
-port = int(os.environ["_U_PORT"])
-proto = os.environ.get("_U_PROTO", "TCP")
-try:
-    qmb = int(os.environ.get("_U_QUOTA_MB") or "0")
-except Exception:
-    qmb = 0
-try:
-    qdays = int(os.environ.get("_U_QUOTA_DAYS") or "0")
-except Exception:
-    qdays = 0
-try:
-    bw = int(os.environ.get("_U_BW") or "0")
-except Exception:
-    bw = 0
-qmode = (os.environ.get("_U_QUOTA_MODE") or "rolling").strip().lower()
-if qmode not in ("rolling", "calendar"):
-    qmode = "rolling"
-expire = (os.environ.get("_U_EXPIRE") or "").strip()
-package = (os.environ.get("_U_PACKAGE") or "").strip() or ("custom" if qmb > 0 else "unlimited")
-advertise_host = (os.environ.get("_U_ADVERTISE_HOST") or "").strip()
-advertise_port = int(os.environ.get("_U_ADVERTISE_PORT")) if os.environ.get("_U_ADVERTISE_PORT") else ""
-ingress_profile_id = (os.environ.get("_U_INGRESS_PROFILE_ID") or "legacy-default-route").strip()
-ingress_enforcement = (os.environ.get("_U_INGRESS_ENFORCEMENT") or "permissive").strip()
-ingress_enforcement_method = (os.environ.get("_U_INGRESS_ENFORCEMENT_METHOD") or "wildcard").strip()
-ingress_local_address = (os.environ.get("_U_INGRESS_LOCAL_ADDRESS") or "").strip()
-try:
-    d = json.load(open(path))
-except Exception:
-    d = {"version": 1, "users": []}
-users = d.setdefault("users", [])
-for u in users:
-    if u.get("name") == name:
-        sys.exit(2)
-    if int(u.get("port") or 0) == port:
-        sys.exit(3)
-ym = datetime.date.today().strftime("%Y-%m")
-used_ids={str(u.get("instance_id") or "") for u in users}
-while True:
-    instance_id="u"+secrets.token_hex(8)
-    if instance_id not in used_ids:
-        break
-users.append({
-    "instance_id": instance_id,
-    "name": name,
-    "password": password,
-    "port": port,
-    "advertise_host": advertise_host,
-    "advertise_port": advertise_port,
-    "enabled": True,
-    "quota_mb": qmb,
-    "quota_days": (qdays if qdays > 0 else 30) if qmb > 0 else 0,
-    "quota_mode": qmode,
-    "last_quota_reset": ym if (qmb > 0 and qmode == "calendar") else "",
-    "expire_at": expire,
-    "package": package,
-    "bandwidth_mbps": bw,
-    "created_at": int(time.time()),
-    "updated_at": int(time.time()),
-    "ingress_profile_id": ingress_profile_id,
-    "ingress_enforcement": ingress_enforcement,
-    "ingress_enforcement_method": ingress_enforcement_method,
-    "ingress_local_address": ingress_local_address,
-})
-d["protocol"] = proto
-json.dump(d, open(path, "w"), indent=2)
-'
-  rc=$?
-  set -e
-  if [ "$rc" -eq 2 ]; then
-    warn "$(t "用户已存在: $name" "User already exists: $name")"
-    return 1
-  fi
-  if [ "$rc" -eq 3 ]; then
-    warn "$(t "端口已被占用: $port" "Port already allocated: $port")"
-    return 1
-  fi
-  if [ "$rc" -ne 0 ]; then
-    warn "$(t "写入用户状态失败 ($rc)" "Failed to write user state ($rc)")"
-    return 1
-  fi
-  MULTI_USER_MODE=1
-  install_users_scheduler 2>/dev/null || true
-  t "已添加用户 ${name}，专属端口 ${port}，套餐=${USER_PACKAGE:-unlimited} 配额=$(quota_label "${USER_QUOTA_MB:-0}" "${USER_QUOTA_DAYS:-0}") 限速=${bw}Mbps 到期=${expire_at:-永不过期}" \
-    "Added ${name}; dedicated port ${port}, package=${USER_PACKAGE:-unlimited} quota=$(quota_label "${USER_QUOTA_MB:-0}" "${USER_QUOTA_DAYS:-0}") rate=${bw}Mbps expire=${expire_at:-never}" >&2
-  printf '%s' "$port"
-}
-
-users_del() {
-  local name="$1" freed rc
-  users_require_python || return 1
-  [ -n "$name" ] || { die "$(t '用户名不能为空' 'Username required')" || return 1; }
-  users_state_exists || { die "$(t '无用户状态文件' 'No users state file')" || return 1; }
-  users_name_exists "$name" || { die "$(t "用户不存在: $name" "User not found: $name")" || return 1; }
-  freed="$(users_get_field "$name" port)"
-  users_backup_now pre-del >/dev/null 2>&1 || true
-  _U_NAME="$name"
-  set +e
-  users_py_locked '
-import json, os, sys
-path = os.environ["MITA_USERS_STATE"]
-name = os.environ["_U_NAME"]
-d = json.load(open(path))
-before = len(d.get("users") or [])
-d["users"] = [u for u in (d.get("users") or []) if u.get("name") != name]
-if len(d["users"]) == before:
-    sys.exit(2)
-json.dump(d, open(path, "w"), indent=2)
-'
-  rc=$?
-  set -e
-  [ "$rc" -eq 0 ] || { die "$(t "删除失败: $name" "Delete failed: $name")" || return 1; }
-  t "已删除用户 ${name}，释放端口 ${freed}" "Deleted user ${name}, freed port ${freed}" >&2
-  printf '%s' "$freed"
-}
-
-# 从 users.json 生成 portBindings + users 片段路径（完整 server json 由 write_server_config_multi 写）
-write_server_config_multi() {
-  local cfg tp tp_section=""
-  users_require_python
-  users_state_exists || die "$(t '无多用户状态' 'No multi-user state')"
-  ensure_traffic_seed
-  tp="$(traffic_pattern_json '  ')"
-  [ -n "$tp" ] && tp_section=",
-${tp}"
-  cfg="$(mktemp_file .json)"
-  if ! MITA_USERS_STATE="$MITA_USERS_STATE" \
-    _PROTO="${PROTOCOL:-TCP}" _MTU="${MTU:-1400}" \
-    _CFG="$cfg" _NO_ENABLED_USERS="$(t '没有启用中的用户' 'no enabled users')" \
-    python3 - <<'PY'
-import json, os, sys
-path = os.environ["MITA_USERS_STATE"]
-proto = os.environ.get("_PROTO", "TCP")
-mtu = int(os.environ.get("_MTU", "1400"))
-cfg_path = os.environ["_CFG"]
-d = json.load(open(path))
-users_out = []
-bindings = []
-seen = set()
-for u in d.get("users") or []:
-    if not u.get("enabled", True):
-        continue
-    name = u.get("name") or ""
-    password = u.get("password") or ""
-    try:
-        port = int(u.get("port"))
-    except Exception:
-        continue
-    if not name or not password:
-        continue
-    entry = {"name": name, "password": password}
-    try:
-        qmb = int(u.get("quota_mb") or 0)
-    except Exception:
-        qmb = 0
-    try:
-        qdays = int(u.get("quota_days") or 0)
-    except Exception:
-        qdays = 0
-    qmode = (u.get("quota_mode") or "rolling").strip().lower()
-    if qmb > 0:
-        if qmode == "calendar":
-            # 自然月：窗口取当月天数（28-31），月初由 user-scan 强制轮换
-            import calendar, datetime
-            t = datetime.date.today()
-            qdays = calendar.monthrange(t.year, t.month)[1]
-        elif qdays <= 0:
-            qdays = 30
-        entry["quotas"] = [{"days": qdays, "megabytes": qmb}]
-    users_out.append(entry)
-    if proto == "BOTH":
-        pairs = [("TCP", port), ("UDP", port + 1)]
-    else:
-        pairs = [(proto, port)]
-    for pr, p in pairs:
-        key = (p, pr)
-        if key in seen:
-            continue
-        seen.add(key)
-        bindings.append({"port": p, "protocol": pr})
-if not users_out:
-    sys.stderr.write(os.environ["_NO_ENABLED_USERS"] + "\n")
-    sys.exit(1)
-doc = {
-    "portBindings": bindings,
-    "users": users_out,
-    "loggingLevel": "INFO",
-    "mtu": mtu,
-}
-json.dump(doc, open(cfg_path, "w"), indent=2)
-PY
-  then
-    die "$(t '生成多用户配置失败' 'Failed to build multi-user config')"
-  fi
-  # 追加 trafficPattern（若有）：与单用户路径一致的 JSON 片段
-  if [ -n "$tp_section" ]; then
-    if ! _CFG="$cfg" _TP="$tp_section" python3 - <<'PY' 2>/dev/null
-import json, os, re
-cfg = os.environ["_CFG"]
-tp = os.environ.get("_TP", "").strip()
-if not tp:
-    raise SystemExit(0)
-if tp.startswith(","):
-    tp = tp[1:].strip()
-# tp like: "trafficPattern": { ... }
-m = re.match(r'"trafficPattern"\s*:\s*(\{.*\})\s*$', tp, re.S)
-if not m:
-    raise SystemExit(0)
-doc = json.load(open(cfg))
-doc["trafficPattern"] = json.loads(m.group(1))
-json.dump(doc, open(cfg, "w"), indent=2)
-PY
-    then
-      rm -f "$cfg"
-      die "$(t '写入 trafficPattern 失败，已中止以避免静默丢失流量模式' \
-        'Failed to write trafficPattern; aborted instead of silently dropping the traffic mode')"
-    fi
-  fi
-  printf '%s' "$cfg"
-}
-
-multi_user_port_protocol_pairs() {
-  # 输出 proto|port 每行（用于防火墙）
-  users_state_exists || return 0
-  python3 -c '
-import json, sys
-path, proto = sys.argv[1], sys.argv[2]
-d = json.load(open(path))
-for u in d.get("users") or []:
-    if not u.get("enabled", True):
-        continue
-    port = int(u.get("port"))
-    if proto == "BOTH":
-        print(f"TCP|{port}")
-        print(f"UDP|{port+1}")
-    else:
-        print(f"{proto}|{port}")
-' "$MITA_USERS_STATE" "${PROTOCOL:-TCP}" 2>/dev/null
-}
-
-apply_users_config() {
-  # 每个启用用户对应一个独立 mita 实例；端口、认证、配额 metrics 均为专属资源。
-  local snapshot="${1:-}" rollback_reapply="${2:-1}" auto_host=""
-  STAGE="应用多用户配置"
-  admin_lock_acquire || return 1
-  auto_host="$(public_ip 2>/dev/null || true)"
-  if ! users_validate_state_file "$MITA_USERS_STATE" "${PROTOCOL:-TCP}" "$auto_host"; then
-    users_tx_rollback "$snapshot" 0
-    admin_lock_release
-    warn "$(t 'users.json 校验失败（字段、监听端口或客户端展示入口冲突），未应用到专属实例' \
-      'users.json validation failed (fields, listen ports, or client display endpoints conflict); dedicated instances were not changed')"
-    return 1
-  fi
-  if [ "$(users_count)" -eq 0 ]; then
-    users_tx_rollback "$snapshot" 0
-    admin_lock_release
-    warn "$(t '至少保留一个用户' 'Keep at least one user')"
-    return 1
-  fi
-  if ! ensure_isolated_deployment "$rollback_reapply"; then
-    users_tx_rollback "$snapshot" "$rollback_reapply"
-    admin_lock_release
-    return 1
-  fi
-  if ! apply_tc_limits; then
-    users_tx_rollback "$snapshot" "$rollback_reapply"
-    admin_lock_release
-    return 1
-  fi
-  harden_mita_permissions 2>/dev/null || true
-  admin_lock_release
-  return 0
-}
-
-# 更新用户字段（不改 name/port/password 除非传入）
-users_update_fields() {
-  local name="$1"
-  users_require_python || return 1
-  users_name_exists "$name" || { warn "$(t "用户不存在: $name" "User not found: $name")"; return 1; }
-  users_backup_now pre-update >/dev/null 2>&1 || true
-  _U_NAME="$name"
-  _U_QUOTA_MB="${USER_QUOTA_MB-}"
-  _U_QUOTA_DAYS="${USER_QUOTA_DAYS-}"
-  _U_QUOTA_MODE="${USER_QUOTA_MODE-}"
-  _U_EXPIRE="${USER_EXPIRE-}"
-  _U_PACKAGE="${USER_PACKAGE-}"
-  _U_ENABLED="${_U_ENABLED-}"
-  _U_PASS="${_U_PASS-}"
-  _U_BW="${USER_BANDWIDTH_MBPS-}"
-  set +e
-  users_py_locked '
-import json, os, time, sys, datetime
-path = os.environ["MITA_USERS_STATE"]
-name = os.environ["_U_NAME"]
-d = json.load(open(path))
-found = None
-for u in d.get("users") or []:
-    if u.get("name") == name:
-        found = u
-        break
-if found is None:
-    sys.exit(2)
-# optional fields: empty string means skip; special __CLEAR__ for expire
-qm = os.environ.get("_U_QUOTA_MB")
-if qm is not None and qm != "":
-    try:
-        found["quota_mb"] = int(qm)
-    except Exception:
-        pass
-qd = os.environ.get("_U_QUOTA_DAYS")
-if qd is not None and qd != "":
-    try:
-        found["quota_days"] = int(qd)
-    except Exception:
-        pass
-if found.get("quota_mb", 0) <= 0:
-    found["quota_mb"] = 0
-    found["quota_days"] = 0
-qmode = os.environ.get("_U_QUOTA_MODE")
-if qmode is not None and qmode != "":
-    qmode = qmode.strip().lower()
-    if qmode in ("calendar", "cal", "month", "monthly"):
-        found["quota_mode"] = "calendar"
-        if not found.get("last_quota_reset"):
-            found["last_quota_reset"] = datetime.date.today().strftime("%Y-%m")
-    else:
-        found["quota_mode"] = "rolling"
-ex = os.environ.get("_U_EXPIRE")
-if ex is not None and ex != "":
-    if ex in ("0", "never", "none", "-", "__CLEAR__"):
-        found["expire_at"] = ""
-    else:
-        found["expire_at"] = ex
-pkg = os.environ.get("_U_PACKAGE")
-if pkg is not None and pkg != "":
-    found["package"] = pkg
-en = os.environ.get("_U_ENABLED")
-if en is not None and en != "":
-    found["enabled"] = en in ("1", "true", "True", "yes")
-pw = os.environ.get("_U_PASS")
-if pw is not None and pw != "":
-    found["password"] = pw
-bw = os.environ.get("_U_BW")
-if bw is not None and bw != "":
-    try:
-        found["bandwidth_mbps"] = max(0, int(bw))
-    except Exception:
-        pass
-found["updated_at"] = int(time.time())
-json.dump(d, open(path, "w"), indent=2)
-'
-  local rc=$?
-  set -e
-  [ "$rc" -eq 0 ] || return 1
-  return 0
-}
-
-users_set_advertise_endpoint() {
-  local name="$1" host="${2:-}" port="${3:-}"
-  users_name_exists "$name" || return 1
-  validate_advertise_endpoint_values "$host" "$port" "${PROTOCOL:-TCP}" || return 1
-  [ -z "$port" ] || port="$(normalize_uint "$port")"
-  _U_NAME="$name" _U_ADVERTISE_HOST="$host" _U_ADVERTISE_PORT="$port"
-  users_py_locked '
-import json, os, sys, time
-path=os.environ["MITA_USERS_STATE"]
-name=os.environ.get("_U_NAME") or ""
-host=os.environ.get("_U_ADVERTISE_HOST") or ""
-port=os.environ.get("_U_ADVERTISE_PORT") or ""
-d=json.load(open(path))
-for u in d.get("users") or []:
-    if u.get("name") == name:
-        u["advertise_host"] = host
-        u["advertise_port"] = int(port) if port else ""
-        u["updated_at"] = int(time.time())
-        json.dump(d, open(path, "w"), indent=2)
-        raise SystemExit(0)
-raise SystemExit(2)
-'
-}
-
-# ---------- 专属实例按端口限速（仅管理本脚本拥有的 tc filter） ----------
-
-tc_available() {
-  command -v tc >/dev/null 2>&1 || return 1
-  tc qdisc show >/dev/null 2>&1 || return 1
-  return 0
-}
+# ---------- Common egress interface lookup for BBR status ----------
 
 tc_default_iface() {
   local dev=""
@@ -11884,1021 +9002,7 @@ tc_default_iface() {
   printf '%s' "$dev"
 }
 
-tc_clear_owned_filters() {
-  local state="${1:-$TC_OWNED_STATE}" dev="" dir proto pref _rest
-  [ -f "$state" ] || return 0
-  dev="$(awk -F'|' '$1=="iface"{print $2; exit}' "$state" 2>/dev/null || true)"
-  [ -n "$dev" ] || { rm -f "$state"; return 0; }
-  while IFS='|' read -r dir proto pref _rest; do
-    [ "$dir" = "ingress" ] || [ "$dir" = "egress" ] || continue
-    [[ "$pref" =~ ^[0-9]+$ ]] || continue
-    [ "$pref" -ge "$TC_PREF_MIN" ] && [ "$pref" -le "$TC_PREF_MAX" ] || continue
-    case "$proto" in ip|ipv6) ;; *) continue ;; esac
-    tc filter del dev "$dev" "$dir" protocol "$proto" pref "$pref" 2>/dev/null || true
-  done <"$state"
-  rm -f "$state"
-}
-
-tc_owned_filter_absent() {
-  local dev="$1" dir="$2" proto="$3" pref="$4" output
-  if command -v ip >/dev/null 2>&1 && ! ip link show dev "$dev" >/dev/null 2>&1; then
-    return 0
-  fi
-  output="$(tc filter show dev "$dev" "$dir" protocol "$proto" pref "$pref" 2>/dev/null)" \
-    || return 1
-  [ -z "$output" ]
-}
-
-# Restore rollback must not discard the ownership manifest until every
-# recorded filter is proven absent. This strict variant is deliberately kept
-# separate so established best-effort cleanup semantics remain unchanged for
-# ordinary quota operations.
-tc_clear_owned_filters_strict() {
-  local state="${1:-$TC_OWNED_STATE}" dev="" dir proto pref rest
-  local failed=0 iface_count=0
-  [ -e "$state" ] || [ -L "$state" ] || return 0
-  [ -f "$state" ] && [ ! -L "$state" ] || return 1
-  dev="$(awk -F'|' '$1=="iface"{print $2; exit}' "$state" 2>/dev/null || true)"
-  [ -n "$dev" ] || return 1
-  while IFS='|' read -r dir proto pref rest; do
-    if [ "$dir" = iface ]; then
-      [ "$proto" = "$dev" ] && [ -z "$pref" ] && [ -z "$rest" ] \
-        && iface_count=$((iface_count + 1)) || failed=1
-      continue
-    fi
-    if { [ "$dir" != ingress ] && [ "$dir" != egress ]; } \
-       || ! [[ "$pref" =~ ^[0-9]+$ ]] \
-       || [ "$pref" -lt "$TC_PREF_MIN" ] || [ "$pref" -gt "$TC_PREF_MAX" ]; then
-      failed=1
-      continue
-    fi
-    case "$proto" in
-      ip|ipv6) ;;
-      *) failed=1; continue ;;
-    esac
-    tc filter del dev "$dev" "$dir" protocol "$proto" pref "$pref" \
-      >/dev/null 2>&1 || true
-    tc_owned_filter_absent "$dev" "$dir" "$proto" "$pref" || failed=1
-  done <"$state"
-  [ "$iface_count" -eq 1 ] || failed=1
-  [ "$failed" -eq 0 ] || return 1
-  rm -f -- "$state"
-}
-
-tc_restore_manifest() {
-  local state="$1" dev="" dir family pref l4 field port bw burst
-  [ -f "$state" ] || return 0
-  dev="$(awk -F'|' '$1=="iface"{print $2; exit}' "$state" 2>/dev/null || true)"
-  [ -n "$dev" ] || return 1
-  while IFS='|' read -r dir family pref l4 field port bw; do
-    [ "$dir" = ingress ] || [ "$dir" = egress ] || continue
-    [[ "$pref" =~ ^[0-9]+$ && "$port" =~ ^[0-9]+$ && "$bw" =~ ^[0-9]+$ ]] || continue
-    burst=$((bw * 128))
-    [ "$burst" -lt 64 ] && burst=64
-    [ "$burst" -gt 4096 ] && burst=4096
-    tc filter add dev "$dev" "$dir" protocol "$family" pref "$pref" flower \
-      ip_proto "$l4" "$field" "$port" \
-      action police rate "${bw}mbit" burst "${burst}k" conform-exceed drop \
-      >/dev/null 2>&1 || return 1
-  done <"$state"
-}
-
-tc_rollback_filter_update() {
-  local partial="$1" previous="${2:-}"
-  tc_clear_owned_filters "$partial"
-  if [ -n "$previous" ] && [ -f "$previous" ]; then
-    tc_restore_manifest "$previous" || true
-    mv -f "$previous" "$TC_OWNED_STATE"
-  fi
-}
-
-tc_add_owned_filter() {
-  local state="$1" dev="$2" dir="$3" family="$4" pref="$5"
-  local l4="$6" field="$7" port="$8" bw="$9" burst
-  burst=$((bw * 128))
-  [ "$burst" -lt 64 ] && burst=64
-  [ "$burst" -gt 4096 ] && burst=4096
-  if ! tc filter add dev "$dev" "$dir" protocol "$family" pref "$pref" flower \
-      ip_proto "$l4" "$field" "$port" \
-      action police rate "${bw}mbit" burst "${burst}k" conform-exceed drop; then
-    return 1
-  fi
-  printf '%s|%s|%s|%s|%s|%s|%s\n' \
-    "$dir" "$family" "$pref" "$l4" "$field" "$port" "$bw" >>"$state"
-}
-
-apply_tc_limits() {
-  local has_limit=0 dev tmp previous="" pref="$TC_PREF_MIN" name port bw l4 p family dir field
-  users_state_exists || {
-    tc_clear_owned_filters
-    return 0
-  }
-  has_limit="$(python3 -c '
-import json,sys
-d=json.load(open(sys.argv[1]))
-print(1 if any(u.get("enabled",True) and int(u.get("bandwidth_mbps") or 0)>0 for u in (d.get("users") or [])) else 0)
-' "$MITA_USERS_STATE" 2>/dev/null || echo 0)"
-  if [ "$has_limit" != "1" ]; then
-    tc_clear_owned_filters
-    return 0
-  fi
-  users_isolated_mode || {
-    warn "$(t '拒绝应用限速：schema v3 必须使用 isolated-v2 用户专属实例' \
-      'Refusing rate limits: schema v3 requires isolated-v2 dedicated instances')"
-    return 1
-  }
-  tc_available || {
-    warn "$(t '存在限速套餐但 tc/iproute2 不可用' \
-      'Rate-limited packages exist but tc/iproute2 is unavailable')"
-    return 1
-  }
-  dev="$(tc_default_iface)"
-  [ -n "$dev" ] || {
-    warn "$(t '存在限速套餐但无法检测默认网卡；可设置 TC_IFACE' \
-      'Rate-limited packages exist but no default NIC was found; set TC_IFACE')"
-    return 1
-  }
-  if ! tc qdisc show dev "$dev" 2>/dev/null | grep -qw clsact; then
-    if ! tc qdisc add dev "$dev" clsact 2>/dev/null; then
-      warn "$(t "无法安全添加 clsact 到 ${dev}；未删除或替换现有 qdisc" \
-        "Cannot safely add clsact to ${dev}; existing qdiscs were not deleted or replaced")"
-      return 1
-    fi
-  fi
-  if [ -f "$TC_OWNED_STATE" ]; then
-    previous="$(mktemp_file .tc-previous)" || return 1
-    cp -f "$TC_OWNED_STATE" "$previous" || { rm -f "$previous"; return 1; }
-  fi
-  tc_clear_owned_filters
-  tmp="$(mktemp_file .tc-filters)" || return 1
-  printf 'iface|%s\n' "$dev" >"$tmp"
-  while IFS=$'\t' read -r name port bw; do
-    [ -n "$name" ] && [ -n "$port" ] && [ "${bw:-0}" -gt 0 ] || continue
-    for l4 in $( [ "${PROTOCOL:-TCP}" = "UDP" ] && echo udp || echo tcp ); do
-      p="$port"
-      for family in ip ipv6; do
-        for dir in ingress egress; do
-          [ "$dir" = ingress ] && field=dst_port || field=src_port
-          [ "$pref" -le "$TC_PREF_MAX" ] || {
-            warn "$(t '专属限速规则过多，超出脚本保留的 tc 优先级范围' \
-              'Too many dedicated rate rules for the reserved tc preference range')"
-            tc_rollback_filter_update "$tmp" "$previous"
-            return 1
-          }
-          if ! tc_add_owned_filter "$tmp" "$dev" "$dir" "$family" "$pref" \
-              "$l4" "$field" "$p" "$bw"; then
-            warn "$(t "应用 ${name} 的 tc 限速失败；已撤销本次脚本规则" \
-              "Failed to apply tc limit for ${name}; this run's owned filters were rolled back")"
-            tc_rollback_filter_update "$tmp" "$previous"
-            return 1
-          fi
-          pref=$((pref + 1))
-        done
-      done
-    done
-    if [ "${PROTOCOL:-TCP}" = "BOTH" ]; then
-      l4=udp
-      p=$((port + 1))
-      for family in ip ipv6; do
-        for dir in ingress egress; do
-          [ "$dir" = ingress ] && field=dst_port || field=src_port
-          if ! tc_add_owned_filter "$tmp" "$dev" "$dir" "$family" "$pref" \
-              "$l4" "$field" "$p" "$bw"; then
-            tc_rollback_filter_update "$tmp" "$previous"
-            return 1
-          fi
-          pref=$((pref + 1))
-        done
-      done
-    fi
-  done < <(python3 -c '
-import json,sys
-d=json.load(open(sys.argv[1]))
-for u in d.get("users") or []:
-    if u.get("enabled",True) and int(u.get("bandwidth_mbps") or 0)>0:
-        print("%s\t%s\t%s" % (u.get("name") or "", int(u.get("port") or 0), int(u.get("bandwidth_mbps") or 0)))
-' "$MITA_USERS_STATE")
-  mv -f "$tmp" "$TC_OWNED_STATE"
-  chmod 0600 "$TC_OWNED_STATE" 2>/dev/null || true
-  [ -z "$previous" ] || rm -f "$previous"
-  users_log "$(t "tc：已在 ${dev} 应用用户专属端口过滤器" \
-    "tc: applied dedicated per-user port filters on $dev")"
-}
-
-tc_rate_status() {
-  local dev
-  dev="$(tc_default_iface)"
-  msg ""
-  t '【带宽状态】专属实例按端口限速；仅展示/维护本脚本拥有的 filter' \
-    '[Bandwidth status] dedicated-instance port limits; only script-owned filters are managed'
-  if ! tc_available; then
-    warn "$(t 'tc 不可用' 'tc unavailable')"
-    return 1
-  fi
-  if [ -z "$dev" ]; then
-    warn "$(t '未检测到网卡' 'No NIC detected')"
-    return 1
-  fi
-  t '--- 队列规则（qdisc）---' '--- qdisc ---'
-  tc qdisc show dev "$dev" 2>/dev/null || true
-  t '--- 出站过滤器（egress filter）---' '--- egress filter ---'
-  tc filter show dev "$dev" egress 2>/dev/null | grep -E 'pref 42[0-9]{3}|police' | head -n 60 || true
-  t '--- 入站过滤器（ingress filter）---' '--- ingress filter ---'
-  tc filter show dev "$dev" ingress 2>/dev/null | grep -E 'pref 42[0-9]{3}|police' | head -n 60 || true
-  msg ""
-  t '【套餐带宽】0 表示不限速' '[Package bandwidth] 0 means unlimited'
-  if users_state_exists; then
-    python3 -c '
-import json,sys
-d=json.load(open(sys.argv[1]))
-user_h,port_h,mbps_h,status_h,on_l,off_l,unlim_l=sys.argv[2:9]
-print("%-16s %-8s %-8s %s" % (user_h,port_h,mbps_h,status_h))
-for u in d.get("users") or []:
-    bw=int(u.get("bandwidth_mbps") or 0)
-    st=on_l if u.get("enabled",True) else off_l
-    print("%-16s %-8s %-8s %s" % (u.get("name") or "", u.get("port") or "", bw if bw>0 else unlim_l, st))
-' "$MITA_USERS_STATE" \
-      "$(t '用户' 'USER')" "$(t '端口' 'PORT')" 'Mbps' "$(t '状态' 'STATUS')" \
-      "$(t '启用' 'on')" "$(t '停用' 'off')" "$(t '不限速' 'unlim')"
-  fi
-}
-
-users_set_enabled() {
-  local name="$1" en="$2"
-  _U_ENABLED="$en"
-  USER_QUOTA_MB="" USER_QUOTA_DAYS="" USER_EXPIRE="" USER_PACKAGE="" USER_BANDWIDTH_MBPS=""
-  if ! users_update_fields "$name"; then
-    unset _U_ENABLED
-    return 1
-  fi
-  unset _U_ENABLED
-}
-
-# 扫描到期：expire_at <= today 且 enabled → 停用；stdout 仅输出被停用的用户名
-users_scan_expired() {
-  users_require_python || return 1
-  users_state_exists || return 0
-  local today changed tx old_pairs new_pairs close_pairs
-  admin_lock_acquire || return 1
-  tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
-  old_pairs="$(multi_user_port_protocol_pairs)"
-  today="$(today_ymd)"
-  if ! changed="$(USERS_LOG_QUIET=1 python3 -c '
-import json, sys, time
-path, today = sys.argv[1], sys.argv[2]
-d = json.load(open(path))
-changed = []
-for u in d.get("users") or []:
-    exp = (u.get("expire_at") or "").strip()
-    if not exp:
-        continue
-    if not u.get("enabled", True):
-        continue
-    if exp <= today:
-        u["enabled"] = False
-        u["updated_at"] = int(time.time())
-        changed.append(u.get("name") or "")
-if changed:
-    json.dump(d, open(path, "w"), indent=2)
-print("\n".join(changed))
-' "$MITA_USERS_STATE" "$today" 2>/dev/null)"; then
-    users_tx_rollback "$tx" 0
-    admin_lock_release
-    return 1
-  fi
-  if [ -z "$changed" ]; then
-    users_tx_commit "$tx"
-    admin_lock_release
-    return 0
-  fi
-  local n
-  while IFS= read -r n; do
-    [ -n "$n" ] || continue
-    USERS_LOG_QUIET=1 users_log "$(t "到期停用: $n（expire_at<=${today}）" \
-      "expired disable: $n (expire_at<=$today)")"
-  done <<< "$changed"
-  if mita_installed 2>/dev/null; then
-    load_install_state
-    MULTI_USER_MODE=1
-    if ! apply_users_config "$tx" >/dev/null 2>&1; then
-      USERS_LOG_QUIET=1 users_log "$(t '到期扫描后的配置应用失败；用户状态已回滚' \
-        'apply after expire scan failed; users state rolled back')"
-      admin_lock_release
-      return 1
-    fi
-    new_pairs="$(multi_user_port_protocol_pairs)"
-    close_pairs="$(comm -23 \
-      <(printf '%s\n' "$old_pairs" | sed '/^[[:space:]]*$/d' | LC_ALL=C sort -u) \
-      <(printf '%s\n' "$new_pairs" | sed '/^[[:space:]]*$/d' | LC_ALL=C sort -u))"
-    [ -z "$close_pairs" ] || close_firewall_for_bindings "$close_pairs"
-    users_sync_primary_globals
-    if ! save_install_state; then
-      users_tx_rollback "$tx" 1
-      open_firewall_for_pairs "$old_pairs"
-      admin_lock_release
-      return 1
-    fi
-  fi
-  users_tx_commit "$tx"
-  admin_lock_release
-  printf '%s\n' "$changed"
-}
-
-# 日历月配额重置：quota_mode=calendar 且 last_quota_reset != 当月。
-# isolated-v2 为每个用户提供独立 metrics.pb，因此只重置待处理用户。
-_calendar_mark_pending() {
-  # stdout: 待重置用户名列表；不写 last_quota_reset
-  python3 -c '
-import json, sys, time, datetime, calendar
-path, ym = sys.argv[1], sys.argv[2]
-d = json.load(open(path))
-reset = []
-today = datetime.date.today()
-mdays = calendar.monthrange(today.year, today.month)[1]
-for u in d.get("users") or []:
-    if not u.get("enabled", True):
-        continue
-    try:
-        qmb = int(u.get("quota_mb") or 0)
-    except Exception:
-        qmb = 0
-    if qmb <= 0:
-        continue
-    if (u.get("quota_mode") or "rolling").strip().lower() != "calendar":
-        continue
-    if (u.get("last_quota_reset") or "").strip() == ym:
-        continue
-    u["quota_days"] = mdays
-    u["updated_at"] = int(time.time())
-    u["_reset_pending"] = True
-    reset.append(u.get("name") or "")
-if reset:
-    json.dump(d, open(path, "w"), indent=2)
-print("\n".join(reset))
-' "$MITA_USERS_STATE" "$1" 2>/dev/null
-}
-
-_calendar_commit_reset() {
-  # 成功后：仅对 _reset_pending 用户写 last_quota_reset
-  local ym="$1"
-  python3 -c '
-import json, sys, time
-path, ym = sys.argv[1], sys.argv[2]
-d = json.load(open(path))
-for u in d.get("users") or []:
-    pending = u.pop("_reset_pending", False)
-    if pending:
-        u["last_quota_reset"] = ym
-    u["updated_at"] = int(time.time())
-json.dump(d, open(path, "w"), indent=2)
-' "$MITA_USERS_STATE" "$ym" 2>/dev/null
-}
-
-users_scan_calendar_quota_reset() {
-  users_require_python || return 1
-  users_state_exists || return 0
-  if [ "${DRY_RUN:-0}" -eq 1 ]; then
-    t '[演练] 扫描日历月配额（不更改 users.json 或指标数据）' \
-      '[dry-run] calendar quota scan (no users.json or metrics changes)'
-    return 0
-  fi
-  local ym reset_list method tx
-  admin_lock_acquire || return 1
-  tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
-  ym="$(current_year_month)"
-  method="$(printf '%s' "${QUOTA_RESET_METHOD:-metrics}" | tr '[:upper:]' '[:lower:]')"
-  if ! reset_list="$(_calendar_mark_pending "$ym")"; then
-    users_tx_rollback "$tx" 0
-    admin_lock_release
-    return 1
-  fi
-  if [ -z "$reset_list" ]; then
-    users_tx_commit "$tx"
-    admin_lock_release
-    return 0
-  fi
-  local n
-  while IFS= read -r n; do
-    [ -n "$n" ] || continue
-    USERS_LOG_QUIET=1 users_log "$(t "日历月配额等待重置: $n，月份=${ym}，方式=${method}" \
-      "calendar quota reset pending: $n month=$ym method=$method")"
-  done <<< "$reset_list"
-
-  if ! mita_installed 2>/dev/null; then
-    users_tx_rollback "$tx" 0
-    admin_lock_release
-    warn "$(t 'mita 未安装，无法清空真实指标；未记录日历月配额重置成功' \
-      'mita is not installed, so real metrics cannot be cleared; calendar reset was not marked successful')"
-    return 1
-  fi
-
-  if [ "$method" != "metrics" ]; then
-    users_tx_rollback "$tx" 0
-    admin_lock_release
-    warn "$(t "QUOTA_RESET_METHOD=${method} 已禁用：该方法不会清空按用户名累计的指标。请使用 metrics。" \
-      "QUOTA_RESET_METHOD=${method} is disabled because it does not clear username-keyed metrics. Use metrics.")"
-    return 1
-  fi
-
-  # isolated-v2 中每个用户拥有独立 metrics.pb，可只重置到期的 calendar 用户，
-  # 不再要求所有有限配额账号在同一时间清零。
-  load_install_state
-  MULTI_USER_MODE=1
-  if ! apply_users_config "$tx" >/dev/null 2>&1; then
-    USERS_LOG_QUIET=1 users_log "$(t '日历月配额重置时，专属实例配置应用失败' \
-      'calendar dedicated instance apply failed')"
-    admin_lock_release
-    return 1
-  fi
-  users_isolated_mode || {
-    users_tx_rollback "$tx" 1
-    admin_lock_release
-    warn "$(t '日历月配额重置要求 isolated-v2，但当前部署模型无效' \
-      'Calendar reset requires isolated-v2, but the current model is invalid')"
-    return 1
-  }
-
-  local backup_dir id metric reset_failed=0
-  backup_dir="$(mktemp_dir)"
-  chmod 0700 "$backup_dir" 2>/dev/null || true
-  while IFS= read -r n; do
-    [ -n "$n" ] || continue
-    id="$(users_get_field "$n" instance_id 2>/dev/null || true)"
-    instance_valid_id "$id" || { reset_failed=1; break; }
-    metric="$(instance_metrics_file "$id")"
-    if ! instance_daemon_stop "$id" 0; then
-      reset_failed=1
-      break
-    fi
-    if [ -f "$metric" ]; then
-      cp -f "$metric" "${backup_dir}/${id}.pb" || { reset_failed=1; break; }
-    else
-      : >"${backup_dir}/${id}.absent"
-    fi
-    if ! rm -f "$metric" || ! instance_start_proxy "$id"; then
-      reset_failed=1
-      break
-    fi
-    USERS_LOG_QUIET=1 users_log "$(t "日历月配额重置已清除专属指标: 用户=${n}，实例=${id}" \
-      "calendar reset cleared dedicated metrics: user=$n instance=$id")"
-  done <<<"$reset_list"
-
-  if [ "$reset_failed" -eq 0 ] && _calendar_commit_reset "$ym"; then
-    rm -rf "$backup_dir"
-    users_tx_commit "$tx"
-    admin_lock_release
-    printf '%s\n' "$reset_list"
-    return 0
-  fi
-
-  while IFS= read -r n; do
-    [ -n "$n" ] || continue
-    id="$(users_get_field "$n" instance_id 2>/dev/null || true)"
-    instance_valid_id "$id" || continue
-    metric="$(instance_metrics_file "$id")"
-    instance_daemon_stop "$id" 0 || true
-    if [ -f "${backup_dir}/${id}.pb" ]; then
-      cp -f "${backup_dir}/${id}.pb" "$metric" 2>/dev/null || true
-      chown mita:mita "$metric" 2>/dev/null || true
-      chmod 0600 "$metric" 2>/dev/null || true
-    elif [ -f "${backup_dir}/${id}.absent" ]; then
-      rm -f "$metric" 2>/dev/null || true
-    fi
-  done <<<"$reset_list"
-  rm -rf "$backup_dir"
-  users_tx_rollback "$tx" 1
-  USERS_LOG_QUIET=1 users_log "$(t '日历月专属指标重置失败；状态与指标已回滚' \
-    'calendar dedicated metrics reset failed; state and metrics rolled back')"
-  admin_lock_release
-  return 1
-}
-
-install_users_scheduler() {
-  # systemd timer 优先，否则 cron.d
-  [ "${DRY_RUN:-0}" -eq 1 ] && return 0
-  local script_path
-  script_path="${INSTALL_SCRIPT_PATH}"
-  [ -x "$script_path" ] || script_path="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
-  [ -n "$script_path" ] || return 0
-
-  if command -v systemctl >/dev/null 2>&1 && [ -d /etc/systemd/system ]; then
-    cat >"$MITA_USERS_SERVICE" <<EOF
-[Unit]
-Description=NoBrand Mieru users expire and calendar quota scan
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-ExecStart=${script_path} mieru user-scan
-Nice=10
-EOF
-    cat >"$MITA_USERS_TIMER" <<EOF
-[Unit]
-Description=Run NoBrand Mieru users scan every 15 minutes
-
-[Timer]
-OnBootSec=2min
-OnUnitActiveSec=15min
-AccuracySec=1min
-Unit=nobrand-mieru-users-scan.service
-
-[Install]
-WantedBy=timers.target
-EOF
-    systemctl daemon-reload 2>/dev/null || true
-    systemctl enable --now nobrand-mieru-users-scan.timer 2>/dev/null || true
-    install_logrotate_config 2>/dev/null || true
-    harden_mita_permissions 2>/dev/null || true
-    users_log "$(t '调度器: systemd 到期与配额定时器' \
-      'scheduler: systemd expiry/quota timer')"
-    return 0
-  fi
-
-  if [ -d /etc/cron.d ]; then
-    cat >"$MITA_USERS_CRON" <<EOF
-# NoBrand Mieru multi-user expire / quota scan (every 15 min)
-*/15 * * * * root ${script_path} mieru user-scan >>${MITA_USERS_LOG} 2>&1
-EOF
-    chmod 0644 "$MITA_USERS_CRON" 2>/dev/null || true
-    install_logrotate_config 2>/dev/null || true
-    harden_mita_permissions 2>/dev/null || true
-    users_log "$(t "调度器: cron ${MITA_USERS_CRON}" \
-      "scheduler: cron ${MITA_USERS_CRON}")"
-    return 0
-  fi
-  # OpenRC / 无 cron：写入 hint
-  install_logrotate_config 2>/dev/null || true
-  warn "$(t '未找到 systemd timer 或 /etc/cron.d，请手动定期执行: nobrand mieru user-scan' \
-    'No systemd timer or /etc/cron.d; run: nobrand mieru user-scan')"
-}
-
-remove_users_scheduler() {
-  if [ -f "$MITA_USERS_TIMER" ] || [ -f "$MITA_USERS_SERVICE" ]; then
-    systemctl disable --now nobrand-mieru-users-scan.timer 2>/dev/null || true
-    rm -f "$MITA_USERS_TIMER" "$MITA_USERS_SERVICE" 2>/dev/null || true
-    systemctl daemon-reload 2>/dev/null || true
-  fi
-  rm -f "$MITA_USERS_CRON" 2>/dev/null || true
-}
-
 # ---------- 阶段4：备份 / 恢复 / 导出导入 / 管理锁 ----------
-
-user_package_display_label() {
-  case "${1:-}" in
-    unlimited) t '不限量' 'unlimited' ;;
-    trial) t '体验' 'trial' ;;
-    standard) t '标准' 'standard' ;;
-    custom) t '自定义' 'custom' ;;
-    "") printf '%s' '-' ;;
-    *) printf '%s' "$1" ;;
-  esac
-}
-
-user_enabled_display_label() {
-  if [ "${1:-0}" = 1 ]; then
-    t '启用' 'on'
-  else
-    t '停用' 'off'
-  fi
-}
-
-# 破坏性变更前备份 users.json；成功打印备份路径
-users_backup_now() {
-  local tag="${1:-auto}" dest ts
-  users_state_exists || return 1
-  if [ "${DRY_RUN:-0}" -eq 1 ]; then
-    t "[演练] 备份用户状态: $MITA_USERS_STATE" \
-      "[dry-run] backup users state: $MITA_USERS_STATE"
-    return 0
-  fi
-  run mkdir -p "$MITA_USERS_BACKUP_DIR"
-  ts="$(date +%Y%m%d_%H%M%S 2>/dev/null || echo unknown)_$$_${RANDOM}"
-  dest="${MITA_USERS_BACKUP_DIR}/users_${tag}_${ts}.json"
-  if command -v install >/dev/null 2>&1; then
-    run install -m 0600 "$MITA_USERS_STATE" "$dest"
-  else
-    run cp -f "$MITA_USERS_STATE" "$dest"
-    run chmod 0600 "$dest" 2>/dev/null || true
-  fi
-  # 只保留最近 20 份
-  if command -v python3 >/dev/null 2>&1; then
-    MITA_USERS_BACKUP_DIR="$MITA_USERS_BACKUP_DIR" python3 -c '
-import os, glob
-d=os.environ.get("MITA_USERS_BACKUP_DIR", "/var/lib/nobrand-oneclick/mieru/backups")
-files=sorted(glob.glob(os.path.join(d, "users_*.json")), key=os.path.getmtime, reverse=True)
-for f in files[20:]:
-    try: os.remove(f)
-    except Exception: pass
-' 2>/dev/null || true
-  fi
-  printf '%s' "$dest"
-}
-
-users_validate_state_file() {
-  local f="$1" protocol="${2:-${PROTOCOL:-TCP}}" auto_host="${3:-}"
-  [ -f "$f" ] || return 1
-  python3 -c '
-import datetime,ipaddress,json,re,sys
-d=json.load(open(sys.argv[1]))
-proto=(sys.argv[2] if len(sys.argv)>2 else "TCP").upper()
-auto_host=(sys.argv[3] if len(sys.argv)>3 else "").strip()
-if d.get("deployment_model") != "isolated-v2":
-    sys.exit(19)
-def normalize_endpoint_host(value):
-    value=str(value or "").strip()
-    try:
-        return str(ipaddress.ip_address(value))
-    except Exception:
-        pass
-    raw=value[:-1] if value.endswith(".") else value
-    if not raw or len(raw)>253 or "://" in raw or ":" in raw or "/" in raw:
-        raise ValueError("invalid host")
-    if re.fullmatch(r"[0-9]+(?:\.[0-9]+){3}", raw):
-        raise ValueError("invalid IPv4")
-    labels=raw.split(".")
-    if any(not label or len(label)>63 or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?", label) for label in labels):
-        raise ValueError("invalid host")
-    return raw.lower()
-if proto not in ("TCP", "UDP", "BOTH"):
-    sys.exit(15)
-if auto_host:
-    try:
-        auto_host=str(ipaddress.ip_address(auto_host))
-    except Exception:
-        auto_host=""
-users=d.get("users")
-if not isinstance(users, list):
-    sys.exit(2)
-names=set(); occupied_ports=set(); advertised_endpoints=set()
-for u in users:
-    if not isinstance(u, dict):
-        sys.exit(3)
-    n=u.get("name")
-    pw=u.get("password")
-    if not isinstance(n, str) or not n or len(n.encode()) > 64:
-        sys.exit(4)
-    if any(ord(c) < 32 or ord(c) == 127 for c in n):
-        sys.exit(4)
-    if not isinstance(pw, str) or not pw or len(pw.encode()) > 64:
-        sys.exit(8)
-    if any(ord(c) < 32 or ord(c) == 127 for c in pw):
-        sys.exit(8)
-    if n in names:
-        sys.exit(5)
-    names.add(n)
-    try:
-        p=int(u.get("port"))
-    except Exception:
-        sys.exit(6)
-    if p < 1025 or p > 65535 or (proto == "BOTH" and p > 65534):
-        sys.exit(6)
-    user_ports=(p, p+1) if proto == "BOTH" else (p,)
-    if any(port in occupied_ports for port in user_ports):
-        sys.exit(7)
-    occupied_ports.update(user_ports)
-    advertise_host=str(u.get("advertise_host") or "").strip()
-    advertise_port=u.get("advertise_port")
-    if bool(advertise_host) != bool(advertise_port):
-        sys.exit(17)
-    if advertise_host:
-        try:
-            advertise_host=normalize_endpoint_host(advertise_host)
-            advertise_port=int(advertise_port)
-        except Exception:
-            sys.exit(17)
-        if advertise_port < 1 or advertise_port > 65535 or (proto == "BOTH" and advertise_port > 65534):
-            sys.exit(17)
-    else:
-        advertise_port=""
-    u["advertise_host"]=advertise_host
-    u["advertise_port"]=advertise_port
-    effective_host=advertise_host or auto_host
-    effective_port=advertise_port if advertise_host else p
-    if effective_host:
-        endpoint_pairs=(("TCP", effective_port), ("UDP", effective_port+1)) if proto == "BOTH" else ((proto, effective_port),)
-        for endpoint_proto, endpoint_port in endpoint_pairs:
-            endpoint=(effective_host, endpoint_proto, endpoint_port)
-            if endpoint in advertised_endpoints:
-                sys.exit(18)
-            advertised_endpoints.add(endpoint)
-    try:
-        qmb=max(0, int(u.get("quota_mb") or 0))
-        qdays=max(0, int(u.get("quota_days") or 0))
-        bw=max(0, int(u.get("bandwidth_mbps") or 0))
-    except Exception:
-        sys.exit(9)
-    if qmb > 2147483647 or qdays > 2147483647 or bw > 1000000:
-        sys.exit(16)
-    u["quota_mb"]=qmb
-    u["quota_days"]=(qdays if qdays > 0 else 30) if qmb > 0 else 0
-    qmode=str(u.get("quota_mode") or "rolling").strip().lower()
-    if qmode not in ("rolling","calendar"):
-        sys.exit(10)
-    u["quota_mode"]=qmode
-    enabled=u.get("enabled", True)
-    if not isinstance(enabled, bool):
-        sys.exit(11)
-    u["enabled"]=enabled
-    ingress_profile_id=str(u.get("ingress_profile_id") or "legacy-default-route").strip()
-    ingress_enforcement=str(u.get("ingress_enforcement") or "permissive").strip().lower()
-    ingress_method=str(u.get("ingress_enforcement_method") or "wildcard").strip().lower()
-    ingress_address=str(u.get("ingress_local_address") or "").strip()
-    if not ingress_profile_id or ingress_enforcement not in ("permissive","strict"):
-        sys.exit(20)
-    if ingress_enforcement == "permissive" and ingress_method != "wildcard":
-        sys.exit(20)
-    if ingress_enforcement == "strict":
-        if ingress_method != "firewall":
-            sys.exit(20)
-        try:
-            if ipaddress.ip_address(ingress_address).version != 4:
-                sys.exit(20)
-        except Exception:
-            sys.exit(20)
-    expire=str(u.get("expire_at") or "").strip()
-    if expire:
-        try:
-            datetime.date.fromisoformat(expire)
-        except Exception:
-            sys.exit(12)
-    u["expire_at"]=expire
-    last_reset=str(u.get("last_quota_reset") or "").strip()
-    if last_reset and (len(last_reset) != 7 or last_reset[4] != "-" or not last_reset.replace("-","").isdigit()):
-        sys.exit(13)
-    u["last_quota_reset"]=last_reset
-    package=str(u.get("package") or ("custom" if qmb > 0 else "unlimited"))
-    if len(package.encode()) > 64 or any(ord(c) < 32 or ord(c) == 127 for c in package):
-        sys.exit(14)
-    u["package"]=package
-    u["bandwidth_mbps"]=bw
-d["version"]=2
-d["deployment_model"]="isolated-v2"
-d["protocol"]=proto
-json.dump(d, open(sys.argv[1]+".norm","w"), indent=2)
-' "$f" "$protocol" "$auto_host" 2>/dev/null || return 1
-  if [ -f "${f}.norm" ]; then
-    mv -f "${f}.norm" "$f" 2>/dev/null || return 1
-  fi
-  return 0
-}
-
-users_restore_from_file() {
-  local src="$1" bak tx tmp imported_protocol
-  local old_protocol old_user old_password old_port old_pairs new_pairs close_pairs rollback_close_pairs
-  local old_advertise_host old_advertise_port
-  [ -f "$src" ] || { warn "$(t "备份不存在: $src" "Backup not found: $src")"; return 1; }
-  admin_lock_acquire || return 1
-  load_install_state
-  old_protocol="${PROTOCOL:-TCP}"
-  old_user="${USERNAME:-}"
-  old_password="${PASSWORD:-}"
-  old_port="${PORT:-}"
-  old_advertise_host="${ADVERTISE_HOST:-}"
-  old_advertise_port="${ADVERTISE_PORT:-}"
-  old_pairs="$(multi_user_port_protocol_pairs)"
-  tmp="$(mktemp_file .json)"
-  cp -f "$src" "$tmp"
-  imported_protocol="$(python3 -c '
-import json,sys
-d=json.load(open(sys.argv[1]))
-print(str(d.get("protocol") or sys.argv[2]).strip().upper())
-' "$tmp" "$old_protocol" 2>/dev/null || true)"
-  case "$imported_protocol" in
-    TCP|UDP|BOTH) ;;
-    *)
-      rm -f "$tmp"
-      admin_lock_release
-      warn "$(t '备份中的协议无效（仅支持 TCP/UDP/BOTH）' \
-        'Invalid protocol in backup (only TCP/UDP/BOTH are supported)')"
-      return 1
-      ;;
-  esac
-  users_validate_state_file "$tmp" "$imported_protocol" || {
-    rm -f "$tmp"
-    admin_lock_release
-    warn "$(t '备份文件格式无效' 'Invalid backup format')"
-    return 1
-  }
-  tx="$(users_tx_snapshot)" || { rm -f "$tmp"; admin_lock_release; return 1; }
-  if users_state_exists; then
-    bak="$(users_backup_now pre-restore 2>/dev/null || true)"
-    [ -n "$bak" ] && t "恢复前已备份: $bak" "Pre-restore backup: $bak" >&2
-  fi
-  run mkdir -p "$(dirname "$MITA_USERS_STATE")"
-  if command -v install >/dev/null 2>&1; then
-    if ! run install -m 0600 "$tmp" "$MITA_USERS_STATE"; then
-      rm -f "$tmp"
-      users_tx_rollback "$tx" 0
-      admin_lock_release
-      return 1
-    fi
-  else
-    if ! run cp -f "$tmp" "$MITA_USERS_STATE"; then
-      rm -f "$tmp"
-      users_tx_rollback "$tx" 0
-      admin_lock_release
-      return 1
-    fi
-    run chmod 0600 "$MITA_USERS_STATE" 2>/dev/null || true
-  fi
-  rm -f "$tmp"
-  PROTOCOL="$imported_protocol"
-  MULTI_USER_MODE=1
-  users_sync_primary_globals
-  if mita_installed 2>/dev/null; then
-    if ! apply_users_config "$tx"; then
-      # apply_users_config 已恢复 users.json，但它执行回滚时仍使用导入协议；
-      # 这里切回旧协议并再次收敛，保证旧实例与旧端口完整恢复。
-      PROTOCOL="$old_protocol"
-      USERNAME="$old_user"
-      PASSWORD="$old_password"
-      PORT="$old_port"
-      ADVERTISE_HOST="$old_advertise_host"
-      ADVERTISE_PORT="$old_advertise_port"
-      if users_isolated_mode; then
-        reconcile_isolated_instances 2>/dev/null || true
-        apply_tc_limits 2>/dev/null || true
-      fi
-      admin_lock_release
-      return 1
-    fi
-    new_pairs="$(multi_user_port_protocol_pairs)"
-    open_firewall_for_pairs "$new_pairs" 2>/dev/null || true
-  else
-    new_pairs="$(multi_user_port_protocol_pairs)"
-    if ! apply_tc_limits; then
-      PROTOCOL="$old_protocol"
-      USERNAME="$old_user"
-      PASSWORD="$old_password"
-      PORT="$old_port"
-      ADVERTISE_HOST="$old_advertise_host"
-      ADVERTISE_PORT="$old_advertise_port"
-      users_tx_rollback "$tx" 0
-      admin_lock_release
-      return 1
-    fi
-  fi
-  if ! save_install_state; then
-    rollback_close_pairs="$(comm -23 \
-      <(printf '%s\n' "$new_pairs" | sed '/^[[:space:]]*$/d' | LC_ALL=C sort -u) \
-      <(printf '%s\n' "$old_pairs" | sed '/^[[:space:]]*$/d' | LC_ALL=C sort -u))"
-    PROTOCOL="$old_protocol"
-    USERNAME="$old_user"
-    PASSWORD="$old_password"
-    PORT="$old_port"
-    ADVERTISE_HOST="$old_advertise_host"
-    ADVERTISE_PORT="$old_advertise_port"
-    if mita_installed 2>/dev/null; then
-      users_tx_rollback "$tx" 1
-    else
-      users_tx_rollback "$tx" 0
-    fi
-    open_firewall_for_pairs "$old_pairs" 2>/dev/null || true
-    [ -z "$rollback_close_pairs" ] || close_firewall_for_bindings "$rollback_close_pairs"
-    admin_lock_release
-    return 1
-  fi
-  close_pairs="$(comm -23 \
-    <(printf '%s\n' "$old_pairs" | sed '/^[[:space:]]*$/d' | LC_ALL=C sort -u) \
-    <(printf '%s\n' "$new_pairs" | sed '/^[[:space:]]*$/d' | LC_ALL=C sort -u))"
-  [ -z "$close_pairs" ] || close_firewall_for_bindings "$close_pairs"
-  users_tx_commit "$tx"
-  client_exports_clear_current 2>/dev/null || true
-  admin_lock_release
-  t "已从备份恢复用户状态" "Users restored from backup"
-}
-
-do_user_backup() {
-  require_root
-  users_state_exists || die "$(t '无用户状态可备份' 'No users state to backup')"
-  local dest
-  dest="$(users_backup_now manual)"
-  t "已备份: $dest" "Backed up: $dest"
-  # 同时备份 install-state 若存在
-  if [ -f "$MITA_STATE" ]; then
-    local sdest
-    sdest="${dest%.json}_install-state.env"
-    cp -f "$MITA_STATE" "$sdest" 2>/dev/null || true
-    chmod 0600 "$sdest" 2>/dev/null || true
-    t "  安装状态: $sdest" "  Install state: $sdest"
-  fi
-  msg ""
-  t '最近备份:' 'Recent backups:'
-  # shellcheck disable=SC2012
-  ls -1t "$MITA_USERS_BACKUP_DIR"/users_*.json 2>/dev/null | head -n 10 || true
-}
-
-do_user_restore() {
-  require_root
-  local f="${USER_RESTORE_FILE:-}"
-  if [ -z "$f" ]; then
-    if [ "$YES" -eq 1 ]; then
-      die "$(t '需要备份文件路径' 'Backup file path required')"
-    fi
-    msg ""
-    t '可用备份:' 'Available backups:'
-    # shellcheck disable=SC2012
-    ls -1t "$MITA_USERS_BACKUP_DIR"/users_*.json 2>/dev/null | head -n 15 || true
-    read_tty f "$(t '备份文件路径: ' 'Backup file: ')" || true
-  fi
-  [ -n "$f" ] || die "$(t '需要备份文件路径' 'Backup file path required')"
-  if [ "$YES" -ne 1 ]; then
-    confirm '确认用该备份覆盖当前用户配置？[y/N]: ' 'Overwrite current users with this backup? [y/N]: ' n || return 0
-  fi
-  users_restore_from_file "$f"
-}
-
-do_user_export() {
-  require_root
-  users_state_exists || die "$(t '无用户状态' 'No users state')"
-  local out="${USER_EXPORT_FILE:-}"
-  if [ -n "$out" ]; then
-    run mkdir -p "$(dirname "$out")" 2>/dev/null || true
-    cp -f "$MITA_USERS_STATE" "$out"
-    chmod 0600 "$out" 2>/dev/null || true
-    t "已导出: $out" "Exported: $out"
-  else
-    cat "$MITA_USERS_STATE"
-  fi
-}
-
-do_user_import() {
-  require_root
-  local f="${USER_RESTORE_FILE:-}"
-  if [ -z "$f" ] && [ "$YES" -ne 1 ]; then
-    read_tty f "$(t '导入文件路径: ' 'Import file: ')" || f=""
-  fi
-  [ -n "$f" ] || die "$(t '需要 --user-import FILE' 'Need --user-import FILE')"
-  if [ "$YES" -ne 1 ]; then
-    confirm '导入将覆盖当前用户配置，是否继续？[y/N]: ' 'Import overwrites current users. Continue? [y/N]: ' n || return 0
-  fi
-  users_restore_from_file "$f"
-}
-
-print_user_outputs() {
-  local name="$1"
-  local ip password port saved_user saved_pass saved_port saved_advertise_host saved_advertise_port saved_ingress_profile_id
-  password="$(users_get_field "$name" password)" || return 1
-  port="$(users_get_field "$name" port)" || return 1
-  saved_user="$USERNAME"
-  saved_pass="$PASSWORD"
-  saved_port="$PORT"
-  saved_advertise_host="$ADVERTISE_HOST"
-  saved_advertise_port="$ADVERTISE_PORT"
-  saved_ingress_profile_id="${INGRESS_PROFILE_ID:-}"
-  USERNAME="$name"
-  PASSWORD="$password"
-  PORT="$port"
-  ADVERTISE_HOST="$(users_get_field "$name" advertise_host 2>/dev/null || true)"
-  ADVERTISE_PORT="$(users_get_field "$name" advertise_port 2>/dev/null || true)"
-  INGRESS_PROFILE_ID="$(users_get_field "$name" ingress_profile_id 2>/dev/null || true)"
-  [ -n "$INGRESS_PROFILE_ID" ] || INGRESS_PROFILE_ID="$NOBRAND_LEGACY_INGRESS_PROFILE_ID"
-  ip="$(advertised_host || echo 'YOUR_SERVER_IP')"
-  msg ""
-  t "========== 用户 ${name} ==========" "========== User ${name} =========="
-  t "  专属实例端口: ${port}（其它用户凭据无法在此实例认证）" \
-    "  Dedicated instance port: ${port} (other users cannot authenticate on this instance)"
-  t "  网络入口: $(nb_ingress_profile_name "$INGRESS_PROFILE_ID")" \
-    "  Ingress: $(nb_ingress_profile_name "$INGRESS_PROFILE_ID")"
-  local qmb qdays exp en pkg bw status_label
-  qmb="$(users_get_field "$name" quota_mb 2>/dev/null || echo 0)"
-  qdays="$(users_get_field "$name" quota_days 2>/dev/null || echo 0)"
-  exp="$(users_get_field "$name" expire_at 2>/dev/null || true)"
-  en="$(users_get_field "$name" enabled 2>/dev/null || echo 1)"
-  pkg="$(users_get_field "$name" package 2>/dev/null || true)"
-  bw="$(users_get_field "$name" bandwidth_mbps 2>/dev/null || echo 0)"
-  pkg="$(user_package_display_label "$pkg")"
-  status_label="$(user_enabled_display_label "$en")"
-  t "  套餐: ${pkg}  配额: $(quota_label "$qmb" "$qdays")  双向限速: ${bw:-0}Mbps（0=不限） 到期: ${exp:-永不过期}  状态: ${status_label}" \
-    "  Package: ${pkg}  Quota: $(quota_label "$qmb" "$qdays")  Bidirectional rate: ${bw:-0}Mbps (0=unlim) Expire: ${exp:-never}  Status: ${status_label}"
-  print_protocol_outputs "$ip"
-  msg ""
-  t '【连接信息】' '[Connection info]'
-  t "  服务器: ${ip}" "  Server:   ${ip}"
-  t "  用户名: ${name}" "  Username: ${name}"
-  t "  密码:   ${password}" "  Password: ${password}"
-  t "  协议:   $(client_protocol_label)" "  Protocol: $(client_protocol_label)"
-  if [ "$PROTOCOL" = "BOTH" ]; then
-    t "  入口端口: TCP $(advertised_port_for_protocol TCP) / UDP $(advertised_port_for_protocol UDP)" \
-      "  Entry ports: TCP $(advertised_port_for_protocol TCP) / UDP $(advertised_port_for_protocol UDP)"
-  else
-    t "  入口端口: $(advertised_port_for_protocol "$PROTOCOL")" \
-      "  Entry port:  $(advertised_port_for_protocol "$PROTOCOL")"
-  fi
-  print_client_endpoint_mapping
-  if [ -n "$ip" ] && [ "$ip" != "YOUR_SERVER_IP" ]; then
-    msg ""
-    t '【Clash / mihomo 配置片段】' '[Clash / mihomo snippet]'
-    build_clash_yaml_full "$ip"
-  fi
-  USERNAME="$saved_user"
-  PASSWORD="$saved_pass"
-  PORT="$saved_port"
-  ADVERTISE_HOST="$saved_advertise_host"
-  ADVERTISE_PORT="$saved_advertise_port"
-  INGRESS_PROFILE_ID="$saved_ingress_profile_id"
-}
 
 open_firewall_for_pairs() {
   local pairs="$1"
@@ -12927,1394 +9031,50 @@ open_firewall_for_pairs() {
   [ "$failed" -eq 0 ]
 }
 
-do_user_list() {
-  require_root
-  load_install_state
-  users_ensure_loaded
-  if ! users_state_exists || [ "$(users_count)" -eq 0 ]; then
-    t '（schema v3 中没有 Mieru 用户）' '(No Mieru users in schema v3 state.)'
-    return 0
-  fi
-  msg ""
-  t '用户名      端口 状态 套餐      配额      模式  限速  到期' \
-    'USER        PORT ST  PACKAGE   QUOTA     MODE  RATE  EXPIRE'
-  t '----------- ---- ---- --------- --------- ----- ----- ----------' \
-    '----------- ---- ---- --------- --------- ----- ----- ----------'
-  python3 -c '
-import json, sys
-d = json.load(open(sys.argv[1]))
-on_l,off_l,unlimited_l,never_l,day_l,rolling_l,calendar_l=sys.argv[2:9]
-package_labels={"unlimited":unlimited_l,"trial":sys.argv[9],"standard":sys.argv[10],"custom":sys.argv[11]}
-for u in d.get("users") or []:
-    name = (u.get("name") or "")[:11]
-    port = str(u.get("port") or "")
-    st = on_l if u.get("enabled", True) else off_l
-    raw_pkg = u.get("package") or "-"
-    pkg = package_labels.get(raw_pkg,raw_pkg)[:9]
-    qmb = int(u.get("quota_mb") or 0)
-    qdays = int(u.get("quota_days") or 0)
-    raw_mode = u.get("quota_mode") or "rolling"
-    mode = (calendar_l if raw_mode == "calendar" else rolling_l)[:5]
-    if qmb <= 0:
-        quota = unlimited_l
-        mode = "-"
-    elif qmb >= 1024:
-        quota = "%dG/%d%s" % (qmb // 1024, qdays or 30, day_l)
-    else:
-        quota = "%dM/%d%s" % (qmb, qdays or 30, day_l)
-    bw = int(u.get("bandwidth_mbps") or 0)
-    bws = str(bw) if bw > 0 else "-"
-    exp = (u.get("expire_at") or never_l)[:10]
-    print(f"{name:<11} {port:<4} {st:<4} {pkg:<9} {quota:<9} {mode:<5} {bws:<5} {exp}")
-' "$MITA_USERS_STATE" \
-    "$(t '启用' 'on')" "$(t '停用' 'off')" "$(t '不限量' 'unlimited')" \
-    "$(t '永不过期' 'never')" "$(t '天' 'd')" "$(t '滚动' 'rolling')" \
-    "$(t '日历月' 'calendar')" "$(t '体验' 'trial')" "$(t '标准' 'standard')" \
-    "$(t '自定义' 'custom')"
-  t "共 $(users_count) 个用户（滚动模式 rolling；日历月模式 calendar 每月 1 日重置）" \
-    "Total $(users_count) (rolling window; calendar=reset on 1st)"
-}
-
-do_user_add() {
-  require_root
-  require_linux
-  mita_installed || die "$(t 'mita 未安装，请先执行安装' 'mita is not installed; run install first')"
-  # CLI 参数先保存，避免被 load_install_state 覆盖
-  local name="${USERNAME:-}" password="${PASSWORD:-}" prefer="" tx
-  local selected_port="" default_display_port="" choice="" input_host="" input_port="" owner=""
-  local old_pairs="" new_pairs=""
-  local requested_advertise_host="${ADVERTISE_HOST:-}" requested_advertise_port="${ADVERTISE_PORT:-}"
-  local requested_advertise_cli="${ADVERTISE_CLI:-0}"
-  local saved_pkg="${USER_PACKAGE:-}" saved_qmb="${USER_QUOTA_MB:-}" saved_qd="${USER_QUOTA_DAYS:-}" saved_exp="${USER_EXPIRE:-}" saved_bw="${USER_BANDWIDTH_MBPS:-}"
-  if [ "${PORT_CLI:-0}" -eq 1 ] && [ -n "${PORT:-}" ]; then
-    prefer="$PORT"
-  fi
-  # --user/--password/--port 描述的是新用户；读取现有主用户时不能让这些 CLI 值覆盖安装状态。
-  USERNAME_CLI=0
-  PASSWORD_CLI=0
-  PORT_CLI=0
-  PORT_RANGE_CLI=0
-  PROTOCOL_CLI=0
-  ADVERTISE_CLI=0
-  load_install_state
-  USER_PACKAGE="$saved_pkg"
-  USER_QUOTA_MB="$saved_qmb"
-  USER_QUOTA_DAYS="$saved_qd"
-  USER_EXPIRE="$saved_exp"
-  USER_BANDWIDTH_MBPS="$saved_bw"
-  if [ "$requested_advertise_cli" -ne 1 ]; then
-    requested_advertise_host=""
-    requested_advertise_port=""
-  fi
-  if ! users_state_exists || [ "$(users_count)" -eq 0 ]; then
-    die "$(t 'schema v3 Mieru 用户状态缺失；请重新执行全新安装' \
-      'Schema-v3 Mieru user state is missing; perform a fresh install')"
-  fi
-  if [ -z "$name" ]; then
-    if [ "$YES" -eq 1 ]; then
-      name="$(random_token)"
-    else
-      read_tty name "$(t '新用户名: ' 'New username: ')" || true
-    fi
-  fi
-  if [ -z "$password" ]; then
-    if [ "$YES" -eq 1 ]; then
-      password="$(random_token)"
-    else
-      read_tty_secret password "$(t '密码（回车随机）: ' 'Password (Enter=random): ')" || true
-      [ -n "$password" ] || password="$(random_token)"
-    fi
-  fi
-  if [ "$YES" -ne 1 ] && [ -z "${USER_PACKAGE}" ] && [ -z "${USER_QUOTA_MB}" ]; then
-    local pk=""
-    t '套餐: 1)不限量 2)体验10GB/7天 3)标准100GB/30天 4)自定义 5)跳过' \
-      'Package: 1)unlimited 2)trial 10GB/7d 3)standard 100GB/30d 4)custom 5)skip'
-    read_tty pk "$(t '选择 [1-5，默认1]: ' 'Choose [1-5, default 1]: ')" || pk=1
-    case "${pk:-1}" in
-      2) USER_PACKAGE=trial ;;
-      3) USER_PACKAGE=standard ;;
-      4)
-        USER_PACKAGE=custom
-        read_tty USER_QUOTA_MB "$(t '配额 MB（0=不限）: ' 'Quota MB (0=unlimited): ')" || true
-        read_tty USER_QUOTA_DAYS "$(t '滚动天数 [30]: ' 'Rolling days [30]: ')" || true
-        read_tty USER_EXPIRE "$(t '到期 YYYY-MM-DD 或 +30d（空=永不过期）: ' 'Expire YYYY-MM-DD or +30d (empty=never): ')" || true
-        ;;
-      5) ;;
-      *) USER_PACKAGE=unlimited ;;
-    esac
-  fi
-  if [ "$requested_advertise_cli" -eq 0 ] && [ "$YES" -ne 1 ]; then
-    t '客户端展示入口：1) 自动探测（默认） 2) 自定义入口 3) 取消' \
-      'Client Display Endpoint: 1) Auto (default) 2) Custom 3) Cancel'
-    read_tty choice "$(t '请选择 [1]: ' 'Choose [1]: ')" || return 3
-    case "${choice:-1}" in
-      1) ;;
-      2)
-        nb_prepare_ingress_request || return 1
-        selected_port="$(allocate_user_port "$prefer")" || return 1
-        prefer="$selected_port"
-        default_display_port="$(nb_effective_advertise_port auto '' "$selected_port" "$INGRESS_PROFILE_ID")"
-        while true; do
-          read_tty input_host "$(t '展示 Host/IP（q=取消）: ' 'Display Host/IP (q=cancel): ')" || return 3
-          [ "$input_host" != q ] || return 3
-          read_tty input_port "$(t "展示端口 [${default_display_port}]（q=取消）: " \
-            "Display port [${default_display_port}] (q=cancel): ")" || return 3
-          [ "$input_port" != q ] || return 3
-          input_port="${input_port:-$default_display_port}"
-          if nb_validate_advertise_endpoint "$input_host" "$input_port" "$PROTOCOL"; then
-            requested_advertise_host="$input_host"
-            requested_advertise_port="$input_port"
-            break
-          fi
-          warn "$(t '展示入口无效；请输入 IPv4、IPv6 或域名及有效端口' \
-            'Invalid Display Endpoint; enter an IPv4, IPv6, or domain and valid port')"
-        done
-        ;;
-      3) return 3 ;;
-      *) warn "$(t '无效选择' 'Invalid choice')"; return 1 ;;
-    esac
-  elif [ "$requested_advertise_cli" -eq 1 ] \
-       && { [ -n "$requested_advertise_host" ] || [ -n "$requested_advertise_port" ]; } \
-       && { [ -z "$requested_advertise_host" ] || [ -z "$requested_advertise_port" ]; }; then
-    nb_prepare_ingress_request || return 1
-    selected_port="$(allocate_user_port "$prefer")" || return 1
-    prefer="$selected_port"
-    if [ -z "$requested_advertise_host" ]; then
-      requested_advertise_host="$(nb_effective_advertise_host auto '' "$INGRESS_PROFILE_ID")"
-    fi
-    if [ -z "$requested_advertise_port" ]; then
-      requested_advertise_port="$(nb_effective_advertise_port auto '' "$selected_port" "$INGRESS_PROFILE_ID")"
-    fi
-  fi
-  if ! validate_advertise_endpoint_values "$requested_advertise_host" \
-    "$requested_advertise_port" "${PROTOCOL:-TCP}"; then
-    die "$(t '新用户的自定义客户端入口参数无效' \
-      'Invalid custom client entry parameters for the new user')"
-  fi
-  if [ -n "$requested_advertise_host" ]; then
-    requested_advertise_host="$(nb_normalize_endpoint_host "$requested_advertise_host")"
-    requested_advertise_port="$(normalize_uint "$requested_advertise_port")"
-    owner="$(nb_endpoint_conflict_owner "${PROTOCOL/BOTH/TCP}" "$requested_advertise_host" "$requested_advertise_port" '' 2>/dev/null || true)"
-    if [ -z "$owner" ] && [ "$PROTOCOL" = BOTH ]; then
-      owner="$(nb_endpoint_conflict_owner UDP "$requested_advertise_host" "$((requested_advertise_port + 1))" '' 2>/dev/null || true)"
-    fi
-    if [ -n "$owner" ]; then
-      warn "$(t "客户端展示入口已被占用: $owner" "Client Display Endpoint is already used by: $owner")"
-      return 1
-    fi
-  fi
-  admin_lock_acquire || return 1
-  old_pairs="$(multi_user_port_protocol_pairs)"
-  tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
-  if ! users_add "$name" "$password" "$prefer" \
-    "$requested_advertise_host" "$requested_advertise_port" >/dev/null; then
-    users_tx_rollback "$tx" 0
-    admin_lock_release
-    return 1
-  fi
-  if ! apply_users_config "$tx"; then
-    admin_lock_release
-    return 1
-  fi
-  users_sync_primary_globals
-  if ! save_install_state; then
-    users_tx_rollback "$tx" 1
-    admin_lock_release
-    return 1
-  fi
-  new_pairs="$(comm -23 \
-    <(multi_user_port_protocol_pairs | sed '/^[[:space:]]*$/d' | LC_ALL=C sort -u) \
-    <(printf '%s\n' "$old_pairs" | sed '/^[[:space:]]*$/d' | LC_ALL=C sort -u))"
-  if ! open_firewall_for_pairs "$(multi_user_port_protocol_pairs)"; then
-    close_firewall_for_bindings "$new_pairs" 2>/dev/null || true
-    users_tx_rollback "$tx" 1
-    admin_lock_release
-    return 1
-  fi
-  users_tx_commit "$tx"
-  admin_lock_release
-  print_user_outputs "$name"
-}
-
-do_user_set_quota() {
-  require_root
-  mita_installed || die "$(t 'mita 未安装' 'mita is not installed')"
-  local requested_name="${USERNAME:-}"
-  load_install_state
-  users_ensure_loaded
-  local name="${requested_name:-${USERNAME:-}}"
-  [ -n "$name" ] || die "$(t '需要 --user NAME' 'Need --user NAME')"
-  users_name_exists "$name" || die "$(t "用户不存在: $name" "User not found: $name")"
-  if [ -z "${USER_QUOTA_MB}" ] && [ -z "${USER_QUOTA_DAYS}" ] \
-     && [ -z "${USER_PACKAGE}" ] && [ -z "${USER_QUOTA_MODE}" ] \
-     && [ -z "${USER_EXPIRE}" ]; then
-    die "$(t '需要 --package / --quota-mb / --quota-mode' 'Need --package / --quota-mb / --quota-mode')" || return 1
-    return 1
-  fi
-  if ! apply_user_package_defaults 0; then
-    die "$(t '套餐或配额参数无效' 'Invalid package or quota value')" || return 1
-    return 1
-  fi
-  if [ -n "${USER_QUOTA_MB}" ] && ! valid_nonnegative_int32 "$USER_QUOTA_MB"; then
-    die "$(t '--quota-mb 必须是 0-2147483647 的整数' \
-      '--quota-mb must be an integer from 0 to 2147483647')" || return 1
-    return 1
-  fi
-  if [ -n "${USER_QUOTA_DAYS}" ] && ! valid_nonnegative_int32 "$USER_QUOTA_DAYS"; then
-    die "$(t '--quota-days 必须是 0-2147483647 的整数' \
-      '--quota-days must be an integer from 0 to 2147483647')" || return 1
-    return 1
-  fi
-  local exp_parsed=""
-  if [ -n "${USER_EXPIRE:-}" ]; then
-    exp_parsed="$(parse_expire_date "$USER_EXPIRE")" || return 1
-    USER_EXPIRE="$exp_parsed"
-    [ -z "$USER_EXPIRE" ] && USER_EXPIRE="__CLEAR__"
-  fi
-  if [ -n "${USER_QUOTA_MODE:-}" ]; then
-    USER_QUOTA_MODE="$(normalize_quota_mode "$USER_QUOTA_MODE")" || {
-      die "$(t '--quota-mode 仅支持 rolling 或 calendar' \
-        '--quota-mode accepts only rolling or calendar')" || return 1
-      return 1
-    }
-  fi
-  USER_BANDWIDTH_MBPS=""
-  local tx old_pairs new_pairs close_pairs="" disabled_now=0
-  admin_lock_acquire || return 1
-  tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
-  old_pairs="$(multi_user_port_protocol_pairs)"
-  if ! users_update_fields "$name"; then
-    users_tx_rollback "$tx" 0
-    admin_lock_release
-    return 1
-  fi
-  if [ -n "$exp_parsed" ]; then
-    local today
-    today="$(today_ymd)"
-    if [[ "$exp_parsed" < "$today" || "$exp_parsed" == "$today" ]]; then
-      users_set_enabled "$name" 0 || {
-        users_tx_rollback "$tx" 0
-        admin_lock_release
-        return 1
-      }
-      disabled_now=1
-    fi
-  fi
-  if ! apply_users_config "$tx"; then
-    admin_lock_release
-    return 1
-  fi
-  if [ "$disabled_now" -eq 1 ]; then
-    new_pairs="$(multi_user_port_protocol_pairs)"
-    close_pairs="$(comm -23 \
-      <(printf '%s\n' "$old_pairs" | sed '/^[[:space:]]*$/d' | LC_ALL=C sort -u) \
-      <(printf '%s\n' "$new_pairs" | sed '/^[[:space:]]*$/d' | LC_ALL=C sort -u))"
-    [ -z "$close_pairs" ] || close_firewall_for_bindings "$close_pairs"
-    users_sync_primary_globals
-    if ! save_install_state; then
-      users_tx_rollback "$tx" 1
-      open_firewall_for_pairs "$old_pairs"
-      admin_lock_release
-      return 1
-    fi
-  fi
-  users_tx_commit "$tx"
-  admin_lock_release
-  t "已更新 ${name} 配额=$(quota_label "${USER_QUOTA_MB:-0}" "${USER_QUOTA_DAYS:-0}") 模式=${USER_QUOTA_MODE:-keep} 套餐=${USER_PACKAGE:-} 到期=${exp_parsed:-保持}" \
-    "Updated ${name} quota=$(quota_label "${USER_QUOTA_MB:-0}" "${USER_QUOTA_DAYS:-0}") mode=${USER_QUOTA_MODE:-keep} package=${USER_PACKAGE:-} expire=${exp_parsed:-keep}"
-}
-
-do_user_set_expire() {
-  require_root
-  mita_installed || die "$(t 'mita 未安装' 'mita is not installed')"
-  local requested_name="${USERNAME:-}"
-  load_install_state
-  users_ensure_loaded
-  local name="${requested_name:-${USERNAME:-}}" exp disabled_now=0 disabled_port="" close_pairs=""
-  [ -n "$name" ] || die "$(t '需要 --user NAME' 'Need --user NAME')"
-  users_name_exists "$name" || die "$(t "用户不存在: $name" "User not found: $name")"
-  [ -n "${USER_EXPIRE}" ] || die "$(t '需要 --expire YYYY-MM-DD|+Nd|0' 'Need --expire YYYY-MM-DD|+Nd|0')"
-  exp="$(parse_expire_date "$USER_EXPIRE")" || return 1
-  USER_EXPIRE="${exp:-__CLEAR__}"
-  USER_QUOTA_MB="" USER_QUOTA_DAYS="" USER_PACKAGE="" USER_BANDWIDTH_MBPS=""
-  local tx
-  admin_lock_acquire || return 1
-  tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
-  if ! users_update_fields "$name"; then
-    users_tx_rollback "$tx" 0
-    admin_lock_release
-    return 1
-  fi
-  if [ -n "$exp" ]; then
-    local today
-    today="$(today_ymd)"
-    if [[ "$exp" < "$today" || "$exp" == "$today" ]]; then
-      if ! users_set_enabled "$name" 0; then
-        users_tx_rollback "$tx" 0
-        admin_lock_release
-        return 1
-      fi
-      disabled_now=1
-      disabled_port="$(users_get_field "$name" port 2>/dev/null || true)"
-    fi
-  fi
-  if ! apply_users_config "$tx"; then
-    admin_lock_release
-    return 1
-  fi
-  if [ "$disabled_now" -eq 1 ] && valid_port "$disabled_port"; then
-    close_pairs="${PROTOCOL:-TCP}|${disabled_port}"
-    [ "$PROTOCOL" != "BOTH" ] || close_pairs="TCP|${disabled_port}"$'\n'"UDP|$((disabled_port + 1))"
-    close_firewall_for_bindings "$close_pairs"
-    users_sync_primary_globals
-    if ! save_install_state; then
-      users_tx_rollback "$tx" 1
-      open_firewall_for_pairs "$close_pairs"
-      admin_lock_release
-      return 1
-    fi
-  fi
-  users_tx_commit "$tx"
-  admin_lock_release
-  t "已设置 ${name} 到期=${exp:-永不过期}" "Set ${name} expire=${exp:-never}"
-}
-
-do_user_enable() {
-  require_root
-  mita_installed || die "$(t 'mita 未安装' 'mita is not installed')"
-  load_install_state
-  users_ensure_loaded
-  local name="${USER_SHOW_NAME:-${USERNAME:-}}"
-  [ -n "$name" ] || die "$(t '需要用户名' 'Username required')"
-  local exp today tx old_pairs
-  admin_lock_acquire || return 1
-  tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
-  exp="$(users_get_field "$name" expire_at 2>/dev/null || true)"
-  today="$(today_ymd)"
-  if [ -n "$exp" ] && { [[ "$exp" < "$today" ]] || [[ "$exp" == "$today" ]]; }; then
-    users_tx_commit "$tx"
-    admin_lock_release
-    warn "$(t "用户 $name 已到期 ($exp)，请先 --user-set-expire 续期" \
-      "User $name expired ($exp); renew with --user-set-expire first")"
-    return 1
-  fi
-  old_pairs="$(multi_user_port_protocol_pairs)"
-  if ! users_set_enabled "$name" 1; then
-    users_tx_rollback "$tx" 0
-    admin_lock_release
-    return 1
-  fi
-  if ! apply_users_config "$tx"; then
-    admin_lock_release
-    return 1
-  fi
-  users_sync_primary_globals
-  if ! save_install_state; then
-    users_tx_rollback "$tx" 1
-    open_firewall_for_pairs "$old_pairs"
-    admin_lock_release
-    return 1
-  fi
-  open_firewall_for_pairs "$(multi_user_port_protocol_pairs)"
-  users_tx_commit "$tx"
-  admin_lock_release
-  t "已启用用户 $name" "Enabled user $name"
-}
-
-do_user_disable() {
-  require_root
-  mita_installed || die "$(t 'mita 未安装' 'mita is not installed')"
-  load_install_state
-  users_ensure_loaded
-  local name="${USER_SHOW_NAME:-${USERNAME:-}}"
-  [ -n "$name" ] || die "$(t '需要用户名' 'Username required')"
-  local en_n disabled_port close_pairs tx
-  admin_lock_acquire || return 1
-  tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
-  disabled_port="$(users_get_field "$name" port 2>/dev/null || true)"
-  en_n="$(python3 -c '
-import json,sys
-d=json.load(open(sys.argv[1]))
-print(sum(1 for u in (d.get("users") or []) if u.get("enabled", True) and u.get("name")!=sys.argv[2]))
-' "$MITA_USERS_STATE" "$name" 2>/dev/null || echo 0)"
-  if [ "${en_n:-0}" -lt 1 ]; then
-    users_tx_commit "$tx"
-    admin_lock_release
-    die "$(t '不能停用最后一个启用中的用户' 'Cannot disable the last enabled user')"
-  fi
-  if ! users_set_enabled "$name" 0; then
-    users_tx_rollback "$tx" 0
-    admin_lock_release
-    return 1
-  fi
-  if ! apply_users_config "$tx"; then
-    admin_lock_release
-    return 1
-  fi
-  if valid_port "$disabled_port"; then
-    close_pairs="${PROTOCOL:-TCP}|${disabled_port}"
-    if [ "$PROTOCOL" = "BOTH" ]; then
-      close_pairs="TCP|${disabled_port}"$'\n'"UDP|$((disabled_port + 1))"
-    fi
-    close_firewall_for_bindings "$close_pairs"
-  fi
-  users_sync_primary_globals
-  if ! save_install_state; then
-    users_tx_rollback "$tx" 1
-    open_firewall_for_pairs "$close_pairs"
-    admin_lock_release
-    return 1
-  fi
-  users_tx_commit "$tx"
-  admin_lock_release
-  t "已停用用户 $name（端口仍保留，可再次启用）" "Disabled $name (port kept; can re-enable)"
-}
-
-do_user_scan() {
-  # cron/timer 入口：到期停用 + 日历月配额重置
-  require_root 2>/dev/null || true
-  load_install_state 2>/dev/null || true
-  users_state_exists || return 0
-  local out="" cal="" rc=0
-  admin_lock_acquire || return 1
-  if ! out="$(users_scan_expired)"; then
-    warn "$(t '到期用户扫描失败，状态已回滚' 'Expired-user scan failed; state rolled back')"
-    rc=1
-  fi
-  if ! cal="$(users_scan_calendar_quota_reset)"; then
-    warn "$(t '日历月配额重置失败，状态已回滚' 'Calendar quota reset failed; state rolled back')"
-    rc=1
-  fi
-  admin_lock_release
-  if [ -n "$out" ]; then
-    t "已停用: $(printf '%s' "$out" | tr '\n' ' ')" \
-      "disabled: $(printf '%s' "$out" | tr '\n' ' ')"
-  fi
-  if [ -n "$cal" ]; then
-    t "已重置配额: $(printf '%s' "$cal" | tr '\n' ' ')" \
-      "quota-reset: $(printf '%s' "$cal" | tr '\n' ' ')"
-  fi
-  return "$rc"
-}
-
-do_user_usage() {
-  require_root 2>/dev/null || true
-  mita_installed || die "$(t 'mita 未安装' 'mita is not installed')"
-  users_isolated_mode || die "$(t 'schema v3 Mieru 状态必须使用 isolated-v2' \
-    'Schema-v3 Mieru state must use isolated-v2')"
-  local iid iname iport
-  while IFS=$'\t' read -r iid iname iport; do
-    [ -n "$iid" ] || continue
-    msg ""
-    t "【${iname} / 专属实例 ${iid}】" "[${iname} / dedicated instance ${iid}]"
-    instance_cmd "$iid" get users 2>/dev/null \
-      || warn "$(t "${iname}: mita get users 不可用" "${iname}: mita get users unavailable")"
-    instance_cmd "$iid" get quotas 2>/dev/null \
-      || warn "$(t "${iname}: mita get quotas 不可用" "${iname}: mita get quotas unavailable")"
-  done < <(users_enabled_instance_rows)
-  msg ""
-  t '【本地套餐配置】' '[Local package config]'
-  if users_state_exists; then
-    t '用户名         端口   配额模式 配额_MB    带宽_Mbps' \
-      'USER           PORT   MODE     QUOTA_MB   BW_Mbps'
-    python3 -c '
-import json,sys
-d=json.load(open(sys.argv[1]))
-rolling_l,calendar_l=sys.argv[2:4]
-for u in d.get("users") or []:
-    raw_mode=u.get("quota_mode") or "rolling"
-    print("%-14s %-6s %-8s %-10s %-8s" % (
-      (u.get("name") or "")[:14],
-      u.get("port") or "",
-      (calendar_l if raw_mode == "calendar" else rolling_l)[:8],
-      u.get("quota_mb") or 0,
-      u.get("bandwidth_mbps") or 0,
-    ))
-' "$MITA_USERS_STATE" "$(t '滚动' 'rolling')" "$(t '日历月' 'calendar')"
-  fi
-}
-
-do_user_export_clients() {
-  require_root
-  load_install_state
-  users_ensure_loaded
-  users_state_exists || die "$(t '无用户状态' 'No users state')"
-  local dir="${MITA_CLIENT_EXPORT_DIR:-/root/mieru-clients}"
-  local ts ip name safe_name backend_ip
-  ts="$(date +%Y%m%d_%H%M%S)_$$_${RANDOM}"
-  dir="${dir%/}/${ts}"
-  run mkdir -p "$dir"
-  run chmod 0700 "$dir" 2>/dev/null || true
-  load_install_state
-  backend_ip="$(public_ip 2>/dev/null || true)"
-  t "导出目录: $dir" "Export dir: $dir" >&2
-  while IFS= read -r name; do
-    [ -n "$name" ] || continue
-    local password port saved_u saved_p saved_port saved_advertise_host saved_advertise_port proto f links_file
-    password="$(users_get_field "$name" password)" || continue
-    port="$(users_get_field "$name" port)" || continue
-    saved_u="$USERNAME"; saved_p="$PASSWORD"; saved_port="$PORT"
-    saved_advertise_host="$ADVERTISE_HOST"; saved_advertise_port="$ADVERTISE_PORT"
-    USERNAME="$name"; PASSWORD="$password"; PORT="$port"
-    ADVERTISE_HOST="$(users_get_field "$name" advertise_host 2>/dev/null || true)"
-    ADVERTISE_PORT="$(users_get_field "$name" advertise_port 2>/dev/null || true)"
-    ip="$(advertised_host || echo 'YOUR_SERVER_IP')"
-    prepare_traffic_pattern_export
-    safe_name="$(safe_filename_component "$name")"
-    [ -n "$safe_name" ] || safe_name="user"
-    links_file="${dir}/${safe_name}_links.txt"
-    : >"$links_file"
-    while IFS= read -r proto; do
-      [ -n "$proto" ] || continue
-      f="${dir}/${safe_name}_$(proto_lower "$proto").json"
-      build_client_json_for "$ip" "$proto" >"$f"
-      chmod 0600 "$f" 2>/dev/null || true
-      generate_share_link_for "$ip" "$proto" >>"$links_file"
-      printf '\n' >>"$links_file"
-    done < <(protocols_for_mode)
-    chmod 0600 "$links_file" 2>/dev/null || true
-    print_client_endpoint_mapping "$backend_ip" >&2
-    USERNAME="$saved_u"; PASSWORD="$saved_p"; PORT="$saved_port"
-    ADVERTISE_HOST="$saved_advertise_host"; ADVERTISE_PORT="$saved_advertise_port"
-    t "  已导出: $name" "  Exported: $name" >&2
-  done < <(python3 -c '
-import json,sys
-d=json.load(open(sys.argv[1]))
-for u in d.get("users") or []:
-    if u.get("enabled", True):
-        print(u.get("name") or "")
-' "$MITA_USERS_STATE")
-  t "完成: $dir" "Done: $dir" >&2
-  printf '%s\n' "$dir"
-}
-
-doctor_check_tc_limits() {
-  local dev rate_users
-  rate_users="$(users_rate_limited_count)"
-  if [ "${rate_users:-0}" -eq 0 ]; then
-    check "$(t '用户限速规则' 'rate-limit rules')" 1 "$(t '未配置用户限速，clsact/filter 无需创建' \
-      'No users have rate limits; clsact/filter rules are not required')"
-  elif ! command -v tc >/dev/null 2>&1; then
-    check "$(t 'tc 命令' 'tc binary')" 0 "$(t "${rate_users} 个限速用户，但 tc 未安装" \
-      "${rate_users} rate-limited user(s), but tc is not installed")"
-  else
-    dev="$(tc_default_iface 2>/dev/null || true)"
-    if [ -z "$dev" ]; then
-      check "$(t '网卡检测' 'nic detect')" 0 "$(t "${rate_users} 个限速用户，但未检测到网卡；可设置 TC_IFACE" \
-        "${rate_users} rate-limited user(s), but no interface was detected; set TC_IFACE")"
-    else
-      check "$(t '网卡' 'nic')" 1 "$dev"
-      if tc qdisc show dev "$dev" 2>/dev/null | grep -qw clsact; then
-        check "clsact" 1
-      else
-        check "clsact" 0 "$(t "${rate_users} 个限速用户，但 clsact 缺失" \
-          "${rate_users} rate-limited user(s), but clsact is missing")"
-      fi
-      if [ -s "$TC_OWNED_STATE" ]; then
-        check "$(t '自有 filter 清单' 'owned filter manifest')" 1 "$TC_OWNED_STATE"
-      else
-        check "$(t '自有 filter 清单' 'owned filter manifest')" 0 "$(t "${rate_users} 个限速用户，但规则清单缺失" \
-          "${rate_users} rate-limited user(s), but the owned-filter manifest is missing")"
-      fi
-    fi
-  fi
-}
-
-do_doctor() {
-  require_root 2>/dev/null || true
-  local pass=0 fail=0 warn_n=0
-  check() {
-    local name="$1" ok="$2" detail="${3:-}"
-    if [ "$ok" = "1" ]; then
-      msg "  [PASS] $name${detail:+ — $detail}"
-      pass=$((pass + 1))
-    elif [ "$ok" = "2" ]; then
-      msg "  [WARN] $name${detail:+ — $detail}"
-      warn_n=$((warn_n + 1))
-    else
-      msg "  [FAIL] $name${detail:+ — $detail}"
-      fail=$((fail + 1))
-    fi
-  }
-  print_banner
-  t '========== 一键验收 Doctor ==========' '========== doctor / verify =========='
-  msg ""
-
-  t '【环境】' '[Environment]'
-  check "$(t 'root 权限' 'root')" "$([ "$(id -u 2>/dev/null || echo 1)" -eq 0 ] && echo 1 || echo 0)"
-  check "python3" "$(command -v python3 >/dev/null 2>&1 && echo 1 || echo 0)"
-  check "tc (iproute2)" "$(command -v tc >/dev/null 2>&1 && echo 1 || echo 2)" \
-    "$(t '专属端口限速' 'dedicated-port rate limits')"
-  check "flock" "$(command -v flock >/dev/null 2>&1 && echo 1 || echo 2)" \
-    "$(t '并发锁' 'concurrency lock')"
-
-  t '【mita】' '[mita]'
-  load_install_state 2>/dev/null || true
-  if mita_installed; then
-    check "$(t 'mita 已安装' 'mita installed')" 1 "$(installed_version 2>/dev/null || echo ok)"
-    local bin st iid iname iport cfg_ok
-    bin="$(mita_bin)"
-    if users_isolated_mode; then
-      check "$(t '部署模型' 'deployment model')" 1 "$MITA_DEPLOYMENT_MODEL"
-      if [ "$(service_manager)" = systemd ]; then
-        check "$(t '实例 systemd 服务模板' 'instance service template')" \
-          "$([ -f "$MITA_INSTANCE_SYSTEMD_TEMPLATE" ] && echo 1 || echo 0)"
-        check "$(t '实例运行时 tmpfiles' 'instance runtime tmpfiles')" \
-          "$([ -f "$MITA_INSTANCE_TMPFILES" ] && echo 1 || echo 0)"
-      else
-        check "$(t '实例启动器' 'instance runner')" "$([ -x "$MITA_INSTANCE_RUNNER" ] && echo 1 || echo 0)"
-      fi
-      while IFS=$'\t' read -r iid iname iport; do
-        [ -n "$iid" ] || continue
-        check "$(t "实例 ${iname} 配置" "instance ${iname} config")" \
-          "$([ -r "$(instance_config_path "$iid")" ] && echo 1 || echo 0)" "$iid"
-        check "$(t "实例 ${iname} 套接字" "instance ${iname} socket")" \
-          "$([ -S "$(instance_socket_path "$iid")" ] && echo 1 || echo 0)" "$iid"
-        st="$(instance_cmd "$iid" status 2>/dev/null || true)"
-        check "$(t "实例 ${iname} 运行状态" "instance ${iname} RUNNING")" \
-          "$(printf '%s' "$st" | grep -q 'status is \"RUNNING\"' && echo 1 || echo 0)" "$iid"
-        cfg_ok="$(python3 - "$(instance_config_path "$iid")" "$iname" "$iport" "${PROTOCOL:-TCP}" <<'PY' 2>/dev/null && echo 1 || echo 0
-import json,sys
-path,name,port,proto=sys.argv[1],sys.argv[2],int(sys.argv[3]),sys.argv[4]
-d=json.load(open(path))
-users=d.get("users") or []
-bindings=d.get("portBindings") or []
-expected={(port, "TCP" if proto=="BOTH" else proto)}
-if proto=="BOTH": expected.add((port+1,"UDP"))
-actual={(int(x.get("port") or 0),x.get("protocol")) for x in bindings}
-raise SystemExit(0 if len(users)==1 and users[0].get("name")==name and actual==expected else 1)
-PY
-)"
-        check "$(t "实例 ${iname} 隔离配置" "instance ${iname} isolation")" "$cfg_ok" \
-          "$(t '单用户 / 专属端口绑定' 'one user / dedicated bindings')"
-        check "$(t "实例 ${iname} 指标目录" "instance ${iname} metrics dir")" \
-          "$([ -d "$(instance_metrics_dir "$iid")" ] && echo 1 || echo 0)" "$iid"
-        if instance_cmd "$iid" get users >/dev/null 2>&1; then
-          check "$(t "实例 ${iname} 指标 API" "instance ${iname} metrics API")" 1
-        else
-          check "$(t "实例 ${iname} 指标 API" "instance ${iname} metrics API")" 2 \
-            "$(t 'get users 不可用' 'get users unavailable')"
-        fi
-      done < <(users_enabled_instance_rows)
-    else
-      check "$(t '部署模型' 'deployment model')" 0 \
-        "$(t 'schema v3 要求 isolated-v2' 'schema v3 requires isolated-v2')"
-    fi
-  else
-    check "$(t 'mita 已安装' 'mita installed')" 0
-  fi
-
-  t '【用户状态】' '[Users state]'
-  if users_state_exists; then
-    local en user_count enabled_detail
-    user_count="$(users_count)"
-    check "users.json" 1 "$(t "${user_count} 位用户" "${user_count} users")"
-    en="$(python3 -c '
-import json,sys
-d=json.load(open(sys.argv[1]))
-print(sum(1 for u in (d.get("users") or []) if u.get("enabled",True)))
-' "$MITA_USERS_STATE" 2>/dev/null || echo 0)"
-    enabled_detail="$en"
-    if [ "${en:-0}" -eq 0 ]; then
-      enabled_detail="$(t "${en}（全部已停用或已过期）" "${en} (all disabled/expired)")"
-    fi
-    check "$(t '已启用用户' 'enabled users')" "$([ "${en:-0}" -ge 1 ] && echo 1 || echo 2)" \
-      "$enabled_detail"
-    if users_isolated_mode; then
-      check "$(t '用户到实例映射' 'user-to-instance mapping')" 1 \
-        "$(t "${en} 个专属实例" "${en} dedicated instances")"
-    else
-      check "$(t '用户到实例映射' 'user-to-instance mapping')" 0 \
-        "$(t 'schema v3 要求 isolated-v2' 'schema v3 requires isolated-v2')"
-    fi
-    # 目录权限
-    local mode
-    mode="$(stat -c '%a' /etc/mita 2>/dev/null || stat -f '%OLp' /etc/mita 2>/dev/null || echo '?')"
-    if [ "$mode" = "750" ] || [ "$mode" = "0750" ] || [ "$mode" = "770" ] || [ "$mode" = "0770" ] || [ "$mode" = "700" ] || [ "$mode" = "0700" ]; then
-      check "$(t '/etc/mita 权限模式' '/etc/mita mode')" 1 "$mode"
-    else
-      check "$(t '/etc/mita 权限模式' '/etc/mita mode')" 2 \
-        "$(t "$mode（建议 mita:mita 750）" "$mode (recommended: mita:mita 750)")"
-    fi
-  else
-    check "users.json" 0 "$(t 'schema v3 Mieru 用户状态缺失' 'schema v3 Mieru user state missing')"
-  fi
-
-  t '【防火墙所有权】' '[Firewall ownership]'
-  if [ -f "$MITA_FIREWALL_OWNED_STATE" ]; then
-    check "$(t '自有防火墙规则清单' 'owned firewall manifest')" 1 "$MITA_FIREWALL_OWNED_STATE"
-  else
-    check "$(t '自有防火墙规则清单' 'owned firewall manifest')" 2 \
-      "$(t '未新增本地规则或沿用预先存在的规则' \
-        'no local rule was added, or a pre-existing rule is in use')"
-  fi
-
-  t '【专属实例 tc 限速】' '[Dedicated-instance tc limits]'
-  doctor_check_tc_limits
-
-  t '【定时任务】' '[Scheduler]'
-  if [ -f "$MITA_USERS_TIMER" ] || systemctl is-enabled nobrand-mieru-users-scan.timer >/dev/null 2>&1; then
-    check "$(t 'systemd 定时器' 'systemd timer')" 1
-  elif [ -f "$MITA_USERS_CRON" ]; then
-    check "cron.d" 1 "$MITA_USERS_CRON"
-  else
-    check "$(t '定时任务' 'scheduler')" 2 "$(t '未安装 timer/cron' 'timer/cron is not installed')"
-  fi
-  if [ -f "$MITA_LOGROTATE_CONF" ]; then
-    check "logrotate" 1
-  else
-    check "logrotate" 2 "$(t '可选' 'optional')"
-  fi
-
-  msg ""
-  t "结果: PASS=$pass WARN=$warn_n FAIL=$fail" "Result: PASS=$pass WARN=$warn_n FAIL=$fail"
-  if [ "$fail" -gt 0 ]; then
-    t '存在失败项，请根据上方提示排查' 'Failures above need attention'
-    return 1
-  fi
-  if [ "$warn_n" -gt 0 ]; then
-    t '验收通过（警告可忽略或稍后处理）' 'Verify OK (warnings optional)'
-  else
-    t '验收通过' 'Verify OK'
-  fi
-  return 0
-}
-
-detect_public_ip_family() {
-  local family="${1:-4}" candidate="" curl_flag=-4
-  [ "$family" = 6 ] && curl_flag=-6
-  candidate="$(curl "$curl_flag" -fsSL --connect-timeout 4 --max-time 8 \
-    https://api.ip.sb/ip 2>/dev/null | head -n1 | tr -d '[:space:]' || true)"
-  valid_public_ip_literal "$candidate" || return 1
-  if command -v python3 >/dev/null 2>&1; then
-    python3 -c 'import ipaddress,sys; raise SystemExit(0 if ipaddress.ip_address(sys.argv[1]).version==int(sys.argv[2]) else 1)' \
-      "$candidate" "$family" 2>/dev/null || return 1
-  elif { [ "$family" = 4 ] && [[ "$candidate" == *:* ]]; } \
-       || { [ "$family" = 6 ] && [[ "$candidate" != *:* ]]; }; then
-    return 1
-  fi
-  printf '%s' "$candidate"
-}
-
-perf_sysctl_value() {
-  local key="$1" path="/proc/sys/${1//./\/}"
-  if command -v sysctl >/dev/null 2>&1; then
-    sysctl -n "$key" 2>/dev/null || true
-  elif [ -r "$path" ]; then
-    head -n1 "$path" 2>/dev/null || true
-  fi
-}
-
-perf_display_value() {
-  local value="${1:-}"
-  case "$value" in
-    enabled) t '已启用' 'enabled' ;;
-    disabled) t '未启用' 'disabled' ;;
-    inactive) t '未启用' 'inactive' ;;
-    unknown) t '未知' 'unknown' ;;
-    unavailable) t '不可用' 'unavailable' ;;
-    auto) t '自动' 'auto' ;;
-    'owned filters recorded') t '已记录 OneClick 管理的 filter' 'owned filters recorded' ;;
-    'no OneClick-owned rate filters') t '没有 OneClick 管理的限速 filter' 'no OneClick-owned rate filters' ;;
-    *) msg "$value" ;;
-  esac
-}
-
 do_perf() {
-  # 严格只读：本函数不得调用 run/save/apply/reconcile/ensure/start/enable 等写路径。
-  local iface="" iface_mtu="" public4="" public6="" cc="" default_qdisc="" qdisc_live=""
-  local cpu_cores="" load_now="" memory="" memory_total="" memory_available=""
-  local instance_count=0 process_rows="" rate_users=0 tc_state="inactive"
-  local bbr_state="disabled" fq_state="disabled" installed="unknown" advertised=""
-  local unknown_text="" auto_text=""
-  load_install_state 2>/dev/null || true
-  if users_state_exists && [ "$(users_count 2>/dev/null || echo 0)" -gt 0 ]; then
-    users_sync_primary_globals
-  fi
-  profile_reconcile_metadata
-  unknown_text="$(perf_display_value unknown)"
-  auto_text="$(perf_display_value auto)"
-  advertised="$auto_text"
-  installed="$(installed_version 2>/dev/null || printf unknown)"
-  iface="$(tc_default_iface 2>/dev/null || true)"
-  [ -z "$iface" ] || iface_mtu="$(mtu_iface_value "$iface" 2>/dev/null || true)"
-  public4="$(detect_public_ip_family 4 2>/dev/null || true)"
-  public6="$(detect_public_ip_family 6 2>/dev/null || true)"
-  cc="$(perf_sysctl_value net.ipv4.tcp_congestion_control)"
-  default_qdisc="$(perf_sysctl_value net.core.default_qdisc)"
-  [ -z "$iface" ] || qdisc_live="$(tc qdisc show dev "$iface" 2>/dev/null || true)"
-  [ "$cc" != bbr ] || bbr_state=enabled
-  if [ "$default_qdisc" = fq ] || printf '%s' "$qdisc_live" | grep -qw fq; then
-    fq_state=enabled
-  fi
-  cpu_cores="$(getconf _NPROCESSORS_ONLN 2>/dev/null || true)"
-  if [ -z "$cpu_cores" ] && command -v nproc >/dev/null 2>&1; then
-    cpu_cores="$(nproc 2>/dev/null || true)"
-  fi
-  [ -n "$cpu_cores" ] || cpu_cores=unknown
-  load_now="$(awk '{print $1" "$2" "$3}' /proc/loadavg 2>/dev/null || printf unknown)"
-  memory="$(awk '/^MemTotal:/{t=$2}/^MemAvailable:/{a=$2}END{if(t)printf "%.0f|%.0f",t/1024,a/1024}' /proc/meminfo 2>/dev/null || true)"
-  if [[ "$memory" == *'|'* ]]; then
-    memory_total="${memory%%|*}"
-    memory_available="${memory#*|}"
-    memory="$(t "${memory_total} MiB 总计 / ${memory_available} MiB 可用" \
-      "${memory_total} MiB total / ${memory_available} MiB available")"
-  else
-    memory=unknown
-  fi
-  if users_state_exists; then
-    instance_count="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(sum(1 for u in d.get("users",[]) if u.get("enabled",True)))' \
-      "$MITA_USERS_STATE" 2>/dev/null || echo 0)"
-    rate_users="$(users_rate_limited_count 2>/dev/null || echo 0)"
-  elif mita_installed; then
-    instance_count=1
-  fi
-  if command -v ps >/dev/null 2>&1; then
-    process_rows="$(ps -eo pid=,pcpu=,rss=,comm=,args= 2>/dev/null \
-      | awk '$4=="mita" {printf "    PID %-7s CPU %-6s RSS %.1f MiB  %s\n",$1,$2,$3/1024,$4}' \
-      | head -n 20 || true)"
-  fi
-  if [ -s "$TC_OWNED_STATE" ]; then
-    tc_state="owned filters recorded"
-  elif [ -n "$qdisc_live" ]; then
-    tc_state="no OneClick-owned rate filters"
-  fi
-  if [ -n "${ADVERTISE_HOST:-}" ]; then
-    advertised="$(url_host "$ADVERTISE_HOST"):${ADVERTISE_PORT}"
-  elif [ -n "$public4" ]; then
-    advertised="${public4}:${PORT:-$unknown_text} (${auto_text})"
-  elif [ -n "$public6" ]; then
-    advertised="[$public6]:${PORT:-$unknown_text} (${auto_text})"
-  fi
-
-  t '========== Mieru 性能诊断 ==========' '========== Mieru Performance ========='
-  msg ''
-  t '配置预设 / Profile' 'Profile'
-  t "  $(profile_label)" "  $(profile_label)"
-  msg ''
-  t 'Mieru' 'Mieru'
-  t "  版本: $(perf_display_value "$installed")" "  Version: $(perf_display_value "$installed")"
-  t "  传输协议: $(perf_display_value "${PROTOCOL:-unknown}")" \
-    "  Transport: $(perf_display_value "${PROTOCOL:-unknown}")"
-  t "  MTU: $(perf_display_value "${MTU:-unknown}")" "  MTU: $(perf_display_value "${MTU:-unknown}")"
-  t "  多路复用 / Multiplexing: $(perf_display_value "${MULTIPLEXING:-unknown}")" \
-    "  Multiplexing: $(perf_display_value "${MULTIPLEXING:-unknown}")"
-  t "  握手模式 / Handshake: $(perf_display_value "${HANDSHAKE_MODE:-unknown}")" \
-    "  Handshake: $(perf_display_value "${HANDSHAKE_MODE:-unknown}")"
-  t "  流量模式 / Traffic Pattern: $(traffic_label)" "  Traffic Pattern: $(traffic_label)"
-  t "  低熵模式 / Low Entropy: $(low_entropy_label)" "  Low Entropy: $(low_entropy_label)"
-  msg ''
-  t '内核' 'Kernel'
-  t "  TCP 拥塞控制: $(perf_display_value "${cc:-unknown}")" \
-    "  TCP congestion control: $(perf_display_value "${cc:-unknown}")"
-  t "  默认 qdisc: $(perf_display_value "${default_qdisc:-unknown}")" \
-    "  Default qdisc: $(perf_display_value "${default_qdisc:-unknown}")"
-  t "  BBR 状态: $(perf_display_value "$bbr_state")" "  BBR status: $(perf_display_value "$bbr_state")"
-  t "  FQ 状态: $(perf_display_value "$fq_state")" "  fq status: $(perf_display_value "$fq_state")"
-  msg ''
-  t '网络' 'Network'
-  t "  默认网卡: $(perf_display_value "${iface:-unknown}")" \
-    "  Default interface: $(perf_display_value "${iface:-unknown}")"
-  t "  网卡 MTU: $(perf_display_value "${iface_mtu:-unknown}")" \
-    "  Interface MTU: $(perf_display_value "${iface_mtu:-unknown}")"
-  t "  检测到的公网 IPv4: $(perf_display_value "${public4:-unavailable}")" \
-    "  Detected public IPv4: $(perf_display_value "${public4:-unavailable}")"
-  t "  检测到的公网 IPv6: $(perf_display_value "${public6:-unavailable}")" \
-    "  Detected public IPv6: $(perf_display_value "${public6:-unavailable}")"
-  msg ''
-  t '连接端点 / Endpoint' 'Endpoint'
-  t '  后端监听地址: 所有网卡' '  Backend listen address: all interfaces'
-  t "  后端监听端口: $(perf_display_value "${PORT:-unknown}")" \
-    "  Backend listen port: $(perf_display_value "${PORT:-unknown}")"
-  t "  客户端展示地址 / Display Endpoint: $(perf_display_value "${ADVERTISE_HOST:-auto}")" \
-    "  Advertised client address: $(perf_display_value "${ADVERTISE_HOST:-auto}")"
-  t "  客户端展示端口: $(perf_display_value "${ADVERTISE_PORT:-${PORT:-unknown}}")" \
-    "  Advertised client port: $(perf_display_value "${ADVERTISE_PORT:-${PORT:-unknown}}")"
-  if client_endpoint_is_independent "$public4" "$public6"; then
-    local backend_endpoint="${public4:-${public6:-}}" backend_display=""
-    if [ -n "$backend_endpoint" ]; then
-      backend_display="$(url_host "$backend_endpoint")"
-    else
-      backend_display="$(t '<未检测到>' '<undetected>')"
-    fi
-    t '  [INFO] 当前使用独立客户端入口' \
-      '  [INFO] An independent client endpoint is in use'
-    t "    客户端: ${advertised}" "    Client: ${advertised}"
-    t "    后端: ${backend_display}:$(perf_display_value "${PORT:-unknown}")" \
-      "    Backend: ${backend_display}:$(perf_display_value "${PORT:-unknown}")"
-  fi
-  msg ''
-  t '系统资源' 'Resource'
-  t "  CPU 核心数: $(perf_display_value "$cpu_cores")" "  CPU cores: $(perf_display_value "$cpu_cores")"
-  t "  当前负载: $(perf_display_value "$load_now")" "  Current load: $(perf_display_value "$load_now")"
-  t "  内存: $(perf_display_value "$memory")" "  Memory: $(perf_display_value "$memory")"
-  t "  mita 实例数: ${instance_count}" "  Number of mita instances: ${instance_count}"
-  if [ -n "$process_rows" ]; then
-    t '  相关进程:' '  Relevant processes:'
-    msg "$process_rows"
-  else
-    t '  相关进程: 未检测到' '  Relevant processes: none detected'
-  fi
-  msg ''
-  t '流量控制 / Traffic Control' 'Traffic Control'
-  t '  全局带宽限制: OneClick 未配置' \
-    '  Global bandwidth limit: not configured by OneClick'
-  t "  按用户带宽限制: ${rate_users}" "  Per-user bandwidth limits: ${rate_users}"
-  t "  tc 状态: $(perf_display_value "$tc_state")" "  tc status: $(perf_display_value "$tc_state")"
-  msg ''
-  t '注意事项' 'Warnings'
-  local warning_count=0
-  if [ "$(normalize_traffic_pattern "${TRAFFIC_PATTERN:-off}" 2>/dev/null || printf off)" != off ]; then
-    warn "$(t 'Traffic Pattern 已开启；性能基准测试时建议关闭后进行 A/B 对比。' \
-      'Traffic Pattern is enabled; benchmark with it off for an A/B comparison.')"
-    warning_count=$((warning_count + 1))
-  fi
-  if [ "$(normalize_low_entropy_mode "${LOW_ENTROPY_MODE:-LOW_ENTROPY_MODE_OFF}" 2>/dev/null || true)" != LOW_ENTROPY_MODE_OFF ]; then
-    warn "$(t 'Low Entropy 已开启，会增加额外流量。' 'Low Entropy is enabled and adds traffic overhead.')"
-    warning_count=$((warning_count + 1))
-  fi
-  case "${MULTIPLEXING:-MULTIPLEXING_OFF}" in
-    MULTIPLEXING_MIDDLE|MULTIPLEXING_HIGH)
-      warn "$(t 'Multiplexing MIDDLE/HIGH 可能不适合纯大文件吞吐测试。' \
-        'Multiplexing MIDDLE/HIGH may not suit bulk-file throughput tests.')"
-      warning_count=$((warning_count + 1))
-      ;;
-  esac
-  if [ "${rate_users:-0}" -gt 0 ] || [ -s "$TC_OWNED_STATE" ]; then
-    warn "$(t 'tc 当前存在 OneClick 管理的限速。' 'OneClick-managed tc rate limits are active.')"
-    warning_count=$((warning_count + 1))
-  fi
-  if [[ "${iface_mtu:-}" =~ ^[0-9]+$ ]] && [[ "${MTU:-}" =~ ^[0-9]+$ ]] \
-     && { [ "$MTU" -gt "$iface_mtu" ] \
-       || { [ "${PROTOCOL:-TCP}" != TCP ] && [ $((MTU + 48)) -gt "$iface_mtu" ]; }; }; then
-    warn "$(t '网卡 MTU 与 Mieru MTU/传输开销组合可能存在分片风险。' \
-      'Interface MTU versus Mieru MTU/transport overhead may cause fragmentation.')"
-    warning_count=$((warning_count + 1))
-  fi
-  if [ "$bbr_state" != enabled ]; then
-    warn "$(t 'BBR 未启用。' 'BBR is not enabled.')"
-    warning_count=$((warning_count + 1))
-  fi
-  if [ "$fq_state" != enabled ]; then
-    warn "$(t 'fq 未启用。' 'fq is not enabled.')"
-    warning_count=$((warning_count + 1))
-  fi
-  [ "$warning_count" -gt 0 ] || t '  未发现明显性能限制。' '  No obvious performance limits detected.'
-  t '  本报告为只读；未修改任何系统或 Mieru 配置。' \
-    '  This report is read-only; no system or Mieru configuration was changed.'
+  t '========== 网络诊断（只读） ==========' '========== Network diagnostics (read only) =========='
+  nb_splicore_call status || return 1
+  report_bbr_fq_status
+  ip -brief address show 2>/dev/null || true
+  ip route show default 2>/dev/null || true
 }
 
-do_user_quota_reset() {
-  # 手动触发日历月重置（或强制所有 calendar 用户）
-  require_root
-  load_install_state
-  users_ensure_loaded
-  local force="${1:-}" cal tx
-  admin_lock_acquire || return 1
-  tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
-  if [ "$force" = "force" ] || [ "${YES:-0}" -eq 1 ]; then
-    # 清除 last_quota_reset 使本月全部 calendar 用户重跑
-    python3 -c '
-import json,sys
-path=sys.argv[1]
-d=json.load(open(path))
-for u in d.get("users") or []:
-    if (u.get("quota_mode") or "")=="calendar" and int(u.get("quota_mb") or 0)>0:
-        u["last_quota_reset"]=""
-json.dump(d, open(path,"w"), indent=2)
-' "$MITA_USERS_STATE" 2>/dev/null || {
-      users_tx_rollback "$tx" 0
-      admin_lock_release
-      return 1
-    }
-  fi
-  if ! cal="$(users_scan_calendar_quota_reset)"; then
-    users_tx_rollback "$tx" 0
-    admin_lock_release
-    return 1
-  fi
-  users_tx_commit "$tx"
-  admin_lock_release
-  if [ -n "$cal" ]; then
-    t "已重置日历月配额: $(printf '%s' "$cal" | tr '\n' ' ')" \
-      "Calendar quota reset: $(printf '%s' "$cal" | tr '\n' ' ')"
-  else
-    t '无需重置（没有日历月配额用户，或本月已重置）' \
-      'Nothing to reset (no calendar users or already done this month)'
-  fi
-}
-
-do_user_set_rate() {
-  require_root
-  mita_installed || die "$(t 'mita 未安装' 'mita is not installed')"
-  local requested_name="${USERNAME:-}"
-  load_install_state
-  users_ensure_loaded
-  local name="${requested_name:-${USERNAME:-}}" bw="${USER_BANDWIDTH_MBPS:-}"
-  [ -n "$name" ] || die "$(t '需要 --user NAME' 'Need --user NAME')"
-  [ -n "$bw" ] || die "$(t '需要 --bandwidth Mbps（0=不限）' 'Need --bandwidth Mbps (0=unlimited)')"
-  valid_bandwidth_mbps "$bw" || die "$(t '带宽须为 0-1000000 Mbps 的整数' \
-    'Bandwidth must be an integer from 0 to 1000000 Mbps')"
-  users_name_exists "$name" || die "$(t "用户不存在: $name" "User not found: $name")"
-  USER_QUOTA_MB="" USER_QUOTA_DAYS="" USER_EXPIRE="" USER_PACKAGE=""
-  USER_BANDWIDTH_MBPS="$bw"
-  local tx
-  admin_lock_acquire || return 1
-  tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
-  if ! users_update_fields "$name"; then
-    users_tx_rollback "$tx" 0
-    admin_lock_release
-    return 1
-  fi
-  if ! apply_users_config "$tx"; then
-    admin_lock_release
-    return 1
-  fi
-  users_tx_commit "$tx"
-  admin_lock_release
-  t "已更新 ${name} 的专属实例限速: ${bw} Mbps（0=不限）" \
-    "Updated dedicated-instance limit for ${name}: ${bw} Mbps (0=unlimited)"
-}
-
-do_rate_status() {
-  require_root 2>/dev/null || true
-  load_install_state 2>/dev/null || true
-  tc_rate_status
-}
-
-do_rate_restore() {
-  require_root 2>/dev/null || true
-  load_install_state 2>/dev/null || true
-  admin_lock_acquire || return 1
-  if ! apply_tc_limits; then
-    admin_lock_release
-    return 1
-  fi
-  admin_lock_release
-  t '已根据专属实例套餐恢复本脚本拥有的 tc filter；未替换现有 root qdisc' \
-    'Restored script-owned tc filters from dedicated packages; existing root qdiscs were not replaced'
-}
-
-do_user_del() {
-  require_root
-  require_linux
-  mita_installed || die "$(t 'mita 未安装' 'mita is not installed')"
-  load_install_state
-  users_ensure_loaded
-  local name="${USER_DEL_NAME:-}"
-  if [ -z "$name" ]; then
-    if [ "$YES" -eq 1 ]; then
-      die "$(t '--user-del 需要用户名' '--user-del requires username')"
-    fi
-    do_user_list
-    read_tty name "$(t '要删除的用户名: ' 'Username to delete: ')" || true
-  fi
-  [ -n "$name" ] || die "$(t '用户名不能为空' 'Username required')"
-  local n freed tx close_pairs=""
-  admin_lock_acquire || return 1
-  tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
-  n="$(users_count)"
-  if [ "${n:-0}" -le 1 ] && users_name_exists "$name"; then
-    users_tx_commit "$tx"
-    admin_lock_release
-    if [ "${MENU_MODE:-0}" -eq 1 ]; then
-      warn "$(t '不能删除最后一个用户' 'Cannot delete the last user')"
-      return "$USER_MENU_HANDLED_RC"
-    fi
-    die "$(t '不能删除最后一个用户' 'Cannot delete the last user')"
-  fi
-  if ! freed="$(users_del "$name")"; then
-    users_tx_rollback "$tx" 0
-    admin_lock_release
-    return 1
-  fi
-  if ! apply_users_config "$tx"; then
-    admin_lock_release
-    return 1
-  fi
-  if [ -n "$freed" ]; then
-    close_pairs="${PROTOCOL}|${freed}"
-    [ "$PROTOCOL" = "BOTH" ] && close_pairs="TCP|${freed}"$'\n'"UDP|$((freed + 1))"
-    close_firewall_for_bindings "$close_pairs"
-  fi
-  open_firewall_for_pairs "$(multi_user_port_protocol_pairs)"
-  users_sync_primary_globals
-  if ! save_install_state; then
-    users_tx_rollback "$tx" 1
-    open_firewall_for_pairs "$close_pairs"
-    admin_lock_release
-    return 1
-  fi
-  users_tx_commit "$tx"
-  client_export_remove_user "$name" 2>/dev/null || true
-  admin_lock_release
-  t "完成。已释放端口: ${freed:-?}" "Done. Freed port: ${freed:-?}"
-}
-
-do_user_set_endpoint() {
-  require_root
-  require_linux
-  local requested_name="${USERNAME:-}" requested_host="${ADVERTISE_HOST:-}"
-  local requested_port="${ADVERTISE_PORT:-}" requested_cli="${ADVERTISE_CLI:-0}"
-  local requested_auto="${ADVERTISE_AUTO_REQUESTED:-0}"
-  local name host port actual_port current_host current_port tx auto_host=""
-  USERNAME_CLI=0
-  ADVERTISE_CLI=0
-  load_install_state
-  users_ensure_loaded
-  users_state_exists || die "$(t '无用户状态' 'No users state')"
-  name="${requested_name:-${USERNAME:-}}"
-  if [ -z "$name" ]; then
-    [ "$YES" -ne 1 ] || die "$(t '需要 --user NAME' 'Need --user NAME')"
-    read_tty name "$(t '用户名: ' 'Username: ')" || true
-  fi
-  users_name_exists "$name" || die "$(t "用户不存在: $name" "User not found: $name")"
-  actual_port="$(users_get_field "$name" port)"
-  current_host="$(users_get_field "$name" advertise_host 2>/dev/null || true)"
-  current_port="$(users_get_field "$name" advertise_port 2>/dev/null || true)"
-
-  if [ "$requested_cli" -eq 1 ]; then
-    if [ "$requested_auto" -eq 1 ]; then
-      host=""
-      port=""
-    else
-      host="${requested_host:-$current_host}"
-      port="${requested_port:-${current_port:-$actual_port}}"
-      if [ -z "$host" ]; then
-        host="$(public_ip 2>/dev/null || true)"
-      fi
-    fi
-    validate_advertise_endpoint_values "$host" "$port" "$PROTOCOL" \
-      || die "$(t '自定义客户端入口参数无效' 'Invalid custom client entry parameters')"
-    [ -z "$port" ] || port="$(normalize_uint "$port")"
-  else
-    [ "$YES" -ne 1 ] || die "$(t '请提供 --advertise-host/--advertise-port 或 --advertise-auto' \
-      'Provide --advertise-host/--advertise-port or --advertise-auto')"
-    ADVERTISE_HOST="$(users_get_field "$name" advertise_host 2>/dev/null || true)"
-    ADVERTISE_PORT="$(users_get_field "$name" advertise_port 2>/dev/null || true)"
-    PORT="$actual_port"
-    msg ""
-    t "当前客户端入口: $([ -n "$ADVERTISE_HOST" ] && printf '%s:%s' "$ADVERTISE_HOST" "$ADVERTISE_PORT" || printf '自动探测')" \
-      "Current client entry: $([ -n "$ADVERTISE_HOST" ] && printf '%s:%s' "$ADVERTISE_HOST" "$ADVERTISE_PORT" || printf 'auto-detect')"
-    collect_advertise_endpoint_interactive
-    host="$ADVERTISE_HOST"
-    port="$ADVERTISE_PORT"
-  fi
-
-  admin_lock_acquire || return 1
-  tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
-  if ! users_set_advertise_endpoint "$name" "$host" "$port"; then
-    users_tx_rollback "$tx" 0
-    admin_lock_release
-    return 1
-  fi
-  auto_host="$(public_ip 2>/dev/null || true)"
-  if ! users_validate_state_file "$MITA_USERS_STATE" "$PROTOCOL" "$auto_host"; then
-    users_tx_rollback "$tx" 0
-    admin_lock_release
-    die "$(t '客户端展示入口与其它用户冲突' \
-      'Client display endpoint conflicts with another user')"
-  fi
-  users_sync_primary_globals
-  if ! save_install_state; then
-    users_tx_rollback "$tx" 0
-    admin_lock_release
-    return 1
-  fi
-  users_tx_commit "$tx"
-  admin_lock_release
-  ADVERTISE_AUTO_REQUESTED=0
-  t "已更新 ${name} 的客户端展示入口；服务端实例未重启" \
-    "Updated ${name} client display endpoint; server instance was not restarted"
-  print_user_outputs "$name"
-}
-
-do_user_show() {
-  require_root
-  load_install_state
-  users_ensure_loaded
-  local name="${USER_SHOW_NAME:-}"
-  if [ -z "$name" ]; then
-    read_tty name "$(t '用户名: ' 'Username: ')" || true
-  fi
-  users_name_exists "$name" || die "$(t "用户不存在: $name" "User not found: $name")"
-  print_user_outputs "$name"
-}
+# Native architecture: ordinary protocols use src/19-splicore.sh.
 
 do_user_manage() {
-  require_root
-  MENU_MODE=1
+  local choice="" operation="" selector=""
   while true; do
-    msg ""
-    t '【用户管理】每个账号使用专属 mita 实例、端口、配额 metrics 与可选双向限速' \
-      '[Users] every account has a dedicated mita instance, port, quota metrics, and optional bidirectional rate limit'
-    msg "  1) 列出用户"
-    msg "  2) 添加用户"
-    msg "  3) 删除用户"
-    msg "  4) 查看用户节点配置"
-    msg "  5) 设置套餐/配额"
-    msg "  6) 设置到期日"
-    msg "  7) 启用用户"
-    msg "  8) 停用用户"
-    msg "  9) 立即扫描到期+月配额"
-    msg "  10) 设置专属实例限速"
-    msg "  11) 查看专属限速/tc 状态"
-    msg "  12) 备份用户配置"
-    msg "  13) 从备份恢复"
-    msg "  14) 强制日历月配额重置"
-    msg "  15) 查看流量/配额用量"
-    msg "  16) 批量导出客户端配置"
-    msg "  17) 设置客户端展示入口"
-    msg "  18) 返回主菜单"
-    local c=""
-    read_tty c "$(t '请选择 [1-18]: ' 'Choose [1-18]: ')" || {
-      [ "${MAIN_MENU_ACTIVE:-0}" -ne 1 ] || return 3
-      return 0
-    }
-    c="$(printf '%s' "$c" | tr -d '[:space:]')"
-    if [ "$c" = 18 ]; then
-      [ "${MAIN_MENU_ACTIVE:-0}" -eq 1 ] && return 3
-      return 0
-    fi
-    local action_rc=0 action_lock=0
-    if [ "${NOBRAND_MANAGER_SESSION_ACTIVE:-0}" -eq 1 ]; then
-      nb_lifecycle_lock_acquire || return 1
-      action_lock=1
-      if ! nobrand_menu_state_current || ! mita_installed; then
-        nb_lifecycle_lock_release
-        warn "$(t '菜单显示后 Mieru 状态已变化；请重新选择操作。' \
-          'Mieru state changed after the menu was shown; select the action again.')"
-        return 1
-      fi
-    fi
-    set +e
-    (
-      set -Eeuo pipefail
-      NOBRAND_LIFECYCLE_LOCK_FLOOR="${NOBRAND_LIFECYCLE_LOCK_HELD:-0}"
-      NOBRAND_LIFECYCLE_ACTIVE=0
-      NOBRAND_LIFECYCLE_OPERATION=""
-      NOBRAND_LIFECYCLE_SCOPE=""
-      NOBRAND_LIFECYCLE_MUTATION_STARTED=0
-      nb_lifecycle_signal_handlers_install
-      trap 'rc=$?; if [ "$rc" -eq 3 ] || [ "$rc" -eq "$USER_MENU_HANDLED_RC" ]; then exit "$rc"; fi; on_error' ERR
-      case "$c" in
-        1) STAGE="列出用户" ;;
-        2) STAGE="添加用户" ;;
-        3) STAGE="删除用户" ;;
-        4) STAGE="查看用户节点配置" ;;
-        5) STAGE="设置用户套餐" ;;
-        6) STAGE="设置用户到期日" ;;
-        7) STAGE="启用用户" ;;
-        8) STAGE="停用用户" ;;
-        9) STAGE="扫描用户配额" ;;
-        10) STAGE="设置用户限速" ;;
-        11) STAGE="查看限速状态" ;;
-        12) STAGE="备份用户配置" ;;
-        13) STAGE="恢复用户配置" ;;
-        14) STAGE="重置用户配额" ;;
-        15) STAGE="查看用户用量" ;;
-        16) STAGE="导出用户客户端配置" ;;
-        17) STAGE="设置用户展示入口" ;;
-        *) STAGE="用户管理" ;;
-      esac
-      case "$c" in
-      1) do_user_list ;;
+    msg '【Mieru 节点】一个运行时管理多个节点 / Mieru nodes'
+    msg '  1) 列出节点'
+    msg '  2) 添加节点'
+    msg '  3) 删除节点'
+    msg '  4) 导出客户端配置'
+    msg '  5) 启用节点'
+    msg '  6) 停用节点'
+    msg '  7) 设置展示端点'
+    msg '  0) 返回'
+    read_tty choice '请选择 [0-7]: ' || return 0
+    selector=""
+    case "$choice" in
+      0) return 0 ;;
+      1) operation=status ;;
       2)
-        USERNAME=""; PASSWORD=""; PORT=""; PORT_CLI=0
-        ADVERTISE_HOST=""; ADVERTISE_PORT=""; ADVERTISE_CLI=0; ADVERTISE_AUTO_REQUESTED=0
-        USER_PACKAGE=""; USER_QUOTA_MB=""; USER_QUOTA_DAYS=""; USER_QUOTA_MODE=""; USER_EXPIRE=""; USER_BANDWIDTH_MBPS=""
-        local bw_in="" qm_in=""
-        read_tty USERNAME "$(t '新用户名: ' 'New username: ')" || true
-        read_tty PASSWORD "$(t '密码（回车随机）: ' 'Password (Enter=random): ')" || true
-        read_tty bw_in "$(t '带宽 Mbps（回车=不限，双向）: ' 'Bandwidth Mbps (Enter=unlim, both dirs): ')" || true
-        USER_BANDWIDTH_MBPS="${bw_in:-0}"
-        do_user_add
+        operation=install
+        PORT="" PORT_CLI=0 USERNAME="" PASSWORD=""
+        ADVERTISE_HOST="" ADVERTISE_PORT="" ADVERTISE_CLI=0 ADVERTISE_AUTO_REQUESTED=0
+        read_tty USERNAME '新节点名: ' || continue
+        read_tty PASSWORD '密码（回车随机）: ' || continue
+        selector="$USERNAME"
         ;;
-      3)
-        USER_DEL_NAME=""
-        do_user_del
+      3|4|5|6|7)
+        nb_splicore_menu_select mieru || continue
+        selector="$NOBRAND_MENU_SELECTION_ID"
+        case "$choice" in 3) operation=remove ;; 4) operation=show ;; 5) operation=start ;; 6) operation=stop ;; 7) operation=set-endpoint; ADVERTISE_CLI=0 ;; esac
         ;;
-      4)
-        USER_SHOW_NAME=""
-        do_user_show
-        ;;
-      5)
-        USERNAME=""; USER_PACKAGE=""; USER_QUOTA_MB=""; USER_QUOTA_DAYS=""; USER_QUOTA_MODE=""; USER_EXPIRE=""; USER_BANDWIDTH_MBPS=""
-        read_tty USERNAME "$(t '用户名: ' 'Username: ')" || true
-        t '1)不限量 2)体验 3)标准 4)自定义' '1)unlimited 2)trial 3)standard 4)custom'
-        local pk="" qm_in=""
-        read_tty pk "$(t '套餐 [1-4]: ' 'Package [1-4]: ')" || true
-        case "$pk" in
-          1) USER_PACKAGE=unlimited ;;
-          2) USER_PACKAGE=trial ;;
-          3) USER_PACKAGE=standard ;;
-          4)
-            USER_PACKAGE=custom
-            read_tty USER_QUOTA_MB "$(t '配额 MB: ' 'Quota MB: ')" || true
-            read_tty USER_QUOTA_DAYS "$(t '滚动天数 [30]: ' 'Days [30]: ')" || true
-            ;;
-        esac
-        read_tty qm_in "$(t '配额模式 1)滚动 2)日历月 [1]: ' 'Quota mode 1)rolling 2)calendar [1]: ')" || true
-        case "${qm_in:-1}" in
-          2) USER_QUOTA_MODE=calendar ;;
-          *) USER_QUOTA_MODE=rolling ;;
-        esac
-        do_user_set_quota
-        ;;
-      6)
-        USERNAME=""; USER_EXPIRE=""; USER_BANDWIDTH_MBPS=""
-        read_tty USERNAME "$(t '用户名: ' 'Username: ')" || true
-        read_tty USER_EXPIRE "$(t '到期 YYYY-MM-DD / +30d / 0: ' 'Expire YYYY-MM-DD / +30d / 0: ')" || true
-        do_user_set_expire
-        ;;
-      7)
-        USER_SHOW_NAME=""
-        read_tty USER_SHOW_NAME "$(t '用户名: ' 'Username: ')" || true
-        do_user_enable
-        ;;
-      8)
-        USER_SHOW_NAME=""
-        read_tty USER_SHOW_NAME "$(t '用户名: ' 'Username: ')" || true
-        do_user_disable
-        ;;
-      9) do_user_scan ;;
-      10)
-        USERNAME=""; USER_BANDWIDTH_MBPS=""
-        read_tty USERNAME "$(t '用户名: ' 'Username: ')" || true
-        read_tty USER_BANDWIDTH_MBPS "$(t '带宽 Mbps（0=不限，双向）: ' 'Bandwidth Mbps (0=unlimited, both directions): ')" || true
-        do_user_set_rate
-        ;;
-      11) do_rate_status ;;
-      12) do_user_backup ;;
-      13)
-        USER_RESTORE_FILE=""
-        do_user_restore
-        ;;
-      14)
-        local saved_yes="$YES"
-        YES=1
-        do_user_quota_reset force
-        YES="$saved_yes"
-        ;;
-      15) do_user_usage ;;
-      16) do_user_export_clients ;;
-      17)
-        USERNAME=""; ADVERTISE_HOST=""; ADVERTISE_PORT=""; ADVERTISE_CLI=0
-        read_tty USERNAME "$(t '用户名: ' 'Username: ')" || true
-        do_user_set_endpoint
-        ;;
-      *) warn "$(t '无效选择' 'Invalid choice')" ;;
-      esac
-    )
-    action_rc=$?
-    set -e
-    [ "$action_lock" -eq 0 ] || nb_lifecycle_lock_release
-    [ "$action_rc" -ne 3 ] || return 3
-    if [ "$action_rc" -ne 0 ] && [ "$action_rc" -ne "$USER_MENU_HANDLED_RC" ]; then
-      warn "$(t '用户操作未完成，请根据上方错误重试' \
-        'User operation failed; review the error above and retry')"
-    fi
-    user_menu_pause
+      *) continue ;;
+    esac
+    YES=0
+    nobrand_menu_run nb_splicore_protocol mieru "$operation" "$selector"
   done
 }
 
@@ -14330,51 +9090,7 @@ normalize_profile() {
 
 # Optional argument is part of the public helper API.
 # shellcheck disable=SC2120
-profile_label() {
-  case "$(normalize_profile "${1:-${PROFILE:-custom}}" 2>/dev/null || printf custom)" in
-    iplc) t 'IPLC / 专线性能' 'IPLC / Dedicated-line Performance' ;;
-    balanced) t '普通公网' 'General Public Network' ;;
-    stealth) t '强化伪装' 'Enhanced Camouflage' ;;
-    *) t '高级自定义' 'Advanced Custom' ;;
-  esac
-}
 
-profile_values_match() {
-  local expected="$1"
-  local proto mtu mux handshake traffic low
-  proto="$(normalize_protocol "${PROTOCOL:-TCP}" 2>/dev/null || true)"
-  mtu="$(normalize_uint "${MTU:-}" 2>/dev/null || true)"
-  mux="$(normalize_multiplexing "${MULTIPLEXING:-}" 2>/dev/null || true)"
-  handshake="$(normalize_handshake_mode "${HANDSHAKE_MODE:-}" 2>/dev/null || true)"
-  traffic="$(normalize_traffic_pattern "${TRAFFIC_PATTERN:-}" 2>/dev/null || true)"
-  low="$(normalize_low_entropy_mode "${LOW_ENTROPY_MODE:-}" 2>/dev/null || true)"
-  case "$expected" in
-    iplc)
-      [ "$proto|$mtu|$mux|$handshake|$traffic|$low" = \
-        'TCP|1400|MULTIPLEXING_OFF|HANDSHAKE_NO_WAIT|off|LOW_ENTROPY_MODE_OFF' ]
-      ;;
-    balanced)
-      [ "$proto|$mtu|$mux|$handshake|$traffic|$low" = \
-        'TCP|1400|MULTIPLEXING_OFF|HANDSHAKE_NO_WAIT|conservative|LOW_ENTROPY_MODE_OFF' ]
-      ;;
-    stealth)
-      [ "$proto|$mtu|$mux|$handshake|$traffic|$low" = \
-        'TCP|1400|MULTIPLEXING_OFF|HANDSHAKE_NO_WAIT|aggressive|LOW_ENTROPY_MODE_OFF' ]
-      ;;
-    *) return 1 ;;
-  esac
-}
-
-infer_profile_from_values() {
-  local candidate
-  for candidate in iplc balanced stealth; do
-    if profile_values_match "$candidate"; then
-      printf '%s' "$candidate"
-      return 0
-    fi
-  done
-  printf 'custom'
-}
 
 apply_profile_values() {
   local selected
@@ -14384,7 +9100,6 @@ apply_profile_values() {
     iplc)
       PROTOCOL=TCP
       MTU=1400
-      MTU_POLICY=safe
       MULTIPLEXING=MULTIPLEXING_OFF
       HANDSHAKE_MODE=HANDSHAKE_NO_WAIT
       TRAFFIC_PATTERN=off
@@ -14393,7 +9108,6 @@ apply_profile_values() {
     balanced)
       PROTOCOL=TCP
       MTU=1400
-      MTU_POLICY=safe
       MULTIPLEXING=MULTIPLEXING_OFF
       HANDSHAKE_MODE=HANDSHAKE_NO_WAIT
       TRAFFIC_PATTERN=conservative
@@ -14402,7 +9116,6 @@ apply_profile_values() {
     stealth)
       PROTOCOL=TCP
       MTU=1400
-      MTU_POLICY=safe
       MULTIPLEXING=MULTIPLEXING_OFF
       HANDSHAKE_MODE=HANDSHAKE_NO_WAIT
       TRAFFIC_PATTERN=aggressive
@@ -14428,2462 +9141,28 @@ apply_requested_profile_preserving_cli() {
   [ "${LOW_ENTROPY_CLI:-0}" -eq 0 ] || LOW_ENTROPY_MODE="$cli_low"
 }
 
-profile_reconcile_metadata() {
-  PROFILE="$(normalize_profile "${PROFILE:-custom}" 2>/dev/null || printf custom)"
-  [ "$PROFILE" = custom ] && return 0
-  profile_values_match "$PROFILE" || PROFILE=custom
-}
-
 choose_profile_interactive() {
-  local input="" def=2
-  case "$(normalize_profile "${PROFILE:-balanced}" 2>/dev/null || printf balanced)" in
-    iplc) def=1 ;;
-    stealth) def=3 ;;
-    custom) def=4 ;;
-  esac
-  msg ""
-  t '配置预设（真实参数仍会完整保存；之后单独修改参数会自动变为高级自定义）:' \
-    'Configuration profile (full parameters are saved; later manual edits become Advanced Custom):'
-  t '  1) IPLC / 专线性能 — IPLC、企业专线、明确允许使用的网络' \
-    '  1) IPLC / Dedicated-line Performance — IPLC, enterprise lines, permitted networks'
-  t '  2) 普通公网 — 普通 VPS / 公网环境' \
-    '  2) General Public Network — ordinary VPS / public networks'
-  t '  3) 强化伪装 — 更强 traffic-pattern；Low Entropy 仍默认关闭' \
-    '  3) Enhanced Camouflage — stronger traffic-pattern; Low Entropy remains off'
-  t '  4) 高级自定义 — 逐项配置全部高级参数' \
-    '  4) Advanced Custom — configure every advanced parameter'
-  read_tty input "$(t "请选择 [1-4，默认 ${def}]: " "Choose [1-4, default ${def}]: ")" || input=""
-  input="${input:-$def}"
-  case "$input" in
-    1) apply_profile_values iplc ;;
-    3) apply_profile_values stealth ;;
-    4) PROFILE=custom ;;
-    *) apply_profile_values balanced ;;
-  esac
-  t "已选配置预设（Profile）: $(profile_label)" "Selected profile: $(profile_label)"
+  t '使用原生 TCP 默认参数；traffic-pattern 与低熵模式当前不支持。' 'Using native TCP defaults; traffic-pattern and low entropy are unsupported.'
+  apply_profile_values iplc
 }
 
-choose_protocol_interactive() {
-  msg ""
-  t '传输协议:' 'Transport protocol:'
-  t '  1) TCP（推荐；Clash 设 udp: true 即可）' \
-    '  1) TCP (recommended; Clash udp: true is enough)'
-  t '  2) UDP' '  2) UDP'
-  t '  3) TCP + UDP 双协议（UDP 端口 = TCP 端口 + 1）' \
-    '  3) TCP + UDP dual (UDP port = TCP port + 1)'
-  msg ""
-  local choice=""
-  read_tty choice "$(t '请选择协议 [1-3，默认 1]: ' 'Choose protocol [1-3, default 1]: ')" || choice="1"
-  choice="${choice:-1}"
-  case "$choice" in
-    1|TCP|tcp) PROTOCOL="TCP" ;;
-    2|UDP|udp) PROTOCOL="UDP" ;;
-    3|BOTH|both|双协议) PROTOCOL="BOTH" ;;
-    *)
-      warn "$(t "无效选择「${choice}」，使用默认 TCP" "Invalid choice \"${choice}\", using TCP")"
-      PROTOCOL="TCP"
-      ;;
-  esac
-}
-
-collect_advertise_endpoint_interactive() {
-  local input="" candidate="" detected="" auto_selected=0 profile_default=0
-  local default_host="${ADVERTISE_HOST:-}" default_port="${ADVERTISE_PORT:-${PORT:-}}"
-  if [ "${ADVERTISE_CLI:-0}" -eq 1 ]; then
-    validate_advertise_endpoint || die "$(t '自定义客户端入口参数无效' \
-      'Invalid custom client entry parameters')"
-    [ -z "$ADVERTISE_PORT" ] || ADVERTISE_PORT="$(normalize_uint "$ADVERTISE_PORT")"
-    return
-  fi
-
-  msg ""
-  if [ -z "$default_host" ]; then
-    detected="$(nb_ingress_profile_display_host "${INGRESS_PROFILE_ID:-}" 2>/dev/null || true)"
-    if [ -n "$detected" ]; then
-      profile_default=1
-      default_port="$(nb_ingress_profile_display_port "$INGRESS_PROFILE_ID" "${PORT:-}")"
-    else
-      detected="$(public_ip 2>/dev/null || true)"
-    fi
-    default_host="$detected"
-  fi
-  if [ -n "$detected" ]; then
-    t "检测到服务器公网 IP: ${detected}" "Detected server public IP: ${detected}"
-  fi
-  t '客户端入口只用于节点展示/导出，不会修改 mita 监听、firewall 或 tc。' \
-    'The client entry is only used in client exports; it never changes mita listeners, firewall, or tc.'
-  t '如前面有 IPLC/NAT/端口映射，请在这里填写用户真正连接的入口；输入 auto 可恢复自动探测。' \
-    'If IPLC/NAT/port mapping is in front, enter the endpoint clients really use; enter auto to restore auto detection.'
-
-  while true; do
-    input=""
-    if [ -n "$default_host" ]; then
-      read_tty input "$(t "客户端连接时使用的入口地址 [${default_host}]: " \
-        "Client entry host [${default_host}]: ")" || input=""
-    else
-      read_tty input "$(t '客户端连接时使用的入口地址: ' \
-        'Client entry host: ')" || input=""
-    fi
-    candidate="${input:-$default_host}"
-    candidate="$(printf '%s' "$candidate" | tr -d '[:space:]')"
-    if [ "$(printf '%s' "$candidate" | tr '[:upper:]' '[:lower:]')" = auto ]; then
-      auto_selected=1
-      ADVERTISE_HOST=""
-      break
-    fi
-    if [ "$profile_default" -eq 1 ] && [ -z "$input" ]; then
-      auto_selected=1
-      ADVERTISE_HOST=""
-      break
-    elif valid_advertise_host "$candidate"; then
-      ADVERTISE_HOST="$candidate"
-      break
-    fi
-    warn "$(t '入口地址无效，请重新输入 IPv4、IPv6 或域名' \
-      'Invalid entry host; enter IPv4, IPv6, or a domain name')"
-  done
-
-  while true; do
-    input=""
-    read_tty input "$(t "客户端入口端口 [${default_port}]: " \
-      "Client entry port [${default_port}]: ")" || input=""
-    candidate="${input:-$default_port}"
-    if [ "$auto_selected" -eq 1 ]; then
-      if valid_advertise_port "$candidate"; then
-        ADVERTISE_PORT=""
-        break
-      fi
-    elif validate_advertise_endpoint_values "$ADVERTISE_HOST" "$candidate" "$PROTOCOL"; then
-      ADVERTISE_PORT="$(normalize_uint "$candidate")"
-      break
-    fi
-    warn "$(t '入口端口必须是 1-65535 的整数' \
-      'Client entry port must be an integer from 1 to 65535')"
-  done
-
-  msg ""
-  if [ "$auto_selected" -eq 1 ]; then
-    t "客户端入口: 使用入口配置 $(nb_ingress_profile_name "${INGRESS_PROFILE_ID:-}") 的默认展示（不修改监听）" \
-      "Client entry: ingress profile $(nb_ingress_profile_name "${INGRESS_PROFILE_ID:-}") display default (listener unchanged)"
-  elif [ "$PROTOCOL" = "BOTH" ]; then
-    t "客户端配置将展示: ${ADVERTISE_HOST}，TCP ${ADVERTISE_PORT} / UDP $((ADVERTISE_PORT + 1))" \
-      "Client configs will show: ${ADVERTISE_HOST}, TCP ${ADVERTISE_PORT} / UDP $((ADVERTISE_PORT + 1))"
-  else
-    t "客户端配置将展示: ${ADVERTISE_HOST}:${ADVERTISE_PORT}" \
-      "Client configs will show: ${ADVERTISE_HOST}:${ADVERTISE_PORT}"
-  fi
-  t "服务端仍使用实际监听端口 ${PORT}；自定义入口不修改 mita、防火墙或 tc 配置" \
-    "The server still listens on ${PORT}; the custom entry does not change mita, firewall, or tc settings"
-}
-
-normalize_multiplexing() {
-  case "$(printf '%s' "${1:-}" | tr '[:lower:]' '[:upper:]')" in
-    OFF|0|NO|DISABLED|MULTIPLEXING_OFF) printf 'MULTIPLEXING_OFF' ;;
-    LOW|MULTIPLEXING_LOW) printf 'MULTIPLEXING_LOW' ;;
-    MIDDLE|MEDIUM|MULTIPLEXING_MIDDLE) printf 'MULTIPLEXING_MIDDLE' ;;
-    HIGH|MULTIPLEXING_HIGH) printf 'MULTIPLEXING_HIGH' ;;
-    *) return 1 ;;
-  esac
-}
-
-normalize_handshake_mode() {
-  case "$(printf '%s' "${1:-}" | tr '[:lower:]' '[:upper:]' | tr '-' '_')" in
-    NO_WAIT|NOWAIT|0RTT|HANDSHAKE_NO_WAIT) printf 'HANDSHAKE_NO_WAIT' ;;
-    STANDARD|WAIT|HANDSHAKE_STANDARD) printf 'HANDSHAKE_STANDARD' ;;
-    *) return 1 ;;
-  esac
-}
-
-normalize_low_entropy_mode() {
-  case "$(printf '%s' "${1:-}" | tr '[:lower:]' '[:upper:]')" in
-    OFF|0|NO|DISABLED|LOW_ENTROPY_MODE_OFF) printf 'LOW_ENTROPY_MODE_OFF' ;;
-    56|MODE_56|LOW_ENTROPY_MODE_56) printf 'LOW_ENTROPY_MODE_56' ;;
-    48|MODE_48|LOW_ENTROPY_MODE_48) printf 'LOW_ENTROPY_MODE_48' ;;
-    40|MODE_40|LOW_ENTROPY_MODE_40) printf 'LOW_ENTROPY_MODE_40' ;;
-    32|MODE_32|LOW_ENTROPY_MODE_32) printf 'LOW_ENTROPY_MODE_32' ;;
-    *) return 1 ;;
-  esac
-}
-
-low_entropy_label() {
-  case "$(normalize_low_entropy_mode "${LOW_ENTROPY_MODE:-LOW_ENTROPY_MODE_OFF}" 2>/dev/null || true)" in
-    LOW_ENTROPY_MODE_56) t '56（约 1.15 倍流量）' '56 (~1.15x traffic)' ;;
-    LOW_ENTROPY_MODE_48) t '48（约 1.34 倍流量）' '48 (~1.34x traffic)' ;;
-    LOW_ENTROPY_MODE_40) t '40（约 1.6 倍流量）' '40 (~1.6x traffic)' ;;
-    LOW_ENTROPY_MODE_32) t '32（约 2 倍流量）' '32 (~2x traffic)' ;;
-    *) t '关闭' 'Off' ;;
-  esac
-}
-
-warn_low_entropy_client_compat() {
-  [ "$(normalize_low_entropy_mode "${LOW_ENTROPY_MODE:-LOW_ENTROPY_MODE_OFF}" 2>/dev/null || true)" != "LOW_ENTROPY_MODE_OFF" ] || return 0
-  warn "$(t \
-    '低熵模式是较新的实验性能力；请确认客户端确实支持 lowEntropy。尚未适配的 mihomo 等客户端可能无法正确使用，不确定时请保持关闭并优先使用官方 mieru 客户端。' \
-    'Low entropy is a newer experimental capability. Confirm that the client supports lowEntropy; clients such as mihomo builds without adaptation may not work correctly. Keep it off when unsure and prefer the official mieru client.')"
-}
-
-choose_client_modes_interactive() {
-  local input="" def=1
-  if [ "${MULTIPLEXING_CLI:-0}" -ne 1 ]; then
-    case "$(normalize_multiplexing "${MULTIPLEXING:-MULTIPLEXING_OFF}" 2>/dev/null || true)" in
-      MULTIPLEXING_LOW) def=2 ;;
-      MULTIPLEXING_MIDDLE) def=3 ;;
-      MULTIPLEXING_HIGH) def=4 ;;
-      *) def=1 ;;
-    esac
-    msg ""
-    t '多路复用模式（默认推荐关闭）:' 'Multiplexing mode (OFF recommended by default):'
-    t '  1) MULTIPLEXING_OFF（推荐）' '  1) MULTIPLEXING_OFF (recommended)'
-    t '  2) MULTIPLEXING_LOW' '  2) MULTIPLEXING_LOW'
-    t '  3) MULTIPLEXING_MIDDLE' '  3) MULTIPLEXING_MIDDLE'
-    t '  4) MULTIPLEXING_HIGH' '  4) MULTIPLEXING_HIGH'
-    read_tty input "$(t "请选择 [1-4，默认 ${def}]: " "Choose [1-4, default ${def}]: ")" || input=""
-    input="${input:-$def}"
-    case "$input" in
-      2) MULTIPLEXING="MULTIPLEXING_LOW" ;;
-      3) MULTIPLEXING="MULTIPLEXING_MIDDLE" ;;
-      4) MULTIPLEXING="MULTIPLEXING_HIGH" ;;
-      *) MULTIPLEXING="MULTIPLEXING_OFF" ;;
-    esac
-  fi
-
-  input=""
-  def=1
-  if [ "${HANDSHAKE_CLI:-0}" -ne 1 ]; then
-    [ "$(normalize_handshake_mode "${HANDSHAKE_MODE:-HANDSHAKE_NO_WAIT}" 2>/dev/null || true)" = "HANDSHAKE_STANDARD" ] && def=2
-    msg ""
-    t '握手模式:' 'Handshake mode:'
-    t '  1) HANDSHAKE_NO_WAIT（推荐，0-RTT）' '  1) HANDSHAKE_NO_WAIT (recommended, 0-RTT)'
-    t '  2) HANDSHAKE_STANDARD' '  2) HANDSHAKE_STANDARD'
-    read_tty input "$(t "请选择 [1-2，默认 ${def}]: " "Choose [1-2, default ${def}]: ")" || input=""
-    input="${input:-$def}"
-    case "$input" in
-      2) HANDSHAKE_MODE="HANDSHAKE_STANDARD" ;;
-      *) HANDSHAKE_MODE="HANDSHAKE_NO_WAIT" ;;
-    esac
-  fi
-
-  msg ""
-  t "客户端模式: ${MULTIPLEXING} / ${HANDSHAKE_MODE}" \
-    "Client modes: ${MULTIPLEXING} / ${HANDSHAKE_MODE}"
-}
-
-choose_low_entropy_interactive() {
-  local current input="" def=1 enabled_default="n"
-  if [ "$(normalize_traffic_pattern "${TRAFFIC_PATTERN:-conservative}")" = "off" ]; then
-    LOW_ENTROPY_MODE="LOW_ENTROPY_MODE_OFF"
-    return 0
-  fi
-  if [ "${LOW_ENTROPY_CLI:-0}" -eq 1 ]; then
-    warn_low_entropy_client_compat
-    return 0
-  fi
-
-  current="$(normalize_low_entropy_mode "${LOW_ENTROPY_MODE:-LOW_ENTROPY_MODE_OFF}" 2>/dev/null || printf 'LOW_ENTROPY_MODE_OFF')"
-  [ "$current" != "LOW_ENTROPY_MODE_OFF" ] && enabled_default="y"
-  msg ""
-  if [ "$enabled_default" = "y" ]; then
-    read_tty input "$(t '是否启用低熵模式？会增加流量和 CPU 开销 [Y/n]: ' \
-      'Enable low entropy mode? This increases traffic and CPU load [Y/n]: ')" || input=""
-    input="${input:-y}"
-  else
-    read_tty input "$(t '是否启用低熵模式？会增加流量和 CPU 开销 [y/N]: ' \
-      'Enable low entropy mode? This increases traffic and CPU load [y/N]: ')" || input=""
-    input="${input:-n}"
-  fi
-  case "$(printf '%s' "$input" | tr '[:upper:]' '[:lower:]')" in
-    y|yes|1|是) ;;
-    *)
-      LOW_ENTROPY_MODE="LOW_ENTROPY_MODE_OFF"
-      t '低熵模式: 关闭（推荐默认）' 'Low entropy: Off (recommended default)'
-      return 0
-      ;;
-  esac
-
-  case "$current" in
-    LOW_ENTROPY_MODE_48) def=2 ;;
-    LOW_ENTROPY_MODE_40) def=3 ;;
-    LOW_ENTROPY_MODE_32) def=4 ;;
-    *) def=1 ;;
-  esac
-  msg ""
-  t '低熵强度（数字越小，伪装越强，但开销越大）:' \
-    'Low entropy strength (smaller means stronger disguise and more overhead):'
-  t '  1) 56 —— 需要 Low Entropy 时优先考虑；约增加 15% 数据体积' \
-    '  1) 56 — first choice when Low Entropy is needed; about 15% more data'
-  t '  2) 48 —— 更强 Low Entropy；流量开销进一步增加（约 34%）' \
-    '  2) 48 — stronger Low Entropy; higher traffic overhead (~34%)'
-  t '  3) 40 —— 高开销高级模式（约 60%）' \
-    '  3) 40 — high-overhead advanced mode (~60%)'
-  t '  4) 32 —— 高开销高级模式（约 100%）' \
-    '  4) 32 — high-overhead advanced mode (~100%)'
-  t '性能优先（IPLC/明确允许 Mieru 的环境）应保持 OFF。' \
-    'For performance-first IPLC or explicitly permitted networks, keep this OFF.'
-  input=""
-  read_tty input "$(t "请选择 [1-4，默认 ${def}]: " "Choose [1-4, default ${def}]: ")" || input=""
-  input="${input:-$def}"
-  case "$input" in
-    2) LOW_ENTROPY_MODE="LOW_ENTROPY_MODE_48" ;;
-    3) LOW_ENTROPY_MODE="LOW_ENTROPY_MODE_40" ;;
-    4) LOW_ENTROPY_MODE="LOW_ENTROPY_MODE_32" ;;
-    *) LOW_ENTROPY_MODE="LOW_ENTROPY_MODE_56" ;;
-  esac
-  t "低熵模式: $(low_entropy_label)" "Low entropy: $(low_entropy_label)"
-  warn_low_entropy_client_compat
-}
-
-choose_traffic_pattern_interactive() {
-  [ "${TRAFFIC_CLI:-0}" -eq 1 ] && return 0
-  local cur def input="" enable_default="y"
-  cur="$(normalize_traffic_pattern "${TRAFFIC_PATTERN:-conservative}")"
-  [ "$cur" = "off" ] && enable_default="n"
-  msg ""
-  if [ "$enable_default" = "y" ]; then
-    read_tty input "$(t '是否加入 traffic-pattern 流量伪装？[Y/n]: ' \
-      'Include traffic-pattern obfuscation? [Y/n]: ')" || input=""
-    input="${input:-y}"
-  else
-    read_tty input "$(t '是否加入 traffic-pattern 流量伪装？[y/N]: ' \
-      'Include traffic-pattern obfuscation? [y/N]: ')" || input=""
-    input="${input:-n}"
-  fi
-  case "$(printf '%s' "$input" | tr '[:upper:]' '[:lower:]')" in
-    y|yes|1|是) ;;
-    *)
-      TRAFFIC_PATTERN="off"
-      msg ""
-      t '已选择不加入 traffic-pattern' 'traffic-pattern will not be included'
-      return 0
-      ;;
-  esac
-
-  def=1
-  [ "$cur" = "aggressive" ] && def=2
-  msg ""
-  t 'traffic-pattern 主要用于改变流量特征，并不是性能优化功能（客户端无需与服务端一致）:' \
-    'traffic-pattern changes traffic characteristics; it is not a performance feature (client need not match server):'
-  t '  1) 保守 —— 可打印 Nonce + 末尾填充，额外开销较低（推荐）' \
-    '  1) Conservative — printable nonce + end padding, lower extra overhead (recommended)'
-  t '  2) 激进 —— 再加 TCP 分片 + 全量填充，更隐蔽但增加延迟/降速' \
-    '  2) Aggressive — also TCP fragment + full padding, stealthier but slower'
-  input=""
-  read_tty input "$(t "请选择 [1-2，默认 ${def}]: " "Choose [1-2, default ${def}]: ")" || input=""
-  input="${input:-$def}"
-  case "$input" in
-    2) TRAFFIC_PATTERN="aggressive" ;;
-    *) TRAFFIC_PATTERN="conservative" ;;
-  esac
-  msg ""
-  t "已选流量伪装: $(traffic_label)" "Traffic obfuscation: $(traffic_label)"
-}
-
-collect_config_interactive() {
-  STAGE="交互配置"
-  local requested_protocol="$PROTOCOL" requested_mtu="$MTU_REQUEST"
-  local requested_mux="$MULTIPLEXING" requested_handshake="$HANDSHAKE_MODE"
-  local requested_traffic="$TRAFFIC_PATTERN" requested_low="$LOW_ENTROPY_MODE"
-  nb_prepare_ingress_request || return 1
-  [ -n "$USERNAME" ] || USERNAME="$(random_token)"
-  [ -n "$PASSWORD" ] || PASSWORD="$(random_token)"
-  msg ""
-  t '已自动生成代理凭据（安装完成后会再次显示）:' \
-    'Proxy credentials auto-generated (shown again after install):'
-  t "  用户名: ${USERNAME}" "  Username: ${USERNAME}"
-  t "  密码:   ${PASSWORD}" "  Password: ${PASSWORD}"
-
-  if [ "${PROFILE_CLI:-0}" -eq 1 ]; then
-    apply_requested_profile_preserving_cli
-  else
-    choose_profile_interactive
-    [ "${PROTOCOL_CLI:-0}" -eq 0 ] || PROTOCOL="$requested_protocol"
-    [ "${MTU_CLI:-0}" -eq 0 ] || MTU_REQUEST="$requested_mtu"
-    [ "${MULTIPLEXING_CLI:-0}" -eq 0 ] || MULTIPLEXING="$requested_mux"
-    [ "${HANDSHAKE_CLI:-0}" -eq 0 ] || HANDSHAKE_MODE="$requested_handshake"
-    [ "${TRAFFIC_CLI:-0}" -eq 0 ] || TRAFFIC_PATTERN="$requested_traffic"
-    [ "${LOW_ENTROPY_CLI:-0}" -eq 0 ] || LOW_ENTROPY_MODE="$requested_low"
-  fi
-
-  if [ "$PROTOCOL_CLI" -eq 0 ] && [ "$PROFILE" = custom ]; then
-    choose_protocol_interactive
-  fi
-
-  msg ""
-  if [ -z "$PORT" ] && [ -z "$PORT_RANGE" ]; then
-    local default_port="" input="" candidate="" bounds="" profile_name
-    profile_name="$(nb_ingress_profile_name "$INGRESS_PROFILE_ID")"
-    bounds="$(nb_ingress_profile_auto_range "$INGRESS_PROFILE_ID" 2>/dev/null || true)"
-    default_port="$(select_available_port 2>/dev/null || true)"
-    if [ -n "$bounds" ]; then
-      t "入口配置 ${profile_name} 的自动端口段: ${bounds%%|*}-${bounds#*|}（派生值由所选本地 IPv4 尾号推导）" \
-        "Ingress profile ${profile_name} auto range: ${bounds%%|*}-${bounds#*|} (Derived means inferred from the selected local IPv4 tail)"
-    else
-      t "入口配置 ${profile_name} 仅支持手动端口，必须输入端口" \
-        "Ingress profile ${profile_name} is manual-only; a port is required"
-    fi
-    while true; do
-      input=""
-      if [ -n "$default_port" ]; then
-        read_tty input "$(t "监听端口 [${default_port}]: " "Listen port [${default_port}]: ")" || input=""
-      else
-        read_tty input "$(t '监听端口: ' 'Listen port: ')" || input=""
-      fi
-      candidate="${input:-$default_port}"
-      if ! valid_port "$candidate"; then
-        warn "$(t '非法端口，请重新输入' 'Invalid port; try again')"
-        continue
-      fi
-      candidate="$(normalize_uint "$candidate")"
-      if [ "$PROTOCOL" = "BOTH" ] && [ "$candidate" -ge 65535 ]; then
-        warn "$(t '双协议需要主端口 ≤65534（UDP 使用主端口+1）' \
-          'Dual protocol needs main port ≤65534 (UDP uses main port + 1)')"
-        continue
-      fi
-      if ! port_available_for_mode "$candidate"; then
-        warn "$(t "端口 ${candidate} 已被占用，请重新输入" \
-          "Port ${candidate} is already in use; try again")"
-        port_listener_details "$candidate"
-        continue
-      fi
-      PORT="$candidate"
-      [ -z "$input" ] && PORT_AUTO_SELECTED=1 || PORT_AUTO_SELECTED=0
-      break
-    done
-    nb_warn_if_outside_recommended_range "$PORT" "$INGRESS_PROFILE_ID"
-  elif [ -n "$PORT" ] && [ -n "$PORT_RANGE" ]; then
-    die "$(t '不能同时指定端口与端口段' 'Cannot set both port and port range')"
-  fi
-
-  if [ "$PROTOCOL" = "BOTH" ] && [ -n "$PORT" ] && [ "$PORT" -ge 65535 ]; then
-    die "$(t '双协议需要主端口 ≤65534（UDP 使用主端口+1）' \
-      'Dual protocol needs main port ≤65534 (UDP uses main port + 1)')"
-  fi
-  msg ""
-  t "已选协议: $(protocol_label)" "Selected protocol: $(protocol_label)"
-  collect_advertise_endpoint_interactive
-  if [ "$PROFILE" = custom ]; then
-    choose_mtu_interactive
-    choose_client_modes_interactive
-    choose_traffic_pattern_interactive
-    choose_low_entropy_interactive
-  else
-    [ "${MTU_CLI:-0}" -eq 0 ] || resolve_mtu_request
-    t "预设参数: $(protocol_label) / MTU ${MTU} / ${MULTIPLEXING} / ${HANDSHAKE_MODE}" \
-      "Preset parameters: $(protocol_label) / MTU ${MTU} / ${MULTIPLEXING} / ${HANDSHAKE_MODE}"
-    t "流量伪装（Traffic Pattern）: $(traffic_label)；低熵模式: $(low_entropy_label)" \
-      "Traffic Pattern: $(traffic_label); Low Entropy: $(low_entropy_label)"
-  fi
-  profile_reconcile_metadata
-  ensure_traffic_seed
-  validate_proxy_credentials
-}
-
-load_config_from_mita() {
-  local cli_user="$USERNAME" cli_password="$PASSWORD"
-  local cli_port="$PORT" cli_port_range="$PORT_RANGE" cli_protocol="$PROTOCOL"
-  local cli_advertise_host="$ADVERTISE_HOST" cli_advertise_port="$ADVERTISE_PORT"
-  local cli_mtu_request="$MTU_REQUEST"
-  load_install_state || return 1
-  users_isolated_mode || {
-    bail "$(t 'schema v3 Mieru 状态必须使用 isolated-v2' \
-      'Schema-v3 Mieru state must use isolated-v2')" || return 1
-  }
-  users_sync_primary_globals
-  PORT_RANGE=""
-  MTU_POLICY="$(normalize_mtu_policy "$MTU_POLICY" 2>/dev/null || printf 'safe')"
-  [ "${USERNAME_CLI:-0}" -eq 1 ] && USERNAME="$cli_user"
-  [ "${PASSWORD_CLI:-0}" -eq 1 ] && PASSWORD="$cli_password"
-  [ "${PORT_CLI:-0}" -eq 1 ] && PORT="$cli_port"
-  [ "${PORT_RANGE_CLI:-0}" -eq 1 ] && { PORT=""; PORT_RANGE="$cli_port_range"; }
-  [ "${PROTOCOL_CLI:-0}" -eq 1 ] && PROTOCOL="$cli_protocol"
-  if [ "${ADVERTISE_CLI:-0}" -eq 1 ]; then
-    ADVERTISE_HOST="$cli_advertise_host"
-    ADVERTISE_PORT="$cli_advertise_port"
-  fi
-  [ "${MTU_CLI:-0}" -eq 1 ] && MTU_REQUEST="$cli_mtu_request"
-  validate_proxy_credentials
-}
-
-collect_reconfigure_interactive() {
-  STAGE="重新配置"
-  load_config_from_mita
-  msg ""
-  t '【当前配置】' '[Current config]'
-  t "  用户名: ${USERNAME}" "  Username: ${USERNAME}"
-  t '  密码:   （已隐藏）' '  Password: (hidden)'
-  t "  协议:   $(protocol_label)" "  Protocol: $(protocol_label)"
-  t "  MTU:    ${MTU}（$(mtu_policy_label)）" \
-    "  MTU:      ${MTU} ($(mtu_policy_label))"
-  if [ -n "$PORT" ]; then
-    t "  端口:   ${PORT}" "  Port:     ${PORT}"
-  else
-    t "  端口段: ${PORT_RANGE}" "  Port range: ${PORT_RANGE}"
-  fi
-  msg ""
-  t '留空则保持当前值' 'Press Enter to keep current value'
-
-  local input=""
-  read_tty input "$(t "新用户名 [${USERNAME}]: " "New username [${USERNAME}]: ")" || input=""
-  [ -n "$input" ] && USERNAME="$input"
-
-  input=""
-  read_tty_secret input "$(t '新密码（留空保持当前）: ' 'New password (Enter to keep current): ')" || input=""
-  [ -n "$input" ] && PASSWORD="$input"
-
-  if [ "$PROTOCOL_CLI" -eq 0 ]; then
-    msg ""
-    t '是否更改传输协议？' 'Change transport protocol?'
-    t '  1) 保持当前' '  1) Keep current'
-    t '  2) 重新选择' '  2) Choose again'
-    input=""
-    read_tty input "$(t '请选择 [1-2，默认 1]: ' 'Choose [1-2, default 1]: ')" || input="1"
-    input="${input:-1}"
-    if [ "$input" = "2" ]; then
-      choose_protocol_interactive
-    fi
-  fi
-
-  if [ -z "$PORT_RANGE" ]; then
-    msg ""
-    input=""
-    read_tty input "$(t "新监听端口 [${PORT}]: " "New listen port [${PORT}]: ")" || input=""
-    if [ -n "$input" ]; then
-      PORT="$input"
-      valid_port "$PORT" || die "$(t '非法端口' 'Invalid port')"
-      PORT="$(normalize_uint "$PORT")"
-    fi
-  fi
-
-  if [ "$PROTOCOL" = "BOTH" ] && [ -n "$PORT" ] && [ "$PORT" -ge 65535 ]; then
-    die "$(t '双协议需要主端口 ≤65534' 'Dual protocol needs main port ≤65534')"
-  fi
-  collect_advertise_endpoint_interactive
-  choose_mtu_interactive
-  choose_client_modes_interactive
-  choose_traffic_pattern_interactive
-  choose_low_entropy_interactive
-  ensure_traffic_seed
-  validate_proxy_credentials
-  msg ""
-  t "将应用协议: $(protocol_label)" "Will apply protocol: $(protocol_label)"
-}
-
-ensure_config_noninteractive() {
-  STAGE="参数校验"
-  nb_prepare_ingress_request || return 1
-  apply_requested_profile_preserving_cli
-  [ -n "$PORT" ] && [ -n "$PORT_RANGE" ] && \
-    die "$(t '--port 与 --port-range 不能同时使用' 'Cannot use --port and --port-range together')"
-  [ -n "$USERNAME" ] || USERNAME="$(random_token)"
-  [ -n "$PASSWORD" ] || PASSWORD="$(random_token)"
-  validate_proxy_credentials
-  PROTOCOL="$(normalize_protocol "$PROTOCOL")" || \
-    die "$(t '非法协议（仅支持 TCP/UDP/BOTH）' \
-      'Invalid protocol (only TCP/UDP/BOTH are supported)')"
-  if [ -z "$PORT" ] && [ -z "$PORT_RANGE" ]; then
-    PORT="$(select_available_port)" \
-      || die "$(t '未找到可用监听端口' 'No available listen port found')"
-    PORT_AUTO_SELECTED=1
-  fi
-  if [ -n "$PORT" ]; then
-    valid_port "$PORT" || die "$(t '非法端口' 'Invalid port')"
-    PORT="$(normalize_uint "$PORT")"
-    nb_warn_if_outside_recommended_range "$PORT" "$INGRESS_PROFILE_ID"
-  fi
-  if [ -n "$PORT_RANGE" ]; then
-    die "$(t 'v2 用户专属实例不支持 --port-range，请使用单个 --port' \
-      'v2 dedicated user instances do not support --port-range; use one --port')"
-  fi
-  if [ "$PROTOCOL" = "BOTH" ] && [ -n "$PORT" ] && [ "$PORT" -ge 65535 ]; then
-    die "$(t '双协议需要主端口 ≤65534' 'Dual protocol needs main port ≤65534')"
-  fi
-  validate_advertise_endpoint || die "$(t '自定义客户端入口参数无效' \
-    'Invalid custom client entry parameters')"
-  [ -z "$ADVERTISE_PORT" ] || ADVERTISE_PORT="$(normalize_uint "$ADVERTISE_PORT")"
-  resolve_mtu_request || return 1
-  [ "${MTU_CLI:-0}" -eq 1 ] && print_mtu_selection
-  TRAFFIC_PATTERN="$(normalize_traffic_pattern "$TRAFFIC_PATTERN")" || \
-    die "$(t '非法 traffic-pattern 模式' 'Invalid traffic-pattern mode')"
-  LOW_ENTROPY_MODE="$(normalize_low_entropy_mode "$LOW_ENTROPY_MODE")" || \
-    die "$(t '非法低熵模式' 'Invalid low entropy mode')"
-  [ "$TRAFFIC_PATTERN" != "off" ] || LOW_ENTROPY_MODE="LOW_ENTROPY_MODE_OFF"
-  warn_low_entropy_client_compat
-  MULTIPLEXING="$(normalize_multiplexing "$MULTIPLEXING")" || \
-    die "$(t '非法多路复用模式' 'Invalid multiplexing mode')"
-  HANDSHAKE_MODE="$(normalize_handshake_mode "$HANDSHAKE_MODE")" || \
-    die "$(t '非法握手模式' 'Invalid handshake mode')"
-  profile_reconcile_metadata
-  ensure_traffic_seed
-}
-
-normalize_traffic_pattern() {
-  case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
-    off|none|no|0|disable|disabled|close|关) printf 'off' ;;
-    aggressive|aggr|full|high|强|激进|2) printf 'aggressive' ;;
-    conservative|cons|safe|low|保守|1) printf 'conservative' ;;
-    *) return 1 ;;
-  esac
-}
-
-traffic_label() {
-  case "$(normalize_traffic_pattern "${TRAFFIC_PATTERN:-conservative}")" in
-    off) t '关闭' 'Off' ;;
-    aggressive) t '激进' 'Aggressive' ;;
-    *) t '保守' 'Conservative' ;;
-  esac
-}
-
-random_seed() {
-  local s=""
-  if [ -r /dev/urandom ] && command -v od >/dev/null 2>&1; then
-    s="$(od -An -N4 -tu4 /dev/urandom 2>/dev/null | tr -dc '0-9')"
-  fi
-  [ -n "$s" ] || s=$(( (RANDOM << 15) | RANDOM ))
-  printf '%s' "$(( s % 2147483647 ))"
-}
-
-# 流量模式自 mita v3.28.0 起支持；旧二进制不识别该字段，需跳过以免 apply 失败
-mita_supports_traffic_pattern() {
-  local v
-  v="$(installed_version 2>/dev/null || true)"
-  [ -n "$v" ] || return 1
-  [ "$(printf '%s\n%s' "3.28.0" "$v" | sort -V 2>/dev/null | head -n1)" = "3.28.0" ]
-}
-
-mita_supports_low_entropy() {
-  local v
-  v="$(installed_version 2>/dev/null || true)"
-  [ -n "$v" ] || return 1
-  [ "$(printf '%s\n%s' "3.35.0" "$v" | sort -V 2>/dev/null | head -n1)" = "3.35.0" ]
-}
-
-ensure_traffic_seed() {
-  [ "$(normalize_traffic_pattern "${TRAFFIC_PATTERN:-conservative}")" = "off" ] && return 0
-  [ -n "$TRAFFIC_SEED" ] && return 0
-  TRAFFIC_SEED="$(random_seed)"
-}
-
-# 选了流量伪装但当前 mita 过旧不支持时给出明确提示（须在二进制就绪后调用）
-warn_traffic_unsupported() {
-  [ "$(normalize_traffic_pattern "${TRAFFIC_PATTERN:-conservative}")" = "off" ] && return 0
-  mita_supports_traffic_pattern && return 0
-  warn "$(t '当前 mita 版本不支持流量伪装（需 ≥3.28.0），本次不会写入 trafficPattern；如需启用请先执行「升级」' \
-    'Current mita does not support traffic obfuscation (needs >=3.28.0); trafficPattern will be skipped. Use 3) Upgrade to enable.')"
-  TRAFFIC_PATTERN="off"
-  LOW_ENTROPY_MODE="LOW_ENTROPY_MODE_OFF"
-}
-
-warn_low_entropy_unsupported() {
-  [ "$(normalize_low_entropy_mode "${LOW_ENTROPY_MODE:-LOW_ENTROPY_MODE_OFF}" 2>/dev/null || true)" = "LOW_ENTROPY_MODE_OFF" ] && return 0
-  mita_supports_low_entropy && return 0
-  warn "$(t '当前 mita 版本不支持低熵模式（需要 ≥3.35.0），本次将关闭低熵；请先升级后再启用' \
-    'Current mita does not support low entropy mode (needs >=3.35.0); it will be disabled. Upgrade first to enable it.')"
-  LOW_ENTROPY_MODE="LOW_ENTROPY_MODE_OFF"
-}
-
-# 输出缩进后的 "trafficPattern": {...} 片段；off 或旧版 mita 时输出空
-traffic_pattern_json() {
-  local ind="${1:-  }"
-  local level seed low_entropy_section=""
-  level="$(normalize_traffic_pattern "${TRAFFIC_PATTERN:-conservative}")"
-  [ "$level" = "off" ] && return 0
-  mita_supports_traffic_pattern || return 0
-  seed="${TRAFFIC_SEED:-0}"
-  if mita_supports_low_entropy; then
-    low_entropy_section="${ind}  \"lowEntropy\": { \"mode\": \"$(normalize_low_entropy_mode "${LOW_ENTROPY_MODE:-LOW_ENTROPY_MODE_OFF}")\" },
-"
-  fi
-  if [ "$level" = "aggressive" ]; then
-    cat <<EOF
-${ind}"trafficPattern": {
-${ind}  "seed": ${seed},
-${ind}  "unlockAll": false,
-${low_entropy_section}${ind}  "tcpFragment": { "enable": true, "maxSleepMs": 8 },
-${ind}  "nonce": { "type": "NONCE_TYPE_PRINTABLE", "applyToAllUDPPacket": true, "minLen": 6, "maxLen": 12 },
-${ind}  "padding": { "maxMiddlePaddingLen": 64, "maxEndPaddingLen": 255 }
-${ind}}
-EOF
-  else
-    cat <<EOF
-${ind}"trafficPattern": {
-${ind}  "seed": ${seed},
-${ind}  "unlockAll": false,
-${low_entropy_section}${ind}  "nonce": { "type": "NONCE_TYPE_PRINTABLE", "applyToAllUDPPacket": true, "minLen": 4, "maxLen": 8 },
-${ind}  "padding": { "maxMiddlePaddingLen": 0, "maxEndPaddingLen": 128 }
-${ind}}
-EOF
-  fi
-}
-
-write_server_config() {
-  # Single-user semantic builder is retained as the golden-parity primitive;
-  # production schema-v3 installs use the users.json multi-instance branch.
-  if [ "${MULTI_USER_MODE:-0}" -eq 1 ] && users_state_exists && [ "$(users_count)" -gt 0 ]; then
-    write_server_config_multi
-    return
-  fi
-  local cfg bindings="" proto pp tp tp_section="" user_json password_json
-  cfg="$(mktemp_file .json)"
-  user_json="$(json_string "$USERNAME")"
-  password_json="$(json_string "$PASSWORD")"
-  while IFS= read -r pp; do
-    proto="${pp%%|*}"
-    local p="${pp#*|}"
-    local binding
-    if [ -n "$PORT" ]; then
-      binding=$(cat <<EOB
-    {
-      "port": ${p},
-      "protocol": "${proto}"
-    }
-EOB
-)
-    else
-      binding=$(cat <<EOB
-    {
-      "portRange": "${p}",
-      "protocol": "${proto}"
-    }
-EOB
-)
-    fi
-    if [ -n "$bindings" ]; then
-      bindings="${bindings},
-${binding}"
-    else
-      bindings="${binding}"
-    fi
-  done < <(port_protocol_pairs)
-  ensure_traffic_seed
-  tp="$(traffic_pattern_json '  ')"
-  [ -n "$tp" ] && tp_section=",
-${tp}"
-  cat >"$cfg" <<EOF
-{
-  "portBindings": [
-${bindings}
-  ],
-  "users": [
-    {
-      "name": ${user_json},
-      "password": ${password_json}
-    }
-  ],
-  "loggingLevel": "INFO",
-  "mtu": ${MTU}${tp_section}
-}
-EOF
-  printf '%s' "$cfg"
-}
-
-# ---------- Snell v4/v5 multi-instance engine ----------
-
-snell_state_path() {
-  local id="${1:-}"
-  [[ "$id" =~ ^s[0-9a-f]{16}$ ]] || return 1
-  printf '%s/%s.json' "$NOBRAND_SNELL_STATE_DIR" "$id"
-}
-
-snell_config_path() {
-  local id="${1:-}"
-  [[ "$id" =~ ^s[0-9a-f]{16}$ ]] || return 1
-  printf '%s/%s.conf' "$NOBRAND_SNELL_CONFIG_DIR" "$id"
-}
-
-snell_state_exists() {
-  local path
-  path="$(snell_state_path "$1")" || return 1
-  [ -s "$path" ] && jq empty "$path" >/dev/null 2>&1
-}
-
-snell_state_field() {
-  local id="$1" field="$2" path
-  path="$(snell_state_path "$id")" || return 1
-  snell_state_exists "$id" || return 1
-  jq -r --arg field "$field" \
-    'if has($field) and .[$field] != null then .[$field] else empty end' "$path"
-}
-
-snell_instance_ids() {
-  local path id
-  for path in "$NOBRAND_SNELL_STATE_DIR"/*.json; do
-    [ -f "$path" ] || continue
-    id="$(basename "$path" .json)"
-    [[ "$id" =~ ^s[0-9a-f]{16}$ ]] || continue
-    jq -e --arg id "$id" '.instance_id == $id and (.version == 4 or .version == 5)' \
-      "$path" >/dev/null 2>&1 || continue
-    printf '%s\n' "$id"
-  done
-}
-
-snell_find_id_by_name() {
-  local expected="${1:-}" id
-  [ -n "$expected" ] || return 1
-  while IFS= read -r id; do
-    [ "$(snell_state_field "$id" name 2>/dev/null || true)" = "$expected" ] || continue
-    printf '%s' "$id"
-    return 0
-  done < <(snell_instance_ids)
-  return 1
-}
-
-snell_resolve_target_id() {
-  local target="${1:-}" ids count major
-  if [[ "$target" =~ ^s[0-9a-f]{16}$ ]] && snell_state_exists "$target"; then
-    major="$(snell_state_field "$target" version 2>/dev/null || true)"
-    case "$major" in 4|5) ;; *) return 1 ;; esac
-    printf '%s' "$target"
-    return 0
-  fi
-  if [ -n "$target" ]; then
-    snell_find_id_by_name "$target"
-    return $?
-  fi
-  ids="$(snell_instance_ids)"
-  count="$(printf '%s\n' "$ids" | sed '/^$/d' | wc -l | tr -d '[:space:]')"
-  [ "$count" -eq 1 ] || return 1
-  printf '%s' "$ids"
-}
-
-snell_valid_name() {
-  local value="${1:-}"
-  valid_proxy_identity_part "$value" || return 1
-  case "$value" in *'|'*|*$'\t'*|*$'\n'*|*$'\r'*) return 1 ;; esac
-}
-
-snell_valid_psk() {
-  local value="${1:-}"
-  [ "${#value}" -ge 8 ] && [ "${#value}" -le 128 ] || return 1
-  [[ "$value" =~ ^[A-Za-z0-9._~+/@:=,-]+$ ]]
-}
-
-snell_state_valid() {
-  local id="$1" path name psk listen_host listen_port mode host advertise_port
-  path="$(snell_state_path "$id")" || return 1
-  [ -f "$path" ] && [ ! -L "$path" ] && snell_state_exists "$id" || return 1
-  jq -e --arg id "$id" '
-    .protocol=="snell" and .instance_id==$id and (.version==4 or .version==5) and
-    (.name|type)=="string" and (.psk|type)=="string" and
-    (.listen_host|type)=="string" and
-    (.listen_port|type)=="number" and (.listen_port|floor)==.listen_port and
-    .listen_port>=1 and .listen_port<=65535 and .transport=="tcp" and
-    (.advertise_mode=="auto" or .advertise_mode=="custom") and
-    (.advertise_host|type)=="string" and
-    (.advertise_port=="" or ((.advertise_port|type)=="number" and
-      (.advertise_port|floor)==.advertise_port and .advertise_port>=1 and .advertise_port<=65535)) and
-    (.enabled|type)=="boolean" and
-    (.quic_proxy_enabled|type)=="boolean" and (.managed_udp|type)=="boolean" and
-    .quic_proxy_enabled==.managed_udp and
-    (.version==5 or (.quic_proxy_enabled==false and .managed_udp==false)) and
-    (.runtime_version|type)=="string" and (.runtime_version|length)>0 and
-    (.runtime_status|type)=="string" and (.runtime_status|length)>0 and
-    (.created_at|type)=="string" and (.created_at|length)>0 and
-    (.updated_at|type)=="string" and (.updated_at|length)>0 and
-    (has("ingress_profile_id")==false or
-      ((.ingress_profile_id|type)=="string" and (.ingress_profile_id|length)>0))
-  ' "$path" >/dev/null 2>&1 || return 1
-  name="$(snell_state_field "$id" name)" || return 1
-  psk="$(snell_state_field "$id" psk)" || return 1
-  listen_host="$(snell_state_field "$id" listen_host)" || return 1
-  listen_port="$(snell_state_field "$id" listen_port)" || return 1
-  mode="$(snell_state_field "$id" advertise_mode)" || return 1
-  host="$(snell_state_field "$id" advertise_host)" || return 1
-  advertise_port="$(snell_state_field "$id" advertise_port)" || return 1
-  snell_valid_name "$name" && snell_valid_psk "$psk" \
-    && nb_ingress_valid_ipv4 "$listen_host" && nb_valid_port "$listen_port" \
-    && nb_validate_advertise_endpoint "$host" "$advertise_port" TCP || return 1
-  case "$mode" in
-    auto) [ -z "$host" ] && [ -z "$advertise_port" ] ;;
-    custom) [ -n "$host" ] && [ -n "$advertise_port" ] ;;
-    *) return 1 ;;
-  esac
-}
-
-snell_generate_psk() {
-  local value
-  value="$(openssl rand -base64 24 2>/dev/null | tr -d '\r\n')"
-  snell_valid_psk "$value" || value="$(openssl rand -hex 24 2>/dev/null || random_token)"
-  snell_valid_psk "$value" || return 1
-  printf '%s' "$value"
-}
-
-snell_generate_instance_id() {
-  local id attempt=0
-  while [ "$attempt" -lt 64 ]; do
-    id="s$(openssl rand -hex 8 2>/dev/null || true)"
-    [[ "$id" =~ ^s[0-9a-f]{16}$ ]] || {
-      id="s$(printf '%016x' "$((RANDOM * 32768 + RANDOM))")"
-    }
-    if ! snell_state_exists "$id"; then
-      printf '%s' "$id"
-      return 0
-    fi
-    attempt=$((attempt + 1))
-  done
-  return 1
-}
-
-snell_release_status_for_version() {
-  local version
-  version="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
-  case "$version" in
-    *rc*) printf RC ;;
-    *beta*|v*b[0-9]*|*.*.*b[0-9]*) printf Beta ;;
-    *alpha*|v*a[0-9]*|*.*.*a[0-9]*) printf Experimental ;;
-    *[!0-9.v]*) printf Experimental ;;
-    *) printf Stable ;;
-  esac
-}
-
-snell_generate_state() {
-  local output="$1" id="$2" name="$3" major="$4" psk="$5" listen_host="$6" listen_port="$7"
-  local advertise_mode="$8" advertise_host="$9" advertise_port="${10}" created_at="${11:-}"
-  local quic_proxy_enabled="${12:-false}"
-  local ingress_profile_id="${13:-}"
-  local runtime_version runtime_status updated_at
-  case "$major" in 4|5) ;; *) return 1 ;; esac
-  runtime_version="$(snell_runtime_release_version "$major" 2>/dev/null || printf unknown)"
-  runtime_status="$(snell_runtime_release_status "$major" 2>/dev/null || snell_release_status_for_version "$runtime_version")"
-  [ -n "$created_at" ] || created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  updated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  jq -n --arg id "$id" --arg name "$name" --arg version "$major" --arg psk "$psk" \
-    --arg listen_host "$listen_host" --arg listen_port "$listen_port" \
-    --arg advertise_mode "$advertise_mode" --arg advertise_host "$advertise_host" \
-    --arg advertise_port "$advertise_port" --arg runtime_version "$runtime_version" \
-    --arg runtime_status "$runtime_status" --arg created_at "$created_at" --arg updated_at "$updated_at" \
-    --argjson quic_proxy_enabled "$quic_proxy_enabled" --arg ingress_profile_id "$ingress_profile_id" '
-      {
-        protocol:"snell",
-        instance_id:$id,
-        name:$name,
-        version:($version|tonumber),
-        psk:$psk,
-        listen_host:$listen_host,
-        listen_port:($listen_port|tonumber),
-        transport:"tcp",
-        advertise_mode:$advertise_mode,
-        advertise_host:$advertise_host,
-        advertise_port:(if $advertise_port=="" then "" else ($advertise_port|tonumber) end),
-        enabled:true,
-        quic_proxy_enabled:$quic_proxy_enabled,
-        managed_udp:$quic_proxy_enabled,
-        runtime_version:$runtime_version,
-        runtime_status:$runtime_status,
-        created_at:$created_at,
-        updated_at:$updated_at
-      }
-      + if $ingress_profile_id=="" then {} else {ingress_profile_id:$ingress_profile_id} end
-    ' >"$output"
-}
-
-snell_config_matches_state() {
-  local id="$1" state config
-  state="$(snell_state_path "$id")" || return 1
-  config="$(snell_config_path "$id")" || return 1
-  [ -s "$state" ] && [ -s "$config" ] || return 1
-  python3 - "$state" "$config" <<'PY'
-import json
-import sys
-
-state=json.load(open(sys.argv[1], encoding="utf-8"))
-values={}
-section=""
-for raw in open(sys.argv[2], encoding="utf-8"):
-    line=raw.strip()
-    if not line or line.startswith("#") or line.startswith(";"):
-        continue
-    if line.startswith("[") and line.endswith("]"):
-        section=line[1:-1]
-        continue
-    if "=" not in line:
-        raise SystemExit(1)
-    key,value=(part.strip() for part in line.split("=",1))
-    values[(section,key)]=value
-expected="%s:%s" % (state.get("listen_host"), state.get("listen_port"))
-if values.get(("snell-server","listen")) != expected:
-    raise SystemExit(1)
-if values.get(("snell-server","psk")) != state.get("psk"):
-    raise SystemExit(1)
-version=int(state.get("version"))
-if version in (4,5):
-    if values.get(("snell-server","ipv6")) != "false":
-        raise SystemExit(1)
-else:
-    raise SystemExit(1)
-PY
-}
-
-snell_quic_proxy_enabled() {
-  local id="$1"
-  [ "$(snell_state_field "$id" version 2>/dev/null || true)" = 5 ] || return 1
-  [ "$(snell_state_field "$id" quic_proxy_enabled 2>/dev/null || printf false)" = true ]
-}
-
-snell_managed_udp_enabled() {
-  local id="$1"
-  [ "$(snell_state_field "$id" version 2>/dev/null || true)" = 5 ] || return 1
-  [ "$(snell_state_field "$id" managed_udp 2>/dev/null || printf false)" = true ]
-}
-
-snell_quic_state_consistent() {
-  local id="$1" quic managed
-  quic="$(snell_state_field "$id" quic_proxy_enabled 2>/dev/null || printf false)"
-  managed="$(snell_state_field "$id" managed_udp 2>/dev/null || printf false)"
-  case "$quic:$managed" in false:false|true:true) return 0 ;; *) return 1 ;; esac
-}
-
-snell_firewall_pairs() {
-  local id="$1" port
-  port="$(snell_state_field "$id" listen_port)" || return 1
-  printf 'TCP|%s\n' "$port"
-  snell_managed_udp_enabled "$id" && printf 'UDP|%s\n' "$port"
-  return 0
-}
-
-snell_install_port_available() {
-  local port="$1"
-  nb_port_available_for_profile "$port" TCP "${INGRESS_PROFILE_ID:-$NOBRAND_LEGACY_INGRESS_PROFILE_ID}" || return 1
-  [ "${SNELL_QUIC_PROXY:-off}" != on ] \
-    || nb_port_available_for_profile "$port" UDP "${INGRESS_PROFILE_ID:-$NOBRAND_LEGACY_INGRESS_PROFILE_ID}"
-}
-
-snell_select_available_install_port() {
-  local profile_id="${INGRESS_PROFILE_ID:-$NOBRAND_LEGACY_INGRESS_PROFILE_ID}" bounds lo hi selected attempt=0 random_value
-  [ "${SNELL_QUIC_PROXY:-off}" = on ] || { nb_select_available_port TCP "$profile_id"; return; }
-  if bounds="$(nb_ingress_profile_auto_range "$profile_id" 2>/dev/null)"; then
-    lo="${bounds%%|*}"; hi="${bounds#*|}"
-    if selected="$(nb_scan_port_span "$lo" "$hi" snell_install_port_available)"; then
-      printf '%s' "$selected"
-      return 0
-    fi
-  fi
-  [ "$profile_id" = "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ] || return 1
-  while [ "$attempt" -lt 512 ]; do
-    random_value="$(openssl rand -hex 2 2>/dev/null || true)"
-    if [[ "$random_value" =~ ^[0-9a-fA-F]{4}$ ]]; then
-      selected=$((1025 + 16#$random_value % (65535 - 1025 + 1)))
-    else
-      selected=$((1025 + RANDOM % (65535 - 1025 + 1)))
-    fi
-    snell_install_port_available "$selected" && { printf '%s' "$selected"; return 0; }
-    attempt=$((attempt + 1))
-  done
-  return 1
-}
-
-snell_effective_endpoint() {
-  local id="$1" mode host advertise_port listen_port ingress_profile_id effective_host effective_port
-  mode="$(snell_state_field "$id" advertise_mode)"
-  host="$(snell_state_field "$id" advertise_host)"
-  advertise_port="$(snell_state_field "$id" advertise_port)"
-  listen_port="$(snell_state_field "$id" listen_port)"
-  ingress_profile_id="$(snell_state_field "$id" ingress_profile_id 2>/dev/null || true)"
-  effective_host="$(nb_effective_advertise_host "$mode" "$host" "$ingress_profile_id")"
-  effective_port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port" "$ingress_profile_id")"
-  printf '%s|%s' "$effective_host" "$effective_port"
-}
-
-snell_state_set_enabled() {
-  local id="$1" enabled="$2" path tmp
-  path="$(snell_state_path "$id")" || return 1
-  tmp="$(mktemp_file .json)" || return 1
-  if ! jq --argjson enabled "$enabled" --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-      '.enabled=$enabled | .updated_at=$updated' "$path" >"$tmp" \
-     || ! nb_atomic_install_file "$tmp" "$path" 0600; then
-    rm -f "$tmp"
-    return 1
-  fi
-  rm -f "$tmp"
-}
-
-snell_collect_install_requests() {
-  local interactive="$1" detected="" owner quic_choice=""
-  case "${SNELL_VERSION:-5}" in 4|5) ;; *) die 'Snell 只支持 v4、v5' ;; esac
-  snell_platform_supported "$SNELL_VERSION" \
-    || die "当前 OS/arch 不支持官方 Snell v${SNELL_VERSION} runtime"
-  nb_prepare_ingress_request || return 1
-  nb_prepare_ingress_deployment "$INGRESS_PROFILE_ID" native-bind \
-    || die 'Snell 无法绑定所选 Ingress 的 Strict 本地地址'
-  if [ -z "${SNELL_NAME:-}" ]; then
-    if [ "$interactive" -eq 1 ]; then
-      read_tty SNELL_NAME "$(t "节点名 [snell-v${SNELL_VERSION}]: " "Node name [snell-v${SNELL_VERSION}]: ")" || SNELL_NAME=""
-    fi
-    SNELL_NAME="${SNELL_NAME:-snell-v${SNELL_VERSION}}"
-  fi
-  snell_valid_name "$SNELL_NAME" || die 'Snell 节点名无效（1-64 字符且不能含控制字符或 |）'
-  [ -z "$(snell_find_id_by_name "$SNELL_NAME" 2>/dev/null || true)" ] || die "Snell 节点名已存在: $SNELL_NAME"
-  if [ -z "${PORT:-}" ]; then
-    PORT="$(nb_select_available_port TCP "$INGRESS_PROFILE_ID")" \
-      || die '所选入口配置没有可用 Snell TCP 自动端口；manual-only 必须显式使用 --port'
-    PORT_AUTO_SELECTED=1
-  else
-    nb_valid_port "$PORT" || die 'Snell 端口必须是 1-65535'
-    PORT="$(normalize_uint "$PORT")"
-    nb_warn_if_outside_recommended_range "$PORT" "$INGRESS_PROFILE_ID"
-    if ! nb_port_available_for_profile "$PORT" TCP "$INGRESS_PROFILE_ID"; then
-      warn "Snell TCP/${PORT} 已占用"
-      nb_describe_port_conflict TCP "$PORT"
-      return 1
-    fi
-  fi
-  if [ -z "${SNELL_PSK:-}" ]; then
-    SNELL_PSK="$(snell_generate_psk)" || die '无法生成 Snell PSK'
-  fi
-  snell_valid_psk "$SNELL_PSK" \
-    || die 'Snell PSK 必须为 8-128 位安全 ASCII（字母、数字或 ._~+/@:=,-）'
-  if [ "$SNELL_VERSION" = 5 ]; then
-    if [ "$interactive" -eq 1 ] && [ "${SNELL_QUIC_CLI:-0}" -eq 0 ]; then
-      msg ''
-      msg '是否启用 Snell v5 QUIC Proxy 模式？'
-      msg '  1) 否 [默认 / 推荐兼容]'
-      msg '  2) 是 [同时开放 UDP，同端口]'
-      read_tty quic_choice "$(t '请选择 [1]: ' 'Choose [1]: ')" || quic_choice=""
-      case "$quic_choice" in
-        ""|1) SNELL_QUIC_PROXY=off ;;
-        2) SNELL_QUIC_PROXY=on ;;
-        *) die 'QUIC Proxy 模式选择无效' ;;
-      esac
-    else
-      SNELL_QUIC_PROXY="${SNELL_QUIC_PROXY:-off}"
-    fi
-  else
-    [ "${SNELL_QUIC_PROXY:-off}" != on ] || die 'Snell v4 不支持 QUIC Proxy 模式'
-    SNELL_QUIC_PROXY=off
-  fi
-  case "$SNELL_QUIC_PROXY" in on|off) ;; *) die 'QUIC Proxy 模式只支持 on 或 off' ;; esac
-  if [ "$SNELL_QUIC_PROXY" = on ] \
-     && ! nb_port_available_for_profile "$PORT" UDP "$INGRESS_PROFILE_ID"; then
-    if [ "${PORT_AUTO_SELECTED:-0}" -eq 1 ]; then
-      PORT="$(snell_select_available_install_port)" || die '未找到同时可用的 Snell v5 TCP/UDP 同号端口'
-    else
-      warn "Snell v5 QUIC 需要同号 UDP/${PORT}，但该端口已占用"
-      nb_describe_port_conflict UDP "$PORT"
-      return 1
-    fi
-  fi
-  detected="$(public_ip 2>/dev/null || true)"
-  if [ "$interactive" -eq 1 ] && [ "${ADVERTISE_CLI:-0}" -eq 0 ]; then
-    nb_collect_advertise_endpoint_interactive "Snell v${SNELL_VERSION}" "$PORT"
-  else
-    nb_require_explicit_endpoint_noninteractive
-  fi
-  nb_validate_advertise_endpoint "$ADVERTISE_HOST" "$ADVERTISE_PORT" TCP \
-    || die 'Snell Display Endpoint 无效'
-  if [ -n "$ADVERTISE_HOST" ]; then
-    owner="$(nb_endpoint_conflict_owner TCP "$ADVERTISE_HOST" "$ADVERTISE_PORT" '' 2>/dev/null || true)"
-    [ -z "$owner" ] || die "Snell Display Endpoint 与 ${owner} 冲突"
-    if [ "$SNELL_QUIC_PROXY" = on ]; then
-      owner="$(nb_endpoint_conflict_owner UDP "$ADVERTISE_HOST" "$ADVERTISE_PORT" '' 2>/dev/null || true)"
-      [ -z "$owner" ] || die "Snell QUIC Display Endpoint 与 ${owner} 冲突"
-    fi
-  fi
-  [ -z "$detected" ] || :
-}
-
-snell_install_rollback() {
-  local id="$1" close_pairs="${2:-}"
-  snell_remove_service "$id" >/dev/null 2>&1 || true
-  [ -z "$close_pairs" ] || nb_firewall_close_pairs "$close_pairs" >/dev/null 2>&1 || true
-  rm -f "$(snell_state_path "$id" 2>/dev/null || true)" \
-    "$(snell_config_path "$id" 2>/dev/null || true)"
-}
-
-install_snell() {
-  local interactive=0 id config_tmp state_tmp mode firewall_pairs new_pairs=""
-  local tcp_was_owned=0 udp_was_owned=0
-  [ "${YES:-0}" -eq 1 ] || interactive=1
-  nobrand_prepare_common
-  snell_collect_install_requests "$interactive"
-  snell_install_runtime "$SNELL_VERSION" 0 || return 1
-  admin_lock_acquire || return 1
-  id="$(snell_generate_instance_id)" || { admin_lock_release; return 1; }
-  if ! snell_install_port_available "$PORT"; then
-    warn "提交前发现 TCP/${PORT} 已被其它实例或进程占用"
-    nb_describe_port_conflict TCP "$PORT"
-    admin_lock_release
-    return 1
-  fi
-  config_tmp="$(mktemp_file .conf)" || { admin_lock_release; return 1; }
-  state_tmp="$(mktemp_file .json)" || { rm -f "$config_tmp"; admin_lock_release; return 1; }
-  mode="$(nb_endpoint_mode_from_values "$ADVERTISE_HOST")"
-  firewall_pairs="TCP|${PORT}"
-  [ "$SNELL_QUIC_PROXY" != on ] || firewall_pairs="${firewall_pairs}"$'\n'"UDP|${PORT}"
-  if ! snell_generate_server_config "$config_tmp" "$SNELL_VERSION" "$INGRESS_LISTEN_HOST" "$PORT" "$SNELL_PSK" \
-     || ! snell_generate_state "$state_tmp" "$id" "$SNELL_NAME" "$SNELL_VERSION" "$SNELL_PSK" \
-          "$INGRESS_LISTEN_HOST" "$PORT" "$mode" "$ADVERTISE_HOST" "$ADVERTISE_PORT" "" \
-          "$([ "$SNELL_QUIC_PROXY" = on ] && printf true || printf false)" \
-          "$INGRESS_PROFILE_ID" \
-     || ! nb_ingress_stamp_state_file "$state_tmp" "$INGRESS_PROFILE_ID" native-bind \
-     || ! snell_config_matches_state_files "$state_tmp" "$config_tmp"; then
-    rm -f "$config_tmp" "$state_tmp"
-    admin_lock_release
-    return 1
-  fi
-  nb_firewall_binding_owned TCP "$PORT" && tcp_was_owned=1
-  nb_firewall_binding_owned UDP "$PORT" && udp_was_owned=1
-  nb_lifecycle_mark_protocol_mutation_started snell || {
-    rm -f "$config_tmp" "$state_tmp"
-    admin_lock_release
-    return 1
-  }
-  if ! nb_atomic_install_file "$config_tmp" "$(snell_config_path "$id")" 0600 \
-     || ! nb_atomic_install_file "$state_tmp" "$(snell_state_path "$id")" 0600 \
-     || ! snell_install_service_runtime \
-     || ! snell_ensure_openrc_service "$id" \
-     || ! nb_firewall_open_pairs "$firewall_pairs"; then
-    rm -f "$config_tmp" "$state_tmp"
-    nb_firewall_binding_owned TCP "$PORT" && [ "$tcp_was_owned" -eq 0 ] \
-      && new_pairs="TCP|${PORT}"
-    nb_firewall_binding_owned UDP "$PORT" && [ "$udp_was_owned" -eq 0 ] \
-      && new_pairs="${new_pairs}${new_pairs:+$'\n'}UDP|${PORT}"
-    snell_install_rollback "$id" "$new_pairs"
-    admin_lock_release
-    return 1
-  fi
-  rm -f "$config_tmp" "$state_tmp"
-  nb_firewall_binding_owned TCP "$PORT" && [ "$tcp_was_owned" -eq 0 ] \
-    && new_pairs="TCP|${PORT}"
-  nb_firewall_binding_owned UDP "$PORT" && [ "$udp_was_owned" -eq 0 ] \
-    && new_pairs="${new_pairs}${new_pairs:+$'\n'}UDP|${PORT}"
-  if ! snell_service_action "$id" start \
-     || ! snell_service_active "$id" \
-     || ! snell_wait_for_required_listeners "$id" 25; then
-    snell_install_rollback "$id" "$new_pairs"
-    admin_lock_release
-    warn "Snell v${SNELL_VERSION} 启动或 TCP listener 验收失败，已回滚"
-    return 1
-  fi
-  nobrand_install_manager_script || true
-  admin_lock_release
-  snell_print_result "$id" install
-}
-
-# 与 snell_config_matches_state 相同，但用于尚未提交的事务文件。
-snell_config_matches_state_files() {
-  local state="$1" config="$2"
-  python3 - "$state" "$config" <<'PY'
-import json
-import sys
-state=json.load(open(sys.argv[1], encoding="utf-8"))
-values={}
-section=""
-for raw in open(sys.argv[2], encoding="utf-8"):
-    line=raw.strip()
-    if not line or line.startswith(("#",";")):
-        continue
-    if line.startswith("[") and line.endswith("]"):
-        section=line[1:-1]
-    elif "=" in line:
-        key,value=(x.strip() for x in line.split("=",1))
-        values[(section,key)]=value
-    else:
-        raise SystemExit(1)
-if values.get(("snell-server","listen")) != "%s:%s" % (state["listen_host"],state["listen_port"]):
-    raise SystemExit(1)
-if values.get(("snell-server","psk")) != state["psk"]:
-    raise SystemExit(1)
-if state["version"] in (4,5) and values.get(("snell-server","ipv6")) != "false":
-    raise SystemExit(1)
-PY
-}
-
-snell_set_endpoint() {
-  local id interactive=0 owner path tmp mode
-  require_root
-  id="$(snell_resolve_target_id "${SNELL_NAME:-}")" \
-    || die '请用 --name 指定唯一存在的 Snell 节点'
-  [ "${YES:-0}" -eq 1 ] || interactive=1
-  PORT="$(snell_state_field "$id" listen_port)"
-  if [ "$interactive" -eq 1 ] && [ "${ADVERTISE_CLI:-0}" -eq 0 ]; then
-    nb_collect_advertise_endpoint_interactive "Snell $(snell_state_field "$id" name)" "$PORT"
-  else
-    nb_require_explicit_endpoint_noninteractive
-  fi
-  nb_validate_advertise_endpoint "$ADVERTISE_HOST" "$ADVERTISE_PORT" TCP || die 'Display Endpoint 无效'
-  if [ -n "$ADVERTISE_HOST" ]; then
-    owner="$(nb_endpoint_conflict_owner TCP "$ADVERTISE_HOST" "$ADVERTISE_PORT" "snell:${id}" 2>/dev/null || true)"
-    [ -z "$owner" ] || die "Display Endpoint 与 ${owner} 冲突"
-    if snell_managed_udp_enabled "$id"; then
-      owner="$(nb_endpoint_conflict_owner UDP "$ADVERTISE_HOST" "$ADVERTISE_PORT" "snell:${id}" 2>/dev/null || true)"
-      [ -z "$owner" ] || die "QUIC Display Endpoint 与 ${owner} 冲突"
-    fi
-  fi
-  admin_lock_acquire || return 1
-  path="$(snell_state_path "$id")"
-  tmp="$(mktemp_file .json)" || { admin_lock_release; return 1; }
-  mode="$(nb_endpoint_mode_from_values "$ADVERTISE_HOST")"
-  if ! jq --arg mode "$mode" --arg host "$ADVERTISE_HOST" --arg port "$ADVERTISE_PORT" \
-      --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
-        .advertise_mode=$mode |
-        .advertise_host=$host |
-        .advertise_port=(if $port=="" then "" else ($port|tonumber) end) |
-        .updated_at=$updated
-      ' "$path" >"$tmp" \
-     || ! nb_atomic_install_file "$tmp" "$path" 0600; then
-    rm -f "$tmp"
-    admin_lock_release
-    return 1
-  fi
-  rm -f "$tmp"
-  # Display Endpoint 红线：不触碰 config、unit、listener、firewall、tc 或 quota。
-  admin_lock_release
-  t 'Snell 客户端展示入口已更新；server config/listener/service/firewall 均未改变' \
-    'Snell display endpoint updated; server config/listener/service/firewall are unchanged'
-  snell_print_result "$id" show
-}
-
-snell_state_set_quic() {
-  local id="$1" enabled="$2" path tmp
-  path="$(snell_state_path "$id")" || return 1
-  tmp="$(mktemp_file .json)" || return 1
-  if ! jq --argjson enabled "$enabled" --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
-      .quic_proxy_enabled=$enabled |
-      .managed_udp=$enabled |
-      .updated_at=$updated
-    ' "$path" >"$tmp" \
-     || ! nb_atomic_install_file "$tmp" "$path" 0600; then
-    rm -f "$tmp"
-    return 1
-  fi
-  rm -f "$tmp"
-}
-
-snell_set_quic() {
-  local id port desired current udp_was_owned=0 state_consistent=0
-  require_root
-  id="$(snell_resolve_target_id "${SNELL_NAME:-}")" \
-    || die '请用 --name 指定唯一存在的 Snell v5 节点'
-  [ "$(snell_state_field "$id" version)" = 5 ] || die 'QUIC Proxy 模式只适用于 Snell v5'
-  desired="${SNELL_QUIC_PROXY:-}"
-  if [ -z "$desired" ] && [ "${YES:-0}" -ne 1 ]; then
-    read_tty desired "$(t 'QUIC Proxy 模式 [on/off]: ' 'QUIC Proxy Mode [on/off]: ')" || desired=""
-  fi
-  case "$desired" in on|off) ;; *) die '请用 --quic on 或 --quic off 明确选择' ;; esac
-  current=off; snell_quic_proxy_enabled "$id" && current=on
-  snell_quic_state_consistent "$id" && state_consistent=1
-  if [ "$current" = "$desired" ] && [ "$state_consistent" -eq 1 ]; then
-    t "Snell v5 QUIC Proxy 模式已是 ${desired}" "Snell v5 QUIC Proxy Mode is already ${desired}"
-    return 0
-  fi
-  port="$(snell_state_field "$id" listen_port)"
-  admin_lock_acquire || return 1
-  if [ "$desired" = on ]; then
-    if snell_service_active "$id" \
-       && ! snell_v5_auxiliary_udp_same_process "$port"; then
-      admin_lock_release
-      die "Snell v5 同进程 UDP/${port} listener 未通过验收，拒绝开放 QUIC"
-    fi
-    if ! snell_service_active "$id" \
-       && ! nb_port_available_for_transport "$port" UDP; then
-      admin_lock_release
-      warn "Snell v5 QUIC 需要同号 UDP/${port}，但该端口已占用"
-      nb_describe_port_conflict UDP "$port"
-      return 1
-    fi
-    nb_firewall_binding_owned UDP "$port" && udp_was_owned=1
-    if ! nb_firewall_open_pairs "UDP|${port}" \
-       || ! snell_state_set_quic "$id" true; then
-      [ "$udp_was_owned" -eq 1 ] || nb_firewall_close_pairs "UDP|${port}" >/dev/null 2>&1 || true
-      admin_lock_release
-      return 1
-    fi
-  else
-    if ! nb_firewall_close_pairs "UDP|${port}" \
-       || ! snell_state_set_quic "$id" false; then
-      nb_firewall_open_pairs "UDP|${port}" >/dev/null 2>&1 || true
-      admin_lock_release
-      return 1
-    fi
-  fi
-  admin_lock_release
-  t "Snell v5 QUIC Proxy 模式: ${desired}；服务器配置、服务与 PSK 未改变" \
-    "Snell v5 QUIC Proxy Mode: ${desired}; server config/service/PSK unchanged"
-  snell_print_result "$id" show
-}
-
-snell_running() {
-  local id="$1" port
-  snell_state_exists "$id" || return 1
-  port="$(snell_state_field "$id" listen_port)"
-  snell_service_active "$id" && nb_port_is_listening TCP "$port"
-}
-
-snell_v5_auxiliary_udp_same_process() {
-  local port="$1" tcp_pids udp_pids tcp_pid udp_pid
-  tcp_pids="$(nb_port_listener_pids TCP "$port")"
-  udp_pids="$(nb_port_listener_pids UDP "$port")"
-  [ -n "$tcp_pids" ] && [ -n "$udp_pids" ] || return 1
-  for udp_pid in $udp_pids; do
-    for tcp_pid in $tcp_pids; do
-      [ "$udp_pid" != "$tcp_pid" ] || return 0
-    done
-  done
-  return 1
-}
-
-snell_wait_for_quic_listener() {
-  local port="$1" timeout="${2:-25}" elapsed=0
-  while [ "$elapsed" -lt "$timeout" ]; do
-    snell_v5_auxiliary_udp_same_process "$port" && return 0
-    sleep 1
-    elapsed=$((elapsed + 1))
-  done
-  return 1
-}
-
-snell_wait_for_required_listeners() {
-  local id="$1" timeout="${2:-25}" port policy method address owner
-  port="$(snell_state_field "$id" listen_port)" || return 1
-  policy="$(snell_state_field "$id" ingress_enforcement 2>/dev/null || printf permissive)"
-  method="$(snell_state_field "$id" ingress_enforcement_method 2>/dev/null || printf wildcard)"
-  address="$(snell_state_field "$id" ingress_local_address 2>/dev/null || true)"
-  owner="snell:${id}"
-  nb_wait_for_enforced_listener "$policy" "$method" TCP "$port" "$address" "$owner" "$timeout" || return 1
-  snell_quic_proxy_enabled "$id" || return 0
-  snell_wait_for_quic_listener "$port" "$timeout" || return 1
-  [ "$policy" != strict ] || nb_wait_for_listener_address UDP "$port" "$address" "$timeout"
-}
-
-snell_apply_ingress_enforcement() {
-  local id="$1" state config profile_id port major psk candidate_state candidate_config snapshot
-  local was_active=0 enabled policy method address rc=0
-  state="$(snell_state_path "$id")" || return 1
-  config="$(snell_config_path "$id")" || return 1
-  snell_state_exists "$id" || return 1
-  profile_id="$(snell_state_field "$id" ingress_profile_id 2>/dev/null || true)"
-  [ -n "$profile_id" ] || profile_id="$NOBRAND_LEGACY_INGRESS_PROFILE_ID"
-  nb_prepare_ingress_deployment "$profile_id" native-bind || return 1
-  port="$(snell_state_field "$id" listen_port)"
-  major="$(snell_state_field "$id" version)"
-  psk="$(snell_state_field "$id" psk)"
-  enabled="$(snell_state_field "$id" enabled 2>/dev/null || printf true)"
-  candidate_state="$(mktemp_file .snell-ingress-state)" || return 1
-  candidate_config="$(mktemp_file .snell-ingress-config)" || { rm -f "$candidate_state"; return 1; }
-  snapshot="$(mktemp_dir)" || { rm -f "$candidate_state" "$candidate_config"; return 1; }
-  cp -a "$state" "$snapshot/state" && cp -a "$config" "$snapshot/config" || rc=1
-  if [ "$rc" -eq 0 ]; then
-    jq --arg listen "$INGRESS_LISTEN_HOST" "$state" '.listen_host=$listen' >"$candidate_state" \
-      && nb_ingress_stamp_state_file "$candidate_state" "$profile_id" native-bind \
-      && snell_generate_server_config "$candidate_config" "$major" "$INGRESS_LISTEN_HOST" "$port" "$psk" \
-      && snell_config_matches_state_files "$candidate_state" "$candidate_config" || rc=1
-  fi
-  snell_service_active "$id" && was_active=1
-  if [ "$rc" -eq 0 ]; then
-    nb_atomic_install_file "$candidate_config" "$config" 0600 \
-      && nb_atomic_install_file "$candidate_state" "$state" 0600 || rc=1
-  fi
-  if [ "$rc" -eq 0 ] && [ "$was_active" -eq 1 ]; then
-    [ "${NOBRAND_TEST_INGRESS_SERVICE_FAIL:-0}" -eq 0 ] \
-      && snell_service_action "$id" restart \
-      && [ "${NOBRAND_TEST_INGRESS_LISTENER_FAIL:-0}" -eq 0 ] \
-      && snell_wait_for_required_listeners "$id" 25 || rc=1
-  fi
-  if [ "$rc" -ne 0 ]; then
-    nb_atomic_install_file "$snapshot/config" "$config" 0600 >/dev/null 2>&1 || true
-    nb_atomic_install_file "$snapshot/state" "$state" 0600 >/dev/null 2>&1 || true
-    if [ "$was_active" -eq 1 ]; then
-      snell_service_action "$id" restart >/dev/null 2>&1 \
-        && snell_wait_for_required_listeners "$id" 25 >/dev/null 2>&1 || true
-    else
-      snell_service_action "$id" stop >/dev/null 2>&1 || true
-    fi
-  elif [ "$enabled" != true ] && [ "$was_active" -eq 0 ]; then
-    snell_service_action "$id" stop >/dev/null 2>&1 || true
-  fi
-  rm -f "$candidate_state" "$candidate_config"
-  rm -rf -- "$snapshot"
-  return "$rc"
-}
-
-snell_node_rows() {
-  local id name major endpoint host port status quic endpoint_text transport
-  while IFS= read -r id; do
-    [ -n "$id" ] || continue
-    name="$(snell_state_field "$id" name)"
-    major="$(snell_state_field "$id" version)"
-    endpoint="$(snell_effective_endpoint "$id")"
-    host="${endpoint%%|*}"; port="${endpoint#*|}"
-    status=Stopped; snell_running "$id" && status=Running
-    quic=off; snell_quic_proxy_enabled "$id" && quic=on
-    endpoint_text="$(url_host "$host"):${port}/TCP; $(t 'QUIC 已关闭' 'QUIC Off')"
-    transport=TCP
-    if [ "$quic" = on ]; then
-      endpoint_text="$(url_host "$host"):${port}/TCP; $(t 'QUIC 已开启（UDP 同端口）' 'QUIC On (UDP same port)')"
-      transport=TCP+UDP
-    fi
-    printf 'Snell/v%s|%s|%s|%s|%s\n' "$major" "$name" "$endpoint_text" "$status" "$transport"
-  done < <(snell_instance_ids)
-}
-
-snell_print_result() {
-  local id="$1" context="${2:-show}" name major psk listen_host listen_port endpoint host port status runtime quic quic_label
-  snell_state_exists "$id" || { t 'Snell 节点不存在' 'Snell node does not exist'; return 1; }
-  name="$(snell_state_field "$id" name)"; major="$(snell_state_field "$id" version)"
-  psk="$(snell_state_field "$id" psk)"; listen_host="$(snell_state_field "$id" listen_host)"
-  listen_port="$(snell_state_field "$id" listen_port)"; runtime="$(snell_state_field "$id" runtime_version)"
-  endpoint="$(snell_effective_endpoint "$id")"; host="${endpoint%%|*}"; port="${endpoint#*|}"
-  status=已停止; snell_running "$id" && status=运行中
-  quic=Disabled; snell_quic_proxy_enabled "$id" && quic=Enabled
-  quic_label='已禁用'; [ "$quic" != Enabled ] || quic_label='已启用'
-  nobrand_print_banner
-  msg "$([ "$context" = install ] && printf '部署完成' || printf '节点配置')"
-  msg ''
-  printf '协议        Snell v%s\n节点        %s\n实例        %s\n状态        %s\nRuntime     %s\n' \
-    "$major" "$name" "$id" "$status" "$runtime"
-  msg ''
-  printf '实际监听 / Actual Listener\n  地址      %s\n  端口      %s\n  传输      TCP\n' "$listen_host" "$listen_port"
-  printf '  QUIC Proxy %s\n' "$quic_label"
-  [ "$quic" != Enabled ] || printf '  QUIC 传输 UDP/%s（同端口）\n' "$listen_port"
-  msg ''
-  printf '网络入口 / Ingress\n  入口配置 / Ingress Profile  %s\n' "$(nb_ingress_profile_name "$(snell_state_field "$id" ingress_profile_id 2>/dev/null || true)")"
-  msg ''
-  printf '展示端点 / Display Endpoint\n  主机      %s\n  端口      %s\n' "$host" "$port"
-  msg ''
-  printf '认证\n  PSK       %s\n' "$psk"
-  msg ''
-  snell_print_client_exports "$id"
-}
-
-snell_show() {
-  local id found=0
-  if [ -n "${SNELL_NAME:-}" ]; then
-    id="$(snell_resolve_target_id "$SNELL_NAME")" || die "Snell 节点不存在: $SNELL_NAME"
-    snell_print_result "$id" show
-    return
-  fi
-  while IFS= read -r id; do
-    [ -n "$id" ] || continue
-    [ "$found" -eq 0 ] || msg ''
-    snell_print_result "$id" show
-    found=1
-  done < <(snell_instance_ids)
-  [ "$found" -eq 1 ] || t 'Snell 未安装任何节点' 'No Snell nodes are installed'
-}
-
-snell_service_command() {
-  local action="$1" id port was_enabled firewall_pairs
-  id="$(snell_resolve_target_id "${SNELL_NAME:-}")" || die '请用 --name 指定唯一存在的 Snell 节点'
-  port="$(snell_state_field "$id" listen_port)"
-  was_enabled="$(snell_state_field "$id" enabled)"
-  firewall_pairs="$(snell_firewall_pairs "$id")"
-  case "$action" in
-    start)
-      nb_firewall_open_pairs "$firewall_pairs" || return 1
-      if ! snell_service_action "$id" start || ! snell_wait_for_required_listeners "$id" 25 \
-         || ! snell_state_set_enabled "$id" true; then
-        snell_service_action "$id" stop >/dev/null 2>&1 || true
-        [ "$was_enabled" = true ] || snell_state_set_enabled "$id" false >/dev/null 2>&1 || true
-        return 1
-      fi
-      ;;
-    stop)
-      snell_service_action "$id" stop || return 1
-      if ! snell_state_set_enabled "$id" false; then
-        [ "$was_enabled" != true ] || snell_service_action "$id" start >/dev/null 2>&1 || true
-        return 1
-      fi
-      ;;
-    restart)
-      snell_service_action "$id" restart && snell_wait_for_required_listeners "$id" 25
-      ;;
-    status)
-      if snell_running "$id"; then msg "Snell $(snell_state_field "$id" name)：运行中"; else msg "Snell $(snell_state_field "$id" name)：已停止"; return 1; fi
-      ;;
-  esac
-}
-
-remove_snell_instance() {
-  local id firewall_pairs
-  require_root
-  id="$(snell_resolve_target_id "${SNELL_NAME:-}")" || die '请用 --name 指定唯一存在的 Snell 节点'
-  firewall_pairs="$(snell_firewall_pairs "$id")"
-  admin_lock_acquire || return 1
-  snell_remove_service "$id" || { admin_lock_release; return 1; }
-  nb_firewall_close_pairs "$firewall_pairs" || { admin_lock_release; return 1; }
-  rm -f "$(snell_config_path "$id")" "$(snell_state_path "$id")"
-  admin_lock_release
-  t "Snell 节点已删除: ${SNELL_NAME:-$id}" "Snell node removed: ${SNELL_NAME:-$id}"
-}
-
-snell_doctor_instance() {
-  local id="$1" failed=0 name major port endpoint host advertise_port mode runtime actual_runtime quic enabled
-  snell_state_valid "$id" || return 1
-  name="$(snell_state_field "$id" name)"; major="$(snell_state_field "$id" version)"
-  port="$(snell_state_field "$id" listen_port)"; runtime="$(snell_state_field "$id" runtime_version)"
-  enabled="$(snell_state_field "$id" enabled 2>/dev/null || true)"
-  case "$enabled" in true|false) ;; *) return 1 ;; esac
-  printf '实例 %s（%s，v%s）\n' "$name" "$id" "$major"
-  if [ -x "$(snell_runtime_path "$major")" ]; then
-    actual_runtime="$(snell_runtime_reported_version "$(snell_runtime_path "$major")" 2>/dev/null || true)"
-    [[ "$actual_runtime" = "$major".* ]] \
-      && nb_doctor_line PASS "官方 Runtime v${actual_runtime}" \
-      || { nb_doctor_line FAIL "Runtime 主版本不匹配: ${actual_runtime:-未知}"; failed=1; }
-    [ "$actual_runtime" = "$runtime" ] || nb_doctor_line INFO "状态记录 Runtime=${runtime}，已安装=${actual_runtime}"
-  else
-    nb_doctor_line FAIL "缺少 Runtime: $(snell_runtime_path "$major")"; failed=1
-  fi
-  snell_config_matches_state "$id" && nb_doctor_line PASS '配置 / 状态一致' \
-    || { nb_doctor_line FAIL '配置 / 状态不一致'; failed=1; }
-  snell_quic_state_consistent "$id" \
-    && nb_doctor_line PASS 'QUIC 状态 / 受管 UDP 一致' \
-    || { nb_doctor_line FAIL 'QUIC 状态 / 受管 UDP 不一致'; failed=1; }
-  quic=off; snell_quic_proxy_enabled "$id" && quic=on
-  if [ "$enabled" = true ]; then
-    snell_running "$id" && nb_doctor_line PASS "服务与 TCP/${port} 监听正常" \
-      || { nb_doctor_line FAIL "服务 / 监听异常: TCP/${port}"; failed=1; }
-  elif snell_service_active "$id" || nb_port_is_listening TCP "$port" \
-       || { [ "$quic" = on ] && nb_port_is_listening UDP "$port"; }; then
-    nb_doctor_line FAIL "服务标记为已停止，但仍有服务或监听: TCP/UDP ${port}"
-    failed=1
-  else
-    nb_doctor_line PASS '服务按状态保持停止，且无残留监听'
-  fi
-  if [ "$major" = 5 ] && [ "$quic" = on ]; then
-    if [ "$enabled" = true ]; then
-      snell_v5_auxiliary_udp_same_process "$port" \
-        && nb_doctor_line PASS "QUIC Proxy 已启用；同进程 UDP/${port} 监听正常" \
-        || { nb_doctor_line FAIL "QUIC Proxy 已启用，但缺少同进程 UDP/${port} 监听"; failed=1; }
-    fi
-    nb_firewall_binding_owned UDP "$port" \
-      && nb_doctor_line PASS "QUIC 防火墙归属正常: UDP/${port}" \
-      || { nb_doctor_line FAIL "QUIC Proxy 已启用，但缺少 UDP/${port} 防火墙归属"; failed=1; }
-  elif [ "$major" = 5 ]; then
-    nb_doctor_line PASS 'QUIC Proxy 已禁用；UDP 公网归属已关闭'
-    if nb_firewall_binding_owned UDP "$port"; then
-      nb_doctor_line FAIL "QUIC Proxy 已禁用，但 UDP/${port} 仍归 NoBrand 管理"
-      failed=1
-    elif nb_port_is_listening UDP "$port"; then
-      if snell_v5_auxiliary_udp_same_process "$port"; then
-        nb_doctor_line INFO \
-          "检测到 Runtime 辅助监听 UDP/${port}；owner=snell-server；公网归属=OFF；规范归属=TCP/${port}"
-      else
-        nb_doctor_line WARN \
-          "检测到同端口 UDP/${port} 监听，但无法确认其归属于 Snell 主进程"
-      fi
-    fi
-  fi
-  nb_firewall_binding_owned TCP "$port" && nb_doctor_line PASS "防火墙归属正常: TCP/${port}" \
-    || nb_doctor_line INFO "防火墙规则不归 NoBrand 管理（预先存在 / 无本地防火墙）: TCP/${port}"
-  mode="$(snell_state_field "$id" advertise_mode)"; host="$(snell_state_field "$id" advertise_host)"
-  advertise_port="$(snell_state_field "$id" advertise_port)"
-  nb_validate_advertise_endpoint "$host" "$advertise_port" TCP \
-    && nb_doctor_line PASS "展示端点 / Display Endpoint 模式=${mode}" \
-    || { nb_doctor_line FAIL '展示端点 / Display Endpoint 状态无效'; failed=1; }
-  endpoint="$(snell_effective_endpoint "$id" 2>/dev/null || true)"
-  [ -n "$endpoint" ] || { nb_doctor_line FAIL '无法解析有效展示端点'; failed=1; }
-  return "$failed"
-}
-
-snell_doctor_all() {
-  local id found=0 failed=0
-  while IFS= read -r id; do
-    [ -n "$id" ] || continue
-    snell_doctor_instance "$id" || failed=1
-    found=1
-  done < <(snell_instance_ids)
-  [ "$found" -eq 1 ] || nb_doctor_line INFO 'Snell 未安装'
-  return "$failed"
-}
-
-snell_upgrade_runtime() {
-  local major id ids backup="" metadata_backup="" runtime metadata active_ids="" failed=0 port
-  nobrand_prepare_common
-  if [ -n "${SNELL_NAME:-}" ]; then
-    id="$(snell_resolve_target_id "$SNELL_NAME")" || die "Snell 节点不存在: $SNELL_NAME"
-    major="$(snell_state_field "$id" version)"
-  elif [ "${SNELL_VERSION_CLI:-0}" -eq 1 ]; then
-    major="${SNELL_VERSION:-5}"
-  else
-    major=5
-  fi
-  case "$major" in 4|5) ;; *) die 'Snell 只支持 v4、v5' ;; esac
-  runtime="$(snell_runtime_path "$major")"
-  metadata="$(snell_runtime_metadata_path "$major")"
-  if [ -e "$runtime" ]; then
-    backup="$(mktemp_file .snell-runtime)" || return 1
-    cp -a "$runtime" "$backup" || { rm -f "$backup"; return 1; }
-  fi
-  if [ -e "$metadata" ]; then
-    metadata_backup="$(mktemp_file .snell-metadata)" || { rm -f "$backup"; return 1; }
-    cp -a "$metadata" "$metadata_backup" || { rm -f "$backup" "$metadata_backup"; return 1; }
-  fi
-  while IFS= read -r id; do
-    [ "$(snell_state_field "$id" version)" = "$major" ] || continue
-    snell_service_active "$id" && active_ids="${active_ids}${id}"$'\n'
-  done < <(snell_instance_ids)
-  admin_lock_acquire || { rm -f "$backup"; return 1; }
-  if ! snell_install_runtime "$major" 1; then
-    rm -f "$backup"
-    admin_lock_release
-    return 1
-  fi
-  while IFS= read -r id; do
-    [ -n "$id" ] || continue
-    port="$(snell_state_field "$id" listen_port)"
-    snell_service_action "$id" restart >/dev/null 2>&1 \
-      && snell_wait_for_required_listeners "$id" 25 || { failed=1; break; }
-  done <<<"$active_ids"
-  if [ "$failed" -eq 1 ]; then
-    [ -n "$backup" ] && install -m 0755 "$backup" "$runtime"
-    if [ -n "$metadata_backup" ]; then
-      install -m 0600 "$metadata_backup" "$metadata"
-    else
-      rm -f "$metadata"
-    fi
-    while IFS= read -r id; do [ -z "$id" ] || snell_service_action "$id" restart >/dev/null 2>&1 || true; done <<<"$active_ids"
-    rm -f "$backup" "$metadata_backup"
-    admin_lock_release
-    warn "Snell v${major} 升级后实例验收失败，已恢复旧 Runtime"
-    return 1
-  fi
-  ids="$(snell_instance_ids)"
-  while IFS= read -r id; do
-    [ "$(snell_state_field "$id" version 2>/dev/null || true)" = "$major" ] || continue
-    snell_refresh_runtime_metadata "$id" || true
-  done <<<"$ids"
-  rm -f "$backup" "$metadata_backup"
-  admin_lock_release
-  t "Snell v${major} Runtime 升级完成" "Snell v${major} runtime upgraded"
-}
-
-snell_refresh_runtime_metadata() {
-  local id="$1" path tmp major runtime status
-  path="$(snell_state_path "$id")"; major="$(snell_state_field "$id" version)"
-  runtime="$(snell_runtime_release_version "$major")" || return 1
-  status="$(snell_runtime_release_status "$major")"
-  tmp="$(mktemp_file .json)" || return 1
-  jq --arg runtime "$runtime" --arg status "$status" --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    '.runtime_version=$runtime | .runtime_status=$status | .updated_at=$updated' "$path" >"$tmp" \
-    && nb_atomic_install_file "$tmp" "$path" 0600
-  local rc=$?
-  rm -f "$tmp"
-  return "$rc"
-}
+# Native architecture: ordinary protocols use src/19-splicore.sh.
 
 nobrand_run_snell_action() {
   case "${SNELL_ACTION:-menu}" in
     menu) snell_menu_loop ;;
-    install)
-      if [ "${NOBRAND_MANAGER_SESSION_ACTIVE:-0}" -eq 1 ]; then
-        nb_lifecycle_run_protocol_install snell install_snell
-      else
-        install_snell
-      fi
-      ;;
-    show) snell_show ;;
-    set-endpoint) snell_set_endpoint ;;
-    set-quic) snell_set_quic ;;
-    remove) remove_snell_instance ;;
-    start|stop|restart|status) snell_service_command "$SNELL_ACTION" ;;
-    doctor) snell_doctor_all ;;
-    upgrade) snell_upgrade_runtime ;;
     help) nobrand_usage ;;
+    *) nb_splicore_protocol snell "${SNELL_ACTION:-status}" "${SNELL_NAME:-}" ;;
   esac
 }
 
-# ---------- Hysteria2 engine: Xray-core v2 inbound parity ----------
-
-hysteria2_state_exists() {
-  [ -s "$NOBRAND_HY2_STATE_FILE" ] && jq empty "$NOBRAND_HY2_STATE_FILE" >/dev/null 2>&1
-}
-
-hysteria2_state_field() {
-  local field="$1"
-  hysteria2_state_exists || return 1
-  jq -r --arg field "$field" \
-    'if has($field) and .[$field] != null then .[$field] else empty end' "$NOBRAND_HY2_STATE_FILE"
-}
-
-hysteria2_valid_sni() {
-  local value="${1:-}"
-  valid_domain_name "$value" || {
-    [[ "$value" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && valid_ip_literal "$value"
-  }
-}
-
-# 保持 Xray-OneClick lib/57-hysteria2.sh 的 prime256v1、3650 days、CN、
-# 0600/0644 与 key-first atomic rollback 语义。
-generate_hysteria2_cert() {
-  local cert="$NOBRAND_HY2_CERT_FILE" key="$NOBRAND_HY2_KEY_FILE"
-  local tmp_cert tmp_key old_key=""
-  command -v openssl >/dev/null 2>&1 || {
-    warn '[Hysteria2] 需要 openssl 生成自签证书。'
-    return 1
-  }
-  mkdir -p "$NOBRAND_HY2_CONFIG_DIR" || return 1
-  chmod 0700 "$NOBRAND_HY2_CONFIG_DIR" || return 1
-  tmp_key="$(mktemp "${key}.tmp.XXXXXX")" || return 1
-  tmp_cert="$(mktemp "${cert}.tmp.XXXXXX")" || { rm -f "$tmp_key"; return 1; }
-  if ! openssl ecparam -genkey -name prime256v1 -out "$tmp_key" 2>/dev/null; then
-    rm -f "$tmp_key" "$tmp_cert"
-    warn '[Hysteria2] 生成 P-256 私钥失败。'
-    return 1
-  fi
-  if ! openssl req -new -x509 -days 3650 -key "$tmp_key" -out "$tmp_cert" \
-      -subj "/CN=${HY2_SNI:-bing.com}" 2>/dev/null; then
-    rm -f "$tmp_key" "$tmp_cert"
-    warn '[Hysteria2] 生成自签证书失败。'
-    return 1
-  fi
-  chmod 0600 "$tmp_key" && chmod 0644 "$tmp_cert" \
-    || { rm -f "$tmp_key" "$tmp_cert"; return 1; }
-  if [ -f "$key" ]; then
-    old_key="$(mktemp "${key}.rollback.XXXXXX")" \
-      || { rm -f "$tmp_key" "$tmp_cert"; return 1; }
-    cp -a "$key" "$old_key" \
-      || { rm -f "$tmp_key" "$tmp_cert" "$old_key"; return 1; }
-  fi
-  mv "$tmp_key" "$key" \
-    || { rm -f "$tmp_key" "$tmp_cert" "$old_key"; return 1; }
-  if ! mv "$tmp_cert" "$cert"; then
-    rm -f "$tmp_cert"
-    if [ -n "$old_key" ]; then cp -a "$old_key" "$key" || true; else rm -f "$key"; fi
-    rm -f "$old_key"
-    return 1
-  fi
-  rm -f "$old_key"
-}
-
-hysteria2_generate_config() {
-  local output="$1" listen="$2" port="$3" auth="$4" sni="$5" obfs="$6"
-  local cert="${7:-$NOBRAND_HY2_CERT_FILE}" key="${8:-$NOBRAND_HY2_KEY_FILE}"
-  jq -n --arg tag "$NOBRAND_HY2_TAG" --arg listen "$listen" --arg port "$port" \
-    --arg auth "$auth" --arg cert "$cert" --arg key "$key" --arg obfs "$obfs" '
-    {
-      "log": {"loglevel":"warning"},
-      "inbounds": [{
-        "tag": $tag,
-        "listen": $listen,
-        "port": ($port|tonumber),
-        "protocol": "hysteria",
-        "settings": {
-          "version": 2,
-          "clients": [{"auth":$auth,"email":"hysteria2@xray"}]
-        },
-        "streamSettings": {
-          "network": "hysteria",
-          "security": "tls",
-          "tlsSettings": {
-            "alpn": ["h3"],
-            "certificates": [{"certificateFile":$cert,"keyFile":$key}]
-          },
-          "hysteriaSettings": {"version":2},
-          "finalmask": {
-            "udp": [{"type":"salamander","settings":{"password":$obfs}}]
-          }
-        }
-      }],
-      "outbounds": [{"tag":"direct","protocol":"freedom"}],
-      "routing": {"rules":[]}
-    }
-  ' >"$output"
-}
-
-hysteria2_build_share_link() {
-  local auth="${1:-}" host="${2:-}" port="${3:-}" sni="${4:-}" obfs="${5:-}"
-  local name="${6:-NoBrand-Hysteria2}" auth_uri host_uri sni_uri obfs_uri name_uri
-  [ -n "$auth" ] && [ -n "$host" ] && nb_valid_port "$port" && [ -n "$sni" ] || return 1
-  auth_uri="$(urlencode "$auth")" || return 1
-  host_uri="$(url_host "$host")"
-  sni_uri="$(urlencode "$sni")" || return 1
-  obfs_uri="$(urlencode "$obfs")" || return 1
-  name_uri="$(urlencode "$name")" || return 1
-  printf 'hysteria2://%s@%s:%s?sni=%s&alpn=h3&insecure=1&obfs=salamander&obfs-password=%s#%s' \
-    "$auth_uri" "$host_uri" "$port" "$sni_uri" "$obfs_uri" "$name_uri"
-}
-
-hysteria2_current_share_link() {
-  local auth sni obfs listen_port mode advertise_host advertise_port ingress_profile_id host port
-  hysteria2_state_exists || return 1
-  auth="$(hysteria2_state_field auth)"
-  sni="$(hysteria2_state_field sni)"
-  obfs="$(hysteria2_state_field obfs)"
-  listen_port="$(hysteria2_state_field listen_port)"
-  mode="$(hysteria2_state_field advertise_mode)"
-  advertise_host="$(hysteria2_state_field advertise_host)"
-  advertise_port="$(hysteria2_state_field advertise_port)"
-  ingress_profile_id="$(hysteria2_state_field ingress_profile_id 2>/dev/null || true)"
-  host="$(nb_effective_advertise_host "$mode" "$advertise_host" "$ingress_profile_id")"
-  port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port" "$ingress_profile_id")"
-  hysteria2_build_share_link "$auth" "$host" "$port" "$sni" "$obfs"
-}
-
-hysteria2_export_values() {
-  local auth sni obfs listen_port mode advertise_host advertise_port ingress_profile_id host port
-  hysteria2_state_exists || return 1
-  auth="$(hysteria2_state_field auth)"
-  sni="$(hysteria2_state_field sni)"
-  obfs="$(hysteria2_state_field obfs)"
-  listen_port="$(hysteria2_state_field listen_port)"
-  mode="$(hysteria2_state_field advertise_mode)"
-  advertise_host="$(hysteria2_state_field advertise_host)"
-  advertise_port="$(hysteria2_state_field advertise_port)"
-  ingress_profile_id="$(hysteria2_state_field ingress_profile_id 2>/dev/null || true)"
-  host="$(nb_effective_advertise_host "$mode" "$advertise_host" "$ingress_profile_id")"
-  port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port" "$ingress_profile_id")"
-  printf '%s\t%s\t%s\t%s\t%s\n' "$auth" "$sni" "$obfs" "$host" "$port"
-}
-
-hysteria2_export_mihomo() {
-  local auth sni obfs host port values
-  values="$(hysteria2_export_values)" || return 1
-  IFS=$'\t' read -r auth sni obfs host port <<<"$values"
-  jq -n --arg server "$host" --arg port "$port" --arg password "$auth" \
-    --arg sni "$sni" --arg obfs "$obfs" -r '
-      "- name: NoBrand-Hysteria2\n" +
-      "  type: hysteria2\n" +
-      "  server: " + ($server|tojson) + "\n" +
-      "  port: " + $port + "\n" +
-      "  password: " + ($password|tojson) + "\n" +
-      "  sni: " + ($sni|tojson) + "\n" +
-      "  skip-cert-verify: true\n" +
-      "  obfs: salamander\n" +
-      "  obfs-password: " + ($obfs|tojson)
-    '
-}
-
-hysteria2_export_singbox() {
-  local auth sni obfs host port values
-  values="$(hysteria2_export_values)" || return 1
-  IFS=$'\t' read -r auth sni obfs host port <<<"$values"
-  jq -n --arg server "$host" --arg port "$port" --arg password "$auth" \
-    --arg sni "$sni" --arg obfs "$obfs" '
-      {
-        type:"hysteria2",
-        tag:"NoBrand-Hysteria2",
-        server:$server,
-        server_port:($port|tonumber),
-        password:$password,
-        obfs:{type:"salamander",password:$obfs},
-        tls:{enabled:true,server_name:$sni,insecure:true,alpn:["h3"]}
-      }
-    '
-}
-
-hysteria2_generate_state() {
-  local output="$1" listen="$2" port="$3" auth="$4" sni="$5" obfs="$6"
-  local advertise_mode="$7" advertise_host="$8" advertise_port="$9"
-  local created_at="${10:-}" updated_at link effective_host effective_port runtime_version
-  local ingress_profile_id="${11:-}"
-  [ -n "$created_at" ] || created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  updated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  effective_host="$(nb_effective_advertise_host "$advertise_mode" "$advertise_host" "$ingress_profile_id")"
-  effective_port="$(nb_effective_advertise_port "$advertise_mode" "$advertise_port" "$port" "$ingress_profile_id")"
-  link="$(hysteria2_build_share_link "$auth" "$effective_host" "$effective_port" "$sni" "$obfs")" || return 1
-  runtime_version="$(nobrand_xray_version 2>/dev/null || printf unknown)"
-  jq -n --arg auth "$auth" --arg sni "$sni" --arg obfs "$obfs" \
-    --arg listen "$listen" --arg port "$port" --arg mode "$advertise_mode" \
-    --arg advertise_host "$advertise_host" --arg advertise_port "$advertise_port" \
-    --arg tag "$NOBRAND_HY2_TAG" --arg link "$link" --arg runtime "$runtime_version" \
-    --arg created "$created_at" --arg updated "$updated_at" --arg ingress_profile_id "$ingress_profile_id" '
-    {
-      "protocol":"hysteria2",
-      "auth":$auth,
-      "sni":$sni,
-      "obfs":$obfs,
-      "listen_host":$listen,
-      "listen_port":($port|tonumber),
-      "transport":"udp",
-      "advertise_mode":$mode,
-      "advertise_host":$advertise_host,
-      "advertise_port":(if $advertise_port=="" then "" else ($advertise_port|tonumber) end),
-      "tag":$tag,
-      "runtime_version":$runtime,
-      "link":$link,
-      "enabled":true,
-      "created_at":$created,
-      "updated_at":$updated
-    }
-    + if $ingress_profile_id=="" then {} else {ingress_profile_id:$ingress_profile_id} end
-  ' >"$output"
-}
-
-hysteria2_snapshot_file() {
-  local source="$1" destination="$2"
-  if [ -e "$source" ]; then cp -a "$source" "$destination"; else printf absent >"${destination}.absent"; fi
-}
-
-hysteria2_restore_snapshot_file() {
-  local snapshot="$1" destination="$2"
-  if [ -f "${snapshot}.absent" ]; then
-    rm -f "$destination"
-  elif [ -e "$snapshot" ]; then
-    mkdir -p "$(dirname "$destination")"
-    cp -a "$snapshot" "$destination"
-  fi
-}
-
-hysteria2_configure_requests() {
-  local interactive="${1:-0}" old_port="" conflict_owner=""
-  if hysteria2_state_exists && [ "${INGRESS_PROFILE_CLI:-0}" -eq 0 ]; then
-    INGRESS_PROFILE_ID="$(hysteria2_state_field ingress_profile_id 2>/dev/null || true)"
-    [ -n "$INGRESS_PROFILE_ID" ] || INGRESS_PROFILE_ID="$NOBRAND_LEGACY_INGRESS_PROFILE_ID"
-  else
-    nb_prepare_ingress_request || return 1
-  fi
-  nb_prepare_ingress_deployment "$INGRESS_PROFILE_ID" native-bind \
-    || die 'Hysteria2 无法绑定所选 Ingress 的 Strict 本地地址'
-  HY2_LISTEN="$INGRESS_LISTEN_HOST"
-  hysteria2_state_exists && old_port="$(hysteria2_state_field listen_port 2>/dev/null || true)"
-  if [ -z "${PORT:-}" ]; then
-    PORT="$(nb_select_available_port UDP "$INGRESS_PROFILE_ID")" \
-      || die '所选入口配置没有可用 Hysteria2 UDP 自动端口；manual-only 必须显式使用 --port'
-    PORT_AUTO_SELECTED=1
-  else
-    nb_valid_port "$PORT" || die 'Hysteria2 端口必须是 1-65535'
-    PORT="$(normalize_uint "$PORT")"
-    nb_warn_if_outside_recommended_range "$PORT" "$INGRESS_PROFILE_ID"
-    if [ "$PORT" != "$old_port" ] \
-       && ! nb_port_available_for_profile "$PORT" UDP "$INGRESS_PROFILE_ID" 'hy2:default'; then
-      warn "Hysteria2 UDP/${PORT} 已占用"
-      nb_describe_port_conflict UDP "$PORT"
-      return 1
-    fi
-  fi
-  if [ "$interactive" -eq 1 ] && [ "${ADVERTISE_CLI:-0}" -eq 0 ]; then
-    nb_collect_advertise_endpoint_interactive Hysteria2 "$PORT"
-  else
-    nb_require_explicit_endpoint_noninteractive
-  fi
-  nb_validate_advertise_endpoint "$ADVERTISE_HOST" "$ADVERTISE_PORT" UDP \
-    || die 'Hysteria2 Display Endpoint 无效'
-  if [ -n "$ADVERTISE_HOST" ]; then
-    conflict_owner="$(nb_endpoint_conflict_owner UDP "$ADVERTISE_HOST" "$ADVERTISE_PORT" 'hy2:default' 2>/dev/null || true)"
-    [ -z "$conflict_owner" ] || die "Hysteria2 Display Endpoint 与 ${conflict_owner} 冲突"
-  fi
-  if [ -z "${HY2_SNI:-}" ]; then
-    if [ "$interactive" -eq 1 ]; then
-      read_tty HY2_SNI "$(t 'Hysteria2 伪装 SNI（回车随机）: ' 'Hysteria2 camouflage SNI (Enter=random): ')" || HY2_SNI=""
-      [ -n "$HY2_SNI" ] || HY2_SNI="${NOBRAND_HY2_SNI_CANDIDATES[$((RANDOM % ${#NOBRAND_HY2_SNI_CANDIDATES[@]}))]}"
-    else
-      HY2_SNI="${NOBRAND_HY2_SNI_CANDIDATES[0]}"
-    fi
-  fi
-  hysteria2_valid_sni "$HY2_SNI" || die 'Hysteria2 SNI 必须是有效域名或 IPv4 地址'
-  HY2_AUTH="$(openssl rand -hex 16 2>/dev/null || true)"
-  [ -n "$HY2_AUTH" ] || HY2_AUTH="$(random_token)$(random_token)$(random_token)"
-  HY2_OBFS="$(openssl rand -hex 16 2>/dev/null || true)"
-  [ -n "$HY2_OBFS" ] || HY2_OBFS="$(random_token)$(random_token)$(random_token)"
-}
-
-hysteria2_install_rollback() {
-  local snapshot="$1" was_active="$2" new_binding_owned="$3"
-  nobrand_hy2_service_action stop >/dev/null 2>&1 || true
-  [ "$new_binding_owned" -eq 0 ] || nb_firewall_close_pairs "UDP|${PORT}" >/dev/null 2>&1 || true
-  hysteria2_restore_snapshot_file "$snapshot/config" "$NOBRAND_HY2_CONFIG_FILE"
-  hysteria2_restore_snapshot_file "$snapshot/state" "$NOBRAND_HY2_STATE_FILE"
-  hysteria2_restore_snapshot_file "$snapshot/cert" "$NOBRAND_HY2_CERT_FILE"
-  hysteria2_restore_snapshot_file "$snapshot/key" "$NOBRAND_HY2_KEY_FILE"
-  hysteria2_restore_snapshot_file "$snapshot/service-systemd" "$NOBRAND_HY2_SYSTEMD_SERVICE"
-  hysteria2_restore_snapshot_file "$snapshot/service-openrc" "$NOBRAND_HY2_OPENRC_SERVICE"
-  hysteria2_restore_snapshot_file "$snapshot/xray" "$NOBRAND_XRAY_BIN"
-  [ "$(nb_service_manager)" != systemd ] || systemctl daemon-reload >/dev/null 2>&1 || true
-  [ "$was_active" -eq 0 ] || nobrand_hy2_service_action start >/dev/null 2>&1 || true
-}
-
-install_hysteria2() {
-  local interactive=0 snapshot config_tmp state_tmp advertise_mode old_port="" old_created=""
-  local was_active=0 binding_was_owned=0 binding_now_owned=0
-  [ "${YES:-0}" -eq 1 ] || interactive=1
-  nobrand_prepare_common
-  hysteria2_configure_requests "$interactive" || return 1
-  admin_lock_acquire || return 1
-  snapshot="$(mktemp_dir)" || { admin_lock_release; return 1; }
-  hysteria2_snapshot_file "$NOBRAND_HY2_CONFIG_FILE" "$snapshot/config"
-  hysteria2_snapshot_file "$NOBRAND_HY2_STATE_FILE" "$snapshot/state"
-  hysteria2_snapshot_file "$NOBRAND_HY2_CERT_FILE" "$snapshot/cert"
-  hysteria2_snapshot_file "$NOBRAND_HY2_KEY_FILE" "$snapshot/key"
-  hysteria2_snapshot_file "$NOBRAND_HY2_SYSTEMD_SERVICE" "$snapshot/service-systemd"
-  hysteria2_snapshot_file "$NOBRAND_HY2_OPENRC_SERVICE" "$snapshot/service-openrc"
-  hysteria2_snapshot_file "$NOBRAND_XRAY_BIN" "$snapshot/xray"
-  nobrand_hy2_service_active && was_active=1
-  if hysteria2_state_exists; then
-    old_port="$(hysteria2_state_field listen_port 2>/dev/null || true)"
-    old_created="$(hysteria2_state_field created_at 2>/dev/null || true)"
-  fi
-  if ! nobrand_install_xray_runtime 0; then
-    if [ "${NOBRAND_LIFECYCLE_ACTIVE:-0}" -ne 1 ] \
-       || [ "$(nb_lifecycle_mutation_started 2>/dev/null || printf 1)" = 1 ]; then
-      hysteria2_install_rollback "$snapshot" "$was_active" 0
-    fi
-    rm -rf -- "$snapshot"
-    admin_lock_release
-    return 1
-  fi
-  nb_firewall_binding_owned UDP "$PORT" && binding_was_owned=1
-  if [ "$was_active" -eq 1 ]; then
-    nb_lifecycle_mark_protocol_mutation_started hy2 || {
-      rm -rf -- "$snapshot"; admin_lock_release; return 1
-    }
-    nobrand_hy2_service_action stop || {
-      hysteria2_install_rollback "$snapshot" "$was_active" 0
-      rm -rf -- "$snapshot"; admin_lock_release; return 1;
-    }
-  fi
-  # TOCTOU 二次检测：旧实例同端口需先停止自身 listener。
-  if ! nb_port_available_for_profile "$PORT" UDP "$INGRESS_PROFILE_ID" 'hy2:default'; then
-    warn "提交前发现 UDP/${PORT} 已被其它进程占用"
-    nb_describe_port_conflict UDP "$PORT"
-    if [ "${NOBRAND_LIFECYCLE_ACTIVE:-0}" -ne 1 ] \
-       || [ "$(nb_lifecycle_mutation_started 2>/dev/null || printf 1)" = 1 ]; then
-      hysteria2_install_rollback "$snapshot" "$was_active" 0
-    fi
-    rm -rf -- "$snapshot"; admin_lock_release; return 1
-  fi
-  if [ "$was_active" -eq 0 ]; then
-    nb_lifecycle_mark_protocol_mutation_started hy2 || {
-      rm -rf -- "$snapshot"; admin_lock_release; return 1
-    }
-  fi
-  if ! generate_hysteria2_cert; then
-    hysteria2_install_rollback "$snapshot" "$was_active" 0
-    rm -rf -- "$snapshot"; admin_lock_release; return 1
-  fi
-  config_tmp="$(mktemp_file .json)" || {
-    hysteria2_install_rollback "$snapshot" "$was_active" 0
-    rm -rf -- "$snapshot"; admin_lock_release; return 1;
-  }
-  state_tmp="$(mktemp_file .json)" || {
-    rm -f "$config_tmp"; hysteria2_install_rollback "$snapshot" "$was_active" 0
-    rm -rf -- "$snapshot"; admin_lock_release; return 1;
-  }
-  advertise_mode="$(nb_endpoint_mode_from_values "$ADVERTISE_HOST")"
-  if ! hysteria2_generate_config "$config_tmp" "$HY2_LISTEN" "$PORT" "$HY2_AUTH" "$HY2_SNI" "$HY2_OBFS" \
-     || ! nobrand_xray_test_config "$config_tmp" \
-     || ! hysteria2_generate_state "$state_tmp" "$HY2_LISTEN" "$PORT" "$HY2_AUTH" "$HY2_SNI" "$HY2_OBFS" \
-          "$advertise_mode" "$ADVERTISE_HOST" "$ADVERTISE_PORT" "$old_created" "$INGRESS_PROFILE_ID" \
-     || ! nb_ingress_stamp_state_file "$state_tmp" "$INGRESS_PROFILE_ID" native-bind \
-     || ! nb_atomic_install_file "$config_tmp" "$NOBRAND_HY2_CONFIG_FILE" 0600 \
-     || ! nb_atomic_install_file "$state_tmp" "$NOBRAND_HY2_STATE_FILE" 0600 \
-     || ! nobrand_write_hy2_service \
-     || ! nb_firewall_open_pairs "UDP|${PORT}"; then
-    rm -f "$config_tmp" "$state_tmp"
-    nb_firewall_binding_owned UDP "$PORT" && [ "$binding_was_owned" -eq 0 ] && binding_now_owned=1
-    hysteria2_install_rollback "$snapshot" "$was_active" "$binding_now_owned"
-    rm -rf -- "$snapshot"; admin_lock_release; return 1
-  fi
-  rm -f "$config_tmp" "$state_tmp"
-  nb_firewall_binding_owned UDP "$PORT" && [ "$binding_was_owned" -eq 0 ] && binding_now_owned=1
-  if ! nobrand_hy2_service_action restart \
-     || ! nobrand_hy2_service_active \
-     || ! nb_wait_for_enforced_listener "$INGRESS_ENFORCEMENT_RESOLVED" "$INGRESS_ENFORCEMENT_METHOD" \
-          UDP "$PORT" "$INGRESS_LOCAL_ADDRESS" 'hy2:default' 25; then
-    hysteria2_install_rollback "$snapshot" "$was_active" "$binding_now_owned"
-    rm -rf -- "$snapshot"; admin_lock_release
-    warn 'Hysteria2 服务启动或 UDP listener 验收失败，已回滚'
-    return 1
-  fi
-  if [ -n "$old_port" ] && [ "$old_port" != "$PORT" ]; then
-    nb_firewall_close_pairs "UDP|${old_port}" || true
-  fi
-  nobrand_install_manager_script || true
-  rm -rf -- "$snapshot"
-  admin_lock_release
-  print_hysteria2_result install
-}
-
-hysteria2_set_endpoint() {
-  local interactive=0 tmp mode owner auth sni obfs host port link ingress_profile_id
-  require_root
-  hysteria2_state_exists || die 'Hysteria2 未安装'
-  [ "${YES:-0}" -eq 1 ] || interactive=1
-  PORT="$(hysteria2_state_field listen_port)"
-  if [ "$interactive" -eq 1 ] && [ "${ADVERTISE_CLI:-0}" -eq 0 ]; then
-    nb_collect_advertise_endpoint_interactive Hysteria2 "$PORT"
-  else
-    nb_require_explicit_endpoint_noninteractive
-  fi
-  nb_validate_advertise_endpoint "$ADVERTISE_HOST" "$ADVERTISE_PORT" UDP || die 'Display Endpoint 无效'
-  if [ -n "$ADVERTISE_HOST" ]; then
-    owner="$(nb_endpoint_conflict_owner UDP "$ADVERTISE_HOST" "$ADVERTISE_PORT" 'hy2:default' 2>/dev/null || true)"
-    [ -z "$owner" ] || die "Display Endpoint 与 ${owner} 冲突"
-  fi
-  admin_lock_acquire || return 1
-  tmp="$(mktemp_file .json)" || { admin_lock_release; return 1; }
-  mode="$(nb_endpoint_mode_from_values "$ADVERTISE_HOST")"
-  auth="$(hysteria2_state_field auth)"
-  sni="$(hysteria2_state_field sni)"
-  obfs="$(hysteria2_state_field obfs)"
-  ingress_profile_id="$(hysteria2_state_field ingress_profile_id 2>/dev/null || true)"
-  [ -n "$ingress_profile_id" ] || ingress_profile_id="$NOBRAND_LEGACY_INGRESS_PROFILE_ID"
-  host="$(nb_effective_advertise_host "$mode" "$ADVERTISE_HOST" "$ingress_profile_id")"
-  port="$(nb_effective_advertise_port "$mode" "$ADVERTISE_PORT" "$PORT" "$ingress_profile_id")"
-  link="$(hysteria2_build_share_link "$auth" "$host" "$port" "$sni" "$obfs")" \
-    || { rm -f "$tmp"; admin_lock_release; return 1; }
-  if ! jq --arg mode "$mode" --arg host "$ADVERTISE_HOST" --arg port "$ADVERTISE_PORT" \
-      --arg link "$link" --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
-        .advertise_mode=$mode |
-        .advertise_host=$host |
-        .advertise_port=(if $port=="" then "" else ($port|tonumber) end) |
-        .link=$link |
-        .updated_at=$updated
-      ' "$NOBRAND_HY2_STATE_FILE" >"$tmp" \
-     || ! nb_atomic_install_file "$tmp" "$NOBRAND_HY2_STATE_FILE" 0600; then
-    rm -f "$tmp"; admin_lock_release; return 1
-  fi
-  rm -f "$tmp"
-  # 红线：本函数不调用 service、firewall、config、tc 或 quota。
-  admin_lock_release
-  t 'Hysteria2 客户端展示入口已更新；server config/listener/service/firewall 均未改变' \
-    'Hysteria2 display endpoint updated; server config/listener/service/firewall are unchanged'
-  print_hysteria2_result show
-}
-
-hysteria2_running() {
-  local port policy method address
-  hysteria2_state_exists || return 1
-  port="$(hysteria2_state_field listen_port)"
-  policy="$(hysteria2_state_field ingress_enforcement 2>/dev/null || printf permissive)"
-  method="$(hysteria2_state_field ingress_enforcement_method 2>/dev/null || printf wildcard)"
-  address="$(hysteria2_state_field ingress_local_address 2>/dev/null || true)"
-  nobrand_hy2_service_active \
-    && nb_wait_for_enforced_listener "$policy" "$method" UDP "$port" "$address" 'hy2:default' 1
-}
-
-hysteria2_apply_ingress_enforcement() {
-  local profile_id port auth sni obfs candidate_state candidate_config snapshot was_active=0 rc=0
-  hysteria2_state_exists || return 1
-  profile_id="$(hysteria2_state_field ingress_profile_id 2>/dev/null || true)"
-  [ -n "$profile_id" ] || profile_id="$NOBRAND_LEGACY_INGRESS_PROFILE_ID"
-  nb_prepare_ingress_deployment "$profile_id" native-bind || return 1
-  port="$(hysteria2_state_field listen_port)"
-  auth="$(hysteria2_state_field auth)"
-  sni="$(hysteria2_state_field sni)"
-  obfs="$(hysteria2_state_field obfs)"
-  candidate_state="$(mktemp_file .hy2-ingress-state)" || return 1
-  candidate_config="$(mktemp_file .hy2-ingress-config)" || { rm -f "$candidate_state"; return 1; }
-  snapshot="$(mktemp_dir)" || { rm -f "$candidate_state" "$candidate_config"; return 1; }
-  cp -a "$NOBRAND_HY2_STATE_FILE" "$snapshot/state" \
-    && cp -a "$NOBRAND_HY2_CONFIG_FILE" "$snapshot/config" || rc=1
-  if [ "$rc" -eq 0 ]; then
-    jq --arg listen "$INGRESS_LISTEN_HOST" '.listen_host=$listen' "$NOBRAND_HY2_STATE_FILE" >"$candidate_state" \
-      && nb_ingress_stamp_state_file "$candidate_state" "$profile_id" native-bind \
-      && hysteria2_generate_config "$candidate_config" "$INGRESS_LISTEN_HOST" "$port" "$auth" "$sni" "$obfs" \
-      && nobrand_xray_test_config "$candidate_config" || rc=1
-  fi
-  nobrand_hy2_service_active && was_active=1
-  if [ "$rc" -eq 0 ]; then
-    nb_atomic_install_file "$candidate_config" "$NOBRAND_HY2_CONFIG_FILE" 0600 \
-      && nb_atomic_install_file "$candidate_state" "$NOBRAND_HY2_STATE_FILE" 0600 || rc=1
-  fi
-  if [ "$rc" -eq 0 ] && [ "$was_active" -eq 1 ]; then
-    [ "${NOBRAND_TEST_INGRESS_SERVICE_FAIL:-0}" -eq 0 ] \
-      && nobrand_hy2_service_action restart \
-      && [ "${NOBRAND_TEST_INGRESS_LISTENER_FAIL:-0}" -eq 0 ] \
-      && hysteria2_running || rc=1
-  fi
-  if [ "$rc" -ne 0 ]; then
-    nb_atomic_install_file "$snapshot/config" "$NOBRAND_HY2_CONFIG_FILE" 0600 >/dev/null 2>&1 || true
-    nb_atomic_install_file "$snapshot/state" "$NOBRAND_HY2_STATE_FILE" 0600 >/dev/null 2>&1 || true
-    if [ "$was_active" -eq 1 ]; then
-      nobrand_hy2_service_action restart >/dev/null 2>&1 && hysteria2_running >/dev/null 2>&1 || true
-    else
-      nobrand_hy2_service_action stop >/dev/null 2>&1 || true
-    fi
-  fi
-  rm -f "$candidate_state" "$candidate_config"
-  rm -rf -- "$snapshot"
-  return "$rc"
-}
-
-hysteria2_state_set_enabled() {
-  local enabled="$1" tmp
-  tmp="$(mktemp_file .json)" || return 1
-  if ! jq --argjson enabled "$enabled" --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-      '.enabled=$enabled | .updated_at=$updated' "$NOBRAND_HY2_STATE_FILE" >"$tmp" \
-     || ! nb_atomic_install_file "$tmp" "$NOBRAND_HY2_STATE_FILE" 0600; then
-    rm -f "$tmp"
-    return 1
-  fi
-  rm -f "$tmp"
-}
-
-hysteria2_node_rows() {
-  local mode advertise_host advertise_port listen_port host port status
-  hysteria2_state_exists || return 0
-  mode="$(hysteria2_state_field advertise_mode)"
-  advertise_host="$(hysteria2_state_field advertise_host)"
-  advertise_port="$(hysteria2_state_field advertise_port)"
-  listen_port="$(hysteria2_state_field listen_port)"
-  host="$(nb_effective_advertise_host "$mode" "$advertise_host" "$(hysteria2_state_field ingress_profile_id 2>/dev/null || true)")"
-  port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port" "$(hysteria2_state_field ingress_profile_id 2>/dev/null || true)")"
-  status=Stopped; hysteria2_running && status=Running
-  printf 'Hysteria2|default|%s:%s/UDP|%s|UDP\n' "$host" "$port" "$status"
-}
-
-print_hysteria2_result() {
-  local context="${1:-show}" auth sni obfs listen_host listen_port mode mode_label advertise_host advertise_port host port status link
-  hysteria2_state_exists || { t 'Hysteria2 未安装' 'Hysteria2 is not installed'; return 0; }
-  auth="$(hysteria2_state_field auth)"; sni="$(hysteria2_state_field sni)"; obfs="$(hysteria2_state_field obfs)"
-  listen_host="$(hysteria2_state_field listen_host)"; listen_port="$(hysteria2_state_field listen_port)"
-  mode="$(hysteria2_state_field advertise_mode)"; advertise_host="$(hysteria2_state_field advertise_host)"
-  advertise_port="$(hysteria2_state_field advertise_port)"
-  host="$(nb_effective_advertise_host "$mode" "$advertise_host" "$(hysteria2_state_field ingress_profile_id 2>/dev/null || true)")"
-  port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port" "$(hysteria2_state_field ingress_profile_id 2>/dev/null || true)")"
-  status=已停止; hysteria2_running && status=运行中
-  mode_label="$mode"; case "$mode" in auto) mode_label='自动' ;; custom) mode_label='自定义' ;; esac
-  link="$(hysteria2_build_share_link "$auth" "$host" "$port" "$sni" "$obfs")"
-  nobrand_print_banner
-  msg "$( [ "$context" = install ] && printf '部署完成' || printf '节点配置' )"
-  msg ''
-  printf '协议        Hysteria2\n节点        default\n状态        %s\n' "$status"
-  msg ''
-  printf '实际监听 / Actual Listener\n  地址      %s\n  端口      %s\n  传输      UDP\n' "$listen_host" "$listen_port"
-  msg ''
-  printf '网络入口 / Ingress\n  入口配置 / Ingress Profile  %s\n' "$(nb_ingress_profile_name "$(hysteria2_state_field ingress_profile_id 2>/dev/null || true)")"
-  msg ''
-  printf '展示端点 / Display Endpoint\n  主机      %s\n  端口      %s\n  模式      %s\n' "$host" "$port" "$mode_label"
-  msg ''
-  printf '认证\n  Auth      %s\n  SNI       %s\n  Salamander 密码  %s\n' "$auth" "$sni" "$obfs"
-  msg ''
-  msg '========================================'
-  msg 'Mihomo'
-  msg '========================================'
-  hysteria2_export_mihomo
-  msg ''
-  msg '========================================'
-  msg 'sing-box'
-  msg '========================================'
-  hysteria2_export_singbox
-  msg '  证书：P-256 自签名证书，有效期 3650 天；客户端必须设置 insecure=1。'
-  msg ''
-  msg '========================================'
-  msg '客户端配置'
-  msg '========================================'
-  msg "$link"
-}
-
-hysteria2_service_command() {
-  local action="$1" port was_enabled
-  hysteria2_state_exists || die 'Hysteria2 未安装'
-  port="$(hysteria2_state_field listen_port)"
-  was_enabled="$(hysteria2_state_field enabled)"
-  case "$action" in
-    start)
-      nb_firewall_open_pairs "UDP|${port}" || return 1
-      if ! nobrand_hy2_service_action start || ! hysteria2_running \
-         || ! hysteria2_state_set_enabled true; then
-        nobrand_hy2_service_action stop >/dev/null 2>&1 || true
-        [ "$was_enabled" = true ] || hysteria2_state_set_enabled false >/dev/null 2>&1 || true
-        return 1
-      fi
-      ;;
-    stop)
-      nobrand_hy2_service_action stop || return 1
-      if ! hysteria2_state_set_enabled false; then
-        [ "$was_enabled" != true ] || nobrand_hy2_service_action start >/dev/null 2>&1 || true
-        return 1
-      fi
-      ;;
-    restart) nobrand_hy2_service_action restart && hysteria2_running ;;
-    status)
-      if hysteria2_running; then msg 'Hysteria2：运行中'; else msg 'Hysteria2：已停止'; return 1; fi
-      ;;
-  esac
-}
-
-remove_hysteria2_config() {
-  local port
-  require_root
-  hysteria2_state_exists || { t 'Hysteria2 未安装' 'Hysteria2 is not installed'; return 0; }
-  port="$(hysteria2_state_field listen_port)"
-  admin_lock_acquire || return 1
-  nobrand_remove_hy2_service || { admin_lock_release; return 1; }
-  nb_firewall_close_pairs "UDP|${port}" || { admin_lock_release; return 1; }
-  rm -f "$NOBRAND_HY2_CONFIG_FILE" "$NOBRAND_HY2_STATE_FILE" \
-    "$NOBRAND_HY2_CERT_FILE" "$NOBRAND_HY2_KEY_FILE"
-  admin_lock_release
-  t '已删除 NoBrand 管理的 Hysteria2；未触碰 /etc/xray、xray.service、ike 或 Xray-OneClick' \
-    'Removed NoBrand-managed Hysteria2; /etc/xray, xray.service, ike, and Xray-OneClick were untouched'
-}
-
-hysteria2_doctor() {
-  local failed=0 port mode host advertise_port key_mode cert_cn expected_sni enabled
-  if ! hysteria2_state_exists; then
-    nb_doctor_line INFO 'Hysteria2 未安装'
-    return 0
-  fi
-  port="$(hysteria2_state_field listen_port)"
-  enabled="$(hysteria2_state_field enabled 2>/dev/null || true)"
-  case "$enabled" in true|false) ;; *) return 1 ;; esac
-  [ -x "$NOBRAND_XRAY_BIN" ] && nb_doctor_line PASS "Xray $(nobrand_xray_version 2>/dev/null || printf '未知版本')" \
-    || { nb_doctor_line FAIL 'NoBrand Xray 可执行文件'; failed=1; }
-  nobrand_xray_test_config "$NOBRAND_HY2_CONFIG_FILE" \
-    && nb_doctor_line PASS 'Xray 配置校验' || { nb_doctor_line FAIL 'Xray 配置校验'; failed=1; }
-  if openssl ec -in "$NOBRAND_HY2_KEY_FILE" -noout -text 2>/dev/null | grep -q 'ASN1 OID: prime256v1'; then
-    key_mode="$(stat -c '%a' "$NOBRAND_HY2_KEY_FILE" 2>/dev/null || true)"
-    [ "$key_mode" = 600 ] && nb_doctor_line PASS 'P-256 私钥权限=0600' \
-      || { nb_doctor_line FAIL "私钥权限=${key_mode}"; failed=1; }
-  else
-    nb_doctor_line FAIL 'P-256 私钥'; failed=1
-  fi
-  if openssl x509 -in "$NOBRAND_HY2_CERT_FILE" -noout >/dev/null 2>&1; then
-    cert_cn="$(openssl x509 -in "$NOBRAND_HY2_CERT_FILE" -noout -subject -nameopt RFC2253 2>/dev/null \
-      | sed -nE 's/^subject=.*CN=([^,]+).*$/\1/p')"
-    expected_sni="$(hysteria2_state_field sni)"
-    if [ "$cert_cn" = "$expected_sni" ]; then
-      nb_doctor_line PASS "证书 CN=${cert_cn}"
-    else
-      nb_doctor_line FAIL "证书 CN=${cert_cn:-缺失}，状态 SNI=${expected_sni}"
-      failed=1
-    fi
-  else
-    nb_doctor_line FAIL '证书'; failed=1
-  fi
-  if [ "$enabled" = true ]; then
-    hysteria2_running && nb_doctor_line PASS "服务与 UDP/${port} 监听正常" \
-      || { nb_doctor_line FAIL "服务 / 监听异常: UDP/${port}"; failed=1; }
-  elif nobrand_hy2_service_active || nb_port_is_listening UDP "$port"; then
-    nb_doctor_line FAIL "服务标记为已停止，但仍有服务或监听: UDP/${port}"
-    failed=1
-  else
-    nb_doctor_line PASS '服务按状态保持停止，且无残留监听'
-  fi
-  nb_firewall_binding_owned UDP "$port" && nb_doctor_line PASS "防火墙归属正常: UDP/${port}" \
-    || nb_doctor_line INFO "防火墙规则不归 NoBrand 管理（预先存在 / 无本地防火墙）: UDP/${port}"
-  mode="$(hysteria2_state_field advertise_mode)"; host="$(hysteria2_state_field advertise_host)"
-  advertise_port="$(hysteria2_state_field advertise_port)"
-  nb_validate_advertise_endpoint "$host" "$advertise_port" UDP \
-    && nb_doctor_line PASS "展示端点 / Display Endpoint 模式=${mode}" \
-    || { nb_doctor_line FAIL '展示端点 / Display Endpoint 状态无效'; failed=1; }
-  hysteria2_current_share_link >/dev/null \
-    && nb_doctor_line PASS 'Hysteria2 URI 生成正常' || { nb_doctor_line FAIL 'URI 生成失败'; failed=1; }
-  return "$failed"
-}
-
-hysteria2_refresh_runtime_metadata() {
-  local tmp runtime
-  hysteria2_state_exists || return 0
-  runtime="$(nobrand_xray_version)" || return 1
-  tmp="$(mktemp_file .json)" || return 1
-  jq --arg runtime "$runtime" --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    '.runtime_version=$runtime | .updated_at=$updated' "$NOBRAND_HY2_STATE_FILE" >"$tmp" \
-    && nb_atomic_install_file "$tmp" "$NOBRAND_HY2_STATE_FILE" 0600
-  local rc=$?
-  rm -f "$tmp"
-  return "$rc"
-}
-
-hysteria2_upgrade_runtime() {
-  nobrand_upgrade_xray_runtime
-}
+# Native architecture: ordinary protocols use src/19-splicore.sh.
 
 nobrand_run_hy2_action() {
   case "${HY2_ACTION:-menu}" in
     menu) hysteria2_menu_loop ;;
-    install)
-      if [ "${NOBRAND_MANAGER_SESSION_ACTIVE:-0}" -eq 1 ]; then
-        nb_lifecycle_run_protocol_install hy2 install_hysteria2
-      else
-        install_hysteria2
-      fi
-      ;;
-    show) print_hysteria2_result show ;;
-    set-endpoint) hysteria2_set_endpoint ;;
-    remove) remove_hysteria2_config ;;
-    start|stop|restart|status) hysteria2_service_command "$HY2_ACTION" ;;
-    doctor) hysteria2_doctor ;;
-    upgrade) hysteria2_upgrade_runtime ;;
     help) nobrand_usage ;;
+    *) nb_splicore_protocol hysteria2 "${HY2_ACTION:-status}" "hy2" ;;
   esac
 }
 
@@ -17230,7 +9509,6 @@ vless_sudoku_configure_requests() {
   if [ -z "${PORT:-}" ]; then
     PORT="$(nb_select_available_port TCP "$INGRESS_PROFILE_ID")" \
       || die '所选入口配置没有可用 VLESS Sudoku TCP 自动端口；manual-only 必须显式使用 --port'
-    PORT_AUTO_SELECTED=1
   else
     nb_valid_port "$PORT" || die 'VLESS Sudoku 端口必须是 1-65535'
     PORT="$(normalize_uint "$PORT")"
@@ -17655,11 +9933,14 @@ remove_vless_sudoku_config() {
   admin_lock_acquire || return 1
   nobrand_remove_vless_sudoku_service || { admin_lock_release; return 1; }
   nb_firewall_close_pairs "TCP|${port}" || { admin_lock_release; return 1; }
+  # Xray is now exclusive to Sudoku. Leaving it without its ownership state
+  # would look like an unsupported legacy runtime on the next invocation.
+  nobrand_remove_xray_runtime_files || { admin_lock_release; return 1; }
   rm -f "$NOBRAND_VLESS_CONFIG_FILE" "$NOBRAND_VLESS_STATE_FILE" "$NOBRAND_VLESS_CLIENT_FILE"
   rmdir "$NOBRAND_VLESS_CONFIG_DIR" "$NOBRAND_VLESS_STATE_DIR" 2>/dev/null || true
   admin_lock_release
-  t '已删除 NoBrand VLESS Sudoku；共享 Xray、HY2、Mieru、Snell 与外部 Xray 均保留' \
-    'Removed NoBrand VLESS Sudoku; shared Xray, HY2, Mieru, Snell, and external Xray are preserved'
+  t '已删除 NoBrand VLESS Sudoku 及其专用 Xray；Splicore 与外部资源保留' \
+    'Removed NoBrand VLESS Sudoku and its dedicated Xray; Splicore and external resources are preserved'
 }
 
 vless_sudoku_doctor() {
@@ -17776,2128 +10057,23 @@ nobrand_run_vless_sudoku_action() {
   esac
 }
 
-# ---------- TUIC v5: named instance, one QUIC listener, multiple users ----------
-
-tuic_protocol_scope_valid() {
-  [ "$TUIC_PROTOCOL_VERSION" = 5 ] \
-    && [ "$TUIC_V5_SUPPORTED" = true ] \
-    && [ "$TUIC_V1_SUPPORTED" = false ] \
-    && [ "$TUIC_V2_SUPPORTED" = false ] \
-    && [ "$TUIC_V3_SUPPORTED" = false ] \
-    && [ "$TUIC_V4_SUPPORTED" = false ]
-}
-
-tuic_valid_name() {
-  local value="${1:-}"
-  [ -n "$value" ] && [ "$(printf '%s' "$value" | wc -c | tr -d '[:space:]')" -le 64 ] \
-    && ! has_control_chars "$value" && [[ "$value" != *'|'* ]]
-}
-
-tuic_generate_instance_id() {
-  local value
-  value="$(openssl rand -hex 8 2>/dev/null || true)"
-  [ -n "$value" ] || value="$(printf '%08x%08x' "$RANDOM" "$RANDOM")"
-  printf 't%s' "$value"
-}
-
-tuic_generate_user_id() {
-  local value
-  value="$(openssl rand -hex 8 2>/dev/null || true)"
-  [ -n "$value" ] || value="$(printf '%08x%08x' "$RANDOM" "$RANDOM")"
-  printf 'u%s' "$value"
-}
-
-tuic_instance_ids() {
-  local path id
-  for path in "$NOBRAND_TUIC_STATE_DIR"/*/state.json; do
-    [ -f "$path" ] || continue
-    id="$(basename "$(dirname "$path")")"
-    [[ "$id" =~ ^t[0-9a-f]{16}$ ]] || continue
-    jq -e --arg id "$id" '
-      .schema_version==3 and .ownership=="nobrand-v3" and .protocol=="tuic"
-      and .tuic_version==5 and .instance_id==$id
-    ' "$path" >/dev/null 2>&1 || continue
-    printf '%s\n' "$id"
-  done
-}
-
-tuic_state_file() { printf '%s/%s/state.json' "$NOBRAND_TUIC_STATE_DIR" "$1"; }
-tuic_instance_config_dir() { printf '%s/%s' "$NOBRAND_TUIC_CONFIG_DIR" "$1"; }
-tuic_config_file() { printf '%s/config.json' "$(tuic_instance_config_dir "$1")"; }
-tuic_cert_file() { printf '%s/tuic-cert.pem' "$(tuic_instance_config_dir "$1")"; }
-tuic_key_file() { printf '%s/tuic-key.pem' "$(tuic_instance_config_dir "$1")"; }
-
-tuic_state_exists() {
-  local id="$1" state
-  state="$(tuic_state_file "$id")"
-  [ -s "$state" ] && jq -e --arg id "$id" '
-    .schema_version==3 and .ownership=="nobrand-v3" and .protocol=="tuic"
-    and .tuic_version==5 and .instance_id==$id
-  ' "$state" >/dev/null 2>&1
-}
-
-tuic_state_field() {
-  local id="$1" field="$2" state
-  state="$(tuic_state_file "$id")"
-  tuic_state_exists "$id" || return 1
-  jq -r --arg field "$field" 'if has($field) and .[$field]!=null then .[$field] else empty end' "$state"
-}
-
-tuic_find_id_by_name() {
-  local name="$1" id matched=""
-  while IFS= read -r id; do
-    [ "$(tuic_state_field "$id" name 2>/dev/null || true)" = "$name" ] || continue
-    [ -z "$matched" ] || return 1
-    matched="$id"
-  done < <(tuic_instance_ids)
-  [ -n "$matched" ] || return 1
-  printf '%s' "$matched"
-}
-
-tuic_resolve_instance_id() {
-  local selector="${1:-}" ids id
-  if [[ "$selector" =~ ^t[0-9a-f]{16}$ ]] && tuic_state_exists "$selector"; then
-    printf '%s' "$selector"
-    return 0
-  fi
-  [ -z "$selector" ] || tuic_find_id_by_name "$selector"
-  [ -n "$selector" ] && return $?
-  ids="$(tuic_instance_ids)"
-  [ "$(printf '%s\n' "$ids" | sed '/^$/d' | wc -l | tr -d '[:space:]')" -eq 1 ] || return 1
-  id="$(printf '%s\n' "$ids" | sed '/^$/d')"
-  printf '%s' "$id"
-}
-
-tuic_resolve_user_json() {
-  local id="$1" selector="${2:-}" state
-  state="$(tuic_state_file "$id")"
-  tuic_state_exists "$id" || return 1
-  if [ -z "$selector" ]; then
-    [ "$(jq '.users|length' "$state")" -eq 1 ] || return 1
-    jq -c '.users[0]' "$state"
-    return 0
-  fi
-  jq -ce --arg selector "$selector" '
-    [.users[] | select(.user_id==$selector or .name==$selector or .uuid==$selector)]
-    | if length==1 then .[0] else empty end
-  ' "$state"
-}
-
-tuic_generate_uuid() {
-  if command -v uuidgen >/dev/null 2>&1; then
-    uuidgen | tr '[:upper:]' '[:lower:]'
-  elif [ -r /proc/sys/kernel/random/uuid ]; then
-    tr '[:upper:]' '[:lower:]' </proc/sys/kernel/random/uuid
-  else
-    local hex
-    hex="$(openssl rand -hex 16)" || return 1
-    printf '%s-%s-4%s-%x%s-%s' "${hex:0:8}" "${hex:8:4}" "${hex:13:3}" \
-      "$((0x${hex:16:1} % 4 + 8))" "${hex:17:3}" "${hex:20:12}"
-  fi
-}
-
-tuic_generate_password() {
-  openssl rand -hex 24
-}
-
-tuic_user_json() {
-  local user_id="$1" name="$2" uuid="$3" password="$4" created_at="${5:-}"
-  [ -n "$created_at" ] || created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  jq -n --arg user_id "$user_id" --arg name "$name" --arg uuid "$uuid" \
-    --arg password "$password" --arg created "$created_at" '
-    {user_id:$user_id,name:$name,uuid:$uuid,password:$password,created_at:$created}
-  '
-}
-
-tuic_generate_certificate() {
-  local cert="$1" key="$2" sni="$3" tmp_cert tmp_key
-  command -v openssl >/dev/null 2>&1 || return 1
-  mkdir -p "$(dirname "$cert")" || return 1
-  chmod 0700 "$(dirname "$cert")" || return 1
-  tmp_key="$(mktemp "${key}.tmp.XXXXXX")" || return 1
-  tmp_cert="$(mktemp "${cert}.tmp.XXXXXX")" || return 1
-  openssl ecparam -genkey -name prime256v1 -out "$tmp_key" 2>/dev/null \
-    && openssl req -new -x509 -days 3650 -key "$tmp_key" -out "$tmp_cert" \
-      -subj "/CN=${sni}" 2>/dev/null \
-    && chmod 0600 "$tmp_key" \
-    && chmod 0644 "$tmp_cert" \
-    && mv -f "$tmp_key" "$key" \
-    && mv -f "$tmp_cert" "$cert" \
-    || { rm -f "$tmp_key" "$tmp_cert"; return 1; }
-}
-
-tuic_generate_server_config() {
-  local output="$1" instance_id="$2" listen="$3" port="$4" cert="$5" key="$6" sni="$7" users="$8"
-  jq -n --arg tag "nobrand-tuic-${instance_id}-in" --arg listen "$listen" --arg port "$port" \
-    --arg cert "$cert" --arg key "$key" --arg sni "$sni" --argjson users "$users" '
-    {
-      log:{level:"warn",timestamp:true},
-      inbounds:[{
-        type:"tuic",tag:$tag,listen:$listen,listen_port:($port|tonumber),
-        users:[$users[] | {name:.name,uuid:.uuid,password:.password}],
-        congestion_control:"cubic",zero_rtt_handshake:false,
-        tls:{enabled:true,server_name:$sni,alpn:["h3"],certificate_path:$cert,key_path:$key}
-      }],
-      outbounds:[{type:"direct",tag:"direct"}]
-    }
-  ' >"$output"
-}
-
-tuic_certificate_fingerprint() {
-  local cert="$1"
-  openssl x509 -in "$cert" -noout -fingerprint -sha256 2>/dev/null | sed 's/^sha256 Fingerprint=//;s/^SHA256 Fingerprint=//'
-}
-
-tuic_certificate_not_after() {
-  openssl x509 -in "$1" -noout -enddate 2>/dev/null | sed 's/^notAfter=//'
-}
-
-tuic_generate_state() {
-  local output="$1" instance_id="$2" name="$3" listen="$4" port="$5" mode="$6"
-  local advertise_host="$7" advertise_port="$8" sni="$9" channel="${10}" runtime_version="${11}"
-  local cert="${12}" key="${13}" users="${14}" created_at="${15:-}" updated_at fingerprint not_after
-  local ingress_profile_id="${16:-}"
-  [ -n "$created_at" ] || created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  updated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  fingerprint="$(tuic_certificate_fingerprint "$cert" 2>/dev/null || true)"
-  not_after="$(tuic_certificate_not_after "$cert" 2>/dev/null || true)"
-  jq -n --arg instance_id "$instance_id" --arg name "$name" --arg listen "$listen" \
-    --arg port "$port" --arg mode "$mode" --arg advertise_host "$advertise_host" \
-    --arg advertise_port "$advertise_port" --arg sni "$sni" --arg channel "$channel" \
-    --arg runtime "$runtime_version" --arg cert "$cert" --arg key "$key" \
-    --arg fingerprint "$fingerprint" --arg not_after "$not_after" --argjson users "$users" \
-    --arg created "$created_at" --arg updated "$updated_at" --arg ingress_profile_id "$ingress_profile_id" '
-    {
-      schema_version:3,ownership:"nobrand-v3",protocol:"tuic",tuic_version:5,
-      instance_id:$instance_id,name:$name,listen_host:$listen,listen_port:($port|tonumber),transport:"udp",
-      advertise_mode:$mode,advertise_host:$advertise_host,
-      advertise_port:(if $advertise_port=="" then "" else ($advertise_port|tonumber) end),
-      sni:$sni,congestion_control:"cubic",zero_rtt_handshake:false,udp_relay_mode:"native",
-      runtime_channel:$channel,runtime_version:$runtime,
-      tls:{type:"self-signed",curve:"P-256",alpn:["h3"],certificate_path:$cert,key_path:$key,
-           fingerprint_sha256:$fingerprint,not_after:$not_after},
-      users:$users,enabled:true,created_at:$created,updated_at:$updated
-    }
-    + if $ingress_profile_id=="" then {} else {ingress_profile_id:$ingress_profile_id} end
-  ' >"$output"
-}
-
-tuic_config_matches_state() {
-  local id="$1" state config
-  state="$(tuic_state_file "$id")"
-  config="$(tuic_config_file "$id")"
-  tuic_state_exists "$id" && jq empty "$config" >/dev/null 2>&1 || return 1
-  jq -e --slurpfile state "$state" '
-    .inbounds|length==1
-    and .[0].type=="tuic"
-    and .[0].listen==$state[0].listen_host
-    and .[0].listen_port==$state[0].listen_port
-    and .[0].congestion_control=="cubic"
-    and .[0].zero_rtt_handshake==false
-    and .[0].tls.certificate_path==$state[0].tls.certificate_path
-    and .[0].tls.key_path==$state[0].tls.key_path
-    and ([.[0].users[]|{name,uuid,password}] == [$state[0].users[]|{name,uuid,password}])
-  ' "$config" >/dev/null
-}
-
-tuic_effective_endpoint() {
-  local id="$1" mode host port listen_port ingress_profile_id
-  mode="$(tuic_state_field "$id" advertise_mode)"
-  host="$(tuic_state_field "$id" advertise_host)"
-  port="$(tuic_state_field "$id" advertise_port)"
-  listen_port="$(tuic_state_field "$id" listen_port)"
-  ingress_profile_id="$(tuic_state_field "$id" ingress_profile_id 2>/dev/null || true)"
-  printf '%s|%s' "$(nb_effective_advertise_host "$mode" "$host" "$ingress_profile_id")" \
-    "$(nb_effective_advertise_port "$mode" "$port" "$listen_port" "$ingress_profile_id")"
-}
-
-tuic_export_mihomo() {
-  local id="$1" selector="${2:-}" user_json endpoint host port name uuid password sni
-  user_json="$(tuic_resolve_user_json "$id" "$selector")" || return 1
-  endpoint="$(tuic_effective_endpoint "$id")"
-  host="${endpoint%%|*}" port="${endpoint#*|}"
-  name="$(jq -r .name <<<"$user_json")"
-  uuid="$(jq -r .uuid <<<"$user_json")"
-  password="$(jq -r .password <<<"$user_json")"
-  sni="$(tuic_state_field "$id" sni)"
-  cat <<EOF
-mixed-port: 7890
-allow-lan: false
-mode: rule
-log-level: warning
-proxies:
-  - name: "NoBrand-TUIC-${name}"
-    type: tuic
-    server: "${host}"
-    port: ${port}
-    uuid: ${uuid}
-    password: ${password}
-    sni: "${sni}"
-    alpn: [h3]
-    skip-cert-verify: true
-    reduce-rtt: false
-    udp-relay-mode: native
-    congestion-controller: cubic
-    max-udp-relay-packet-size: 1400
-proxy-groups:
-  - name: NOBRAND
-    type: select
-    proxies: ["NoBrand-TUIC-${name}"]
-rules:
-  - MATCH,NOBRAND
-EOF
-}
-
-tuic_export_singbox() {
-  local id="$1" selector="${2:-}" user_json endpoint host port name uuid password sni
-  user_json="$(tuic_resolve_user_json "$id" "$selector")" || return 1
-  endpoint="$(tuic_effective_endpoint "$id")"
-  host="${endpoint%%|*}" port="${endpoint#*|}"
-  name="$(jq -r .name <<<"$user_json")"
-  uuid="$(jq -r .uuid <<<"$user_json")"
-  password="$(jq -r .password <<<"$user_json")"
-  sni="$(tuic_state_field "$id" sni)"
-  jq -n --arg tag "nobrand-tuic-${name}" --arg host "$host" --arg port "$port" \
-    --arg uuid "$uuid" --arg password "$password" --arg sni "$sni" '
-    {
-      log:{level:"warn",timestamp:true},
-      inbounds:[{type:"mixed",tag:"mixed-in",listen:"127.0.0.1",listen_port:1080}],
-      outbounds:[{
-        type:"tuic",tag:$tag,server:$host,server_port:($port|tonumber),uuid:$uuid,password:$password,
-        congestion_control:"cubic",udp_relay_mode:"native",zero_rtt_handshake:false,
-        tls:{enabled:true,server_name:$sni,insecure:true,alpn:["h3"]}
-      }],
-      route:{final:$tag}
-    }
-  '
-}
-
-# No current TUIC v5 specification defines a standardized URI. Exporters must
-# not manufacture one; Mihomo YAML and sing-box JSON are the canonical outputs.
-tuic_build_uri() { return 1; }
-
-tuic_set_endpoint_state() {
-  local id="$1" host="$2" port="$3" mode=custom state tmp
-  state="$(tuic_state_file "$id")"
-  tuic_state_exists "$id" || return 1
-  if [ -z "$host" ]; then
-    mode=auto
-    port=""
-  else
-    nb_validate_advertise_endpoint "$host" "$port" UDP || return 1
-    port="$(normalize_uint "$port")"
-  fi
-  tmp="$(mktemp_file .tuic-state)" || return 1
-  jq --arg mode "$mode" --arg host "$host" --arg port "$port" \
-    --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
-    .advertise_mode=$mode | .advertise_host=$host
-    | .advertise_port=(if $port=="" then "" else ($port|tonumber) end) | .updated_at=$updated
-  ' "$state" >"$tmp" && nb_atomic_install_file "$tmp" "$state" 0600
-  rm -f "$tmp"
-}
-
-tuic_collect_install_requests() {
-  local old_port="" owner
-  tuic_protocol_scope_valid || die 'TUIC 协议范围常量无效'
-  nb_prepare_ingress_request || return 1
-  nb_prepare_ingress_deployment "$INGRESS_PROFILE_ID" native-bind \
-    || die 'TUIC 无法绑定所选 Ingress 的 Strict 本地地址'
-  TUIC_NAME="${TUIC_NAME:-primary}"
-  tuic_valid_name "$TUIC_NAME" || die 'TUIC 实例名称无效'
-  tuic_find_id_by_name "$TUIC_NAME" >/dev/null 2>&1 \
-    && { t "TUIC 实例已存在: ${TUIC_NAME}" "TUIC instance already exists: ${TUIC_NAME}"; return 2; }
-  if [ -z "${PORT:-}" ]; then
-    PORT="$(nb_select_available_port UDP "$INGRESS_PROFILE_ID")" \
-      || die '所选入口配置没有可用 TUIC UDP 自动端口；manual-only 必须显式使用 --port'
-    PORT_AUTO_SELECTED=1
-  else
-    nb_valid_port "$PORT" || die 'TUIC 端口必须是 1025-65535'
-    PORT="$(normalize_uint "$PORT")"
-    nb_ingress_port_is_reserved "$INGRESS_PROFILE_ID" "$PORT" && die 'TUIC 禁止使用所选入口配置的保留端口'
-    nb_warn_if_outside_recommended_range "$PORT" "$INGRESS_PROFILE_ID"
-    nb_port_available_for_profile "$PORT" UDP "$INGRESS_PROFILE_ID" || {
-      owner="$(nb_registry_port_owner UDP "$PORT" 2>/dev/null || true)"
-      die "TUIC UDP/${PORT} 已占用${owner:+，占用方: ${owner}}"
-    }
-  fi
-  if [ -z "${ADVERTISE_HOST:-}" ]; then
-    nb_require_explicit_endpoint_noninteractive
-  else
-    nb_validate_advertise_endpoint "$ADVERTISE_HOST" "$ADVERTISE_PORT" UDP || die 'TUIC Display Endpoint 无效'
-  fi
-  if [ -z "${TUIC_SNI:-}" ]; then TUIC_SNI=www.microsoft.com; fi
-  hysteria2_valid_sni "$TUIC_SNI" || die 'TUIC SNI 必须是有效域名或 IPv4 地址'
-  TUIC_CHANNEL="$(tuic_normalize_channel "${TUIC_CHANNEL:-stable}")" || die 'TUIC Runtime 通道无效'
-  if [ "$TUIC_CHANNEL" = pinned ]; then
-    tuic_valid_runtime_version "$TUIC_VERSION" || die 'pinned TUIC Runtime 需要精确稳定版本'
-  fi
-  TUIC_USER="${TUIC_USER:-default}"
-  tuic_valid_name "$TUIC_USER" || die 'TUIC 用户名称无效'
-  [ -z "$old_port" ] || true
-}
-
-tuic_install_rollback() {
-  local id="$1" port="$2"
-  tuic_remove_service "$id" >/dev/null 2>&1 || true
-  nb_firewall_close_pairs "UDP|${port}" >/dev/null 2>&1 || true
-  find "$NOBRAND_TUIC_STATE_DIR/$id" -mindepth 1 -maxdepth 1 -delete 2>/dev/null || true
-  find "$NOBRAND_TUIC_CONFIG_DIR/$id" -mindepth 1 -maxdepth 1 -delete 2>/dev/null || true
-  rmdir "$NOBRAND_TUIC_STATE_DIR/$id" "$NOBRAND_TUIC_CONFIG_DIR/$id" 2>/dev/null || true
-}
-
-tuic_prepare_runtime_for_install() {
-  local channel="$1" requested_version="${2:-}" first_id current id state_version
-  first_id="$(tuic_instance_ids | head -n1)"
-  if [ -z "$first_id" ]; then
-    tuic_install_runtime "$channel" "$requested_version"
-    return
-  fi
-  current="$(tuic_runtime_version)" || die '现有 NoBrand TUIC Runtime 缺失或不可执行'
-  tuic_runtime_metadata_valid "$current" "" || die '现有 NoBrand TUIC Runtime 归属元数据无效'
-  while IFS= read -r id; do
-    state_version="$(tuic_state_field "$id" runtime_version)"
-    [ "$state_version" = "$current" ] \
-      || die "TUIC 实例 ${id} 的 Runtime 状态不一致，拒绝隐式替换共享 Runtime"
-  done < <(tuic_instance_ids)
-  tuic_resolve_runtime "$channel" "$requested_version" || die '无法解析官方 sing-box Runtime'
-  [ "$TUIC_RUNTIME_RESOLVED_VERSION" = "$current" ] \
-    || die '新增 TUIC 实例不会隐式升级共享 Runtime；请先执行 nobrand tuic upgrade-runtime'
-}
-
-tuic_install_transaction_rollback() {
-  local id="$1" port="$2" runtime_snapshot="$3" template_preexisting="$4"
-  tuic_install_rollback "$id" "$port"
-  tuic_restore_runtime_files "$runtime_snapshot" || warn 'TUIC 安装期间的 Runtime 回滚失败'
-  if [ "$template_preexisting" -eq 0 ] && [ -z "$(tuic_instance_ids)" ]; then
-    case "$NOBRAND_TUIC_SYSTEMD_TEMPLATE" in
-      /etc/systemd/system/nobrand-tuic@.service) rm -f "$NOBRAND_TUIC_SYSTEMD_TEMPLATE" ;;
-    esac
-    [ "$(nb_service_manager)" != systemd ] || systemctl daemon-reload >/dev/null 2>&1 || true
-  fi
-}
-
-install_tuic() {
-  local collect_rc=0 id="" user_id uuid password users cert key config state config_tmp="" state_tmp=""
-  local mode runtime_version runtime_snapshot template_preexisting=0 rollback_needed=1
-  require_root
-  require_linux
-  nobrand_prepare_common
-  tuic_collect_install_requests || collect_rc=$?
-  [ "$collect_rc" -eq 0 ] || { [ "$collect_rc" -eq 2 ] && return 0; return "$collect_rc"; }
-  runtime_snapshot="$(mktemp_dir)" || return 1
-  tuic_snapshot_runtime_files "$runtime_snapshot" \
-    || { rm -rf -- "$runtime_snapshot"; return 1; }
-  [ ! -e "$NOBRAND_TUIC_SYSTEMD_TEMPLATE" ] || template_preexisting=1
-  tuic_prepare_runtime_for_install "$TUIC_CHANNEL" "$TUIC_VERSION" \
-    || { rm -rf -- "$runtime_snapshot"; die '官方 sing-box Runtime 准备失败'; }
-  if [ "${NOBRAND_LIFECYCLE_ACTIVE:-0}" -eq 1 ]; then
-    rollback_needed="$(nb_lifecycle_mutation_started)" || {
-      rm -rf -- "$runtime_snapshot"
-      return 1
-    }
-  fi
-  runtime_version="$(tuic_runtime_version)" || {
-    [ "$rollback_needed" -eq 0 ] || tuic_restore_runtime_files "$runtime_snapshot" || true
-    rm -rf -- "$runtime_snapshot"
-    return 1
-  }
-  id="$(tuic_generate_instance_id)"
-  user_id="$(tuic_generate_user_id)"
-  uuid="$(tuic_generate_uuid)" || {
-    [ "$rollback_needed" -eq 0 ] \
-      || tuic_install_transaction_rollback "$id" "$PORT" "$runtime_snapshot" "$template_preexisting"
-    rm -rf -- "$runtime_snapshot"
-    return 1
-  }
-  password="$(tuic_generate_password)" || {
-    [ "$rollback_needed" -eq 0 ] \
-      || tuic_install_transaction_rollback "$id" "$PORT" "$runtime_snapshot" "$template_preexisting"
-    rm -rf -- "$runtime_snapshot"
-    return 1
-  }
-  users="[$(tuic_user_json "$user_id" "$TUIC_USER" "$uuid" "$password")]"
-  cert="$(tuic_cert_file "$id")" key="$(tuic_key_file "$id")"
-  config="$(tuic_config_file "$id")" state="$(tuic_state_file "$id")"
-  admin_lock_acquire || {
-    [ "$rollback_needed" -eq 0 ] \
-      || tuic_install_transaction_rollback "$id" "$PORT" "$runtime_snapshot" "$template_preexisting"
-    rm -rf -- "$runtime_snapshot"
-    return 1
-  }
-  nb_lifecycle_mark_protocol_mutation_started tuic || {
-    [ "$rollback_needed" -eq 0 ] \
-      || tuic_install_transaction_rollback "$id" "$PORT" "$runtime_snapshot" "$template_preexisting"
-    admin_lock_release
-    rm -rf -- "$runtime_snapshot"
-    return 1
-  }
-  rollback_needed=1
-  mkdir -p "$(dirname "$state")" "$(dirname "$config")" \
-    && chmod 0700 "$(dirname "$state")" "$(dirname "$config")" \
-    && tuic_generate_certificate "$cert" "$key" "$TUIC_SNI" \
-    && config_tmp="$(mktemp_file .tuic-config)" \
-    && state_tmp="$(mktemp_file .tuic-state)" || {
-      tuic_install_transaction_rollback "$id" "$PORT" "$runtime_snapshot" "$template_preexisting"
-      admin_lock_release
-      rm -f "$config_tmp" "$state_tmp"
-      rm -rf -- "$runtime_snapshot"
-      return 1
-    }
-  tuic_generate_server_config "$config_tmp" "$id" "$INGRESS_LISTEN_HOST" "$PORT" "$cert" "$key" "$TUIC_SNI" "$users" \
-    && tuic_validate_config "$config_tmp" \
-    || {
-      tuic_install_transaction_rollback "$id" "$PORT" "$runtime_snapshot" "$template_preexisting"
-      admin_lock_release
-      rm -f "$config_tmp" "$state_tmp"
-      rm -rf -- "$runtime_snapshot"
-      return 1
-    }
-  mode="$(nb_endpoint_mode_from_values "$ADVERTISE_HOST")"
-  tuic_generate_state "$state_tmp" "$id" "$TUIC_NAME" "$INGRESS_LISTEN_HOST" "$PORT" "$mode" \
-    "$ADVERTISE_HOST" "$ADVERTISE_PORT" "$TUIC_SNI" "$TUIC_CHANNEL" "$runtime_version" \
-    "$cert" "$key" "$users" "" "$INGRESS_PROFILE_ID" \
-    && nb_ingress_stamp_state_file "$state_tmp" "$INGRESS_PROFILE_ID" native-bind || {
-      tuic_install_transaction_rollback "$id" "$PORT" "$runtime_snapshot" "$template_preexisting"
-      admin_lock_release
-      rm -f "$config_tmp" "$state_tmp"
-      rm -rf -- "$runtime_snapshot"
-      return 1
-    }
-  if ! nb_port_available_for_profile "$PORT" UDP "$INGRESS_PROFILE_ID" \
-     || ! nb_atomic_install_file "$config_tmp" "$config" 0600 \
-     || ! nb_atomic_install_file "$state_tmp" "$state" 0600 \
-     || ! tuic_install_service_runtime \
-     || ! tuic_ensure_openrc_service "$id" \
-     || ! nb_firewall_open_pairs "UDP|${PORT}" \
-     || ! tuic_service_action "$id" start \
-     || ! nb_wait_for_enforced_listener "$INGRESS_ENFORCEMENT_RESOLVED" "$INGRESS_ENFORCEMENT_METHOD" \
-          UDP "$PORT" "$INGRESS_LOCAL_ADDRESS" "tuic:${id}" 25 \
-     || ! tuic_listener_owned_by_service "$id" "$PORT"; then
-    tuic_install_transaction_rollback "$id" "$PORT" "$runtime_snapshot" "$template_preexisting"
-    admin_lock_release
-    rm -f "$config_tmp" "$state_tmp"
-    rm -rf -- "$runtime_snapshot"
-    return 1
-  fi
-  admin_lock_release
-  rm -f "$config_tmp" "$state_tmp"
-  rm -rf -- "$runtime_snapshot"
-  nobrand_install_manager_script || true
-  tuic_show_user "$id" "$TUIC_USER"
-}
-
-tuic_commit_candidate_state() {
-  local id="$1" candidate_state="$2" state config config_tmp snapshot running port users policy method address rc=0
-  state="$(tuic_state_file "$id")" config="$(tuic_config_file "$id")"
-  port="$(jq -r .listen_port "$candidate_state")"
-  users="$(jq -c .users "$candidate_state")"
-  config_tmp="$(mktemp_file .tuic-config)" || return 1
-  tuic_generate_server_config "$config_tmp" "$id" "$(jq -r .listen_host "$candidate_state")" "$port" \
-    "$(jq -r .tls.certificate_path "$candidate_state")" "$(jq -r .tls.key_path "$candidate_state")" \
-    "$(jq -r .sni "$candidate_state")" "$users" || return 1
-  tuic_validate_config "$config_tmp" || { rm -f "$config_tmp"; return 1; }
-  snapshot="$(mktemp_dir)" || { rm -f "$config_tmp"; return 1; }
-  cp -a "$state" "$config" "$snapshot/" || { rm -f "$config_tmp"; rm -rf -- "$snapshot"; return 1; }
-  running=0
-  tuic_service_active "$id" && running=1
-  policy="$(jq -r '.ingress_enforcement // "permissive"' "$candidate_state")"
-  method="$(jq -r '.ingress_enforcement_method // "wildcard"' "$candidate_state")"
-  address="$(jq -r '.ingress_local_address // empty' "$candidate_state")"
-  if ! nb_atomic_install_file "$config_tmp" "$config" 0600 \
-     || ! nb_atomic_install_file "$candidate_state" "$state" 0600 \
-     || ! { [ "$running" -eq 0 ] || {
-           [ "${NOBRAND_TEST_INGRESS_SERVICE_FAIL:-0}" -eq 0 ] \
-             && tuic_service_action "$id" restart \
-             && [ "${NOBRAND_TEST_INGRESS_LISTENER_FAIL:-0}" -eq 0 ] \
-             && nb_wait_for_enforced_listener "$policy" "$method" UDP "$port" "$address" "tuic:${id}" 25 \
-             && tuic_listener_owned_by_service "$id" "$port"
-         }; }; then
-    cp -a "$snapshot/state.json" "$state" 2>/dev/null || true
-    cp -a "$snapshot/config.json" "$config" 2>/dev/null || true
-    if [ "$running" -eq 1 ]; then
-      if ! tuic_service_action "$id" restart >/dev/null 2>&1 \
-         || ! tuic_running "$id" >/dev/null 2>&1; then
-        warn "TUIC 回滚后的监听校验失败: ${id}"
-      fi
-    fi
-    rc=1
-  fi
-  rm -f "$config_tmp"
-  rm -rf -- "$snapshot"
-  return "$rc"
-}
-
-tuic_apply_ingress_enforcement() {
-  local id="$1" state profile_id candidate rc
-  state="$(tuic_state_file "$id")"
-  tuic_state_exists "$id" || return 1
-  profile_id="$(tuic_state_field "$id" ingress_profile_id 2>/dev/null || true)"
-  [ -n "$profile_id" ] || profile_id="$NOBRAND_LEGACY_INGRESS_PROFILE_ID"
-  nb_prepare_ingress_deployment "$profile_id" native-bind || return 1
-  candidate="$(mktemp_file .tuic-ingress-state)" || return 1
-  jq --arg listen "$INGRESS_LISTEN_HOST" '.listen_host=$listen' "$state" >"$candidate" \
-    && nb_ingress_stamp_state_file "$candidate" "$profile_id" native-bind \
-    && tuic_commit_candidate_state "$id" "$candidate"
-  rc=$?
-  rm -f "$candidate"
-  return "$rc"
-}
-
-tuic_user_add() {
-  local id="$1" name="$2" state candidate user_id uuid password user_json
-  tuic_valid_name "$name" || die 'TUIC 用户名称无效'
-  tuic_resolve_user_json "$id" "$name" >/dev/null 2>&1 && die "TUIC 用户已存在: $name"
-  state="$(tuic_state_file "$id")" candidate="$(mktemp_file .tuic-state)" || return 1
-  user_id="$(tuic_generate_user_id)" uuid="$(tuic_generate_uuid)" password="$(tuic_generate_password)"
-  user_json="$(tuic_user_json "$user_id" "$name" "$uuid" "$password")"
-  jq --argjson user "$user_json" --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    '.users += [$user] | .updated_at=$updated' "$state" >"$candidate" \
-    && tuic_commit_candidate_state "$id" "$candidate"
-  rm -f "$candidate"
-}
-
-tuic_user_delete() {
-  local id="$1" selector="$2" user_json user_id state candidate
-  user_json="$(tuic_resolve_user_json "$id" "$selector")" || die '找不到唯一 TUIC 用户'
-  user_id="$(jq -r .user_id <<<"$user_json")"
-  state="$(tuic_state_file "$id")" candidate="$(mktemp_file .tuic-state)" || return 1
-  [ "$(jq '.users|length' "$state")" -gt 1 ] || die 'TUIC 实例至少要保留一个用户；如需清空，请卸载实例'
-  jq --arg user_id "$user_id" --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    '.users |= map(select(.user_id!=$user_id)) | .updated_at=$updated' "$state" >"$candidate" \
-    && tuic_commit_candidate_state "$id" "$candidate"
-  rm -f "$candidate"
-}
-
-tuic_user_rotate() {
-  local id="$1" selector="$2" user_json user_id state candidate uuid password
-  user_json="$(tuic_resolve_user_json "$id" "$selector")" || die '找不到唯一 TUIC 用户'
-  user_id="$(jq -r .user_id <<<"$user_json")"
-  uuid="$(tuic_generate_uuid)" password="$(tuic_generate_password)"
-  state="$(tuic_state_file "$id")" candidate="$(mktemp_file .tuic-state)" || return 1
-  jq --arg user_id "$user_id" --arg uuid "$uuid" --arg password "$password" \
-    --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
-    (.users[] | select(.user_id==$user_id)) |= (.uuid=$uuid | .password=$password)
-    | .updated_at=$updated
-  ' "$state" >"$candidate" && tuic_commit_candidate_state "$id" "$candidate"
-  rm -f "$candidate"
-}
-
-tuic_user_list() {
-  local id="$1"
-  jq -r '.users[] | [.name,.uuid,.created_at] | @tsv' "$(tuic_state_file "$id")"
-}
-
-tuic_show_user() {
-  local id="$1" selector="${2:-}" user_json endpoint
-  user_json="$(tuic_resolve_user_json "$id" "$selector")" || return 1
-  endpoint="$(tuic_effective_endpoint "$id")"
-  printf 'TUIC v5 实例: %s\n用户: %s\n入口配置 / Ingress Profile: %s\n实际监听 / Actual Listener: %s:%s/UDP\n展示端点 / Display Endpoint: %s:%s\nSNI: %s\nUUID: %s\n密码: %s\n' \
-    "$(tuic_state_field "$id" name)" "$(jq -r .name <<<"$user_json")" \
-    "$(nb_ingress_profile_name "$(tuic_state_field "$id" ingress_profile_id 2>/dev/null || true)")" \
-    "$(tuic_state_field "$id" listen_host)" "$(tuic_state_field "$id" listen_port)" \
-    "${endpoint%%|*}" "${endpoint#*|}" "$(tuic_state_field "$id" sni)" \
-    "$(jq -r .uuid <<<"$user_json")" "$(jq -r .password <<<"$user_json")"
-}
-
-tuic_export_user() {
-  local id="$1" selector="${2:-}" uri
-  printf '%s\n' '===== MIHOMO YAML ====='
-  tuic_export_mihomo "$id" "$selector"
-  printf '%s\n' '' '===== SING-BOX JSON ====='
-  tuic_export_singbox "$id" "$selector"
-  if uri="$(tuic_build_uri "$id" "$selector" 2>/dev/null)"; then
-    printf '\nTUIC URI: %s\n' "$uri"
-  else
-    printf '%s\n' '' 'TUIC URI：不可用（尚未确认上游标准化的 v5 URI）。'
-  fi
-}
-
-tuic_node_rows() {
-  local id endpoint status user
-  while IFS= read -r id; do
-    endpoint="$(tuic_effective_endpoint "$id")"
-    status=Stopped
-    tuic_running "$id" && status=Running
-    while IFS= read -r user; do
-      printf 'TUIC v5|%s/%s|%s:%s|%s|UDP\n' "$(tuic_state_field "$id" name)" \
-        "$(jq -r .name <<<"$user")" "${endpoint%%|*}" "${endpoint#*|}" "$status"
-    done < <(jq -c '.users[]' "$(tuic_state_file "$id")")
-  done < <(tuic_instance_ids)
-}
-
-tuic_running() {
-  local id="$1" port policy method address
-  tuic_state_exists "$id" || return 1
-  port="$(tuic_state_field "$id" listen_port)"
-  policy="$(tuic_state_field "$id" ingress_enforcement 2>/dev/null || printf permissive)"
-  method="$(tuic_state_field "$id" ingress_enforcement_method 2>/dev/null || printf wildcard)"
-  address="$(tuic_state_field "$id" ingress_local_address 2>/dev/null || true)"
-  tuic_service_active "$id" \
-    && nb_wait_for_enforced_listener "$policy" "$method" UDP "$port" "$address" "tuic:${id}" 1 \
-    && tuic_listener_owned_by_service "$id" "$port"
-}
-
-tuic_doctor_one() {
-  local id="$1" failed=0 port cert key runtime expected enabled
-  port="$(tuic_state_field "$id" listen_port)"
-  enabled="$(tuic_state_field "$id" enabled 2>/dev/null || true)"
-  case "$enabled" in true|false) ;; *) return 1 ;; esac
-  cert="$(jq -r .tls.certificate_path "$(tuic_state_file "$id")")"
-  key="$(jq -r .tls.key_path "$(tuic_state_file "$id")")"
-  runtime="$(tuic_runtime_version 2>/dev/null || true)"
-  expected="$(tuic_state_field "$id" runtime_version)"
-  [ "$runtime" = "$expected" ] && nb_doctor_line PASS "sing-box ${runtime}" \
-    || { nb_doctor_line FAIL "sing-box 版本 ${runtime:-缺失}，预期 ${expected}"; failed=1; }
-  tuic_config_matches_state "$id" && tuic_validate_config "$(tuic_config_file "$id")" \
-    && nb_doctor_line PASS "TUIC v5 配置有效: $(tuic_state_field "$id" name)" \
-    || { nb_doctor_line FAIL "TUIC 配置无效: $(tuic_state_field "$id" name)"; failed=1; }
-  if [ "$enabled" = true ]; then
-    tuic_service_active "$id" && nb_doctor_line PASS '服务运行中' \
-      || { nb_doctor_line FAIL '服务未运行'; failed=1; }
-    tuic_running "$id" \
-      && nb_doctor_line PASS "同进程 UDP/${port} 监听正常" \
-      || { nb_doctor_line FAIL "同进程 UDP/${port} 监听异常"; failed=1; }
-  elif tuic_service_active "$id" || nb_port_is_listening UDP "$port"; then
-    nb_doctor_line FAIL "服务标记为已停止，但仍有服务或监听: UDP/${port}"
-    failed=1
-  else
-    nb_doctor_line PASS '服务按状态保持停止，且无残留监听'
-  fi
-  nb_firewall_binding_owned UDP "$port" && nb_doctor_line PASS "防火墙规则正常: UDP/${port}" \
-    || { nb_doctor_line FAIL "防火墙规则异常: UDP/${port}"; failed=1; }
-  [ -s "$cert" ] && openssl x509 -in "$cert" -checkend 2592000 -noout >/dev/null 2>&1 \
-    && nb_doctor_line PASS 'TLS 证书有效期超过 30 天' \
-    || { nb_doctor_line FAIL 'TLS 证书缺失或即将过期'; failed=1; }
-  [ "$(stat -c '%a' "$key" 2>/dev/null || true)" = 600 ] \
-    && nb_doctor_line PASS 'TLS P-256 密钥权限=0600' \
-    || { nb_doctor_line FAIL 'TLS 密钥权限异常'; failed=1; }
-  jq -e '.users|length>0 and all(.[]; .uuid|test("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"))' \
-    "$(tuic_state_file "$id")" >/dev/null \
-    && nb_doctor_line PASS 'TUIC v5 用户 UUID 与密码有效' \
-    || { nb_doctor_line FAIL 'TUIC 用户数据无效'; failed=1; }
-  return "$failed"
-}
-
-tuic_doctor_all() {
-  local id failed=0 found=0
-  while IFS= read -r id; do
-    found=1
-    tuic_doctor_one "$id" || failed=1
-  done < <(tuic_instance_ids)
-  [ "$found" -eq 1 ] || nb_doctor_line INFO 'TUIC v5 未安装'
-  return "$failed"
-}
-
-tuic_status() {
-  local id endpoint service
-  id="$(tuic_resolve_instance_id "${TUIC_NAME:-}")" || { t 'TUIC 实例未安装或选择结果不唯一' 'TUIC instance missing or ambiguous'; return 0; }
-  endpoint="$(tuic_effective_endpoint "$id")"
-  service="$(tuic_service_active "$id" && printf '运行中' || printf '已停止')"
-  printf 'TUIC v5\n  实例: %s\n  Runtime: %s（%s）\n  服务: %s\n  UDP 监听端口: %s\n  展示端点 / Display Endpoint: %s:%s\n  TLS: ECDSA P-256 自签名证书 / h3\n  用户数: %s\n' \
-    "$(tuic_state_field "$id" name)" "$(tuic_state_field "$id" runtime_version)" \
-    "$(tuic_state_field "$id" runtime_channel)" \
-    "$service" \
-    "$(tuic_state_field "$id" listen_port)" "${endpoint%%|*}" "${endpoint#*|}" \
-    "$(jq '.users|length' "$(tuic_state_file "$id")")"
-}
-
-tuic_service_command() {
-  local id action="$1" port
-  id="$(tuic_resolve_instance_id "${TUIC_NAME:-}")" || die '请用 --name 指定 TUIC 实例'
-  port="$(tuic_state_field "$id" listen_port)"
-  tuic_service_action "$id" "$action" || return 1
-  case "$action" in
-    start|restart) tuic_running "$id" ;;
-  esac
-}
-
-remove_tuic_instance() {
-  local id port config_dir state_dir
-  id="$(tuic_resolve_instance_id "${TUIC_NAME:-}")" || die '请用 --name 指定 TUIC 实例'
-  port="$(tuic_state_field "$id" listen_port)"
-  config_dir="$(tuic_instance_config_dir "$id")" state_dir="$(dirname "$(tuic_state_file "$id")")"
-  tuic_remove_service "$id" || return 1
-  nb_firewall_close_pairs "UDP|${port}" || return 1
-  find "$config_dir" -mindepth 1 -maxdepth 1 -delete
-  find "$state_dir" -mindepth 1 -maxdepth 1 -delete
-  rmdir "$config_dir" "$state_dir" 2>/dev/null || true
-  if [ -z "$(tuic_instance_ids)" ]; then
-    rm -f "$NOBRAND_SING_BOX_BIN" "$NOBRAND_SING_BOX_RUNTIME_META"
-    case "$NOBRAND_TUIC_SYSTEMD_TEMPLATE" in
-      /etc/systemd/system/nobrand-tuic@.service) rm -f "$NOBRAND_TUIC_SYSTEMD_TEMPLATE" ;;
-    esac
-    [ "$(nb_service_manager)" != systemd ] || systemctl daemon-reload
-  fi
-}
-
-tuic_upgrade_runtime_rollback() {
-  local snapshot="$1" active_file="$2" id port failed=0 state_snapshot
-  tuic_restore_runtime_files "$snapshot/runtime" || failed=1
-  while IFS= read -r id; do
-    [ -n "$id" ] || continue
-    state_snapshot="$snapshot/states/${id}.json"
-    [ ! -s "$state_snapshot" ] \
-      || nb_atomic_install_file "$state_snapshot" "$(tuic_state_file "$id")" 0600 \
-      || failed=1
-  done < <(tuic_instance_ids)
-  while IFS= read -r id; do
-    [ -n "$id" ] || continue
-    port="$(tuic_state_field "$id" listen_port 2>/dev/null || true)"
-    tuic_service_action "$id" restart >/dev/null 2>&1 \
-      && tuic_running "$id" || failed=1
-  done <"$active_file"
-  [ "$failed" -eq 0 ]
-}
-
-tuic_upgrade_runtime() {
-  local id version state tmp candidate metadata_tmp snapshot active_file port failed=0
-  [ -n "$(tuic_instance_ids)" ] || die '没有可升级的 TUIC 实例'
-  candidate="$(mktemp_file .sing-box-upgrade)" || return 1
-  metadata_tmp="$(mktemp_file .tuic-runtime-meta)" || return 1
-  snapshot="$(mktemp_dir)" || return 1
-  active_file="$snapshot/active.ids"
-  : >"$active_file"
-  mkdir -p "$snapshot/runtime" "$snapshot/states" || return 1
-  tuic_download_runtime_candidate "$candidate" "$TUIC_CHANNEL" "$TUIC_VERSION" || {
-    rm -f "$candidate" "$metadata_tmp"
-    rm -rf -- "$snapshot"
-    return 1
-  }
-  version="$(tuic_runtime_version "$candidate")" || return 1
-  tuic_generate_runtime_metadata "$metadata_tmp" "$TUIC_CHANNEL" "$version" || return 1
-  while IFS= read -r id; do
-    tuic_validate_config "$(tuic_config_file "$id")" "$candidate" || failed=1
-  done < <(tuic_instance_ids)
-  [ "$failed" -eq 0 ] || {
-    rm -f "$candidate" "$metadata_tmp"
-    rm -rf -- "$snapshot"
-    return 1
-  }
-  admin_lock_acquire || return 1
-  tuic_snapshot_runtime_files "$snapshot/runtime" || {
-    admin_lock_release
-    return 1
-  }
-  while IFS= read -r id; do
-    cp -a "$(tuic_state_file "$id")" "$snapshot/states/${id}.json" || failed=1
-    tuic_service_active "$id" && printf '%s\n' "$id" >>"$active_file"
-  done < <(tuic_instance_ids)
-  if [ "$failed" -ne 0 ] \
-     || ! nb_atomic_install_file "$candidate" "$NOBRAND_SING_BOX_BIN" 0755 \
-     || ! nb_atomic_install_file "$metadata_tmp" "$NOBRAND_SING_BOX_RUNTIME_META" 0600 \
-     || [ "$(tuic_runtime_version 2>/dev/null || true)" != "$version" ]; then
-    tuic_upgrade_runtime_rollback "$snapshot" "$active_file" \
-      || warn 'TUIC Runtime 升级回滚校验失败'
-    admin_lock_release
-    rm -f "$candidate" "$metadata_tmp"
-    rm -rf -- "$snapshot"
-    return 1
-  fi
-  while IFS= read -r id; do
-    [ -n "$id" ] || continue
-    port="$(tuic_state_field "$id" listen_port)"
-    if ! tuic_service_action "$id" restart \
-       || ! tuic_running "$id"; then
-      failed=1
-      break
-    fi
-  done <"$active_file"
-  if [ "$failed" -eq 0 ]; then
-    while IFS= read -r id; do
-      state="$(tuic_state_file "$id")"
-      tmp="$(mktemp_file .tuic-state)" || { failed=1; break; }
-      jq --arg version "$version" --arg channel "$TUIC_CHANNEL" \
-        --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-        '.runtime_version=$version | .runtime_channel=$channel | .updated_at=$updated' "$state" >"$tmp" \
-        && nb_atomic_install_file "$tmp" "$state" 0600 || failed=1
-      rm -f "$tmp"
-      [ "$failed" -eq 0 ] || break
-    done < <(tuic_instance_ids)
-  fi
-  if [ "$failed" -ne 0 ]; then
-    tuic_upgrade_runtime_rollback "$snapshot" "$active_file" \
-      || warn 'TUIC Runtime 升级回滚校验失败'
-    admin_lock_release
-    rm -f "$candidate" "$metadata_tmp"
-    rm -rf -- "$snapshot"
-    return 1
-  fi
-  admin_lock_release
-  rm -f "$candidate" "$metadata_tmp"
-  rm -rf -- "$snapshot"
-}
-
-tuic_restore_runtime() {
-  local first_id channel version current id state_version metadata_tmp
-  first_id="$(tuic_instance_ids | head -n1)"
-  [ -n "$first_id" ] || return 0
-  channel="$(tuic_state_field "$first_id" runtime_channel)"
-  version="$(tuic_state_field "$first_id" runtime_version)"
-  while IFS= read -r id; do
-    state_version="$(tuic_state_field "$id" runtime_version)"
-    [ "$state_version" = "$version" ] || return 1
-  done < <(tuic_instance_ids)
-  current="$(tuic_runtime_version 2>/dev/null || true)"
-  if [ "$current" != "$version" ] || ! tuic_runtime_metadata_valid "$version" ""; then
-    tuic_install_runtime pinned "$version" || return 1
-    metadata_tmp="$(mktemp_file .tuic-runtime-meta)" || return 1
-    if ! jq --arg channel "$channel" '.channel=$channel' \
-        "$NOBRAND_SING_BOX_RUNTIME_META" >"$metadata_tmp" \
-       || ! nb_atomic_install_file "$metadata_tmp" "$NOBRAND_SING_BOX_RUNTIME_META" 0600; then
-      rm -f "$metadata_tmp"
-      return 1
-    fi
-    rm -f "$metadata_tmp"
-  fi
-  tuic_install_service_runtime
-}
+# Native architecture: ordinary protocols use src/19-splicore.sh.
 
 nobrand_run_tuic_action() {
-  local id
   case "${TUIC_ACTION:-menu}" in
-    install)
-      if [ "${NOBRAND_MANAGER_SESSION_ACTIVE:-0}" -eq 1 ]; then
-        nb_lifecycle_run_protocol_install tuic install_tuic
-      else
-        install_tuic
-      fi
-      ;;
-    start|stop|restart) tuic_service_command "$TUIC_ACTION" ;;
-    status) tuic_status ;;
-    doctor) tuic_doctor_all ;;
-    show)
-      id="$(tuic_resolve_instance_id "${TUIC_NAME:-}")" || die '请用 --name 指定 TUIC 实例'
-      tuic_show_user "$id" "${TUIC_USER:-}"
-      ;;
-    export)
-      id="$(tuic_resolve_instance_id "${TUIC_NAME:-}")" || die '请用 --name 指定 TUIC 实例'
-      tuic_export_user "$id" "${TUIC_USER:-}"
-      ;;
-    set-endpoint)
-      id="$(tuic_resolve_instance_id "${TUIC_NAME:-}")" || die '请用 --name 指定 TUIC 实例'
-      tuic_set_endpoint_state "$id" "${ADVERTISE_HOST:-}" "${ADVERTISE_PORT:-}"
-      ;;
-    user-add)
-      id="$(tuic_resolve_instance_id "${TUIC_NAME:-}")" || die '请用 --name 指定 TUIC 实例'
-      tuic_user_add "$id" "$TUIC_USER"
-      ;;
-    user-delete)
-      id="$(tuic_resolve_instance_id "${TUIC_NAME:-}")" || die '请用 --name 指定 TUIC 实例'
-      tuic_user_delete "$id" "$TUIC_USER"
-      ;;
-    user-list)
-      id="$(tuic_resolve_instance_id "${TUIC_NAME:-}")" || die '请用 --name 指定 TUIC 实例'
-      tuic_user_list "$id"
-      ;;
-    user-show)
-      id="$(tuic_resolve_instance_id "${TUIC_NAME:-}")" || die '请用 --name 指定 TUIC 实例'
-      tuic_show_user "$id" "$TUIC_USER"
-      ;;
-    user-rotate)
-      id="$(tuic_resolve_instance_id "${TUIC_NAME:-}")" || die '请用 --name 指定 TUIC 实例'
-      tuic_user_rotate "$id" "$TUIC_USER"
-      ;;
-    upgrade-runtime) tuic_upgrade_runtime ;;
-    uninstall) remove_tuic_instance ;;
-    menu) tuic_status ;;
-    help)
-      cat <<'EOF'
-nobrand tuic install|start|stop|restart|status|doctor|show|export|set-endpoint|upgrade-runtime|uninstall
-nobrand tuic user add|delete|list|show|rotate
-仅支持 TUIC v5；使用官方 sing-box；传输为 UDP / QUIC；每个用户拥有独立 UUID 与密码。
-EOF
-      ;;
-    *) die "未知 TUIC 操作: ${TUIC_ACTION}" ;;
+    menu) tuic_menu_loop ;;
+    help) nobrand_usage ;;
+    *) nb_splicore_protocol tuic "${TUIC_ACTION:-status}" "${TUIC_NAME:-}" ;;
   esac
 }
 
-# ---------- VLESS + TCP + REALITY + XTLS Vision ----------
-
-reality_valid_name() {
-  local value="${1:-}"
-  [ -n "$value" ] && [ "$(printf '%s' "$value" | wc -c | tr -d '[:space:]')" -le 64 ] \
-    && ! has_control_chars "$value" && [[ "$value" != *'|'* ]]
-}
-
-reality_generate_instance_id() {
-  local value
-  value="$(openssl rand -hex 8 2>/dev/null || true)"
-  [ -n "$value" ] || value="$(printf '%08x%08x' "$RANDOM" "$RANDOM")"
-  printf 'r%s' "$value"
-}
-
-reality_instance_ids() {
-  local path id
-  for path in "$NOBRAND_REALITY_STATE_DIR"/*/state.json; do
-    [ -f "$path" ] || continue
-    id="$(basename "$(dirname "$path")")"
-    [[ "$id" =~ ^r[0-9a-f]{16}$ ]] || continue
-    jq -e --arg id "$id" '
-      .schema_version==3 and .ownership=="nobrand-v3"
-      and .protocol=="vless-reality" and .instance_id==$id
-    ' "$path" >/dev/null 2>&1 || continue
-    printf '%s\n' "$id"
-  done
-}
-
-reality_state_file() { printf '%s/%s/state.json' "$NOBRAND_REALITY_STATE_DIR" "$1"; }
-reality_instance_config_dir() { printf '%s/%s' "$NOBRAND_REALITY_CONFIG_DIR" "$1"; }
-reality_config_file() { printf '%s/config.json' "$(reality_instance_config_dir "$1")"; }
-reality_private_key_file() { printf '%s/private.key' "$(reality_instance_config_dir "$1")"; }
-
-reality_state_exists() {
-  local id="$1" state
-  state="$(reality_state_file "$id")"
-  [ -s "$state" ] && jq -e --arg id "$id" '
-    .schema_version==3 and .ownership=="nobrand-v3"
-    and .protocol=="vless-reality" and .instance_id==$id
-  ' "$state" >/dev/null 2>&1
-}
-
-reality_state_field() {
-  local id="$1" field="$2" state
-  state="$(reality_state_file "$id")"
-  reality_state_exists "$id" || return 1
-  jq -r --arg field "$field" --arg default_target_port "$NOBRAND_REALITY_DEFAULT_CAMOUFLAGE_PORT" '
-    if has($field) and .[$field]!=null then .[$field]
-    elif $field=="target_port" then $default_target_port
-    elif $field=="camouflage_mode" then "custom"
-    else empty
-    end
-  ' "$state"
-}
-
-reality_public_inbound_tag() { printf 'nobrand-vless-reality-%s-in' "$1"; }
-reality_defender_tag() { printf 'nobrand-vless-reality-%s-defender' "$1"; }
-
-reality_defender_owner_rows() {
-  local id state
-  while IFS= read -r id; do
-    [ -n "$id" ] || continue
-    state="$(reality_state_file "$id")"
-    jq -r --arg id "$id" '
-      select(.defender_enabled == true)
-      | select(.defender_port | type == "number")
-      | [$id, (.defender_port|tostring), (.defender_tag // "")] | @tsv
-    ' "$state" 2>/dev/null || true
-  done < <(reality_instance_ids)
-}
-
-reality_defender_port_owner() {
-  local port="$1" ignore_id="${2:-}" id row_port _tag
-  while IFS=$'\t' read -r id row_port _tag; do
-    [ "$id" = "$ignore_id" ] && continue
-    if [ "$row_port" = "$port" ]; then
-      printf 'vless-reality-defender:%s' "$id"
-      return 0
-    fi
-  done < <(reality_defender_owner_rows)
-  return 1
-}
-
-reality_defender_port_available() {
-  local port="$1" ignore_id="${2:-}" public_port="${3:-}"
-  nb_valid_port "$port" || return 1
-  [ "$port" -ge "$NOBRAND_REALITY_DEFENDER_PORT_MIN" ] \
-    && [ "$port" -le "$NOBRAND_REALITY_DEFENDER_PORT_MAX" ] || return 1
-  [ -z "$public_port" ] || [ "$port" != "$public_port" ] || return 1
-  reality_defender_port_owner "$port" "$ignore_id" >/dev/null 2>&1 && return 1
-  nb_registry_port_owner TCP "$port" >/dev/null 2>&1 && return 1
-  nb_port_is_listening TCP "$port" && return 1
-  return 0
-}
-
-reality_select_defender_port() {
-  local public_port="${1:-}"
-  nb_scan_port_span "$NOBRAND_REALITY_DEFENDER_PORT_MIN" "$NOBRAND_REALITY_DEFENDER_PORT_MAX" \
-    reality_defender_port_available '' "$public_port"
-}
-
-reality_defender_registry_valid() {
-  local id port tag owner
-  declare -A seen=()
-  while IFS=$'\t' read -r id port tag; do
-    [[ "$id" =~ ^r[0-9a-f]{16}$ ]] || return 1
-    nb_valid_port "$port" || return 1
-    [ "$port" -ge "$NOBRAND_REALITY_DEFENDER_PORT_MIN" ] \
-      && [ "$port" -le "$NOBRAND_REALITY_DEFENDER_PORT_MAX" ] || return 1
-    [ "$tag" = "$(reality_defender_tag "$id")" ] || return 1
-    [ -z "${seen[$port]:-}" ] || return 1
-    seen[$port]="$id"
-    owner="$(nb_registry_port_owner TCP "$port" 2>/dev/null || true)"
-    [ -z "$owner" ] || return 1
-  done < <(reality_defender_owner_rows)
-}
-
-reality_find_id_by_name() {
-  local name="$1" id matched=""
-  while IFS= read -r id; do
-    [ "$(reality_state_field "$id" name 2>/dev/null || true)" = "$name" ] || continue
-    [ -z "$matched" ] || return 1
-    matched="$id"
-  done < <(reality_instance_ids)
-  [ -n "$matched" ] || return 1
-  printf '%s' "$matched"
-}
-
-reality_resolve_instance_id() {
-  local selector="${1:-}" ids id
-  if [[ "$selector" =~ ^r[0-9a-f]{16}$ ]] && reality_state_exists "$selector"; then
-    printf '%s' "$selector"
-    return 0
-  fi
-  if [ -n "$selector" ]; then
-    reality_find_id_by_name "$selector"
-    return $?
-  fi
-  ids="$(reality_instance_ids)"
-  [ "$(printf '%s\n' "$ids" | sed '/^$/d' | wc -l | tr -d '[:space:]')" -eq 1 ] || return 1
-  id="$(printf '%s\n' "$ids" | sed '/^$/d')"
-  printf '%s' "$id"
-}
-
-reality_valid_uuid() {
-  [[ "${1:-}" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]]
-}
-
-reality_generate_uuid() {
-  local value=""
-  if [ -x "$NOBRAND_XRAY_BIN" ]; then
-    value="$("$NOBRAND_XRAY_BIN" uuid 2>/dev/null | tr -d '\r\n' || true)"
-  fi
-  if ! reality_valid_uuid "$value" && command -v uuidgen >/dev/null 2>&1; then
-    value="$(uuidgen 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr -d '\r\n' || true)"
-  fi
-  if ! reality_valid_uuid "$value" && [ -r /proc/sys/kernel/random/uuid ]; then
-    value="$(tr -d '\r\n' </proc/sys/kernel/random/uuid)"
-  fi
-  reality_valid_uuid "$value" || return 1
-  printf '%s' "$value"
-}
-
-reality_valid_x25519_key() {
-  [[ "${1:-}" =~ ^[A-Za-z0-9_-]{43}$ ]]
-}
-
-reality_generate_keypair() {
-  local output private_key public_key
-  [ -x "$NOBRAND_XRAY_BIN" ] || return 1
-  output="$("$NOBRAND_XRAY_BIN" x25519 2>/dev/null)" || return 1
-  private_key="$(sed -nE 's/^PrivateKey:[[:space:]]*//p' <<<"$output" | head -n1 | tr -d '\r\n')"
-  public_key="$(sed -nE 's/^Password \(PublicKey\):[[:space:]]*//p' <<<"$output" | head -n1 | tr -d '\r\n')"
-  reality_valid_x25519_key "$private_key" && reality_valid_x25519_key "$public_key" || return 1
-  printf '%s|%s' "$private_key" "$public_key"
-}
-
-reality_derive_public_key() {
-  local private_key="$1" output public_key
-  reality_valid_x25519_key "$private_key" || return 1
-  output="$("$NOBRAND_XRAY_BIN" x25519 -i "$private_key" 2>/dev/null)" || return 1
-  public_key="$(sed -nE 's/^Password \(PublicKey\):[[:space:]]*//p' <<<"$output" | head -n1 | tr -d '\r\n')"
-  reality_valid_x25519_key "$public_key" || return 1
-  printf '%s' "$public_key"
-}
-
-reality_valid_short_id() {
-  local value="${1:-}"
-  [[ "$value" =~ ^[0-9a-fA-F]{2,16}$ ]] && [ "$(( ${#value} % 2 ))" -eq 0 ]
-}
-
-reality_generate_short_id() {
-  local value
-  value="$(openssl rand -hex 8 2>/dev/null || true)"
-  reality_valid_short_id "$value" || return 1
-  printf '%s' "$value"
-}
-
-reality_normalize_hostname() {
-  printf '%s' "${1%.}" | tr '[:upper:]' '[:lower:]'
-}
-
-reality_valid_public_hostname_syntax() {
-  local host
-  host="$(reality_normalize_hostname "${1:-}")"
-  [ -n "$host" ] && [ "${#host}" -le 253 ] || return 1
-  command -v python3 >/dev/null 2>&1 || return 1
-  python3 - "$host" <<'PY'
-import re
-import sys
-
-host = sys.argv[1]
-if host in {"localhost", "localhost.localdomain"} or "." not in host:
-    raise SystemExit(1)
-labels = host.split(".")
-ok = all(1 <= len(label) <= 63 and
-         re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", label)
-         for label in labels)
-raise SystemExit(0 if ok and not host.replace(".", "").isdigit() else 1)
-PY
-}
-
-reality_target_resolves_public() {
-  local host="$1" port="$2"
-  python3 - "$host" "$port" <<'PY'
-import ipaddress
-import socket
-import sys
-
-host, port = sys.argv[1], int(sys.argv[2])
-try:
-    addresses = {item[4][0] for item in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)}
-except OSError:
-    raise SystemExit(1)
-if not addresses:
-    raise SystemExit(1)
-for raw in addresses:
-    ip = ipaddress.ip_address(raw.split("%", 1)[0])
-    if not ip.is_global:
-        raise SystemExit(1)
-raise SystemExit(0)
-PY
-}
-
-reality_validate_target_live() {
-  local host="$1" port="$2" log rc=0
-  reality_valid_public_hostname_syntax "$host" && nb_valid_port "$port" || return 1
-  reality_target_resolves_public "$host" "$port" || return 1
-  log="$(mktemp_file .reality-target)" || return 1
-  if command -v timeout >/dev/null 2>&1; then
-    timeout 20 openssl s_client -connect "${host}:${port}" -servername "$host" \
-      -verify_hostname "$host" -verify_return_error -tls1_3 -brief </dev/null >"$log" 2>&1 || rc=$?
-  else
-    openssl s_client -connect "${host}:${port}" -servername "$host" \
-      -verify_hostname "$host" -verify_return_error -tls1_3 -brief </dev/null >"$log" 2>&1 || rc=$?
-  fi
-  rm -f "$log"
-  [ "$rc" -eq 0 ]
-}
-
-reality_auto_candidate_rows() {
-  printf '%s\n' "${REALITY_AUTO_QUALIFIED_CANDIDATES[@]}"
-}
-
-reality_randomized_auto_candidates() {
-  local candidates=() index swap_index swap
-  mapfile -t candidates < <(reality_auto_candidate_rows)
-  for ((index=${#candidates[@]}-1; index>0; index--)); do
-    swap_index=$((RANDOM % (index + 1)))
-    swap="${candidates[$index]}"
-    candidates[$index]="${candidates[$swap_index]}"
-    candidates[$swap_index]="$swap"
-  done
-  printf '%s\n' "${candidates[@]}"
-}
-
-reality_select_auto_camouflage_target() {
-  local target_port="$1" candidate seen_candidates='|'
-  VLESS_REALITY_TARGET=""
-  while IFS= read -r candidate; do
-    [ -n "$candidate" ] || continue
-    case "$seen_candidates" in
-      *"|${candidate}|"*) continue ;;
-    esac
-    seen_candidates="${seen_candidates}${candidate}|"
-    if reality_validate_target_live "$candidate" "$target_port"; then
-      VLESS_REALITY_TARGET="$candidate"
-      VLESS_REALITY_CAMOUFLAGE_MODE=auto
-      info "REALITY 已自动选择伪装目标: ${candidate}:${target_port}"
-      return 0
-    fi
-    warn "REALITY 自动伪装候选在目标端口 ${target_port} 上不可用: ${candidate}"
-  done < <(reality_randomized_auto_candidates)
-  return 1
-}
-
-reality_resolve_camouflage_request() {
-  VLESS_REALITY_TARGET_PORT="${VLESS_REALITY_TARGET_PORT:-$NOBRAND_REALITY_DEFAULT_CAMOUFLAGE_PORT}"
-  nb_valid_port "$VLESS_REALITY_TARGET_PORT" || return 1
-  VLESS_REALITY_TARGET_PORT="$(normalize_uint "$VLESS_REALITY_TARGET_PORT")"
-  if [ -z "${VLESS_REALITY_TARGET:-}" ]; then
-    VLESS_REALITY_CAMOUFLAGE_MODE=auto
-    reality_select_auto_camouflage_target "$VLESS_REALITY_TARGET_PORT"
-    return
-  fi
-  VLESS_REALITY_CAMOUFLAGE_MODE=custom
-  VLESS_REALITY_TARGET="$(reality_normalize_hostname "$VLESS_REALITY_TARGET")"
-  reality_valid_public_hostname_syntax "$VLESS_REALITY_TARGET" \
-    && reality_validate_target_live "$VLESS_REALITY_TARGET" "$VLESS_REALITY_TARGET_PORT"
-}
-
-reality_profile_recommendation() {
-  local profile_id="$1" type
-  type="$(nb_ingress_profile_json "$profile_id" 2>/dev/null | jq -r .type)" || return 1
-  case "$type" in
-    public) printf 'recommended' ;;
-    mapped|legacy) printf 'warning' ;;
-    *) return 1 ;;
-  esac
-}
-
-reality_generate_server_config() {
-  local output="$1" id="$2" listen="$3" port="$4" uuid="$5" private_key="$6"
-  local short_id="$7" server_name="$8" target_port="$9" defender_port="${10}"
-  reality_valid_uuid "$uuid" && reality_valid_x25519_key "$private_key" \
-    && reality_valid_short_id "$short_id" && reality_valid_public_hostname_syntax "$server_name" \
-    && nb_valid_port "$port" && nb_valid_port "$target_port" \
-    && nb_valid_port "$defender_port" || return 1
-  jq -n --arg tag "$(reality_public_inbound_tag "$id")" \
-    --arg defender_tag "$(reality_defender_tag "$id")" --arg listen "$listen" \
-    --arg port "$port" --arg uuid "$uuid" --arg private_key "$private_key" \
-    --arg short_id "$short_id" --arg server_name "$server_name" \
-    --arg target_port "$target_port" --arg defender_port "$defender_port" \
-    --arg target "127.0.0.1:${defender_port}" \
-    --arg min_client_ver "$NOBRAND_REALITY_MIN_CLIENT_VER" \
-    --arg dispatch "$NOBRAND_REALITY_DEFENDER_DISPATCH_HOST" \
-    --arg redirect "${server_name}:${target_port}" '
-    {
-      log:{loglevel:"warning"},
-      inbounds:[
-        {
-          tag:$tag,listen:$listen,port:($port|tonumber),protocol:"vless",
-          settings:{
-            clients:[{id:$uuid,email:"vless-reality@nobrand",flow:"xtls-rprx-vision"}],
-            decryption:"none"
-          },
-          streamSettings:{
-            network:"tcp",security:"reality",
-            realitySettings:{
-              show:false,target:$target,xver:0,minClientVer:$min_client_ver,serverNames:[$server_name],
-              privateKey:$private_key,shortIds:[$short_id]
-            }
-          },
-          sniffing:{enabled:true,destOverride:["http","tls","quic"]}
-        },
-        {
-          tag:$defender_tag,listen:"127.0.0.1",port:($defender_port|tonumber),
-          protocol:"dokodemo-door",
-          settings:{address:$dispatch,port:($target_port|tonumber),network:"tcp"},
-          sniffing:{enabled:true,routeOnly:true,destOverride:["tls"]}
-        }
-      ],
-      outbounds:[
-        {tag:"PUBLIC_DIRECT",protocol:"freedom"},
-        {tag:"DIRECT",protocol:"freedom",settings:{redirect:$redirect}},
-        {tag:"BLOCK",protocol:"blackhole"}
-      ],
-      routing:{rules:[
-        {type:"field",ip:["geoip:private"],outboundTag:"BLOCK"},
-        {type:"field",network:"tcp",port:"25,135,137,138,139,445,465,587",outboundTag:"BLOCK"},
-        {type:"field",protocol:["bittorrent"],outboundTag:"BLOCK"},
-        {type:"field",inboundTag:[$defender_tag],domain:["full:"+$server_name],outboundTag:"DIRECT"},
-        {type:"field",inboundTag:[$defender_tag],outboundTag:"BLOCK"},
-        {type:"field",inboundTag:[$tag],outboundTag:"PUBLIC_DIRECT"}
-      ]}
-    }
-  ' >"$output"
-}
-
-reality_generate_state() {
-  local output="$1" id="$2" name="$3" listen="$4" port="$5" mode="$6"
-  local advertise_host="$7" advertise_port="$8" uuid="$9" public_key="${10}"
-  local private_key_path="${11}" short_id="${12}" server_name="${13}" target_port="${14}"
-  local fingerprint="${15}" spider_x="${16}" runtime_version="${17}"
-  local ingress_profile_id="${18}" defender_port="${19}" created_at="${20:-}"
-  local camouflage_mode="${21:-custom}"
-  local updated_at recommendation defender_tag
-  [ -n "$created_at" ] || created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  updated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  recommendation="$(reality_profile_recommendation "$ingress_profile_id")" || return 1
-  defender_tag="$(reality_defender_tag "$id")"
-  jq -n --arg id "$id" --arg name "$name" --arg listen "$listen" --arg port "$port" \
-    --arg mode "$mode" --arg advertise_host "$advertise_host" --arg advertise_port "$advertise_port" \
-    --arg uuid "$uuid" --arg public_key "$public_key" --arg private_key_path "$private_key_path" \
-    --arg short_id "$short_id" --arg server_name "$server_name" --arg target_port "$target_port" \
-    --arg camouflage_mode "$camouflage_mode" \
-    --arg fingerprint "$fingerprint" --arg spider_x "$spider_x" --arg runtime "$runtime_version" \
-    --arg ingress "$ingress_profile_id" --arg recommendation "$recommendation" \
-    --arg defender_port "$defender_port" --arg defender_tag "$defender_tag" \
-    --arg defender_dispatch "$NOBRAND_REALITY_DEFENDER_DISPATCH_HOST" \
-    --arg created "$created_at" --arg updated "$updated_at" '
-    {
-      schema_version:3,ownership:"nobrand-v3",protocol:"vless-reality",
-      instance_id:$id,name:$name,listen_host:$listen,listen_port:($port|tonumber),
-      transport:"tcp",network:"tcp",security:"reality",flow:"xtls-rprx-vision",
-      uuid:$uuid,public_key:$public_key,private_key_path:$private_key_path,short_id:$short_id,
-      camouflage_mode:$camouflage_mode,server_name:$server_name,target_host:$server_name,
-      target_port:($target_port|tonumber),
-      defender_enabled:true,defender_protocol:"dokodemo-door",defender_listen:"127.0.0.1",
-      defender_port:($defender_port|tonumber),defender_tag:$defender_tag,
-      defender_dispatch_host:$defender_dispatch,defender_target_mode:"fixed-outbound-redirect",
-      fingerprint:$fingerprint,spider_x:$spider_x,show:false,xver:0,
-      advertise_mode:$mode,advertise_host:$advertise_host,
-      advertise_port:(if $advertise_port=="" then "" else ($advertise_port|tonumber) end),
-      ingress_profile_id:$ingress,profile_recommendation:$recommendation,
-      runtime_version:$runtime,enabled:true,created_at:$created,updated_at:$updated
-    }
-  ' >"$output"
-}
-
-reality_state_matches() {
-  local state="$1" id="${2:-}"
-  jq -e --arg id "$id" \
-    --argjson defender_min "$NOBRAND_REALITY_DEFENDER_PORT_MIN" \
-    --argjson defender_max "$NOBRAND_REALITY_DEFENDER_PORT_MAX" \
-    --argjson default_target_port "$NOBRAND_REALITY_DEFAULT_CAMOUFLAGE_PORT" \
-    --arg defender_dispatch "$NOBRAND_REALITY_DEFENDER_DISPATCH_HOST" '
-    .schema_version==3 and .ownership=="nobrand-v3" and .protocol=="vless-reality"
-    and (.instance_id|test("^r[0-9a-f]{16}$"))
-    and ($id=="" or .instance_id==$id)
-    and (.name | (type=="string" and length>0))
-    and (.listen_host | (type=="string" and length>0))
-    and (.listen_port | (type=="number" and .>=1 and .<=65535 and floor==.))
-    and .transport=="tcp" and .network=="tcp" and .security=="reality"
-    and .flow=="xtls-rprx-vision"
-    and (.uuid|test("^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"))
-    and (.public_key|test("^[A-Za-z0-9_-]{43}$"))
-    and (.private_key_path | (type=="string" and length>0))
-    and (.short_id|test("^(?:[0-9a-fA-F]{2}){1,8}$"))
-    and ((.camouflage_mode // "custom")=="auto" or (.camouflage_mode // "custom")=="custom")
-    and .server_name==.target_host
-    and ((.target_port // $default_target_port) | (type=="number" and .>=1 and .<=65535 and floor==.))
-    and .defender_enabled==true and .defender_protocol=="dokodemo-door"
-    and .defender_listen=="127.0.0.1"
-    and (.defender_port | (type=="number" and .>=$defender_min and .<=$defender_max and floor==.))
-    and .defender_tag==("nobrand-vless-reality-"+.instance_id+"-defender")
-    and .defender_dispatch_host==$defender_dispatch
-    and .defender_target_mode=="fixed-outbound-redirect"
-    and .fingerprint=="chrome" and .spider_x=="/" and .show==false and .xver==0
-    and ((.advertise_mode=="auto" and .advertise_host=="" and .advertise_port=="") or
-         (.advertise_mode=="custom" and (.advertise_host | (type=="string" and length>0))
-          and (.advertise_port | (type=="number" and .>=1 and .<=65535 and floor==.))))
-    and (.ingress_profile_id | (type=="string" and length>0))
-    and (.profile_recommendation=="recommended" or .profile_recommendation=="warning")
-    and (.runtime_version | (type=="string" and length>0))
-    and (.enabled | type=="boolean")
-    and ((.ingress_enforcement // "permissive")=="permissive" or .ingress_enforcement=="strict")
-    and ((.ingress_enforcement_method // "wildcard")=="wildcard" or .ingress_enforcement_method=="native-bind")
-  ' "$state" >/dev/null 2>&1
-}
-
-reality_config_matches_state() {
-  local id="$1" state config key_path private_key
-  state="$(reality_state_file "$id")" config="$(reality_config_file "$id")"
-  reality_state_matches "$state" "$id" || return 1
-  key_path="$(jq -r .private_key_path "$state")"
-  [ -s "$key_path" ] || return 1
-  private_key="$(tr -d '\r\n' <"$key_path")"
-  reality_valid_x25519_key "$private_key" || return 1
-  jq -e --slurpfile state "$state" --arg private_key "$private_key" \
-    --arg min_client_ver "$NOBRAND_REALITY_MIN_CLIENT_VER" \
-    --argjson default_target_port "$NOBRAND_REALITY_DEFAULT_CAMOUFLAGE_PORT" '
-    (.inbounds|length)==2
-    and .inbounds[0].tag==("nobrand-vless-reality-"+$state[0].instance_id+"-in")
-    and .inbounds[0].listen==$state[0].listen_host
-    and .inbounds[0].port==$state[0].listen_port
-    and .inbounds[0].protocol=="vless"
-    and .inbounds[0].settings.decryption=="none"
-    and .inbounds[0].settings.clients==[{
-      id:$state[0].uuid,email:"vless-reality@nobrand",flow:"xtls-rprx-vision"
-    }]
-    and .inbounds[0].streamSettings.network=="tcp"
-    and .inbounds[0].streamSettings.security=="reality"
-    and .inbounds[0].streamSettings.realitySettings=={
-      show:false,target:("127.0.0.1:"+($state[0].defender_port|tostring)),xver:0,
-      minClientVer:$min_client_ver,
-      serverNames:[$state[0].server_name],privateKey:$private_key,shortIds:[$state[0].short_id]
-    }
-    and .inbounds[0].sniffing=={enabled:true,destOverride:["http","tls","quic"]}
-    and .inbounds[1]=={
-      tag:$state[0].defender_tag,listen:"127.0.0.1",port:$state[0].defender_port,
-      protocol:"dokodemo-door",
-      settings:{address:$state[0].defender_dispatch_host,port:($state[0].target_port // $default_target_port),network:"tcp"},
-      sniffing:{enabled:true,routeOnly:true,destOverride:["tls"]}
-    }
-    and .outbounds==[
-      {tag:"PUBLIC_DIRECT",protocol:"freedom"},
-      {tag:"DIRECT",protocol:"freedom",settings:{redirect:($state[0].target_host+":"+(($state[0].target_port // $default_target_port)|tostring))}},
-      {tag:"BLOCK",protocol:"blackhole"}
-    ]
-    and .routing.rules==[
-      {type:"field",ip:["geoip:private"],outboundTag:"BLOCK"},
-      {type:"field",network:"tcp",port:"25,135,137,138,139,445,465,587",outboundTag:"BLOCK"},
-      {type:"field",protocol:["bittorrent"],outboundTag:"BLOCK"},
-      {type:"field",inboundTag:[$state[0].defender_tag],domain:["full:"+$state[0].target_host],outboundTag:"DIRECT"},
-      {type:"field",inboundTag:[$state[0].defender_tag],outboundTag:"BLOCK"},
-      {type:"field",inboundTag:[("nobrand-vless-reality-"+$state[0].instance_id+"-in")],outboundTag:"PUBLIC_DIRECT"}
-    ]
-  ' "$config" >/dev/null 2>&1
-}
-
-reality_effective_endpoint() {
-  local id="$1" mode host port listen_port ingress
-  mode="$(reality_state_field "$id" advertise_mode)"
-  host="$(reality_state_field "$id" advertise_host)"
-  port="$(reality_state_field "$id" advertise_port)"
-  listen_port="$(reality_state_field "$id" listen_port)"
-  ingress="$(reality_state_field "$id" ingress_profile_id)"
-  printf '%s|%s' "$(nb_effective_advertise_host "$mode" "$host" "$ingress")" \
-    "$(nb_effective_advertise_port "$mode" "$port" "$listen_port" "$ingress")"
-}
-
-reality_build_uri() {
-  local id="$1" endpoint host port uuid sni fingerprint public_key short_id name
-  endpoint="$(reality_effective_endpoint "$id")" || return 1
-  host="${endpoint%%|*}"; port="${endpoint#*|}"
-  uuid="$(reality_state_field "$id" uuid)"
-  sni="$(reality_state_field "$id" server_name)"
-  fingerprint="$(reality_state_field "$id" fingerprint)"
-  public_key="$(reality_state_field "$id" public_key)"
-  short_id="$(reality_state_field "$id" short_id)"
-  name="$(urlencode "NoBrand-REALITY-$(reality_state_field "$id" name)")" || return 1
-  printf 'vless://%s@%s:%s?security=reality&type=tcp&flow=xtls-rprx-vision&sni=%s&fp=%s&pbk=%s&sid=%s&spx=%%2F#%s' \
-    "$uuid" "$(url_host "$host")" "$port" "$(urlencode "$sni")" "$fingerprint" \
-    "$(urlencode "$public_key")" "$short_id" "$name"
-}
-
-reality_export_xray() {
-  local id="$1" socks_port="${2:-18080}" endpoint host port
-  endpoint="$(reality_effective_endpoint "$id")" || return 1
-  host="${endpoint%%|*}"; port="${endpoint#*|}"
-  jq -n --arg host "$host" --arg port "$port" --arg socks_port "$socks_port" \
-    --arg uuid "$(reality_state_field "$id" uuid)" \
-    --arg server_name "$(reality_state_field "$id" server_name)" \
-    --arg fingerprint "$(reality_state_field "$id" fingerprint)" \
-    --arg password "$(reality_state_field "$id" public_key)" \
-    --arg short_id "$(reality_state_field "$id" short_id)" \
-    --arg spider_x "$(reality_state_field "$id" spider_x)" '
-    {
-      log:{loglevel:"warning"},
-      inbounds:[{tag:"local-socks",listen:"127.0.0.1",port:($socks_port|tonumber),
-                 protocol:"socks",settings:{udp:true}}],
-      outbounds:[{
-        tag:"vless-reality-out",protocol:"vless",
-        settings:{vnext:[{address:$host,port:($port|tonumber),
-          users:[{id:$uuid,encryption:"none",flow:"xtls-rprx-vision"}]}]},
-        streamSettings:{network:"tcp",security:"reality",realitySettings:{
-          serverName:$server_name,fingerprint:$fingerprint,password:$password,
-          shortId:$short_id,spiderX:$spider_x
-        }}
-      }]
-    }
-  '
-}
-
-reality_export_mihomo() {
-  local id="$1" endpoint host port name
-  endpoint="$(reality_effective_endpoint "$id")" || return 1
-  host="${endpoint%%|*}"; port="${endpoint#*|}"; name="$(reality_state_field "$id" name)"
-  cat <<EOF
-mixed-port: 7890
-allow-lan: false
-mode: rule
-log-level: warning
-proxies:
-  - name: "NoBrand-REALITY-${name}"
-    type: vless
-    server: "${host}"
-    port: ${port}
-    uuid: "$(reality_state_field "$id" uuid)"
-    network: tcp
-    tls: true
-    udp: true
-    flow: xtls-rprx-vision
-    servername: "$(reality_state_field "$id" server_name)"
-    client-fingerprint: "$(reality_state_field "$id" fingerprint)"
-    reality-opts:
-      public-key: "$(reality_state_field "$id" public_key)"
-      short-id: "$(reality_state_field "$id" short_id)"
-proxy-groups:
-  - name: NOBRAND
-    type: select
-    proxies: ["NoBrand-REALITY-${name}"]
-rules:
-  - MATCH,NOBRAND
-EOF
-}
-
-reality_export_singbox() {
-  local id="$1" endpoint host port tag
-  endpoint="$(reality_effective_endpoint "$id")" || return 1
-  host="${endpoint%%|*}"; port="${endpoint#*|}"; tag="nobrand-reality-$(reality_state_field "$id" name)"
-  jq -n --arg tag "$tag" --arg host "$host" --arg port "$port" \
-    --arg uuid "$(reality_state_field "$id" uuid)" \
-    --arg server_name "$(reality_state_field "$id" server_name)" \
-    --arg fingerprint "$(reality_state_field "$id" fingerprint)" \
-    --arg public_key "$(reality_state_field "$id" public_key)" \
-    --arg short_id "$(reality_state_field "$id" short_id)" '
-    {
-      log:{level:"warn",timestamp:true},
-      inbounds:[{type:"mixed",tag:"mixed-in",listen:"127.0.0.1",listen_port:1080}],
-      outbounds:[{
-        type:"vless",tag:$tag,server:$host,server_port:($port|tonumber),uuid:$uuid,
-        flow:"xtls-rprx-vision",
-        tls:{enabled:true,server_name:$server_name,
-          utls:{enabled:true,fingerprint:$fingerprint},
-          reality:{enabled:true,public_key:$public_key,short_id:$short_id}}
-      }],
-      route:{final:$tag}
-    }
-  '
-}
-
-reality_set_endpoint_state() {
-  local id="$1" host="$2" port="$3" mode=custom state tmp
-  state="$(reality_state_file "$id")"
-  reality_state_exists "$id" || return 1
-  if [ -z "$host" ]; then
-    mode=auto; port=""
-  else
-    nb_validate_advertise_endpoint "$host" "$port" TCP || return 1
-    port="$(normalize_uint "$port")"
-  fi
-  tmp="$(mktemp_file .reality-state)" || return 1
-  jq --arg mode "$mode" --arg host "$host" --arg port "$port" \
-    --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
-    .advertise_mode=$mode | .advertise_host=$host
-    | .advertise_port=(if $port=="" then "" else ($port|tonumber) end)
-    | .updated_at=$updated
-  ' "$state" >"$tmp" && nb_atomic_install_file "$tmp" "$state" 0600
-  rm -f "$tmp"
-}
-
-reality_apply_camouflage_defaults() {
-  VLESS_REALITY_TARGET_PORT="${VLESS_REALITY_TARGET_PORT:-$NOBRAND_REALITY_DEFAULT_CAMOUFLAGE_PORT}"
-  if [ -z "${VLESS_REALITY_TARGET:-}" ]; then
-    VLESS_REALITY_CAMOUFLAGE_MODE=auto
-  else
-    VLESS_REALITY_CAMOUFLAGE_MODE=custom
-  fi
-}
-
-reality_collect_install_requests() {
-  local owner profile_type input=""
-  nb_prepare_ingress_request || return 1
-  nb_prepare_ingress_deployment "$INGRESS_PROFILE_ID" native-bind \
-    || die 'VLESS REALITY 无法绑定所选 Ingress 的 Strict 本地地址'
-  VLESS_REALITY_NAME="${VLESS_REALITY_NAME:-primary}"
-  reality_valid_name "$VLESS_REALITY_NAME" || die 'VLESS REALITY 实例名称无效'
-  reality_find_id_by_name "$VLESS_REALITY_NAME" >/dev/null 2>&1 \
-    && { t "VLESS REALITY 实例已存在: ${VLESS_REALITY_NAME}" \
-      "VLESS REALITY instance already exists: ${VLESS_REALITY_NAME}"; return 2; }
-
-  profile_type="$(nb_ingress_profile_json "$INGRESS_PROFILE_ID" | jq -r .type)"
-  if [ "$profile_type" = public ]; then
-    info "VLESS REALITY：推荐使用 $(nb_ingress_profile_name "$INGRESS_PROFILE_ID")（Public Profile）"
-  else
-    warn 'VLESS REALITY 不推荐使用 Mapped / Dedicated Ingress；仍允许继续安装'
-  fi
-
-  if [ "${YES:-0}" -ne 1 ] && [ "${VLESS_REALITY_TARGET_CLI:-0}" -eq 0 ]; then
-    read_tty input "$(t \
-      'REALITY 伪装域名 [auto]: ' \
-      'REALITY camouflage host [auto]: ')" || input=""
-    VLESS_REALITY_TARGET="$input"
-  fi
-  if [ "${YES:-0}" -ne 1 ] && [ "${VLESS_REALITY_TARGET_PORT_CLI:-0}" -eq 0 ]; then
-    read_tty input "$(t \
-      "REALITY 伪装目标端口 [${NOBRAND_REALITY_DEFAULT_CAMOUFLAGE_PORT}]: " \
-      "REALITY camouflage target port [${NOBRAND_REALITY_DEFAULT_CAMOUFLAGE_PORT}]: ")" || input=""
-    VLESS_REALITY_TARGET_PORT="${input:-$NOBRAND_REALITY_DEFAULT_CAMOUFLAGE_PORT}"
-  fi
-  reality_apply_camouflage_defaults
-  nb_valid_port "$VLESS_REALITY_TARGET_PORT" || die 'REALITY 目标端口必须是 1-65535'
-  [ "$VLESS_REALITY_FINGERPRINT" = chrome ] || die '当前 REALITY fingerprint 固定为 chrome'
-  [ "$VLESS_REALITY_SPIDER_X" = / ] || die '当前 REALITY spiderX 固定为 /'
-
-  if [ -z "${PORT:-}" ] && [ "${YES:-0}" -ne 1 ]; then
-    read_tty input "$(t '实际 TCP 监听端口（manual-only 必填，留空时仅自动策略会分配）: ' \
-      'Actual TCP port (required for manual-only; blank only auto-allocates for auto policies): ')" || input=""
-    PORT="$input"
-  fi
-  if [ -z "${PORT:-}" ]; then
-    PORT="$(nb_select_available_port TCP "$INGRESS_PROFILE_ID")" \
-      || die '所选入口配置没有可用 REALITY TCP 自动端口；manual-only 必须显式使用 --port'
-    PORT_AUTO_SELECTED=1
-  else
-    nb_valid_port "$PORT" || die 'VLESS REALITY 端口必须是 1-65535'
-    PORT="$(normalize_uint "$PORT")"
-    nb_ingress_port_is_reserved "$INGRESS_PROFILE_ID" "$PORT" \
-      && die 'VLESS REALITY 禁止使用所选入口配置的保留端口'
-    nb_warn_if_outside_recommended_range "$PORT" "$INGRESS_PROFILE_ID"
-    nb_port_available_for_profile "$PORT" TCP "$INGRESS_PROFILE_ID" || {
-      owner="$(nb_registry_port_owner TCP "$PORT" 2>/dev/null || true)"
-      die "VLESS REALITY TCP/${PORT} 已占用${owner:+，占用方: ${owner}}"
-    }
-  fi
-
-  if [ "${YES:-0}" -ne 1 ] && [ "${ADVERTISE_CLI:-0}" -eq 0 ]; then
-    nb_collect_advertise_endpoint_interactive 'VLESS REALITY' "$PORT" || return 1
-  elif [ -z "${ADVERTISE_HOST:-}" ]; then
-    nb_require_explicit_endpoint_noninteractive
-  else
-    nb_validate_advertise_endpoint "$ADVERTISE_HOST" "$ADVERTISE_PORT" TCP \
-      || die 'VLESS REALITY Display Endpoint 无效'
-  fi
-
-  reality_resolve_camouflage_request \
-    || die 'REALITY 伪装候选池已耗尽，或显式目标未通过 TLS 1.3、证书与公网可达性验证'
-}
-
-reality_install_rollback() {
-  local id="$1" port="$2" runtime_preexisting="$3" template_preexisting="$4"
-  reality_remove_service "$id" >/dev/null 2>&1 || true
-  nb_firewall_close_pairs "TCP|${port}" >/dev/null 2>&1 || true
-  find "$NOBRAND_REALITY_STATE_DIR/$id" -mindepth 1 -maxdepth 1 -delete 2>/dev/null || true
-  find "$NOBRAND_REALITY_CONFIG_DIR/$id" -mindepth 1 -maxdepth 1 -delete 2>/dev/null || true
-  rmdir "$NOBRAND_REALITY_STATE_DIR/$id" "$NOBRAND_REALITY_CONFIG_DIR/$id" 2>/dev/null || true
-  if [ "$template_preexisting" -eq 0 ] && [ -z "$(reality_instance_ids)" ]; then
-    reality_remove_service_runtime_if_owned >/dev/null 2>&1 || true
-  fi
-  if [ "$runtime_preexisting" -eq 0 ] && [ -z "$(reality_instance_ids)" ] \
-     && ! hysteria2_state_exists && ! vless_sudoku_state_exists; then
-    nobrand_remove_xray_runtime_files >/dev/null 2>&1 || true
-  fi
-  [ "$(nb_service_manager)" != systemd ] || systemctl daemon-reload >/dev/null 2>&1 || true
-}
-
-install_vless_reality() {
-  local collect_rc=0 id="" uuid keypair private_key public_key short_id
-  local config state key_file config_tmp="" state_tmp="" key_tmp="" mode runtime defender_port
-  local runtime_preexisting=0 template_preexisting=0
-  require_root
-  require_linux
-  nobrand_prepare_common
-  reality_collect_install_requests || collect_rc=$?
-  [ "$collect_rc" -eq 0 ] || { [ "$collect_rc" -eq 2 ] && return 0; return "$collect_rc"; }
-  [ ! -x "$NOBRAND_XRAY_BIN" ] || runtime_preexisting=1
-  [ ! -e "$NOBRAND_REALITY_SYSTEMD_TEMPLATE" ] || template_preexisting=1
-  nobrand_install_xray_runtime 0 || return 1
-  runtime="$(nobrand_xray_version 2>/dev/null || true)"
-  [ "$runtime" = "$TESTED_XRAY_VERSION" ] \
-    || die "VLESS REALITY 需要 NoBrand 管理的 Xray ${TESTED_XRAY_VERSION}；请先执行官方共享 Runtime 升级"
-
-  id="$(reality_generate_instance_id)"
-  uuid="$(reality_generate_uuid)" || return 1
-  keypair="$(reality_generate_keypair)" || return 1
-  private_key="${keypair%%|*}"; public_key="${keypair#*|}"
-  [ "$(reality_derive_public_key "$private_key")" = "$public_key" ] || return 1
-  short_id="$(reality_generate_short_id)" || return 1
-  config="$(reality_config_file "$id")"; state="$(reality_state_file "$id")"
-  key_file="$(reality_private_key_file "$id")"
-  admin_lock_acquire || return 1
-  defender_port="$(reality_select_defender_port "$PORT")" || {
-    admin_lock_release
-    warn '没有可用且无冲突的 REALITY Defender 回环端口'
-    return 1
-  }
-  nb_lifecycle_mark_protocol_mutation_started vless-reality || {
-    admin_lock_release
-    return 1
-  }
-  # Xray 26.3.27 infers the config format from the candidate filename.
-  # Keep the transactional file JSON-suffixed just like the authoritative
-  # config, otherwise `xray run -test -c` rejects it before parsing.
-  mkdir -p "$(dirname "$config")" "$(dirname "$state")" \
-    && chmod 0700 "$(dirname "$config")" "$(dirname "$state")" \
-    && config_tmp="$(mktemp_file .reality-config.json)" \
-    && state_tmp="$(mktemp_file .reality-state)" \
-    && key_tmp="$(mktemp_file .reality-key)" || {
-      reality_install_rollback "$id" "$PORT" "$runtime_preexisting" "$template_preexisting"
-      admin_lock_release
-      return 1
-    }
-  printf '%s\n' "$private_key" >"$key_tmp"
-  chmod 0600 "$key_tmp"
-  reality_generate_server_config "$config_tmp" "$id" "$INGRESS_LISTEN_HOST" "$PORT" "$uuid" \
-    "$private_key" "$short_id" "$VLESS_REALITY_TARGET" "$VLESS_REALITY_TARGET_PORT" "$defender_port" \
-    && nobrand_xray_test_config "$config_tmp" || {
-      reality_install_rollback "$id" "$PORT" "$runtime_preexisting" "$template_preexisting"
-      admin_lock_release
-      rm -f "$config_tmp" "$state_tmp" "$key_tmp"
-      return 1
-    }
-  mode="$(nb_endpoint_mode_from_values "$ADVERTISE_HOST")"
-  reality_generate_state "$state_tmp" "$id" "$VLESS_REALITY_NAME" "$INGRESS_LISTEN_HOST" "$PORT" "$mode" \
-    "$ADVERTISE_HOST" "$ADVERTISE_PORT" "$uuid" "$public_key" "$key_file" "$short_id" \
-    "$VLESS_REALITY_TARGET" "$VLESS_REALITY_TARGET_PORT" "$VLESS_REALITY_FINGERPRINT" \
-    "$VLESS_REALITY_SPIDER_X" "$runtime" "$INGRESS_PROFILE_ID" "$defender_port" \
-    "" "$VLESS_REALITY_CAMOUFLAGE_MODE" \
-    && nb_ingress_stamp_state_file "$state_tmp" "$INGRESS_PROFILE_ID" native-bind || {
-      reality_install_rollback "$id" "$PORT" "$runtime_preexisting" "$template_preexisting"
-      admin_lock_release
-      rm -f "$config_tmp" "$state_tmp" "$key_tmp"
-      return 1
-    }
-
-  if ! nb_port_available_for_profile "$PORT" TCP "$INGRESS_PROFILE_ID" \
-     || ! reality_defender_port_available "$defender_port" "$id" "$PORT" \
-     || ! nb_atomic_install_file "$key_tmp" "$key_file" 0600 \
-     || ! nb_atomic_install_file "$config_tmp" "$config" 0600 \
-     || ! nb_atomic_install_file "$state_tmp" "$state" 0600 \
-     || ! reality_config_matches_state "$id" \
-     || ! reality_install_service_runtime \
-     || ! reality_ensure_openrc_service "$id" \
-     || ! nb_firewall_open_pairs "TCP|${PORT}" \
-     || ! reality_service_action "$id" start \
-     || ! nb_wait_for_enforced_listener "$INGRESS_ENFORCEMENT_RESOLVED" "$INGRESS_ENFORCEMENT_METHOD" \
-          TCP "$PORT" "$INGRESS_LOCAL_ADDRESS" "vless-reality:${id}" 25 \
-     || ! reality_listener_owned_by_service "$id" "$PORT" \
-     || ! nb_wait_for_listener_address TCP "$defender_port" 127.0.0.1 25 \
-     || ! reality_defender_listener_owned_by_service "$id" "$defender_port" \
-     || ! reality_defender_registry_valid; then
-    reality_install_rollback "$id" "$PORT" "$runtime_preexisting" "$template_preexisting"
-    admin_lock_release
-    rm -f "$config_tmp" "$state_tmp" "$key_tmp"
-    return 1
-  fi
-  admin_lock_release
-  rm -f "$config_tmp" "$state_tmp" "$key_tmp"
-  nobrand_install_manager_script || true
-  reality_show "$id"
-}
-
-reality_state_set_enabled() {
-  local id="$1" value="$2" state tmp
-  state="$(reality_state_file "$id")"; tmp="$(mktemp_file .reality-state)" || return 1
-  jq --argjson enabled "$value" --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    '.enabled=$enabled | .updated_at=$updated' "$state" >"$tmp" \
-    && nb_atomic_install_file "$tmp" "$state" 0600
-  rm -f "$tmp"
-}
-
-reality_running() {
-  local id="$1" port defender_port policy method address
-  reality_state_exists "$id" || return 1
-  port="$(reality_state_field "$id" listen_port)"
-  defender_port="$(reality_state_field "$id" defender_port)"
-  policy="$(reality_state_field "$id" ingress_enforcement 2>/dev/null || printf permissive)"
-  method="$(reality_state_field "$id" ingress_enforcement_method 2>/dev/null || printf wildcard)"
-  address="$(reality_state_field "$id" ingress_local_address 2>/dev/null || true)"
-  reality_service_active "$id" \
-    && nb_wait_for_enforced_listener "$policy" "$method" TCP "$port" "$address" "vless-reality:${id}" 1 \
-    && reality_listener_owned_by_service "$id" "$port" \
-    && nb_wait_for_listener_address TCP "$defender_port" 127.0.0.1 1 \
-    && reality_defender_listener_owned_by_service "$id" "$defender_port"
-}
-
-reality_apply_ingress_enforcement() {
-  local id="$1" state config key_file private_key profile_id port uuid short_id target target_port defender_port
-  local candidate_state candidate_config snapshot was_active=0 rc=0
-  state="$(reality_state_file "$id")"; config="$(reality_config_file "$id")"
-  reality_state_exists "$id" || return 1
-  profile_id="$(reality_state_field "$id" ingress_profile_id)"
-  nb_prepare_ingress_deployment "$profile_id" native-bind || return 1
-  key_file="$(reality_state_field "$id" private_key_path)"
-  [ -s "$key_file" ] || return 1
-  private_key="$(tr -d '\r\n' <"$key_file")"
-  port="$(reality_state_field "$id" listen_port)"
-  uuid="$(reality_state_field "$id" uuid)"
-  short_id="$(reality_state_field "$id" short_id)"
-  target="$(reality_state_field "$id" target_host)"
-  target_port="$(reality_state_field "$id" target_port)"
-  defender_port="$(reality_state_field "$id" defender_port)"
-  candidate_state="$(mktemp_file .reality-ingress-state)" || return 1
-  candidate_config="$(mktemp_file .reality-ingress-config.json)" || { rm -f "$candidate_state"; return 1; }
-  snapshot="$(mktemp_dir)" || { rm -f "$candidate_state" "$candidate_config"; return 1; }
-  cp -a "$state" "$snapshot/state" && cp -a "$config" "$snapshot/config" || rc=1
-  if [ "$rc" -eq 0 ]; then
-    jq --arg listen "$INGRESS_LISTEN_HOST" '.listen_host=$listen' "$state" >"$candidate_state" \
-      && nb_ingress_stamp_state_file "$candidate_state" "$profile_id" native-bind \
-      && reality_state_matches "$candidate_state" "$id" \
-      && reality_generate_server_config "$candidate_config" "$id" "$INGRESS_LISTEN_HOST" "$port" "$uuid" \
-           "$private_key" "$short_id" "$target" "$target_port" "$defender_port" \
-      && nobrand_xray_test_config "$candidate_config" || rc=1
-  fi
-  reality_service_active "$id" && was_active=1
-  if [ "$rc" -eq 0 ]; then
-    nb_atomic_install_file "$candidate_config" "$config" 0600 \
-      && nb_atomic_install_file "$candidate_state" "$state" 0600 \
-      && reality_config_matches_state "$id" || rc=1
-  fi
-  if [ "$rc" -eq 0 ] && [ "$was_active" -eq 1 ]; then
-    [ "${NOBRAND_TEST_INGRESS_SERVICE_FAIL:-0}" -eq 0 ] \
-      && reality_service_action "$id" restart \
-      && [ "${NOBRAND_TEST_INGRESS_LISTENER_FAIL:-0}" -eq 0 ] \
-      && reality_running "$id" || rc=1
-  fi
-  if [ "$rc" -ne 0 ]; then
-    nb_atomic_install_file "$snapshot/config" "$config" 0600 >/dev/null 2>&1 || true
-    nb_atomic_install_file "$snapshot/state" "$state" 0600 >/dev/null 2>&1 || true
-    if [ "$was_active" -eq 1 ]; then
-      reality_service_action "$id" restart >/dev/null 2>&1 && reality_running "$id" >/dev/null 2>&1 || true
-    else
-      reality_service_action "$id" stop >/dev/null 2>&1 || true
-    fi
-  fi
-  rm -f "$candidate_state" "$candidate_config"
-  rm -rf -- "$snapshot"
-  return "$rc"
-}
-
-reality_service_command() {
-  local id action="$1" port
-  id="$(reality_resolve_instance_id "${VLESS_REALITY_NAME:-}")" \
-    || die '请用 --name 指定 VLESS REALITY 实例'
-  port="$(reality_state_field "$id" listen_port)"
-  case "$action" in
-    stop)
-      reality_service_action "$id" stop && reality_state_set_enabled "$id" false
-      ;;
-    start)
-      reality_service_action "$id" start \
-        && reality_running "$id" \
-        && reality_state_set_enabled "$id" true
-      ;;
-    restart)
-      reality_service_action "$id" restart \
-        && reality_running "$id"
-      ;;
-  esac
-}
-
-reality_show() {
-  local id="$1" endpoint recommendation camouflage
-  endpoint="$(reality_effective_endpoint "$id")"
-  recommendation="$(reality_state_field "$id" profile_recommendation)"
-  case "$recommendation" in recommended) recommendation='推荐' ;; warning) recommendation='允许，但不推荐' ;; esac
-  camouflage="$(reality_state_field "$id" camouflage_mode)"
-  case "$camouflage" in auto) camouflage='自动' ;; custom) camouflage='自定义' ;; esac
-  printf 'VLESS REALITY 实例: %s\n入口配置 / Ingress Profile: %s\n建议: %s\n实际监听 / Actual Listener: %s:%s/TCP\n展示端点 / Display Endpoint: %s:%s\n伪装模式: %s\nServerName: %s\nFlow: xtls-rprx-vision\nUUID: %s\n公钥: %s\nShort ID: %s\nURI: %s\n' \
-    "$(reality_state_field "$id" name)" \
-    "$(nb_ingress_profile_name "$(reality_state_field "$id" ingress_profile_id)")" \
-    "$recommendation" \
-    "$(reality_state_field "$id" listen_host)" "$(reality_state_field "$id" listen_port)" "${endpoint%%|*}" "${endpoint#*|}" \
-    "$camouflage" "$(reality_state_field "$id" server_name)" \
-    "$(reality_state_field "$id" uuid)" \
-    "$(reality_state_field "$id" public_key)" "$(reality_state_field "$id" short_id)" \
-    "$(reality_build_uri "$id")"
-}
-
-reality_export_all() {
-  local id="$1"
-  printf '%s\n' '===== VLESS URI ====='
-  reality_build_uri "$id"
-  printf '%s\n' '' '===== XRAY CLIENT JSON ====='
-  reality_export_xray "$id"
-  printf '%s\n' '' '===== MIHOMO YAML ====='
-  reality_export_mihomo "$id"
-  printf '%s\n' '' '===== SING-BOX JSON ====='
-  reality_export_singbox "$id"
-}
-
-reality_node_rows() {
-  local id endpoint status
-  while IFS= read -r id; do
-    endpoint="$(reality_effective_endpoint "$id")"
-    status=Stopped
-    reality_running "$id" && status=Running
-    printf 'VLESS REALITY|%s|%s:%s/TCP|%s|TCP\n' "$(reality_state_field "$id" name)" \
-      "${endpoint%%|*}" "${endpoint#*|}" "$status"
-  done < <(reality_instance_ids)
-}
-
-reality_doctor_one() {
-  local id="$1" failed=0 state config key_file private_key derived expected port owner
-  local defender_port defender_owner
-  state="$(reality_state_file "$id")"; config="$(reality_config_file "$id")"
-  key_file="$(reality_state_field "$id" private_key_path 2>/dev/null || true)"
-  port="$(reality_state_field "$id" listen_port 2>/dev/null || true)"
-  defender_port="$(reality_state_field "$id" defender_port 2>/dev/null || true)"
-  reality_state_matches "$state" "$id" && nb_doctor_line PASS "REALITY_STATE $(reality_state_field "$id" name)" \
-    || { nb_doctor_line FAIL "REALITY_STATE $(reality_state_field "$id" name 2>/dev/null || printf '%s' "$id")"; failed=1; }
-  [ "$(nobrand_xray_version 2>/dev/null || true)" = "$TESTED_XRAY_VERSION" ] \
-    && nb_doctor_line PASS "REALITY_XRAY ${TESTED_XRAY_VERSION}" \
-    || { nb_doctor_line FAIL "REALITY_XRAY expected ${TESTED_XRAY_VERSION}"; failed=1; }
-  reality_config_matches_state "$id" && nobrand_xray_test_config "$config" \
-    && nb_doctor_line PASS 'REALITY_CONFIG' \
-    || { nb_doctor_line FAIL 'REALITY_CONFIG'; failed=1; }
-  nobrand_xray_assets_ready \
-    && nb_doctor_line PASS 'REALITY_XRAY_ASSETS private geoip/geosite' \
-    || { nb_doctor_line FAIL 'REALITY_XRAY_ASSETS'; failed=1; }
-  jq -e --slurpfile state "$state" --arg min_client_ver "$NOBRAND_REALITY_MIN_CLIENT_VER" \
-    --argjson default_target_port "$NOBRAND_REALITY_DEFAULT_CAMOUFLAGE_PORT" '
-    .inbounds[0].streamSettings.realitySettings.target==("127.0.0.1:"+($state[0].defender_port|tostring))
-    and .inbounds[0].streamSettings.realitySettings.minClientVer==$min_client_ver
-    and .inbounds[1].tag==$state[0].defender_tag
-    and .inbounds[1].listen=="127.0.0.1"
-    and .inbounds[1].port==$state[0].defender_port
-    and .inbounds[1].protocol=="dokodemo-door"
-    and .inbounds[1].settings=={address:$state[0].defender_dispatch_host,port:($state[0].target_port // $default_target_port),network:"tcp"}
-    and .inbounds[1].sniffing=={enabled:true,routeOnly:true,destOverride:["tls"]}
-    and .routing.rules[3]=={type:"field",inboundTag:[$state[0].defender_tag],domain:["full:"+$state[0].target_host],outboundTag:"DIRECT"}
-    and .routing.rules[4]=={type:"field",inboundTag:[$state[0].defender_tag],outboundTag:"BLOCK"}
-    and .outbounds[1]=={tag:"DIRECT",protocol:"freedom",settings:{redirect:($state[0].target_host+":"+(($state[0].target_port // $default_target_port)|tostring))}}
-  ' "$config" >/dev/null 2>&1 \
-      && nb_doctor_line PASS 'REALITY_DEFENDER target/minClientVer/loopback/exact-SNI/catch-all' \
-    || { nb_doctor_line FAIL 'REALITY_DEFENDER contract'; failed=1; }
-  jq -e '
-    .routing.rules[0]=={type:"field",ip:["geoip:private"],outboundTag:"BLOCK"}
-    and .routing.rules[1]=={type:"field",network:"tcp",port:"25,135,137,138,139,445,465,587",outboundTag:"BLOCK"}
-    and .routing.rules[2]=={type:"field",protocol:["bittorrent"],outboundTag:"BLOCK"}
-    and .outbounds[0]=={tag:"PUBLIC_DIRECT",protocol:"freedom"}
-    and .outbounds[2]=={tag:"BLOCK",protocol:"blackhole"}
-  ' "$config" >/dev/null 2>&1 \
-    && nb_doctor_line PASS 'REALITY_DEFENDER private/dangerous-port/bittorrent blocks' \
-    || { nb_doctor_line FAIL 'REALITY_DEFENDER safety rules'; failed=1; }
-  if [ -s "$key_file" ] && [ "$(stat -c '%a' "$key_file" 2>/dev/null || true)" = 600 ] \
-     && [ "$(stat -c '%u:%g' "$key_file" 2>/dev/null || true)" = 0:0 ]; then
-    private_key="$(tr -d '\r\n' <"$key_file")"
-    derived="$(reality_derive_public_key "$private_key" 2>/dev/null || true)"
-    expected="$(reality_state_field "$id" public_key)"
-    [ -n "$derived" ] && [ "$derived" = "$expected" ] \
-      && nb_doctor_line PASS 'REALITY_KEYS private->public consistency; private mode=0600 owner=root' \
-      || { nb_doctor_line FAIL 'REALITY_KEYS public derivation mismatch'; failed=1; }
-  else
-    nb_doctor_line FAIL 'REALITY_KEYS private key permissions/owner'
-    failed=1
-  fi
-  reality_valid_short_id "$(reality_state_field "$id" short_id)" \
-    && [ "$(jq -r '.inbounds[0].streamSettings.realitySettings.shortIds[0]' "$config" 2>/dev/null)" = \
-      "$(reality_state_field "$id" short_id)" ] \
-    && nb_doctor_line PASS 'REALITY_SHORT_ID' \
-    || { nb_doctor_line FAIL 'REALITY_SHORT_ID'; failed=1; }
-  reality_valid_public_hostname_syntax "$(reality_state_field "$id" server_name)" \
-    && [ "$(reality_state_field "$id" server_name)" = "$(reality_state_field "$id" target_host)" ] \
-    && [ "$(reality_state_field "$id" flow)" = xtls-rprx-vision ] \
-    && nb_doctor_line PASS 'REALITY_SERVER_NAME_TARGET_FLOW' \
-    || { nb_doctor_line FAIL 'REALITY_SERVER_NAME_TARGET_FLOW'; failed=1; }
-  if [ "$(reality_state_field "$id" enabled)" = true ]; then
-    reality_service_active "$id" && nb_doctor_line PASS 'REALITY_SERVICE' \
-      || { nb_doctor_line FAIL 'REALITY_SERVICE'; failed=1; }
-    reality_running "$id" \
-      && nb_doctor_line PASS "REALITY_LISTENERS public TCP/${port}; defender loopback same-process" \
-      || { nb_doctor_line FAIL "REALITY_LISTENERS public TCP/${port}; defender loopback"; failed=1; }
-  elif reality_service_active "$id" || nb_port_is_listening TCP "$port" \
-       || nb_port_is_listening TCP "$defender_port"; then
-    nb_doctor_line FAIL 'REALITY_SERVICE marked stopped but service/listener remains'
-    failed=1
-  else
-    nb_doctor_line PASS 'REALITY_SERVICE intentionally stopped; no residual listeners'
-  fi
-  owner="$(nb_registry_port_owner TCP "$port" 2>/dev/null || true)"
-  [ "$owner" = "vless-reality:${id}" ] && nb_doctor_line PASS 'REALITY_PORT_OWNERSHIP' \
-    || { nb_doctor_line FAIL 'REALITY_PORT_OWNERSHIP'; failed=1; }
-  nb_firewall_binding_owned TCP "$port" && nb_doctor_line PASS 'REALITY_FIREWALL' \
-    || { nb_doctor_line FAIL 'REALITY_FIREWALL'; failed=1; }
-  defender_owner="$(reality_defender_port_owner "$defender_port" 2>/dev/null || true)"
-  [ "$defender_owner" = "vless-reality-defender:${id}" ] \
-    && reality_defender_registry_valid \
-    && ! nb_firewall_binding_owned TCP "$defender_port" \
-    && nb_doctor_line PASS 'REALITY_DEFENDER_INTERNAL_OWNERSHIP no-public-firewall' \
-    || { nb_doctor_line FAIL 'REALITY_DEFENDER_INTERNAL_OWNERSHIP'; failed=1; }
-  nb_ingress_profile_json "$(reality_state_field "$id" ingress_profile_id)" >/dev/null 2>&1 \
-    && [ "$(reality_profile_recommendation "$(reality_state_field "$id" ingress_profile_id)")" = \
-      "$(reality_state_field "$id" profile_recommendation)" ] \
-    && nb_doctor_line PASS "REALITY_INGRESS_PROFILE $(nb_ingress_profile_name "$(reality_state_field "$id" ingress_profile_id)")" \
-    || { nb_doctor_line FAIL 'REALITY_INGRESS_PROFILE'; failed=1; }
-  reality_effective_endpoint "$id" >/dev/null \
-    && nb_doctor_line PASS 'REALITY_DISPLAY metadata-only' \
-    || { nb_doctor_line FAIL 'REALITY_DISPLAY'; failed=1; }
-  return "$failed"
-}
-
-reality_doctor_all() {
-  local id failed=0 found=0
-  while IFS= read -r id; do
-    found=1
-    reality_doctor_one "$id" || failed=1
-  done < <(reality_instance_ids)
-  [ "$found" -eq 1 ] || nb_doctor_line INFO 'VLESS REALITY 未安装'
-  return "$failed"
-}
-
-reality_status() {
-  local id endpoint found=0 service defender recommendation camouflage
-  while IFS= read -r id; do
-    found=1; endpoint="$(reality_effective_endpoint "$id")"
-    service="$(reality_service_active "$id" && printf '运行中' || printf '已停止')"
-    defender="$(reality_running "$id" && printf '正常' || printf '异常')"
-    recommendation="$(reality_state_field "$id" profile_recommendation)"
-    case "$recommendation" in recommended) recommendation='推荐' ;; warning) recommendation='允许，但不推荐' ;; esac
-    camouflage="$(reality_state_field "$id" camouflage_mode)"
-    case "$camouflage" in auto) camouflage='自动' ;; custom) camouflage='自定义' ;; esac
-    printf 'VLESS REALITY\n  实例: %s\n  运行时 / Runtime: Xray %s\n  服务: %s\n  防御进程 / Defender: %s\n  实际监听 / Actual Listener: %s:%s/TCP\n  展示端点 / Display Endpoint: %s:%s\n  入口配置 / Ingress Profile: %s（%s）\n  伪装模式: %s\n  服务器名称 / ServerName: %s\n  流控 / Flow: xtls-rprx-vision\n' \
-      "$(reality_state_field "$id" name)" "$(reality_state_field "$id" runtime_version)" \
-      "$service" "$defender" \
-      "$(reality_state_field "$id" listen_host)" "$(reality_state_field "$id" listen_port)" "${endpoint%%|*}" "${endpoint#*|}" \
-      "$(nb_ingress_profile_name "$(reality_state_field "$id" ingress_profile_id)")" \
-      "$recommendation" "$camouflage" "$(reality_state_field "$id" server_name)"
-  done < <(reality_instance_ids)
-  [ "$found" -eq 1 ] || t 'VLESS REALITY 未安装' 'VLESS REALITY not installed'
-}
-
-remove_vless_reality_instance() {
-  local id port config_dir state_dir
-  id="$(reality_resolve_instance_id "${VLESS_REALITY_NAME:-}")" \
-    || die '请用 --name 指定 VLESS REALITY 实例'
-  port="$(reality_state_field "$id" listen_port)"
-  config_dir="$(reality_instance_config_dir "$id")"; state_dir="$(dirname "$(reality_state_file "$id")")"
-  reality_remove_service "$id" || return 1
-  nb_firewall_close_pairs "TCP|${port}" || return 1
-  find "$config_dir" -mindepth 1 -maxdepth 1 -delete
-  find "$state_dir" -mindepth 1 -maxdepth 1 -delete
-  rmdir "$config_dir" "$state_dir" 2>/dev/null || true
-  if [ -z "$(reality_instance_ids)" ]; then
-    reality_remove_service_runtime_if_owned || return 1
-    [ "$(nb_service_manager)" != systemd ] || systemctl daemon-reload
-    if ! hysteria2_state_exists && ! vless_sudoku_state_exists; then
-      nobrand_remove_xray_runtime_files || return 1
-    fi
-  fi
-}
-
-reality_restore_runtime() {
-  local id expected current
-  id="$(reality_instance_ids | head -n1)"
-  [ -n "$id" ] || return 0
-  expected="$(reality_state_field "$id" runtime_version)"
-  [ "$expected" = "$TESTED_XRAY_VERSION" ] || return 1
-  current="$(nobrand_xray_version 2>/dev/null || true)"
-  if [ "$current" != "$expected" ] || ! nobrand_xray_assets_ready; then
-    nobrand_install_xray_runtime 1 || return 1
-  fi
-  reality_defender_registry_valid || return 1
-  reality_install_service_runtime || return 1
-  while IFS= read -r id; do
-    [ "$(reality_state_field "$id" runtime_version)" = "$expected" ] \
-      && reality_config_matches_state "$id" \
-      && nobrand_xray_test_config "$(reality_config_file "$id")" \
-      && reality_ensure_openrc_service "$id" || return 1
-  done < <(reality_instance_ids)
-}
+# Native architecture: ordinary protocols use src/19-splicore.sh.
 
 nobrand_run_vless_reality_action() {
-  local id
   case "${VLESS_REALITY_ACTION:-menu}" in
-    install)
-      if [ "${NOBRAND_MANAGER_SESSION_ACTIVE:-0}" -eq 1 ]; then
-        nb_lifecycle_run_protocol_install vless-reality install_vless_reality
-      else
-        install_vless_reality
-      fi
-      ;;
-    start|stop|restart) reality_service_command "$VLESS_REALITY_ACTION" ;;
-    status) reality_status ;;
-    doctor) reality_doctor_all ;;
-    show)
-      id="$(reality_resolve_instance_id "${VLESS_REALITY_NAME:-}")" || die '请用 --name 指定实例'
-      reality_show "$id"
-      ;;
-    export)
-      id="$(reality_resolve_instance_id "${VLESS_REALITY_NAME:-}")" || die '请用 --name 指定实例'
-      reality_export_all "$id"
-      ;;
-    set-endpoint)
-      id="$(reality_resolve_instance_id "${VLESS_REALITY_NAME:-}")" || die '请用 --name 指定实例'
-      reality_set_endpoint_state "$id" "${ADVERTISE_HOST:-}" "${ADVERTISE_PORT:-}"
-      ;;
-    remove|uninstall) remove_vless_reality_instance ;;
-    upgrade) nobrand_upgrade_xray_runtime ;;
-    menu) reality_status ;;
-    help)
-      cat <<'EOF'
-nobrand vless-reality install --name NAME [--target HOST] [--target-port PORT]
-  [--ingress-profile PROFILE] [--port PORT]
-  [--advertise-host HOST --advertise-port PORT | --advertise-auto] [-y]
-nobrand vless-reality show|export|status|doctor|start|stop|restart|set-endpoint|remove [--name NAME]
-固定协议栈：VLESS + TCP + REALITY + xtls-rprx-vision。推荐使用 Public Profile；
-Mapped Profile 仍可使用，但会显示警告。Xray 26.3.27；fingerprint=chrome；spiderX=/。
-默认伪装域名：从发布验收过的候选池自动选择，并保存选定结果。
-伪装域名与目标端口可分别配置；显式指定的域名不会被自动选择替换。
-443 是默认伪装目标端口，不是公网 REALITY 监听端口。
-EOF
-      ;;
-    *) die "未知 VLESS REALITY 操作: ${VLESS_REALITY_ACTION}" ;;
+    menu) vless_reality_menu_loop ;;
+    help) nobrand_usage ;;
+    *) nb_splicore_protocol vless-reality "${VLESS_REALITY_ACTION:-status}" "${VLESS_REALITY_NAME:-}" ;;
   esac
 }
 
@@ -20027,35 +10203,6 @@ close_firewall_for_bindings() {
   persist_iptables_rules
 }
 
-firewall_clear_all_owned() {
-  local snapshot tool proto p failed=0
-  [ -f "$MITA_FIREWALL_OWNED_STATE" ] || return 0
-  snapshot="$(mktemp_file .firewall-owned)" || return 1
-  cp -f "$MITA_FIREWALL_OWNED_STATE" "$snapshot" || {
-    rm -f "$snapshot"
-    return 1
-  }
-  while IFS='|' read -r tool proto p; do
-    [ -n "$tool" ] && [ -n "$proto" ] && [ -n "$p" ] || continue
-    case "$tool" in
-      ufw|firewalld)
-        firewall_apply_binding "$tool" del "$proto" "$p" || failed=1
-        ;;
-      iptables|ip6tables)
-        iptables_remove_owned_rule "$tool" "$proto" "$p" || failed=1
-        ;;
-      *) failed=1 ;;
-    esac
-  done <"$snapshot"
-  rm -f "$snapshot"
-  command -v firewall-cmd >/dev/null 2>&1 \
-    && run firewall-cmd --reload 2>/dev/null || true
-  persist_iptables_rules || failed=1
-  # 只有确认规则已不存在才删除所有权记录；残留记录代表清理未完成。
-  [ ! -s "$MITA_FIREWALL_OWNED_STATE" ] || failed=1
-  [ "$failed" -eq 0 ]
-}
-
 ufw_rule_spec() {
   local p="$1"
   local proto="$2"
@@ -20138,21 +10285,6 @@ persist_iptables_rules() {
       rm -f "$rules_tmp"
     fi
   fi
-}
-
-cloud_firewall_hint() {
-  local specs=() pp proto p
-  while IFS= read -r pp; do
-    proto="${pp%%|*}"
-    p="${pp#*|}"
-    specs+=("${p}/${proto}")
-  done < <(port_protocol_pairs)
-  [ "${#specs[@]}" -gt 0 ] || return 0
-  local spec
-  spec="$(IFS=','; printf '%s' "${specs[*]}")"
-  msg ""
-  t "【云安全组提醒】请在 VPS/云控制台安全组放行: ${spec}" \
-    "[Cloud SG] Allow in provider firewall: ${spec}"
 }
 
 valid_ip_literal() {
@@ -20246,75 +10378,6 @@ public_ip() {
   candidate="$(hostname -I 2>/dev/null | awk '{print $1}' | tr -d '[:space:]' || true)"
   valid_public_ip_literal "$candidate" || return 1
   printf '%s' "$candidate"
-}
-
-endpoint_hosts_equal() {
-  local left="${1:-}" right="${2:-}"
-  [ -n "$left" ] && [ -n "$right" ] || return 1
-  left="${left#\[}"; left="${left%\]}"; left="${left%.}"
-  right="${right#\[}"; right="${right%\]}"; right="${right%.}"
-  if valid_ip_literal "$left" && valid_ip_literal "$right" \
-     && command -v python3 >/dev/null 2>&1; then
-    python3 -c 'import ipaddress,sys; raise SystemExit(0 if ipaddress.ip_address(sys.argv[1]) == ipaddress.ip_address(sys.argv[2]) else 1)' \
-      "$left" "$right" 2>/dev/null
-    return $?
-  fi
-  [ "$(printf '%s' "$left" | tr '[:upper:]' '[:lower:]')" = \
-    "$(printf '%s' "$right" | tr '[:upper:]' '[:lower:]')" ]
-}
-
-# 成功表示客户端入口与后端不同；显式填写同一公网 IP/端口不算独立入口。
-client_endpoint_is_independent() {
-  local advertised_port backend_port candidate
-  [ -n "${ADVERTISE_HOST:-}" ] || return 1
-  advertised_port="$(normalize_uint "${ADVERTISE_PORT:-${PORT:-}}" 2>/dev/null || printf '%s' "${ADVERTISE_PORT:-${PORT:-}}")"
-  backend_port="$(normalize_uint "${PORT:-}" 2>/dev/null || printf '%s' "${PORT:-}")"
-  [ "$advertised_port" = "$backend_port" ] || return 0
-  for candidate in "$@"; do
-    [ -n "$candidate" ] || continue
-    endpoint_hosts_equal "$ADVERTISE_HOST" "$candidate" && return 1
-  done
-  return 0
-}
-
-advertised_host() {
-  if [ -n "${ADVERTISE_HOST:-}" ]; then
-    printf '%s' "$ADVERTISE_HOST"
-  elif [ -n "${INGRESS_PROFILE_ID:-}" ] \
-       && [ "$INGRESS_PROFILE_ID" != "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ]; then
-    nb_ingress_profile_display_host "$INGRESS_PROFILE_ID" 2>/dev/null || public_ip
-  else
-    public_ip
-  fi
-}
-
-advertised_port_for_protocol() {
-  local proto="$1" canonical_port
-  if [ -n "${ADVERTISE_PORT:-}" ]; then
-    canonical_port="$(normalize_uint "$ADVERTISE_PORT")" || return 1
-    if [ "${PROTOCOL:-TCP}" = "BOTH" ] && [ "$proto" = "UDP" ]; then
-      printf '%s' "$((canonical_port + 1))"
-    else
-      printf '%s' "$canonical_port"
-    fi
-  else
-    canonical_port="$(port_for_protocol "$proto")" || return 1
-    if [ -n "${INGRESS_PROFILE_ID:-}" ] \
-       && [ "$INGRESS_PROFILE_ID" != "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ]; then
-      nb_ingress_profile_display_port "$INGRESS_PROFILE_ID" "$canonical_port"
-    else
-      printf '%s' "$canonical_port"
-    fi
-  fi
-}
-
-client_protocol_label() {
-  if [ "${PROTOCOL:-TCP}" = "BOTH" ]; then
-    printf 'TCP(%s) + UDP(%s)' \
-      "$(advertised_port_for_protocol TCP)" "$(advertised_port_for_protocol UDP)"
-  else
-    printf '%s' "${PROTOCOL:-TCP}"
-  fi
 }
 
 # ---------- SSH Tunnel: existing-OpenSSH policy and dedicated identities ----------
@@ -24979,72 +15042,6 @@ nobrand_run_forward_action_unlocked() {
   esac
 }
 
-start_mita() {
-  STAGE="启动 Mieru 专属实例"
-  if [ "${DRY_RUN:-0}" -eq 1 ]; then
-    t '[演练] 启动 Mieru 用户专属实例' \
-      '[dry-run] start dedicated Mieru instances'
-    return 0
-  fi
-  users_isolated_mode || {
-    bail "$(t 'schema v3 Mieru 状态必须使用 isolated-v2' \
-      'Schema-v3 Mieru state must use isolated-v2')" || return 1
-  }
-  local iid iname iport
-  while IFS=$'\t' read -r iid iname iport; do
-    [ -n "$iid" ] || continue
-    if ! instance_start_proxy "$iid"; then
-      warn "$(t "用户 ${iname} 的专属实例启动失败（${iid}）" \
-        "Dedicated instance for ${iname} failed to start (${iid})")"
-      return 1
-    fi
-  done < <(users_enabled_instance_rows)
-}
-
-verify_mita_running() {
-  STAGE="验证服务状态"
-  local quiet="${1:-0}"
-  if [ "${DRY_RUN:-0}" -eq 1 ]; then
-    t '[演练] 验证 mita 运行状态（RUNNING）' \
-      '[dry-run] verify mita RUNNING'
-    return 0
-  fi
-  users_isolated_mode || {
-    warn "$(t 'schema v3 Mieru 状态不是 isolated-v2' \
-      'Schema-v3 Mieru state is not isolated-v2')"
-    return 1
-  }
-  local iid iname iport istatus failed=0
-  while IFS=$'\t' read -r iid iname iport; do
-    [ -n "$iid" ] || continue
-    istatus="$(instance_cmd "$iid" status 2>/dev/null || true)"
-    if ! printf '%s' "$istatus" | grep -q 'status is "RUNNING"'; then
-      warn "$(t "用户 ${iname} 的专属实例未处于运行状态（RUNNING，${iid}）" \
-        "Dedicated instance for ${iname} is not RUNNING (${iid})")"
-      failed=1
-    fi
-  done < <(users_enabled_instance_rows)
-  [ "$failed" -eq 0 ] || return 1
-  [ "$quiet" -eq 1 ] || \
-    t '所有用户专属 mita 实例运行正常' 'All dedicated mita user instances are running'
-}
-
-add_op_user() {
-  local u="$1"
-  [ -n "$u" ] || return 0
-  STAGE="添加操作用户"
-  if id "$u" >/dev/null 2>&1; then
-    if command -v usermod >/dev/null 2>&1; then
-      run usermod -a -G mita "$u"
-    else
-      run addgroup "$u" mita 2>/dev/null || true
-    fi
-    t "已将 ${u} 加入 mita 组（需重新登录生效）" "Added ${u} to mita group (re-login required)"
-  else
-    warn "$(t "用户 ${u} 不存在，已跳过" "User ${u} not found, skipped")"
-  fi
-}
-
 bbr_fq_sysctl_value() {
   local key="$1" path value=""
   if command -v sysctl >/dev/null 2>&1; then
@@ -25091,13 +15088,6 @@ bbr_owned_mode() {
   esac
 }
 
-bbr_state_value() {
-  local line="$1" value=""
-  value="$(sed -n "${line}p" "$BBR_STATE_FILE" 2>/dev/null || true)"
-  [[ "$value" =~ ^[A-Za-z0-9_.-]*$ ]] || return 1
-  printf '%s' "$value"
-}
-
 write_bbr_state() {
   local mode="$1" old_qdisc="$2" old_cc="$3" tmp
   case "$mode" in created|replaced) ;; *) return 1 ;; esac
@@ -25105,7 +15095,7 @@ write_bbr_state() {
   [[ "$old_cc" =~ ^[A-Za-z0-9_.-]*$ ]] || return 1
   tmp="$(mktemp_file .bbr-state)" || return 1
   printf '%s\n%s\n%s\n' "$mode" "$old_qdisc" "$old_cc" >"$tmp"
-  install -d -o root -g root -m 0700 "$MITA_MANAGER_STATE_DIR"
+  install -d -o root -g root -m 0700 "$NOBRAND_STATE_DIR"
   install -o root -g root -m 0600 "$tmp" "$BBR_STATE_FILE"
   rm -f "$tmp"
 }
@@ -25130,42 +15120,6 @@ restore_bbr_fq() {
   [ -z "$backup" ] || rm -f "$backup"
 }
 
-restore_owned_bbr_fq() {
-  local mode old_qdisc old_cc
-  mode="$(bbr_owned_mode 2>/dev/null || true)"
-  [ -n "$mode" ] || return 0
-  if ! bbr_conf_is_owned; then
-    warn "$(t 'BBR sysctl 文件已被外部修改，拒绝在卸载时删除或覆盖；请先人工核对' \
-      'The BBR sysctl file was modified externally; refusing to remove or overwrite it during uninstall')"
-    return 1
-  fi
-  old_qdisc="$(bbr_state_value 2)" || return 1
-  old_cc="$(bbr_state_value 3)" || return 1
-  case "$mode" in
-    created)
-      rm -f "$BBR_SYSCTL_CONF"
-      ;;
-    replaced)
-      [ -f "$BBR_BACKUP_FILE" ] || {
-        warn "$(t '缺少 BBR 原配置备份，拒绝删除当前 sysctl 文件' \
-          'BBR original-config backup is missing; refusing to remove the current sysctl file')"
-        return 1
-      }
-      install -o root -g root -m 0644 "$BBR_BACKUP_FILE" "$BBR_SYSCTL_CONF"
-      sysctl -p "$BBR_SYSCTL_CONF" >/dev/null 2>&1 || {
-        warn "$(t '原 BBR/sysctl 文件已恢复，但重新应用失败' \
-          'The original BBR/sysctl file was restored but could not be reapplied')"
-        return 1
-      }
-      ;;
-  esac
-  [ -z "$old_qdisc" ] \
-    || sysctl -q -w "net.core.default_qdisc=${old_qdisc}" >/dev/null 2>&1 || true
-  [ -z "$old_cc" ] \
-    || sysctl -q -w "net.ipv4.tcp_congestion_control=${old_cc}" >/dev/null 2>&1 || true
-  rm -f "$BBR_STATE_FILE" "$BBR_BACKUP_FILE"
-}
-
 enable_bbr_fq() {
   STAGE="启用 TCP BBR + FQ"
   if bbr_fq_enabled; then
@@ -25174,7 +15128,7 @@ enable_bbr_fq() {
   fi
   require_cmd sysctl
 
-  local available old_qdisc old_cc tmp backup="" had_conf=0 owned_mode="" new_ownership=0
+  local available old_qdisc old_cc tmp backup="" had_conf=0 owned_mode=""
   if command -v modprobe >/dev/null 2>&1; then
     run modprobe tcp_bbr 2>/dev/null || true
     run modprobe sch_fq 2>/dev/null || true
@@ -25225,9 +15179,8 @@ enable_bbr_fq() {
     return 1
   fi
   if [ -z "$owned_mode" ]; then
-    new_ownership=1
     if [ "$had_conf" -eq 1 ]; then
-      if ! install -d -o root -g root -m 0700 "$MITA_MANAGER_STATE_DIR" \
+      if ! install -d -o root -g root -m 0700 "$NOBRAND_STATE_DIR" \
          || ! install -o root -g root -m 0600 "$backup" "$BBR_BACKUP_FILE" \
          || ! write_bbr_state replaced "$old_qdisc" "$old_cc"; then
         rm -f "$BBR_STATE_FILE" "$BBR_BACKUP_FILE"
@@ -25241,7 +15194,6 @@ enable_bbr_fq() {
     fi
   fi
   [ -z "$backup" ] || rm -f "$backup"
-  [ "$new_ownership" -eq 0 ] || harden_mita_permissions 2>/dev/null || true
   report_bbr_fq_status
 }
 
@@ -25285,577 +15237,7 @@ url_host() {
   fi
 }
 
-export_traffic_pattern_value() {
-  local bin value="" iid
-  if [ "${TRAFFIC_PATTERN_EXPORT_READY:-0}" -eq 1 ]; then
-    printf '%s' "${TRAFFIC_PATTERN_EXPORT_CACHE:-}"
-    return 0
-  fi
-  [ "$(normalize_traffic_pattern "${TRAFFIC_PATTERN:-conservative}")" != "off" ] || return 0
-  mita_supports_traffic_pattern || return 0
-  bin="$(mita_bin)"
-  [ -x "$bin" ] || return 0
-  if users_isolated_mode && [ -n "${USERNAME:-}" ]; then
-    iid="$(users_get_field "$USERNAME" instance_id 2>/dev/null || true)"
-    if instance_valid_id "$iid"; then
-      value="$(instance_cmd "$iid" export traffic-pattern 2>/dev/null | tr -d '\r\n' || true)"
-    fi
-  fi
-  case "$value" in
-    ''|*[!A-Za-z0-9+/=]*) return 0 ;;
-  esac
-  printf '%s' "$value"
-}
-
-prepare_traffic_pattern_export() {
-  TRAFFIC_PATTERN_EXPORT_READY=0
-  TRAFFIC_PATTERN_EXPORT_CACHE="$(export_traffic_pattern_value)"
-  TRAFFIC_PATTERN_EXPORT_READY=1
-}
-
-generate_share_link_for() {
-  local ip="$1"
-  local proto="$2"
-  local enc_user enc_pass p host query tp enc_tp=""
-  enc_user="$(urlencode "$USERNAME")"
-  enc_pass="$(urlencode "$PASSWORD")"
-  p="$(advertised_port_for_protocol "$proto")"
-  # 官方 simple URL 始终要求 port/protocol 在 query 中成对出现。
-  # profile=default 是上游客户端的 profileName，不是 OneClick UI 的参数预设 PROFILE。
-  host="$(url_host "$ip")"
-  tp="$(export_traffic_pattern_value)"
-  [ -n "$tp" ] && enc_tp="&traffic-pattern=$(urlencode "$tp")"
-  query="handshake-mode=${HANDSHAKE_MODE}&mtu=${MTU}&multiplexing=${MULTIPLEXING}&port=$(urlencode "$p")&profile=default&protocol=${proto}${enc_tp}"
-  printf 'mierus://%s:%s@%s?%s' "$enc_user" "$enc_pass" "$host" "$query"
-}
-
-build_client_json_for() {
-  local ip="$1"
-  local proto="$2"
-  local p binding tp tp_section="" user_json password_json ip_json domain_json
-  p="$(advertised_port_for_protocol "$proto")"
-  user_json="$(json_string "$USERNAME")"
-  password_json="$(json_string "$PASSWORD")"
-  if valid_ip_literal "$ip"; then
-    ip_json="$(json_string "$ip")"
-    domain_json='""'
-  else
-    ip_json='""'
-    domain_json="$(json_string "$ip")"
-  fi
-  ensure_traffic_seed
-  tp="$(traffic_pattern_json '      ')"
-  [ -n "$tp" ] && tp_section=",
-${tp}"
-  if [ -n "$PORT" ]; then
-    binding=$(cat <<EOB
-            {
-              "port": ${p},
-              "protocol": "${proto}"
-            }
-EOB
-)
-  else
-    binding=$(cat <<EOB
-            {
-              "portRange": "${p}",
-              "protocol": "${proto}"
-            }
-EOB
-)
-  fi
-  cat <<EOF
-{
-  "profiles": [
-    {
-      "profileName": "default",
-      "user": {
-        "name": ${user_json},
-        "password": ${password_json}
-      },
-      "servers": [
-        {
-          "ipAddress": ${ip_json},
-          "domainName": ${domain_json},
-          "portBindings": [
-${binding}
-          ]
-        }
-      ],
-      "mtu": ${MTU},
-      "multiplexing": {
-        "level": "${MULTIPLEXING}"
-      },
-      "handshakeMode": "${HANDSHAKE_MODE}"${tp_section}
-    }
-  ],
-  "activeProfile": "default",
-  "rpcPort": ${CLIENT_RPC_PORT},
-  "socks5Port": ${CLIENT_SOCKS5_PORT},
-  "loggingLevel": "INFO",
-  "socks5ListenLAN": false,
-  "httpProxyPort": ${CLIENT_HTTP_PORT},
-  "httpProxyListenLAN": false
-}
-EOF
-}
-
-build_clash_yaml_entry() {
-  local ip="$1"
-  local proto="$2"
-  local p port_lines name_suffix tp tp_line="" server_yaml user_yaml password_yaml
-  p="$(advertised_port_for_protocol "$proto")"
-  name_suffix="$(proto_lower "$proto")"
-  server_yaml="$(json_string "$ip")"
-  user_yaml="$(json_string "$USERNAME")"
-  password_yaml="$(json_string "$PASSWORD")"
-  tp="$(export_traffic_pattern_value)"
-  [ -n "$tp" ] && tp_line="
-    traffic-pattern: \"${tp}\""
-  if [ -n "$PORT" ]; then
-    port_lines="    port: ${p}"
-  else
-    port_lines="    port-range: ${p}"
-  fi
-  cat <<EOF
-  - name: mieru-mita-${name_suffix}
-    type: mieru
-    server: ${server_yaml}
-${port_lines}
-    transport: ${proto}
-    udp: true
-    username: ${user_yaml}
-    password: ${password_yaml}
-    multiplexing: ${MULTIPLEXING}
-    handshake-mode: ${HANDSHAKE_MODE}${tp_line}
-EOF
-}
-
-build_clash_yaml() {
-  local ip="$1"
-  local proto
-  while IFS= read -r proto; do
-    build_clash_yaml_entry "$ip" "$proto"
-  done < <(protocols_for_mode)
-}
-
-build_clash_yaml_header() {
-  printf '%s\n' 'proxies:'
-}
-
-build_clash_yaml_full() {
-  local ip="$1"
-  build_clash_yaml_header
-  build_clash_yaml "$ip"
-}
-
-protocol_output_count() {
-  local n=0 proto
-  while IFS= read -r proto; do
-    [ -n "$proto" ] || continue
-    n=$((n + 1))
-  done < <(protocols_for_mode)
-  printf '%s' "$n"
-}
-
-client_current_dir() {
-  printf '%s/current' "${MITA_CLIENT_EXPORT_DIR%/}"
-}
-
-client_json_path_for() {
-  local proto="$1" safe_user
-  safe_user="$(safe_filename_component "${USERNAME:-user}")"
-  [ -n "$safe_user" ] || safe_user=user
-  printf '%s/%s_%s.json' "$(client_current_dir)" "$safe_user" "$(proto_lower "$proto")"
-}
-
-client_export_remove_user() {
-  local name="$1" current_dir safe_user
-  current_dir="$(client_current_dir)"
-  safe_user="$(safe_filename_component "$name")"
-  [ -n "$safe_user" ] || return 0
-  run rm -f -- "${current_dir}/${safe_user}_tcp.json" "${current_dir}/${safe_user}_udp.json"
-}
-
-client_exports_clear_current() {
-  local current_dir
-  current_dir="$(client_current_dir)"
-  [ -d "$current_dir" ] || return 0
-  run rm -f -- "${current_dir}/"*.json
-}
-
-client_exports_after_reconfigure() {
-  local old_user="$1" old_protocol="$2" old_mtu="$3" old_traffic="$4"
-  local old_seed="$5" old_low_entropy="$6" old_mux="$7" old_handshake="$8"
-  if [ "${PROTOCOL:-TCP}" != "$old_protocol" ] \
-     || [ "${MTU:-1400}" != "$old_mtu" ] \
-     || [ "${TRAFFIC_PATTERN:-off}" != "$old_traffic" ] \
-     || [ "${TRAFFIC_SEED:-}" != "$old_seed" ] \
-     || [ "${LOW_ENTROPY_MODE:-LOW_ENTROPY_MODE_OFF}" != "$old_low_entropy" ] \
-     || [ "${MULTIPLEXING:-MULTIPLEXING_OFF}" != "$old_mux" ] \
-     || [ "${HANDSHAKE_MODE:-HANDSHAKE_NO_WAIT}" != "$old_handshake" ]; then
-    client_exports_clear_current
-  elif [ "${USERNAME:-}" != "$old_user" ]; then
-    client_export_remove_user "$old_user"
-  fi
-}
-
-print_json_import_hint() {
-  if [ "${PROTOCOL:-TCP}" = "BOTH" ]; then
-    t '  先将上方 TCP 或 UDP JSON 下载到客户端，再执行:' \
-      '  Download the TCP or UDP JSON shown above to the client, then run:'
-  else
-    t '  先将上方 JSON 下载到客户端，再执行:' \
-      '  Download the JSON shown above to the client, then run:'
-  fi
-  t '    mieru apply config <客户端本地 JSON 路径>' \
-    '    mieru apply config <local-client-JSON-path>'
-}
-
-print_protocol_outputs() {
-  local ip="$1"
-  local proto link cfg_path cfg_tmp multi=0 count current_dir safe_user
-  prepare_traffic_pattern_export
-  count="$(protocol_output_count)"
-  if [ "$count" -gt 1 ]; then
-    multi=1
-  fi
-  current_dir="$(client_current_dir)"
-  safe_user="$(safe_filename_component "${USERNAME:-user}")"
-  [ -n "$safe_user" ] || safe_user=user
-  if [ "$DRY_RUN" -ne 1 ]; then
-    install -d -o root -g root -m 0700 "$current_dir"
-  fi
-  while IFS= read -r proto; do
-    [ -n "$proto" ] || continue
-    msg ""
-    if [ "$multi" -eq 1 ]; then
-      t "【${proto} 节点链接】" "[${proto} share link]"
-    else
-      t '【节点链接】' '[Share link]'
-    fi
-    link="$(generate_share_link_for "$ip" "$proto")"
-    msg "$link"
-    cfg_path="$(client_json_path_for "$proto")"
-    msg ""
-    if [ "$multi" -eq 1 ]; then
-      t "【${proto} 客户端 JSON】（供 mieru 客户端使用，勿在服务器 mita apply）" \
-        "[${proto} client JSON] (for mieru client only — do NOT mita apply on server)"
-    else
-      t '【客户端 JSON 配置】（供 mieru 客户端使用，勿在服务器 mita apply）' \
-        '[Client JSON] (for mieru client only — do NOT mita apply on server)'
-    fi
-    if [ "$DRY_RUN" -ne 1 ]; then
-      cfg_tmp="$(mktemp "${cfg_path}.XXXXXX")" || return 1
-      if ! build_client_json_for "$ip" "$proto" >"$cfg_tmp" \
-         || ! chmod 0600 "$cfg_tmp" \
-         || ! mv -f "$cfg_tmp" "$cfg_path"; then
-        rm -f "$cfg_tmp"
-        return 1
-      fi
-      t "  已保存: ${cfg_path}" "  Saved:  ${cfg_path}"
-    else
-      t "  将保存: ${cfg_path}" "  Will save: ${cfg_path}"
-    fi
-  done < <(protocols_for_mode)
-  if [ "$DRY_RUN" -ne 1 ]; then
-    # v2.1.0 及更早版本的时间戳文件会造成通配符歧义和旧凭据回退，
-    # 成功写入稳定文件后清理这些由脚本生成的旧导出。
-    rm -f /root/nobrand_mieru_client_*.json 2>/dev/null || true
-    case "${PROTOCOL:-TCP}" in
-      TCP) rm -f "${current_dir}/${safe_user}_udp.json" 2>/dev/null || true ;;
-      UDP) rm -f "${current_dir}/${safe_user}_tcp.json" 2>/dev/null || true ;;
-    esac
-  fi
-}
-
-print_client_endpoint_mapping() {
-  [ -n "${ADVERTISE_HOST:-}" ] || return 0
-  local backend_ip="${1:-}" entry_host backend_host
-  [ -n "$backend_ip" ] || backend_ip="$(public_ip 2>/dev/null || true)"
-  client_endpoint_is_independent "$backend_ip" || return 0
-  entry_host="$(url_host "$ADVERTISE_HOST")"
-  if [ -n "$backend_ip" ]; then
-    backend_host="$(url_host "$backend_ip")"
-  else
-    backend_host="$(t '<本机可达 IP>' '<server reachable IP>')"
-  fi
-  msg ""
-  t '【客户端入口映射】（仅提示，不修改服务器配置）' \
-    '[Client endpoint mapping] (display only; server config is unchanged)'
-  if [ "${PROTOCOL:-TCP}" = "BOTH" ]; then
-    t "  客户端: TCP ${entry_host}:$(advertised_port_for_protocol TCP) / UDP ${entry_host}:$(advertised_port_for_protocol UDP)" \
-      "  Client: TCP ${entry_host}:$(advertised_port_for_protocol TCP) / UDP ${entry_host}:$(advertised_port_for_protocol UDP)"
-    t "       -> 后端: TCP ${backend_host}:${PORT} / UDP ${backend_host}:$((PORT + 1))" \
-      "       -> Backend: TCP ${backend_host}:${PORT} / UDP ${backend_host}:$((PORT + 1))"
-  else
-    t "  客户端: ${entry_host}:$(advertised_port_for_protocol "$PROTOCOL")/${PROTOCOL}" \
-      "  Client: ${entry_host}:$(advertised_port_for_protocol "$PROTOCOL")/${PROTOCOL}"
-    t "       -> 后端: ${backend_host}:${PORT}/${PROTOCOL}" \
-      "       -> Backend: ${backend_host}:${PORT}/${PROTOCOL}"
-  fi
-}
-
-print_summary() {
-  local context="${1:-install}" ip
-  ip="$(advertised_host || true)"
-  msg ""
-  case "$context" in
-    install) t '========== 安装完成 ==========' '========== Installation complete ==========' ;;
-    *) t '========== 当前节点配置 ==========' '========== Current node configuration ==========' ;;
-  esac
-  if [ -n "$ip" ]; then
-    print_protocol_outputs "$ip"
-  else
-    warn "$(t '未能获取公网 IP，请手动将下方连接信息填入客户端' \
-      'Could not detect public IP; use connection info below manually')"
-  fi
-  msg ""
-  t '【连接信息】' '[Connection info]'
-  if [ -n "${ADVERTISE_HOST:-}" ]; then
-    t "  客户端入口: ${ip:-<未知>}" "  Client entry: ${ip:-<unknown>}"
-  else
-    t "  服务器: ${ip:-<未知>}" "  Server:   ${ip:-<unknown>}"
-  fi
-  t "  用户名: ${USERNAME}" "  Username: ${USERNAME}"
-  t "  密码:   ${PASSWORD}" "  Password: ${PASSWORD}"
-  t "  协议:   $(client_protocol_label)" "  Protocol: $(client_protocol_label)"
-  t "  网络入口: $(nb_ingress_profile_name "${INGRESS_PROFILE_ID:-}")" \
-    "  Ingress:  $(nb_ingress_profile_name "${INGRESS_PROFILE_ID:-}")"
-  t "  配置预设（Profile）: $(profile_label)" "  Profile:  $(profile_label)"
-  t "  MTU:    ${MTU}（$(mtu_policy_label)）" \
-    "  MTU:      ${MTU} ($(mtu_policy_label))"
-  t "  流量伪装: $(traffic_label)" "  Obfuscation: $(traffic_label)"
-  t "  低熵模式: $(low_entropy_label)" "  Low entropy: $(low_entropy_label)"
-  t "  多路复用: ${MULTIPLEXING}" "  Multiplexing: ${MULTIPLEXING}"
-  t "  握手模式: ${HANDSHAKE_MODE}" "  Handshake: ${HANDSHAKE_MODE}"
-  if [ -n "$PORT" ]; then
-    if [ "$PROTOCOL" = "BOTH" ]; then
-      t "  端口:   TCP $(advertised_port_for_protocol TCP) / UDP $(advertised_port_for_protocol UDP)" \
-        "  Ports:    TCP $(advertised_port_for_protocol TCP) / UDP $(advertised_port_for_protocol UDP)"
-    else
-      t "  端口:   $(advertised_port_for_protocol "$PROTOCOL")" \
-        "  Port:     $(advertised_port_for_protocol "$PROTOCOL")"
-    fi
-  else
-    t "  端口段: ${PORT_RANGE}" "  Port range: ${PORT_RANGE}"
-  fi
-  print_client_endpoint_mapping
-  msg ""
-  t '导入方式:' 'Import options:'
-  if [ "$PROTOCOL" = "BOTH" ]; then
-    msg '  mieru import config "<TCP 节点链接>"   # 或分别导入 TCP / UDP 链接'
-  else
-    msg '  mieru import config "<节点链接>"   # 简单链接不含 socks5Port，全新设备建议用 JSON'
-  fi
-  print_json_import_hint
-  if [ "$PROTOCOL" = "BOTH" ]; then
-    msg ''
-    t '【客户端提示】双协议已分开输出：TCP 与 UDP 各用对应链接/JSON；' \
-      '[Client tip] Dual protocol outputs are split: use matching TCP or UDP link/JSON.'
-    t '  v2rayN 导入后传输协议选 tcp 或 udp（勿选「两个都」）。' \
-      '  In v2rayN pick transport tcp or udp (not "both").'
-  fi
-  if [ -n "$ip" ]; then
-    msg ""
-    t '【Clash / mihomo 配置片段】' '[Clash / mihomo snippet]'
-    build_clash_yaml_full "$ip"
-  fi
-  cloud_firewall_hint
-}
-
-generate_client_config() {
-  local ip
-  ip="$(advertised_host || echo 'YOUR_SERVER_IP')"
-  msg ""
-  t '========== 节点链接与客户端配置 ==========' \
-    '========== Share links & client config =========='
-  t "当前 MTU: ${MTU}（$(mtu_policy_label)）" \
-    "Current MTU: ${MTU} ($(mtu_policy_label))"
-  t 'MTU 已同步写入 mierus:// 节点链接和 mieru 客户端 JSON；mihomo 当前节点字段不单独配置 MTU。' \
-    'MTU is included in the mierus:// link and mieru client JSON; current mihomo proxy fields do not expose a separate MTU option.'
-  print_protocol_outputs "$ip"
-  print_client_endpoint_mapping
-  msg ""
-  t '【导入方式】' '[How to import]'
-  if [ "$PROTOCOL" = "BOTH" ]; then
-    msg '  mieru import config "<TCP 节点链接>"   # TCP / UDP 各用对应链接'
-  else
-    msg '  mieru import config "<节点链接>"   # 一键导入（简单链接）'
-  fi
-  print_json_import_hint
-  msg ""
-  t '说明: 上方 mierus:// 为分享链接；JSON 为 mieru 客户端配置（在电脑/手机导入，勿在服务器 mita apply）' \
-    'Note: mierus:// is the share link; JSON is for the mieru client on your device — do NOT mita apply on server'
-  msg ""
-  t '【Clash / mihomo 配置片段】' '[Clash / mihomo snippet]'
-  build_clash_yaml_full "$ip"
-  cloud_firewall_hint
-}
-
-install_fresh_rollback() {
-  local snapshot="$1" bindings="${2:-}"
-  if [ -n "$bindings" ]; then
-    close_firewall_for_bindings "$bindings" 2>/dev/null || true
-  fi
-  isolated_stop_all 2>/dev/null || true
-  tc_clear_owned_filters 2>/dev/null || true
-  remove_users_scheduler 2>/dev/null || true
-  users_tx_rollback "$snapshot" 0 || true
-}
-
-install_fresh_isolated() {
-  local tx bindings
-  install_self_script
-  admin_lock_acquire || return 1
-  tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
-  if ! users_initialize_primary; then
-    install_fresh_rollback "$tx"
-    admin_lock_release
-    die "$(t '创建初始用户状态失败' 'Failed to create the initial user state')" || return 1
-  fi
-  if ! apply_users_config "$tx" 0; then
-    install_fresh_rollback "$tx"
-    admin_lock_release
-    die "$(t '启动首个用户专属实例失败' \
-      'Failed to start the first dedicated user instance')" || return 1
-  fi
-  bindings="$(multi_user_port_protocol_pairs)"
-  if ! open_firewall_for_pairs "$bindings"; then
-    install_fresh_rollback "$tx" "$bindings"
-    admin_lock_release
-    die "$(t '放行专属实例端口失败，安装状态已回滚' \
-      'Failed to allow dedicated-instance ports; installation state was rolled back')" || return 1
-  fi
-  if ! verify_mita_running || ! save_install_state; then
-    install_fresh_rollback "$tx" "$bindings"
-    admin_lock_release
-    die "$(t '专属实例验收或状态保存失败，安装状态已回滚' \
-      'Dedicated-instance verification or state persistence failed; installation state was rolled back')" || return 1
-  fi
-  users_tx_commit "$tx"
-  client_exports_clear_current 2>/dev/null || true
-  admin_lock_release
-}
-
-mita_preservable_config_exists() {
-  mita_v3_install_state_valid \
-    && users_isolated_mode \
-    && [ "$(users_count 2>/dev/null || printf 0)" -gt 0 ]
-}
-
-# ---------- Snell client exports (Surge / Mihomo / sing-box) ----------
-
-snell_client_values() {
-  local id="$1" name major psk endpoint host port
-  name="$(snell_state_field "$id" name)"
-  major="$(snell_state_field "$id" version)"
-  case "$major" in 4|5) ;; *) return 1 ;; esac
-  psk="$(snell_state_field "$id" psk)"
-  endpoint="$(snell_effective_endpoint "$id")"
-  host="${endpoint%%|*}"; port="${endpoint#*|}"
-  printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$major" "$psk" "$host" "$port"
-}
-
-snell_export_surge() {
-  local id="$1" name major psk host port values
-  values="$(snell_client_values "$id")" || return 1
-  IFS=$'\t' read -r name major psk host port <<<"$values"
-  printf '%s = snell, %s, %s, psk = %s, version = %s' "$name" "$host" "$port" "$psk" "$major"
-  printf '\n'
-}
-
-snell_export_mihomo() {
-  local id="$1" name major psk host port values
-  values="$(snell_client_values "$id")" || return 1
-  IFS=$'\t' read -r name major psk host port <<<"$values"
-  case "$major" in
-    4|5) ;;
-    *) return 1 ;;
-  esac
-  jq -n --arg name "$name" --arg server "$host" --arg port "$port" --arg psk "$psk" --arg version "$major" -r '
-    "- name: " + ($name|tojson) + "\n" +
-    "  type: snell\n" +
-    "  server: " + ($server|tojson) + "\n" +
-    "  port: " + $port + "\n" +
-    "  psk: " + ($psk|tojson) + "\n" +
-    "  version: " + $version + "\n" +
-    "  udp: true"
-  '
-}
-
-snell_export_singbox() {
-  local id="$1" name major psk host port singbox_version values
-  values="$(snell_client_values "$id")" || return 1
-  IFS=$'\t' read -r name major psk host port <<<"$values"
-  case "$major" in
-    4) singbox_version=4 ;;
-    # 官方 v5 未启用 QUIC Proxy Mode 时与 v4 client wire protocol 兼容；
-    # sing-box >=1.14 当前 outbound 用 version=4 表达该兼容语义。
-    5) singbox_version=4 ;;
-    *) return 1 ;;
-  esac
-  jq -n --arg tag "$name" --arg server "$host" --arg port "$port" --arg psk "$psk" \
-    --arg version "$singbox_version" --arg major "$major" '
-      {
-        type:"snell",
-        tag:$tag,
-        server:$server,
-        server_port:($port|tonumber),
-        version:($version|tonumber),
-        psk:$psk
-      }
-    '
-}
-
-snell_print_client_exports() {
-  local id="$1" major
-  major="$(snell_state_field "$id" version)"
-  msg '========================================'
-  msg 'Surge'
-  msg '========================================'
-  snell_export_surge "$id"
-  msg ''
-  msg '========================================'
-  msg 'Mihomo'
-  msg '========================================'
-  snell_export_mihomo "$id"
-  if [ "$major" = 5 ]; then
-    msg '说明：udp: true 是 Mihomo 普通 Snell UDP relay 能力；官方 v5 QUIC Proxy Mode 为 NOT VERIFIED。'
-  fi
-  msg ''
-  msg '========================================'
-  msg 'sing-box'
-  msg '========================================'
-  snell_export_singbox "$id"
-  if [ "$major" = 5 ]; then
-    msg '说明：sing-box version=4 对应 Snell v5 未启用 QUIC Proxy Mode 时的上游兼容语义。'
-    msg '说明：sing-box 不支持官方 Snell v5 QUIC Proxy Mode（CLIENT_UNSUPPORTED）。'
-  fi
-}
-
-mieru_prepare_noninteractive_ingress_endpoint() {
-  # Resolve the explicit/default Profile before enforcing the unattended
-  # Display Endpoint guard.  A first-class Profile with a stable display host
-  # is sufficient input; legacy-default-route still requires an explicit
-  # endpoint or --advertise-auto.
-  nb_prepare_ingress_request || return 1
-  nb_require_explicit_endpoint_noninteractive
-}
-
-nb_authoritative_protocol_state_exists() {
-  local path root
-  for path in \
-    "$MITA_STATE" "$MITA_USERS_STATE" \
-    "$NOBRAND_HY2_STATE_FILE" "$NOBRAND_VLESS_STATE_FILE" \
-    "$NOBRAND_SSH_STATE_FILE" "$NOBRAND_FORWARD_STATE_FILE"; do
-    [ ! -s "$path" ] || return 0
-  done
-  for root in "$NOBRAND_SNELL_STATE_DIR" "$NOBRAND_REALITY_STATE_DIR" "$NOBRAND_TUIC_STATE_DIR"; do
-    [ ! -d "$root" ] || ! nb_directory_has_entries "$root" || return 0
-  done
-  return 1
-}
+# Ordinary protocol runtime and exports are managed by the native Splicore adapter.
 
 nb_lifecycle_validate_manager_repair() {
   local installed=""
@@ -25865,6 +15247,7 @@ nb_lifecycle_validate_manager_repair() {
 }
 
 nobrand_manager_bootstrap() {
+  nb_splicore_legacy_preflight || return 1
   local state operation scope="" pm rc=0
   local recovery_expected_scope="${NOBRAND_RECOVERY_EXPECTED_SCOPE:-}"
   local recovery_expected_state="${NOBRAND_RECOVERY_EXPECTED_STATE:-}"
@@ -25968,7 +15351,7 @@ nobrand_manager_bootstrap() {
   else
     case "$state" in
       CLEAN) operation=install ;;
-      CURRENT_COMPLETE|CURRENT_PARTIAL_INSTALL|CURRENT_PARTIAL_REPAIR|LEGACY_SUPPORTED)
+      CURRENT_COMPLETE|CURRENT_PARTIAL_INSTALL|CURRENT_PARTIAL_REPAIR)
         operation=repair
         ;;
       *)
@@ -26120,56 +15503,12 @@ nb_lifecycle_protocol_state_manifest_record() {
 }
 
 nb_lifecycle_protocol_scope_state_manifest() (
-  local scope="$1" root path child name id rules
-  local -a paths=() children=()
+  local scope="$1" rules
   LC_ALL=C
   export LC_ALL
   shopt -s nullglob dotglob
   printf 'nobrand-protocol-callback-baseline-v1\0%s\0' "$scope" || return 1
   case "$scope" in
-    snell)
-      root="$NOBRAND_SNELL_STATE_DIR"
-      if [ -L "$root" ] || { [ -e "$root" ] && [ ! -d "$root" ]; }; then
-        nb_lifecycle_protocol_state_manifest_record root "$root"
-        return
-      fi
-      paths=("$root"/*)
-      for path in "${paths[@]}"; do
-        name="${path##*/}"
-        nb_lifecycle_protocol_state_manifest_record "$name" "$path" || return 1
-      done
-      ;;
-    hy2)
-      nb_lifecycle_protocol_state_manifest_record state.json "$NOBRAND_HY2_STATE_FILE"
-      ;;
-    tuic|vless-reality)
-      if [ "$scope" = tuic ]; then
-        root="$NOBRAND_TUIC_STATE_DIR"
-      else
-        root="$NOBRAND_REALITY_STATE_DIR"
-      fi
-      if [ -L "$root" ] || { [ -e "$root" ] && [ ! -d "$root" ]; }; then
-        nb_lifecycle_protocol_state_manifest_record root "$root"
-        return
-      fi
-      paths=("$root"/*)
-      for path in "${paths[@]}"; do
-        name="${path##*/}"
-        if [ -L "$path" ] || { [ -e "$path" ] && [ ! -d "$path" ]; }; then
-          nb_lifecycle_protocol_state_manifest_record "$name" "$path" || return 1
-        else
-          children=("$path"/*)
-          if [ "${#children[@]}" -eq 0 ]; then
-            nb_lifecycle_protocol_state_manifest_record "$name" "$path" || return 1
-            continue
-          fi
-          for child in "${children[@]}"; do
-            nb_lifecycle_protocol_state_manifest_record \
-              "$name/${child##*/}" "$child" || return 1
-          done
-        fi
-      done
-      ;;
     vless-sudoku)
       nb_lifecycle_protocol_state_manifest_record state.json "$NOBRAND_VLESS_STATE_FILE"
       ;;
@@ -26216,59 +15555,9 @@ nb_lifecycle_protocol_scope_fingerprint() {
 # through a potentially duplicating install callback.  Runtime validation runs
 # after the transaction advances to ready-to-validate and remains retryable.
 nb_lifecycle_protocol_scope_state_valid() (
-  local scope="$1" root path child name id found=0
-  local -a paths=() children=()
+  local scope="$1"
   shopt -s nullglob dotglob
   case "$scope" in
-    snell)
-      root="$NOBRAND_SNELL_STATE_DIR"
-      [ ! -L "$root" ] && { [ ! -e "$root" ] || [ -d "$root" ]; } || return 1
-      paths=("$root"/*)
-      for path in "${paths[@]}"; do
-        name="${path##*/}"
-        [[ "$name" =~ ^s[0-9a-f]{16}\.json$ ]] || return 1
-        found=1
-        id="${name%.json}"
-        [ -f "$path" ] && [ ! -L "$path" ] || return 1
-        snell_state_valid "$id" || return 1
-      done
-      [ "$found" -eq 1 ]
-      ;;
-    hy2)
-      [ -f "$NOBRAND_HY2_STATE_FILE" ] && [ ! -L "$NOBRAND_HY2_STATE_FILE" ] \
-        && hysteria2_state_exists
-      ;;
-    tuic|vless-reality)
-      if [ "$scope" = tuic ]; then
-        root="$NOBRAND_TUIC_STATE_DIR"
-      else
-        root="$NOBRAND_REALITY_STATE_DIR"
-      fi
-      [ ! -L "$root" ] && { [ ! -e "$root" ] || [ -d "$root" ]; } || return 1
-      paths=("$root"/*)
-      for path in "${paths[@]}"; do
-        name="${path##*/}"
-        if [ "$scope" = tuic ]; then
-          [[ "$name" =~ ^t[0-9a-f]{16}$ ]] || return 1
-        else
-          [[ "$name" =~ ^r[0-9a-f]{16}$ ]] || return 1
-        fi
-        [ -d "$path" ] && [ ! -L "$path" ] || return 1
-        children=("$path"/*)
-        [ "${#children[@]}" -eq 1 ] || return 1
-        child="${children[0]}"
-        [ "${child##*/}" = state.json ] || return 1
-        found=1
-        id="$name"
-        [ -f "$child" ] && [ ! -L "$child" ] || return 1
-        if [ "$scope" = tuic ]; then
-          tuic_state_exists "$id" || return 1
-        else
-          reality_state_exists "$id" || return 1
-        fi
-      done
-      [ "$found" -eq 1 ]
-      ;;
     vless-sudoku)
       [ -f "$NOBRAND_VLESS_STATE_FILE" ] && [ ! -L "$NOBRAND_VLESS_STATE_FILE" ] \
         && vless_sudoku_state_exists && vless_sudoku_state_matches
@@ -26359,7 +15648,7 @@ nb_lifecycle_protocol_retry_authorized() {
 # credentials.  Structural validation intentionally precedes the admin lock
 # and every mutating service/firewall action.
 nb_lifecycle_reconcile_protocol_scope() {
-  local scope="$1" id ids enabled port pairs failed=0
+  local scope="$1" enabled port failed=0
   nb_lifecycle_protocol_scope_state_valid "$scope" || return 1
 
   case "$scope" in
@@ -26380,7 +15669,7 @@ nb_lifecycle_reconcile_protocol_scope() {
       done < <(jq -c '.users[]' "$NOBRAND_SSH_STATE_FILE")
       return 0
       ;;
-    snell|hy2|tuic|vless-reality|vless-sudoku) ;;
+    vless-sudoku) ;;
     *) return 1 ;;
   esac
 
@@ -26388,49 +15677,6 @@ nb_lifecycle_reconcile_protocol_scope() {
   # one unit.  Enumerators are intentionally forgiving for status displays, so
   # recovery additionally requires every derived field/config it will consume.
   case "$scope" in
-    snell)
-      ids="$(snell_instance_ids)" || return 1
-      [ -n "$ids" ] || return 1
-      while IFS= read -r id; do
-        [ -n "$id" ] || continue
-        enabled="$(snell_state_field "$id" enabled 2>/dev/null)" || return 1
-        case "$enabled" in true|false) ;; *) return 1 ;; esac
-        snell_config_matches_state "$id" || return 1
-        snell_firewall_pairs "$id" >/dev/null || return 1
-      done <<<"$ids"
-      ;;
-    hy2)
-      enabled="$(hysteria2_state_field enabled 2>/dev/null)" || return 1
-      case "$enabled" in true|false) ;; *) return 1 ;; esac
-      port="$(hysteria2_state_field listen_port 2>/dev/null)" || return 1
-      [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || return 1
-      nobrand_xray_test_config "$NOBRAND_HY2_CONFIG_FILE" || return 1
-      ;;
-    tuic)
-      ids="$(tuic_instance_ids)" || return 1
-      [ -n "$ids" ] || return 1
-      while IFS= read -r id; do
-        [ -n "$id" ] || continue
-        enabled="$(tuic_state_field "$id" enabled 2>/dev/null)" || return 1
-        case "$enabled" in true|false) ;; *) return 1 ;; esac
-        port="$(tuic_state_field "$id" listen_port 2>/dev/null)" || return 1
-        [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || return 1
-        tuic_config_matches_state "$id" || return 1
-      done <<<"$ids"
-      ;;
-    vless-reality)
-      ids="$(reality_instance_ids)" || return 1
-      [ -n "$ids" ] || return 1
-      while IFS= read -r id; do
-        [ -n "$id" ] || continue
-        enabled="$(reality_state_field "$id" enabled 2>/dev/null)" || return 1
-        case "$enabled" in true|false) ;; *) return 1 ;; esac
-        port="$(reality_state_field "$id" listen_port 2>/dev/null)" || return 1
-        [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || return 1
-        reality_config_matches_state "$id" \
-          && nobrand_xray_test_config "$(reality_config_file "$id")" || return 1
-      done <<<"$ids"
-      ;;
     vless-sudoku)
       enabled="$(vless_sudoku_state_field enabled 2>/dev/null)" || return 1
       case "$enabled" in true|false) ;; *) return 1 ;; esac
@@ -26444,83 +15690,6 @@ nb_lifecycle_reconcile_protocol_scope() {
 
   admin_lock_acquire || return 1
   case "$scope" in
-    snell)
-      ids="$(snell_instance_ids)" || failed=1
-      [ -n "$ids" ] || failed=1
-      [ "$failed" -ne 0 ] || snell_install_service_runtime || failed=1
-      while [ "$failed" -eq 0 ] && IFS= read -r id; do
-        [ -n "$id" ] || continue
-        enabled="$(snell_state_field "$id" enabled 2>/dev/null)" || { failed=1; break; }
-        case "$enabled" in true|false) ;; *) failed=1; break ;; esac
-        snell_ensure_openrc_service "$id" || { failed=1; break; }
-        if [ "$enabled" = true ]; then
-          pairs="$(snell_firewall_pairs "$id")" || { failed=1; break; }
-          nb_firewall_open_pairs "$pairs" >/dev/null 2>&1 \
-            && snell_service_action "$id" start >/dev/null 2>&1 \
-            && snell_wait_for_required_listeners "$id" 25 || failed=1
-        else
-          snell_service_action "$id" stop >/dev/null 2>&1 || failed=1
-        fi
-      done <<<"$ids"
-      ;;
-    hy2)
-      enabled="$(hysteria2_state_field enabled 2>/dev/null)" || failed=1
-      case "$enabled" in true|false) ;; *) failed=1 ;; esac
-      if [ "$failed" -eq 0 ]; then
-        nobrand_write_hy2_service || failed=1
-      fi
-      if [ "$failed" -eq 0 ] && [ "$enabled" = true ]; then
-        port="$(hysteria2_state_field listen_port)" || failed=1
-        [ "$failed" -ne 0 ] \
-          || nobrand_xray_test_config "$NOBRAND_HY2_CONFIG_FILE" || failed=1
-        [ "$failed" -ne 0 ] \
-          || nb_firewall_open_pairs "UDP|${port}" >/dev/null 2>&1 || failed=1
-        [ "$failed" -ne 0 ] \
-          || nobrand_hy2_service_action start >/dev/null 2>&1 || failed=1
-        [ "$failed" -ne 0 ] || hysteria2_running || failed=1
-      elif [ "$failed" -eq 0 ]; then
-        nobrand_hy2_service_action stop >/dev/null 2>&1 || failed=1
-      fi
-      ;;
-    tuic)
-      ids="$(tuic_instance_ids)" || failed=1
-      [ -n "$ids" ] || failed=1
-      [ "$failed" -ne 0 ] || tuic_restore_runtime >/dev/null 2>&1 || failed=1
-      while [ "$failed" -eq 0 ] && IFS= read -r id; do
-        [ -n "$id" ] || continue
-        enabled="$(tuic_state_field "$id" enabled 2>/dev/null)" || { failed=1; break; }
-        case "$enabled" in true|false) ;; *) failed=1; break ;; esac
-        tuic_ensure_openrc_service "$id" \
-          && tuic_validate_config "$(tuic_config_file "$id")" || { failed=1; break; }
-        if [ "$enabled" = true ]; then
-          port="$(tuic_state_field "$id" listen_port)" || { failed=1; break; }
-          nb_firewall_open_pairs "UDP|${port}" >/dev/null 2>&1 \
-            && tuic_service_action "$id" start >/dev/null 2>&1 \
-            && tuic_running "$id" || failed=1
-        else
-          tuic_service_action "$id" stop >/dev/null 2>&1 || failed=1
-        fi
-      done <<<"$ids"
-      ;;
-    vless-reality)
-      ids="$(reality_instance_ids)" || failed=1
-      [ -n "$ids" ] || failed=1
-      [ "$failed" -ne 0 ] || reality_install_service_runtime >/dev/null 2>&1 || failed=1
-      while [ "$failed" -eq 0 ] && IFS= read -r id; do
-        [ -n "$id" ] || continue
-        enabled="$(reality_state_field "$id" enabled 2>/dev/null)" || { failed=1; break; }
-        case "$enabled" in true|false) ;; *) failed=1; break ;; esac
-        reality_ensure_openrc_service "$id" || { failed=1; break; }
-        if [ "$enabled" = true ]; then
-          port="$(reality_state_field "$id" listen_port)" || { failed=1; break; }
-          nb_firewall_open_pairs "TCP|${port}" >/dev/null 2>&1 \
-            && reality_service_action "$id" start >/dev/null 2>&1 \
-            && reality_running "$id" || failed=1
-        else
-          reality_service_action "$id" stop >/dev/null 2>&1 || failed=1
-        fi
-      done <<<"$ids"
-      ;;
     vless-sudoku)
       enabled="$(vless_sudoku_state_field enabled 2>/dev/null)" || failed=1
       case "$enabled" in true|false) ;; *) failed=1 ;; esac
@@ -26550,18 +15719,6 @@ nb_lifecycle_validate_protocol_scope() {
   # authoritative state object before any recovery transaction can complete.
   nb_lifecycle_protocol_scope_state_valid "$scope" || return 1
   case "$scope" in
-    snell)
-      [ -n "$(snell_instance_ids 2>/dev/null)" ] && snell_doctor_all
-      ;;
-    hy2)
-      hysteria2_state_exists && hysteria2_doctor
-      ;;
-    tuic)
-      [ -n "$(tuic_instance_ids 2>/dev/null)" ] && tuic_doctor_all
-      ;;
-    vless-reality)
-      [ -n "$(reality_instance_ids 2>/dev/null)" ] && reality_doctor_all
-      ;;
     vless-sudoku)
       vless_sudoku_state_exists && vless_sudoku_doctor
       ;;
@@ -26880,1648 +16037,11 @@ nb_lifecycle_run_ingress_action() {
   return "$rc"
 }
 
-nb_reconcile_partial_uninstall() {
-  local ssh_pending="" ssh_policy="" ssh_token="" ssh_pid="" ssh_origin=""
-  # A durable backup restore in `applying` state may have crashed between
-  # clearing and copying state/config. Restore its pre-restore snapshot before
-  # ordinary repair is allowed to initialize or infer any authoritative state.
-  if declare -F nobrand_backup_restore_transaction_present >/dev/null 2>&1 \
-     && nobrand_backup_restore_transaction_present; then
-    nobrand_backup_restore_transaction_valid || {
-      warn "$(t '备份恢复的持久快照或事务元数据无效；拒绝初始化新状态' \
-        'The durable backup-restore snapshot or transaction metadata is invalid; refusing to initialize new state')"
-      return 1
-    }
-    case "$(nb_lifecycle_field STATUS "$NOBRAND_BACKUP_RESTORE_META_FILE")" in
-      applying|runtime-applying|rollback-roots)
-        nobrand_backup_restore_recover_applying || return $?
-        ;;
-    esac
-  fi
-  ensure_manager_state_layout 1 || return 1
-  nb_lifecycle_checkpoint repair partial-uninstall-state-layout || return 1
-  install_self_script || return 1
-  nb_lifecycle_checkpoint repair partial-uninstall-manager-ready || return 1
-  if ! nb_authoritative_protocol_state_exists; then
-    return 0
-  fi
-  # Restore only from the protocol state that survived the interrupted
-  # uninstall. These routines are state-driven and do not synthesize a fresh
-  # Mieru user, node, key, or credential.
-  nobrand_restore_protocol_runtimes || return 1
-  nb_lifecycle_checkpoint repair partial-uninstall-runtimes-reconciled || return 1
-  nobrand_start_enabled_services || return 1
-  nb_lifecycle_checkpoint repair partial-uninstall-services-reconciled || return 1
-  if [ -e "$NOBRAND_SSH_STATE_FILE" ] || [ -L "$NOBRAND_SSH_STATE_FILE" ]; then
-    ssh_tunnel_state_exists || return 1
-    ssh_tunnel_state_identity_valid || return 1
-    ssh_pending="$(ssh_tunnel_state_field pending_operation 2>/dev/null || true)"
-    ssh_policy="$(ssh_tunnel_state_field policy_applied 2>/dev/null || true)"
-    ssh_token="$(ssh_tunnel_state_field pending_watchdog_token 2>/dev/null || true)"
-    ssh_pid="$(ssh_tunnel_state_field pending_watchdog_pid 2>/dev/null || true)"
-    ssh_origin="$(ssh_tunnel_state_field pending_origin_connection 2>/dev/null || true)"
-    if [ "$ssh_policy" = false ] && { [ -z "$ssh_pending" ] \
-       || [ "$ssh_pending" = uninstall ] || [ "$ssh_pending" = unified-uninstall ]; } \
-       && [ -z "$ssh_token" ] && [ -z "$ssh_pid" ] && [ -z "$ssh_origin" ]; then
-      ssh_tunnel_restore_system_state || return 1
-      ssh_pending="$(ssh_tunnel_state_field pending_operation 2>/dev/null || true)"
-      ssh_policy="$(ssh_tunnel_state_field policy_applied 2>/dev/null || true)"
-      ssh_token="$(ssh_tunnel_state_field pending_watchdog_token 2>/dev/null || true)"
-      ssh_pid="$(ssh_tunnel_state_field pending_watchdog_pid 2>/dev/null || true)"
-      ssh_origin="$(ssh_tunnel_state_field pending_origin_connection 2>/dev/null || true)"
-    fi
-    if [ "$ssh_pending" = restore ]; then
-      ssh_tunnel_pending_tuple_valid "$ssh_pending" "$ssh_token" "$ssh_pid" \
-        "$ssh_origin" "$ssh_policy" || return 1
-      if [ "$ssh_token" = disabled ]; then
-        ssh_tunnel_confirm_admin disabled || return 1
-        ssh_pending="$(ssh_tunnel_state_field pending_operation 2>/dev/null || true)"
-        ssh_policy="$(ssh_tunnel_state_field policy_applied 2>/dev/null || true)"
-        ssh_token="$(ssh_tunnel_state_field pending_watchdog_token 2>/dev/null || true)"
-        ssh_pid="$(ssh_tunnel_state_field pending_watchdog_pid 2>/dev/null || true)"
-        ssh_origin="$(ssh_tunnel_state_field pending_origin_connection 2>/dev/null || true)"
-      else
-        ssh_tunnel_watchdog_claim_ready "$ssh_token" "$ssh_pid" || return 1
-        ssh_tunnel_watchdog_prompt "$ssh_token" || return 1
-        if declare -F nobrand_backup_restore_transaction_present >/dev/null 2>&1 \
-           && nobrand_backup_restore_transaction_present; then
-          nobrand_backup_restore_transaction_mark_ssh_pending || return 1
-        fi
-        nb_lifecycle_mark_phase partial-uninstall-ssh-confirmation-pending || return 1
-        return 0
-      fi
-    fi
-    [ -z "$ssh_pending" ] && [ -z "$ssh_token" ] && [ -z "$ssh_pid" ] \
-      && [ -z "$ssh_origin" ] && [ "$ssh_policy" = true ] || return 1
-    ssh_tunnel_cleanup_disarmed_watchdogs || return 1
-  fi
-  if [ -s "$MITA_STATE" ] || [ -s "$MITA_USERS_STATE" ]; then
-    mita_v3_install_state_valid || return 1
-    users_state_exists && [ "$(users_count)" -gt 0 ] || return 1
-    verify_mita_running 1 || return 1
-  fi
-  nobrand_doctor || return 1
-  nb_lifecycle_checkpoint repair partial-uninstall-state-validated || return 1
-}
-
-do_install_impl() {
-  ensure_manager_state_layout 1
-  nb_lifecycle_checkpoint "$NOBRAND_LIFECYCLE_OPERATION" state-layout || return 1
-
-  local pm arch ver url tmp tx runtime_tx reinstall_existing=0 managed_existing=0
-  pm="$(detect_pkg_manager)"
-  arch="$(detect_arch)"
-  ensure_management_dependencies "$pm"
-
-  if mita_installed; then
-    local cur
-    cur="$(installed_version || true)"
-    t "检测到已安装 mita ${cur:-未知版本}" "mita already installed (${cur:-unknown})"
-    if mita_preservable_config_exists; then
-      t '如需改端口/密码/协议，请选菜单「重新配置」或执行: nobrand mieru reconfigure' \
-        'To change port/password/protocol, use menu Reconfigure or: nobrand mieru reconfigure'
-      if ! confirm '继续重新下载安装包并保留当前用户/节点配置？[y/N]: ' \
-        'Re-download the package and keep the current users/node config? [y/N]: ' n; then
-        NOBRAND_INSTALL_CANCELLED=1
-        return 0
-      fi
-      if [ "$USERNAME_CLI" -eq 1 ] || [ "$PASSWORD_CLI" -eq 1 ] \
-         || [ "$PORT_CLI" -eq 1 ] || [ "$PORT_RANGE_CLI" -eq 1 ] \
-         || [ "$PROTOCOL_CLI" -eq 1 ] || [ "$MTU_CLI" -eq 1 ] \
-         || [ "$ADVERTISE_CLI" -eq 1 ] \
-         || [ "$PROFILE_CLI" -eq 1 ] \
-         || [ "$MULTIPLEXING_CLI" -eq 1 ] || [ "$HANDSHAKE_CLI" -eq 1 ] \
-         || [ "$TRAFFIC_CLI" -eq 1 ] || [ "$LOW_ENTROPY_CLI" -eq 1 ]; then
-        die "$(t '重装只保留当前配置；如需同时改节点参数，请使用 reconfigure' \
-          'Reinstall preserves current config; use reconfigure to change node parameters')"
-      fi
-      reinstall_existing=1
-      load_install_state
-      if users_state_exists && [ "$(users_count)" -gt 0 ]; then
-        managed_existing=1
-        users_sync_primary_globals
-      fi
-    else
-      warn "$(t '检测到上次安装未完成，且没有可恢复的 OneClick 状态；本次将重新生成配置并完成安装' \
-        'Previous install is incomplete and has no recoverable OneClick state; configuration will be regenerated')"
-      if ! confirm '继续修复并完成安装？[y/N]: ' \
-        'Repair and complete the installation? [y/N]: ' n; then
-        NOBRAND_INSTALL_CANCELLED=1
-        return 0
-      fi
-    fi
-  fi
-
-  if [ "$reinstall_existing" -eq 1 ]; then
-    ensure_config_noninteractive
-  elif [ "$YES" -eq 1 ]; then
-    mieru_prepare_noninteractive_ingress_endpoint || return 1
-    ensure_config_noninteractive
-  else
-    collect_config_interactive
-  fi
-  [ -z "$PORT_RANGE" ] || die "$(t 'v2 用户专属实例不支持端口段，请改用单端口' \
-    'v2 dedicated user instances do not support port ranges; use one port')"
-  [ -z "$PORT" ] || PORT="$(normalize_uint "$PORT")"
-  if [ "$reinstall_existing" -eq 0 ]; then
-    ensure_install_port_available
-  fi
-
-  mieru_resolve_runtime "${MIERU_CHANNEL:-stable}" "${MIERU_VERSION:-}" "$pm" "$arch" \
-    || die "$(t '无法解析并验证官方 Mieru release' \
-      'Failed to resolve and validate the official Mieru release')"
-  ver="$MIERU_RUNTIME_RESOLVED_VERSION"
-  url="$MIERU_RUNTIME_RESOLVED_URL"
-  tmp="$(mktemp_file)"
-  download_package "$url" "$tmp" \
-    "$MIERU_RUNTIME_RESOLVED_SHA256" \
-    "$MIERU_RUNTIME_RESOLVED_CHECKSUM_URL"
-  runtime_tx="$(mieru_runtime_snapshot)" || { rm -f "$tmp"; return 1; }
-  nb_lifecycle_mark_protocol_mutation_started mieru || {
-    rm -f "$tmp"
-    mieru_runtime_commit "$runtime_tx" >/dev/null 2>&1 || true
-    return 1
-  }
-  if ! ( install_package "$tmp" "$pm" ) || ! mieru_assert_runtime_version "$ver"; then
-    rm -f "$tmp"
-    mieru_runtime_rollback "$runtime_tx" 2>/dev/null || true
-    die "$(t 'Mieru runtime 安装验证失败，已恢复原有 managed runtime' \
-      'Mieru runtime installation validation failed; the previous managed runtime was restored')"
-    return 1
-  fi
-  rm -f "$tmp"
-  mieru_runtime_commit "$runtime_tx" || return 1
-  MIERU_VERSION="$ver"
-  nb_lifecycle_checkpoint "$NOBRAND_LIFECYCLE_OPERATION" runtime-ready || return 1
-
-  add_op_user "$OP_USER"
-  warn_traffic_unsupported
-  warn_low_entropy_unsupported
-  if [ "$managed_existing" -eq 1 ]; then
-    install_self_script
-    admin_lock_acquire || return 1
-    tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
-    isolated_stop_all
-    if ! apply_users_config "$tx"; then
-      admin_lock_release
-      die "$(t '重装后二次应用专属实例失败；用户状态已回滚' \
-        'Failed to reapply dedicated instances after reinstall; user state was rolled back')"
-    fi
-    if ! verify_mita_running; then
-      users_tx_rollback "$tx" 1
-      admin_lock_release
-      die "$(t '重装后二次启动专属实例失败；用户状态已回滚' \
-        'Dedicated instances failed after reinstall; user state was rolled back')"
-    fi
-    users_sync_primary_globals
-    if ! save_install_state; then
-      users_tx_rollback "$tx" 1
-      admin_lock_release
-      die "$(t '重装后保存安装状态失败；用户状态已回滚' \
-        'Failed to save install state after reinstall; user state was rolled back')"
-    fi
-    users_tx_commit "$tx"
-    admin_lock_release
-  else
-    if [ "$reinstall_existing" -eq 0 ]; then
-      # 下载/安装期间端口可能被其它进程抢占，落盘前再验一次。
-      ensure_install_port_available
-    fi
-    install_fresh_isolated
-  fi
-  nb_lifecycle_checkpoint "$NOBRAND_LIFECYCLE_OPERATION" state-committed || return 1
-
-  offer_bbr_fq
-
-  print_summary
-}
-
-do_reconfigure_impl() {
-  local old_bindings new_bindings close_bindings desired_bindings binding_proto binding_port tx
-  local old_port old_port_range old_protocol old_mtu old_mtu_policy old_user old_password
-  local old_profile old_traffic old_seed old_low_entropy old_mux old_handshake
-  local old_advertise_host old_advertise_port
-  local client_state_changed=0
-  local requested_port="$PORT" requested_port_range="$PORT_RANGE" requested_protocol="$PROTOCOL"
-  local requested_user="$USERNAME" requested_password="$PASSWORD"
-  local requested_advertise_host="$ADVERTISE_HOST" requested_advertise_port="$ADVERTISE_PORT"
-  local requested_profile="$PROFILE" requested_mtu_request="$MTU_REQUEST"
-  local requested_traffic="$TRAFFIC_PATTERN" requested_low_entropy="$LOW_ENTROPY_MODE"
-  local requested_mux="$MULTIPLEXING" requested_handshake="$HANDSHAKE_MODE"
-  local requested_port_cli="${PORT_CLI:-0}" requested_port_range_cli="${PORT_RANGE_CLI:-0}"
-  local requested_protocol_cli="${PROTOCOL_CLI:-0}" requested_user_cli="${USERNAME_CLI:-0}"
-  local requested_password_cli="${PASSWORD_CLI:-0}" requested_advertise_cli="${ADVERTISE_CLI:-0}"
-  local requested_profile_cli="${PROFILE_CLI:-0}" requested_mtu_cli="${MTU_CLI:-0}"
-  local requested_traffic_cli="${TRAFFIC_CLI:-0}" requested_low_entropy_cli="${LOW_ENTROPY_CLI:-0}"
-  local requested_mux_cli="${MULTIPLEXING_CLI:-0}" requested_handshake_cli="${HANDSHAKE_CLI:-0}"
-  PORT_CLI=0 PORT_RANGE_CLI=0 PROTOCOL_CLI=0 USERNAME_CLI=0 PASSWORD_CLI=0
-  ADVERTISE_CLI=0 PROFILE_CLI=0 MTU_CLI=0 TRAFFIC_CLI=0 LOW_ENTROPY_CLI=0
-  MULTIPLEXING_CLI=0 HANDSHAKE_CLI=0
-  load_install_state
-  if users_state_exists && [ "$(users_count)" -gt 0 ]; then
-    users_sync_primary_globals
-  fi
-  old_port="$PORT"; old_port_range="$PORT_RANGE"; old_protocol="$PROTOCOL"
-  old_mtu="$MTU"; old_mtu_policy="$MTU_POLICY"
-  old_user="$USERNAME"; old_password="$PASSWORD"
-  old_advertise_host="$ADVERTISE_HOST"; old_advertise_port="$ADVERTISE_PORT"
-  old_profile="$PROFILE"
-  old_traffic="$TRAFFIC_PATTERN"; old_seed="$TRAFFIC_SEED"
-  old_low_entropy="$LOW_ENTROPY_MODE"; old_mux="$MULTIPLEXING"; old_handshake="$HANDSHAKE_MODE"
-  PORT_CLI="$requested_port_cli"; PORT_RANGE_CLI="$requested_port_range_cli"
-  PROTOCOL_CLI="$requested_protocol_cli"; USERNAME_CLI="$requested_user_cli"
-  PASSWORD_CLI="$requested_password_cli"; ADVERTISE_CLI="$requested_advertise_cli"
-  PROFILE_CLI="$requested_profile_cli"; MTU_CLI="$requested_mtu_cli"
-  TRAFFIC_CLI="$requested_traffic_cli"; LOW_ENTROPY_CLI="$requested_low_entropy_cli"
-  MULTIPLEXING_CLI="$requested_mux_cli"; HANDSHAKE_CLI="$requested_handshake_cli"
-  [ "$PORT_CLI" -eq 0 ] || PORT="$requested_port"
-  [ "$PORT_RANGE_CLI" -eq 0 ] || PORT_RANGE="$requested_port_range"
-  [ "$PROTOCOL_CLI" -eq 0 ] || PROTOCOL="$requested_protocol"
-  [ "$USERNAME_CLI" -eq 0 ] || USERNAME="$requested_user"
-  [ "$PASSWORD_CLI" -eq 0 ] || PASSWORD="$requested_password"
-  [ "$ADVERTISE_CLI" -eq 0 ] || { ADVERTISE_HOST="$requested_advertise_host"; ADVERTISE_PORT="$requested_advertise_port"; }
-  [ "$PROFILE_CLI" -eq 0 ] || PROFILE="$requested_profile"
-  [ "$MTU_CLI" -eq 0 ] || MTU_REQUEST="$requested_mtu_request"
-  [ "$TRAFFIC_CLI" -eq 0 ] || TRAFFIC_PATTERN="$requested_traffic"
-  [ "$LOW_ENTROPY_CLI" -eq 0 ] || LOW_ENTROPY_MODE="$requested_low_entropy"
-  [ "$MULTIPLEXING_CLI" -eq 0 ] || MULTIPLEXING="$requested_mux"
-  [ "$HANDSHAKE_CLI" -eq 0 ] || HANDSHAKE_MODE="$requested_handshake"
-  users_isolated_mode || die "$(t 'schema v3 Mieru 状态必须使用 isolated-v2' \
-    'Schema-v3 Mieru state must use isolated-v2')"
-  old_bindings="$(multi_user_port_protocol_pairs)"
-
-  if [ "$YES" -eq 1 ]; then
-    load_config_from_mita
-    ensure_config_noninteractive
-  else
-    collect_reconfigure_interactive
-  fi
-  [ -z "$PORT_RANGE" ] || die "$(t 'v2 用户专属实例不支持端口段，请改用单端口' \
-    'v2 dedicated user instances do not support port ranges; use one port')"
-  [ -z "$PORT" ] || PORT="$(normalize_uint "$PORT")"
-  validate_advertise_endpoint || die "$(t '自定义客户端入口参数无效' \
-    'Invalid custom client entry parameters')"
-  [ -z "$ADVERTISE_PORT" ] || ADVERTISE_PORT="$(normalize_uint "$ADVERTISE_PORT")"
-
-  if [ "${PROFILE_CLI:-0}" -eq 0 ] \
-     && { [ "$PROTOCOL" != "$old_protocol" ] || [ "$MTU" != "$old_mtu" ] \
-       || [ "$MULTIPLEXING" != "$old_mux" ] || [ "$HANDSHAKE_MODE" != "$old_handshake" ] \
-       || [ "$TRAFFIC_PATTERN" != "$old_traffic" ] || [ "$LOW_ENTROPY_MODE" != "$old_low_entropy" ]; }; then
-    PROFILE=custom
-  fi
-  profile_reconcile_metadata
-
-  if [ "$ADVERTISE_HOST" != "$old_advertise_host" ] \
-     || [ "$ADVERTISE_PORT" != "$old_advertise_port" ] \
-     || [ "$MTU_POLICY" != "$old_mtu_policy" ] \
-     || [ "$MULTIPLEXING" != "$old_mux" ] \
-     || [ "$HANDSHAKE_MODE" != "$old_handshake" ] \
-     || [ "$PROFILE" != "$old_profile" ]; then
-    client_state_changed=1
-  fi
-
-  # 展示入口、客户端握手/多路复用和 MTU 策略文本不改变服务端运行配置。
-  # 这些字段单独持久化，避免无意义地重启所有专属实例。
-  if [ "$PORT" = "$old_port" ] && [ "$PORT_RANGE" = "$old_port_range" ] \
-     && [ "$PROTOCOL" = "$old_protocol" ] && [ "$MTU" = "$old_mtu" ] \
-     && [ "$USERNAME" = "$old_user" ] && [ "$PASSWORD" = "$old_password" ] \
-     && [ "$TRAFFIC_PATTERN" = "$old_traffic" ] && [ "$TRAFFIC_SEED" = "$old_seed" ] \
-     && [ "$LOW_ENTROPY_MODE" = "$old_low_entropy" ]; then
-    if [ "$client_state_changed" -eq 0 ]; then
-      msg ""
-      t '未检测到配置变化；服务未重启' \
-        'No configuration changes detected; services were not restarted'
-      print_summary current
-      return 0
-    fi
-    local state_only_auto_host="" state_only_mutation_marked=0
-    admin_lock_acquire || return 1
-    tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
-    if [ "$ADVERTISE_HOST" != "$old_advertise_host" ] \
-       || [ "$ADVERTISE_PORT" != "$old_advertise_port" ]; then
-      nb_lifecycle_mark_protocol_mutation_started mieru || {
-        users_tx_commit "$tx"
-        admin_lock_release
-        return 1
-      }
-      state_only_mutation_marked=1
-      if ! users_set_advertise_endpoint "$old_user" "$ADVERTISE_HOST" "$ADVERTISE_PORT"; then
-        users_tx_rollback "$tx" 0
-        admin_lock_release
-        return 1
-      fi
-    fi
-    state_only_auto_host="$(public_ip 2>/dev/null || true)"
-    if ! users_validate_state_file "$MITA_USERS_STATE" "$PROTOCOL" "$state_only_auto_host"; then
-      users_tx_rollback "$tx" 0
-      admin_lock_release
-      die "$(t '客户端展示入口与其它用户冲突' \
-        'Client display endpoint conflicts with another user')"
-    fi
-    users_sync_primary_globals
-    if [ "$state_only_mutation_marked" -eq 0 ]; then
-      nb_lifecycle_mark_protocol_mutation_started mieru || {
-        users_tx_commit "$tx"
-        admin_lock_release
-        return 1
-      }
-    fi
-    if ! save_install_state; then
-      users_tx_rollback "$tx" 0
-      admin_lock_release
-      return 1
-    fi
-    users_tx_commit "$tx"
-    admin_lock_release
-    client_exports_after_reconfigure "$old_user" "$old_protocol" "$old_mtu" \
-      "$old_traffic" "$old_seed" "$old_low_entropy" "$old_mux" "$old_handshake" \
-      2>/dev/null || true
-    msg ""
-    t '仅客户端参数已更新；服务器运行配置未变化，服务未重启' \
-      'Client-only settings were updated; server runtime is unchanged and services were not restarted'
-    print_summary current
-    return 0
-  fi
-
-  if [ -n "${PORT:-}" ]; then
-    desired_bindings="$({
-      multi_user_port_protocol_pairs
-      port_required_bindings "$PORT"
-    } | sed '/^[[:space:]]*$/d' | LC_ALL=C sort -u)"
-    while IFS='|' read -r binding_proto binding_port; do
-      [ -n "$binding_proto" ] && [ -n "$binding_port" ] || continue
-      printf '%s\n' "$old_bindings" | grep -qxF "${binding_proto}|${binding_port}" && continue
-      if port_is_listening "$binding_port" "$binding_proto"; then
-        warn "$(t "新监听 ${binding_proto}/${binding_port} 已被系统其它服务占用" \
-          "New listener ${binding_proto}/${binding_port} is already used by another service")"
-        port_listener_details "$binding_port" "$binding_proto"
-        die "$(t '重新配置已取消，请选择其它端口或协议' \
-          'Reconfigure cancelled; choose another port or protocol')"
-      fi
-    done <<<"$desired_bindings"
-  fi
-
-  warn_traffic_unsupported
-  warn_low_entropy_unsupported
-  # 多用户：协议全局更新；仅当用户显式改了主用户名/密码/端口时同步「主用户」
-  # 主用户 = install-state 中的 USERNAME，找不到则 users[0]
-  MULTI_USER_MODE=1
-  admin_lock_acquire || return 1
-  tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
-  nb_lifecycle_mark_protocol_mutation_started mieru || {
-    users_tx_commit "$tx"
-    admin_lock_release
-    return 1
-  }
-  _U_NAME="$USERNAME" _U_PASS="$PASSWORD" _U_PORT="$PORT" _U_PROTO="$PROTOCOL"
-  _U_ADVERTISE_HOST="$ADVERTISE_HOST" _U_ADVERTISE_PORT="$ADVERTISE_PORT"
-  _U_PRIMARY="${old_user}"
-  users_py_locked '
-import json, os, time
-path = os.environ["MITA_USERS_STATE"]
-d = json.load(open(path))
-name = os.environ.get("_U_NAME") or ""
-password = os.environ.get("_U_PASS") or ""
-port = os.environ.get("_U_PORT") or ""
-proto = os.environ.get("_U_PROTO") or "TCP"
-advertise_host = os.environ.get("_U_ADVERTISE_HOST") or ""
-advertise_port = os.environ.get("_U_ADVERTISE_PORT") or ""
-primary = os.environ.get("_U_PRIMARY") or ""
-users = d.get("users") or []
-# 定位主用户：优先同名，否则第一个
-idx = 0
-for i, u in enumerate(users):
-    if primary and u.get("name") == primary:
-        idx = i
-        break
-if users:
-    u = users[idx]
-    old_port = int(u.get("port") or 0)
-    if name and name != u.get("name"):
-        # 避免与其它用户重名
-        if any(x.get("name") == name for j, x in enumerate(users) if j != idx):
-            raise SystemExit(2)
-        u["name"] = name
-    if password and not password.startswith("*"):
-        u["password"] = password
-    if port and str(port).isdigit():
-        new_port = int(port)
-        # 端口冲突则拒绝改端口（保留其它用户端口）
-        if any(int(x.get("port") or 0) == new_port for j, x in enumerate(users) if j != idx):
-            raise SystemExit(3)
-        u["port"] = new_port
-    u["advertise_host"] = advertise_host
-    u["advertise_port"] = int(advertise_port) if advertise_port else ""
-    u["updated_at"] = int(time.time())
-d["protocol"] = proto
-json.dump(d, open(path, "w"), indent=2)
-' || {
-    local prc=$?
-    users_tx_rollback "$tx" 0
-    admin_lock_release
-    if [ "$prc" -eq 2 ]; then
-      die "$(t '新用户名与其它用户冲突' 'New username conflicts with another user')"
-    elif [ "$prc" -eq 3 ]; then
-      die "$(t '新端口已被其它用户占用' 'New port already used by another user')"
-    fi
-    die "$(t '更新多用户状态失败' 'Failed to update multi-user state')"
-  }
-  if ! users_validate_state_file "$MITA_USERS_STATE" "$PROTOCOL"; then
-    users_tx_rollback "$tx" 0
-    admin_lock_release
-    die "$(t '新协议/端口组合会造成监听端口或客户端展示入口冲突' \
-      'The new protocol/port combination would collide between listeners or client display endpoints')"
-  fi
-  # 协议变更时所有用户 portBindings 随 PROTOCOL 重建；端口仅主用户可能变
-  if ! apply_users_config "$tx"; then
-    PORT="$old_port"; PORT_RANGE="$old_port_range"; PROTOCOL="$old_protocol"
-    MTU="$old_mtu"; MTU_POLICY="$old_mtu_policy"; PROFILE="$old_profile"
-    USERNAME="$old_user"; PASSWORD="$old_password"
-    ADVERTISE_HOST="$old_advertise_host"; ADVERTISE_PORT="$old_advertise_port"
-    TRAFFIC_PATTERN="$old_traffic"; TRAFFIC_SEED="$old_seed"
-    LOW_ENTROPY_MODE="$old_low_entropy"; MULTIPLEXING="$old_mux"; HANDSHAKE_MODE="$old_handshake"
-    reconcile_isolated_instances >/dev/null 2>&1 || true
-    admin_lock_release
-    return 1
-  fi
-  new_bindings="$(multi_user_port_protocol_pairs)"
-  open_firewall_for_pairs "$new_bindings"
-  if ! verify_mita_running || ! save_install_state; then
-    PORT="$old_port"; PORT_RANGE="$old_port_range"; PROTOCOL="$old_protocol"
-    MTU="$old_mtu"; MTU_POLICY="$old_mtu_policy"; PROFILE="$old_profile"
-    USERNAME="$old_user"; PASSWORD="$old_password"
-    ADVERTISE_HOST="$old_advertise_host"; ADVERTISE_PORT="$old_advertise_port"
-    TRAFFIC_PATTERN="$old_traffic"; TRAFFIC_SEED="$old_seed"
-    LOW_ENTROPY_MODE="$old_low_entropy"; MULTIPLEXING="$old_mux"; HANDSHAKE_MODE="$old_handshake"
-    users_tx_rollback "$tx" 1
-    open_firewall_for_pairs "$old_bindings"
-    close_bindings="$(comm -23 \
-      <(printf '%s\n' "$new_bindings" | sed '/^[[:space:]]*$/d' | LC_ALL=C sort -u) \
-      <(printf '%s\n' "$old_bindings" | sed '/^[[:space:]]*$/d' | LC_ALL=C sort -u))"
-    [ -z "$close_bindings" ] || close_firewall_for_bindings "$close_bindings"
-    admin_lock_release
-    return 1
-  fi
-  users_tx_commit "$tx"
-  client_exports_after_reconfigure "$old_user" "$old_protocol" "$old_mtu" \
-    "$old_traffic" "$old_seed" "$old_low_entropy" "$old_mux" "$old_handshake" \
-    2>/dev/null || true
-  close_bindings="$(comm -23 \
-    <(printf '%s\n' "$old_bindings" | sed '/^[[:space:]]*$/d' | LC_ALL=C sort -u) \
-    <(printf '%s\n' "$new_bindings" | sed '/^[[:space:]]*$/d' | LC_ALL=C sort -u))"
-  [ -z "$close_bindings" ] || close_firewall_for_bindings "$close_bindings"
-  admin_lock_release
-  msg ""
-  t '========== 重新配置完成 ==========' '========== Reconfigure complete =========='
-  if users_state_exists && [ "$(users_count)" -gt 1 ]; then
-    t '提示: 多用户模式下「重新配置」只改主用户凭据/端口与全局协议；其它用户端口不变' \
-      'Note: multi-user reconfigure updates primary user + global protocol only; other ports unchanged'
-  fi
-  print_summary current
-}
-
-do_install() {
-  local operation="" scope=mieru state manager_only=0 partial_uninstall_repair=0 lifecycle_phase="" rc=0
-  local recovery_matches=0 validate_only=0 lifecycle_format="" current_mutation=0
-  local allow_transition=0 transaction_preexisting=0
-  NOBRAND_INSTALL_CANCELLED=0
-  require_root
-  require_linux
-  require_cmd curl
-  state="$(nb_classify_installation_state)" || return 1
-  case "$state" in
-    CLEAN|CURRENT_COMPLETE|CURRENT_PARTIAL_INSTALL|CURRENT_PARTIAL_REPAIR|\
-      CURRENT_PARTIAL_UNINSTALL|LEGACY_SUPPORTED) ;;
-    CURRENT_PARTIAL_CONFIGURE)
-      warn "$(t '未完成的组件配置必须先按其记录范围恢复，拒绝启动 Mieru。' \
-        'The incomplete component configuration must be recovered in its recorded scope; refusing to start Mieru.')"
-      return 1
-      ;;
-    LEGACY_UNSUPPORTED) nb_fail_legacy_state; return 1 ;;
-    *) nb_fail_ambiguous_state; return 1 ;;
-  esac
-  nb_lifecycle_lock_acquire || return 1
-  # Reclassify while holding the process lock so no competing lifecycle can
-  # change the evidence between classification and the transaction write.
-  state="$(nb_classify_installation_state)" || {
-    nb_lifecycle_lock_release
-    return 1
-  }
-  if [ -n "${NOBRAND_RECOVERY_EXPECTED_SCOPE:-}" ]; then
-    case "$NOBRAND_RECOVERY_EXPECTED_SCOPE" in
-      mieru)
-        if nb_lifecycle_tx_valid \
-           && [ "$(nb_lifecycle_field STATUS)" = in-progress ] \
-           && [ "$(nb_lifecycle_scope)" = mieru ]; then
-          case "$(nb_lifecycle_field OPERATION)" in install|repair) recovery_matches=1 ;; esac
-        fi
-        ;;
-      global)
-        if nb_lifecycle_tx_valid \
-           && [ "$(nb_lifecycle_field STATUS)" = in-progress ] \
-           && [ "$(nb_lifecycle_scope)" = global ]; then
-          recovery_matches=1
-        elif [ "$state" = CURRENT_PARTIAL_UNINSTALL ]; then
-          recovery_matches=1
-        elif declare -F nobrand_backup_restore_transaction_present >/dev/null 2>&1 \
-             && nobrand_backup_restore_transaction_present \
-             && nobrand_backup_restore_transaction_valid; then
-          recovery_matches=1
-        fi
-        ;;
-    esac
-    if [ "$recovery_matches" -ne 1 ]; then
-      nb_lifecycle_lock_release
-      warn "$(t '原恢复事务已由其它进程改变；拒绝把旧选择作为新的 Mieru/全局操作执行。' \
-        'The recovery transaction changed in another process; refusing to execute the stale choice as a new Mieru/global operation.')"
-      return 1
-    fi
-  fi
-  case "$state" in
-    CLEAN) operation=install ;;
-    CURRENT_COMPLETE|LEGACY_SUPPORTED)
-      if mita_v3_install_state_valid 2>/dev/null || mita_installed 2>/dev/null; then
-        operation=repair
-      else
-        operation=install
-      fi
-      ;;
-    CURRENT_PARTIAL_UNINSTALL)
-      operation=repair
-      scope=global
-      ;;
-    CURRENT_PARTIAL_INSTALL|CURRENT_PARTIAL_REPAIR)
-      if nb_lifecycle_tx_valid && [ "$(nb_lifecycle_field STATUS)" = in-progress ]; then
-        scope="$(nb_lifecycle_scope)" || {
-          nb_lifecycle_lock_release
-          return 1
-        }
-        case "$scope" in
-          mieru)
-            transaction_preexisting=1
-            operation="$(nb_lifecycle_field OPERATION)"
-            lifecycle_format="$(nb_lifecycle_field FORMAT)"
-            lifecycle_phase="$(nb_lifecycle_field LAST_COMPLETED_PHASE)"
-            current_mutation="$(nb_lifecycle_mutation_started)" || {
-              nb_lifecycle_lock_release
-              return 1
-            }
-            if [ "$lifecycle_format" = nobrand-lifecycle-v2 ] \
-               && [ "$current_mutation" = 0 ]; then
-              nb_lifecycle_clear || {
-                nb_lifecycle_lock_release
-                return 1
-              }
-              if [ -n "${NOBRAND_RECOVERY_EXPECTED_SCOPE:-}" ]; then
-                nb_lifecycle_lock_release
-                t 'Mieru 操作在写入协议变更前中止；已清除临时恢复信息，请从管理菜单重新开始。' \
-                  'Mieru stopped before any protocol change; temporary recovery metadata was cleared. Start it again from the manager menu.'
-                return 0
-              fi
-              [ "${NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE:-}" = mieru ] || {
-                nb_lifecycle_lock_release
-                return 1
-              }
-              # The current command carries a new explicit Mieru request. Run
-              # it now as a fresh invocation instead of making the user retry a
-              # second time after clearing stale pre-mutation metadata.
-              transaction_preexisting=0
-              lifecycle_format=""
-              lifecycle_phase=prepare
-              current_mutation=0
-              if mita_v3_install_state_valid 2>/dev/null || mita_installed 2>/dev/null; then
-                operation=repair
-              else
-                operation=install
-              fi
-            fi
-            if [ "$lifecycle_format" = nobrand-lifecycle-v2 ]; then
-              case "$lifecycle_phase" in
-                state-committed|ready-to-validate) validate_only=1 ;;
-                *)
-                  if [ -n "${NOBRAND_RECOVERY_EXPECTED_SCOPE:-}" ]; then
-                    nb_lifecycle_lock_release
-                    warn "$(t \
-                      '原 Mieru 请求未写入恢复记录。为避免使用默认值静默重放，请显式执行 nobrand mieru install；若原操作是重新配置，请执行 nobrand mieru reconfigure。' \
-                      'The original Mieru request was not stored. To avoid silently replaying defaults, explicitly run nobrand mieru install, or nobrand mieru reconfigure if that was the original action.')"
-                    return 1
-                  fi
-                  [ "${NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE:-}" = mieru ] || {
-                    nb_lifecycle_lock_release
-                    return 1
-                  }
-                  ;;
-              esac
-            elif [ "$lifecycle_format" = nobrand-lifecycle-v1 ]; then
-              # v1 has no mutation marker or reliable install-vs-reconfigure
-              # scope. Only phases that prove authoritative state was committed
-              # may recover unattended; earlier phases require the operator to
-              # choose install or reconfigure explicitly and recollect input.
-              case "$lifecycle_phase" in
-                state-committed|ready-to-validate) validate_only=1 ;;
-                *)
-                  if [ -n "${NOBRAND_RECOVERY_EXPECTED_SCOPE:-}" ]; then
-                    nb_lifecycle_lock_release
-                    warn "$(t \
-                      '旧版 Mieru 恢复记录无法证明原操作或参数。请显式执行 nobrand mieru install 或 nobrand mieru reconfigure。' \
-                      'The legacy Mieru recovery record cannot prove the original action or request. Explicitly run nobrand mieru install or nobrand mieru reconfigure.')"
-                    return 1
-                  fi
-                  [ "${NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE:-}" = mieru ] || {
-                    nb_lifecycle_lock_release
-                    return 1
-                  }
-                  ;;
-              esac
-            fi
-            ;;
-          global) operation=repair ;;
-          *)
-            nb_lifecycle_lock_release
-            warn "$(t "未完成的 ${scope} 操作不能由 Mieru 恢复" \
-              "The unfinished ${scope} operation cannot be recovered by Mieru")"
-            return 1
-            ;;
-        esac
-      elif declare -F nobrand_backup_restore_transaction_present >/dev/null 2>&1 \
-           && nobrand_backup_restore_transaction_present; then
-        operation=repair
-        scope=global
-      else
-        nb_lifecycle_lock_release
-        warn "$(t '检测到缺少组件范围的管理器残留；请先运行无参数安装器修复管理器。' \
-          'Manager residue without component scope was detected; run the installer without arguments to repair the manager first.')"
-        return 1
-      fi
-      ;;
-    CURRENT_PARTIAL_CONFIGURE)
-      nb_lifecycle_lock_release
-      return 1
-      ;;
-    LEGACY_UNSUPPORTED)
-      nb_lifecycle_lock_release
-      nb_fail_legacy_state
-      return 1
-      ;;
-    *)
-      nb_lifecycle_lock_release
-      nb_fail_ambiguous_state
-      return 1
-      ;;
-  esac
-  if [ "$state" = CURRENT_PARTIAL_UNINSTALL ] || [ "$scope" = global ]; then
-    partial_uninstall_repair=1
-  elif [ "$state" = CURRENT_PARTIAL_REPAIR ] \
-       && declare -F nobrand_backup_restore_transaction_present >/dev/null 2>&1 \
-       && nobrand_backup_restore_transaction_present \
-       && nobrand_backup_restore_transaction_valid; then
-    partial_uninstall_repair=1
-  elif [ "$state" = CURRENT_PARTIAL_REPAIR ] && nb_lifecycle_tx_valid \
-       && [ "$(nb_lifecycle_field OPERATION)" = repair ]; then
-    lifecycle_phase="$(nb_lifecycle_field LAST_COMPLETED_PHASE)"
-    case "$lifecycle_phase" in partial-uninstall-*) partial_uninstall_repair=1 ;; esac
-  fi
-  if [ "$partial_uninstall_repair" -eq 1 ]; then
-    lifecycle_phase='partial-uninstall-prepare'
-    [ "$state" != CURRENT_PARTIAL_UNINSTALL ] || allow_transition=1
-  elif [ -z "$lifecycle_phase" ]; then
-    lifecycle_phase=prepare
-  fi
-  nb_lifecycle_pre_mutation_snapshot || {
-    nb_lifecycle_lock_release
-    return 1
-  }
-  nb_lifecycle_begin "$operation" "$lifecycle_phase" 0 0 0 0 0 "$allow_transition" "$scope" || {
-    nb_lifecycle_pre_mutation_disarm
-    nb_lifecycle_lock_release
-    return 1
-  }
-  if [ "$partial_uninstall_repair" -eq 1 ]; then
-    # This is a global lifecycle recovery, not a request to create a fresh
-    # Mieru node. State-backed protocols are reconciled individually; if no
-    # authoritative node state survived, only manager/schema are repaired.
-    manager_only=1
-    nb_lifecycle_mark_mutation_started || {
-      rc=$?
-      nb_lifecycle_restore_pre_mutation || rc=1
-      nb_lifecycle_lock_release
-      return "$rc"
-    }
-    nb_reconcile_partial_uninstall
-    rc=$?
-  elif [ "$validate_only" -eq 0 ]; then
-    NOBRAND_PROTOCOL_CALLBACK_ATTEMPT_MUTATION=0
-    do_install_impl
-    rc=$?
-  fi
-  if [ "${NOBRAND_INSTALL_CANCELLED:-0}" -eq 1 ]; then
-    nb_lifecycle_restore_pre_mutation || {
-      nb_lifecycle_lock_release
-      return 1
-    }
-    nb_lifecycle_lock_release
-    return 0
-  fi
-  if [ "$rc" -ne 0 ]; then
-    if [ "$partial_uninstall_repair" -eq 0 ] \
-       && [ "$validate_only" -eq 0 ] \
-       && [ "${NOBRAND_PROTOCOL_CALLBACK_ATTEMPT_MUTATION:-0}" -eq 0 ]; then
-      nb_lifecycle_restore_pre_mutation || rc=1
-    elif nb_lifecycle_tx_valid && [ "$(nb_lifecycle_mutation_started)" = 0 ]; then
-      nb_lifecycle_restore_pre_mutation || rc=1
-    fi
-    nb_lifecycle_lock_release
-    return "$rc"
-  fi
-  if [ "$partial_uninstall_repair" -eq 0 ] \
-     && [ "$validate_only" -eq 0 ] \
-     && [ "${NOBRAND_PROTOCOL_CALLBACK_ATTEMPT_MUTATION:-0}" -eq 0 ]; then
-    nb_lifecycle_restore_pre_mutation || {
-      nb_lifecycle_lock_release
-      return 1
-    }
-    nb_lifecycle_lock_release
-    if [ "$transaction_preexisting" -eq 1 ]; then
-      warn "$(t \
-        'Mieru 本次安装重试未提交新的协议变更；已原样保留先前恢复事务。' \
-        'This Mieru install retry committed no new protocol change; the prior recovery transaction was preserved exactly.')"
-    fi
-    return 1
-  fi
-  if [ "$partial_uninstall_repair" -eq 1 ] \
-     && declare -F ssh_tunnel_state_exists >/dev/null 2>&1 \
-     && ssh_tunnel_state_exists \
-     && [ "$(ssh_tunnel_state_field pending_operation 2>/dev/null || true)" = restore ] \
-     && [ -n "$(ssh_tunnel_state_field pending_watchdog_token 2>/dev/null || true)" ]; then
-    nb_lifecycle_lock_release
-    return 0
-  fi
-  if [ "$partial_uninstall_repair" -eq 1 ]; then
-    nb_lifecycle_checkpoint "$operation" partial-uninstall-ready-to-validate || {
-      rc=$?
-      nb_lifecycle_lock_release
-      return "$rc"
-    }
-  else
-    nb_lifecycle_checkpoint "$operation" ready-to-validate || {
-      rc=$?
-      nb_lifecycle_lock_release
-      return "$rc"
-    }
-  fi
-  nb_lifecycle_validate_manager_repair || {
-    nb_lifecycle_lock_release
-    return 1
-  }
-  if [ "$manager_only" -eq 0 ]; then
-    mita_v3_install_state_valid || {
-      nb_lifecycle_lock_release
-      return 1
-    }
-    if ! users_state_exists || [ "$(users_count)" -le 0 ]; then
-      nb_lifecycle_lock_release
-      return 1
-    fi
-    verify_mita_running 1 || {
-      nb_lifecycle_lock_release
-      return 1
-    }
-  fi
-  nb_lifecycle_complete "$operation" || {
-    nb_lifecycle_lock_release
-    return 1
-  }
-  if declare -F nobrand_backup_restore_transaction_present >/dev/null 2>&1 \
-     && nobrand_backup_restore_transaction_present; then
-    nobrand_backup_restore_confirmation_finalize repair-accepted || {
-      nb_lifecycle_lock_release
-      return 1
-    }
-  fi
-  nb_lifecycle_lock_release
-}
-
-do_reconfigure() {
-  local rc=0 transaction_preexisting=0 validate_only=0
-  local lifecycle_format="" lifecycle_phase=prepare current_mutation=0
-  require_root
-  require_linux
-  mita_installed || die "$(t 'mita 未安装，请先执行安装' 'mita is not installed; run install first')"
-  nb_lifecycle_lock_acquire || return 1
-  if nb_lifecycle_tx_valid \
-     && [ "$(nb_lifecycle_field STATUS)" = in-progress ] \
-     && [ "$(nb_lifecycle_field OPERATION)" = repair ] \
-     && [ "$(nb_lifecycle_scope)" = mieru ]; then
-    transaction_preexisting=1
-    lifecycle_format="$(nb_lifecycle_field FORMAT)"
-    lifecycle_phase="$(nb_lifecycle_field LAST_COMPLETED_PHASE)"
-    current_mutation="$(nb_lifecycle_mutation_started)" || {
-      nb_lifecycle_lock_release
-      return 1
-    }
-    if [ "$lifecycle_format" = nobrand-lifecycle-v2 ] \
-       && [ "$current_mutation" = 0 ]; then
-      nb_lifecycle_clear || {
-        nb_lifecycle_lock_release
-        return 1
-      }
-      if [ -n "${NOBRAND_RECOVERY_EXPECTED_SCOPE:-}" ]; then
-        nb_lifecycle_lock_release
-        t 'Mieru 重新配置在写入变更前中止；已清除临时恢复信息，请从管理菜单重新开始。' \
-          'Mieru reconfigure stopped before any change; temporary recovery metadata was cleared. Start it again from the manager menu.'
-        return 0
-      fi
-      [ "${NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE:-}" = mieru ] || {
-        nb_lifecycle_lock_release
-        return 1
-      }
-      transaction_preexisting=0
-      lifecycle_format=""
-      lifecycle_phase=prepare
-      current_mutation=0
-    fi
-    if [ "$lifecycle_format" = nobrand-lifecycle-v2 ]; then
-      case "$lifecycle_phase" in
-        ready-to-validate) validate_only=1 ;;
-        *)
-          if [ -n "${NOBRAND_RECOVERY_EXPECTED_SCOPE:-}" ]; then
-            nb_lifecycle_lock_release
-            warn "$(t \
-              '原 Mieru 重新配置参数未写入恢复记录。为避免使用默认值静默重放，请显式执行 nobrand mieru reconfigure。' \
-              'The original Mieru reconfigure request was not stored. To avoid silently replaying defaults, explicitly run nobrand mieru reconfigure.')"
-            return 1
-          fi
-          [ "${NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE:-}" = mieru ] || {
-            nb_lifecycle_lock_release
-            return 1
-          }
-          ;;
-      esac
-    fi
-  elif [ -n "${NOBRAND_RECOVERY_EXPECTED_SCOPE:-}" ]; then
-    nb_lifecycle_lock_release
-    warn "$(t '原恢复事务已由其它进程改变；拒绝执行过期的 Mieru 重新配置恢复。' \
-      'The recovery transaction changed in another process; refusing stale Mieru reconfigure recovery.')"
-    return 1
-  fi
-  nb_lifecycle_pre_mutation_snapshot || {
-    nb_lifecycle_lock_release
-    return 1
-  }
-  nb_lifecycle_begin repair "$lifecycle_phase" 0 0 0 0 0 0 mieru || {
-    nb_lifecycle_pre_mutation_disarm
-    nb_lifecycle_lock_release
-    return 1
-  }
-  NOBRAND_PROTOCOL_CALLBACK_ATTEMPT_MUTATION=0
-  if [ "$validate_only" -eq 0 ]; then
-    do_reconfigure_impl
-    rc=$?
-  fi
-  if [ "$rc" -ne 0 ]; then
-    if [ "$validate_only" -eq 0 ] \
-       && [ "$NOBRAND_PROTOCOL_CALLBACK_ATTEMPT_MUTATION" -eq 0 ]; then
-      nb_lifecycle_restore_pre_mutation || rc=1
-    fi
-    nb_lifecycle_lock_release
-    return "$rc"
-  fi
-  if [ "$validate_only" -eq 0 ] \
-     && [ "$NOBRAND_PROTOCOL_CALLBACK_ATTEMPT_MUTATION" -eq 0 ]; then
-    # A user can accept every existing value. That is a successful no-op, not a
-    # repair transaction against which unrelated current state may be completed.
-    nb_lifecycle_restore_pre_mutation || {
-      nb_lifecycle_lock_release
-      return 1
-    }
-    nb_lifecycle_lock_release
-    if [ "$transaction_preexisting" -eq 1 ]; then
-      warn "$(t \
-        'Mieru 本次重新配置重试未提交新的协议变更；已原样保留先前恢复事务。' \
-        'This Mieru reconfigure retry committed no new protocol change; the prior recovery transaction was preserved exactly.')"
-      return 1
-    fi
-    return 0
-  fi
-  nb_lifecycle_checkpoint repair ready-to-validate || {
-    rc=$?
-    nb_lifecycle_lock_release
-    return "$rc"
-  }
-  nb_lifecycle_validate_manager_repair || {
-    nb_lifecycle_lock_release
-    return 1
-  }
-  mita_v3_install_state_valid || {
-    nb_lifecycle_lock_release
-    return 1
-  }
-  verify_mita_running 1 || {
-    nb_lifecycle_lock_release
-    return 1
-  }
-  nb_lifecycle_complete repair || {
-    nb_lifecycle_lock_release
-    return 1
-  }
-  nb_lifecycle_lock_release
-}
-
-mieru_upgrade_rollback() {
-  local runtime_tx="$1" users_tx="$2" old_channel="$3" old_version="$4" rc=0
-  MIERU_CHANNEL="$old_channel"
-  MIERU_VERSION="$old_version"
-  mieru_runtime_rollback "$runtime_tx" || rc=1
-  users_tx_rollback "$users_tx" 0
-  isolated_stop_all 2>/dev/null || true
-  reconcile_isolated_instances 2>/dev/null || rc=1
-  verify_mita_running 2>/dev/null || rc=1
-  return "$rc"
-}
-
-do_upgrade() {
-  require_root
-  require_linux
-  require_cmd curl
-  mita_installed || die "$(t 'mita 未安装，请先执行 fresh install' \
-    'mita is not installed; perform a fresh install first')"
-  mita_v3_install_state_valid || die "$(t 'schema v3 Mieru 安装状态缺失或损坏，拒绝升级' \
-    'Schema-v3 Mieru install state is missing or invalid; refusing upgrade')"
-  local pm arch ver url tmp tx runtime_tx cur state_channel state_version
-  local requested_channel="$MIERU_CHANNEL" requested_version="$MIERU_VERSION"
-  local requested_channel_cli="${MIERU_CHANNEL_CLI:-0}" requested_version_cli="${MIERU_VERSION_CLI:-0}"
-  pm="$(detect_pkg_manager)"
-  arch="$(detect_arch)"
-  ensure_management_dependencies "$pm"
-  MIERU_CHANNEL_CLI=0 MIERU_VERSION_CLI=0
-  load_install_state
-  state_channel="$MIERU_CHANNEL"
-  state_version="$MIERU_VERSION"
-  users_isolated_mode || die "$(t 'schema v3 Mieru 状态必须使用 isolated-v2' \
-    'Schema-v3 Mieru state must use isolated-v2')"
-  [ "$(users_count 2>/dev/null || printf 0)" -gt 0 ] \
-    || die "$(t 'schema v3 Mieru 用户状态缺失，拒绝升级' \
-      'Schema-v3 Mieru user state is missing; refusing upgrade')"
-  MIERU_CHANNEL_CLI="$requested_channel_cli"; MIERU_VERSION_CLI="$requested_version_cli"
-  if [ "$MIERU_CHANNEL_CLI" -eq 1 ]; then
-    MIERU_CHANNEL="$requested_channel"
-  fi
-  if [ "$MIERU_VERSION_CLI" -eq 1 ]; then
-    MIERU_VERSION="$requested_version"
-  fi
-  mieru_resolve_runtime "${MIERU_CHANNEL:-stable}" "${MIERU_VERSION:-}" "$pm" "$arch" \
-    || die "$(t '无法解析并验证官方 Mieru release' \
-      'Failed to resolve and validate the official Mieru release')"
-  ver="$MIERU_RUNTIME_RESOLVED_VERSION"
-  cur="$(installed_version || true)"
-  if version_is_current "$cur" "$ver"; then
-    MIERU_VERSION="$ver"
-    install_self_script
-    admin_lock_acquire || return 1
-    tx="$(users_tx_snapshot)" || { admin_lock_release; return 1; }
-    # 即使二进制已是最新版，也要让运行中的实例重新读取最新 unit/runner。
-    isolated_stop_all
-    if ! apply_users_config "$tx"; then
-      admin_lock_release
-      return 1
-    fi
-    users_tx_commit "$tx"
-    admin_lock_release
-    verify_mita_running
-    [ -f "$MITA_STATE" ] && save_install_state
-    t "管理脚本已更新至 v${SCRIPT_VERSION}（mita ${cur} 已满足 $(mieru_channel_label) 目标 ${ver}）" \
-      "Manager script updated to v${SCRIPT_VERSION} (mita ${cur} satisfies $(mieru_channel_label) target ${ver})"
-    [ "${MENU_MODE:-0}" -eq 1 ] && return 0
-    exit 0
-  fi
-  if [ "${YES:-0}" -ne 1 ] && [ -t 0 ]; then
-    t "已安装: ${cur:-未知}" "Installed: ${cur:-unknown}"
-    t "最新稳定版: ${ver}" "Latest stable: ${ver}"
-    if ! confirm '升级？[Y/n]: ' 'Upgrade? [Y/n]: ' y; then
-      [ "${MENU_MODE:-0}" -eq 1 ] && return 0
-      exit 0
-    fi
-  fi
-  url="$MIERU_RUNTIME_RESOLVED_URL"
-  tmp="$(mktemp_file)"
-  download_package "$url" "$tmp" \
-    "$MIERU_RUNTIME_RESOLVED_SHA256" \
-    "$MIERU_RUNTIME_RESOLVED_CHECKSUM_URL"
-  install_self_script
-  admin_lock_acquire || { rm -f "$tmp"; return 1; }
-  runtime_tx="$(mieru_runtime_snapshot)" \
-    || { rm -f "$tmp"; admin_lock_release; return 1; }
-  tx="$(users_tx_snapshot)" || {
-    rm -f "$tmp"
-    mieru_runtime_commit "$runtime_tx" 2>/dev/null || true
-    admin_lock_release
-    return 1
-  }
-  if ! ( install_package "$tmp" "$pm" ) || ! mieru_assert_runtime_version "$ver"; then
-    rm -f "$tmp"
-    mieru_upgrade_rollback "$runtime_tx" "$tx" "$state_channel" "$state_version" \
-      || warn "$(t 'Mieru runtime 回滚后服务恢复不完整，请立即运行 doctor' \
-        'Mieru services were not fully restored after runtime rollback; run doctor immediately')"
-    admin_lock_release
-    die "$(t 'Mieru runtime 升级验证失败，已恢复旧 runtime 与节点状态' \
-      'Mieru runtime upgrade validation failed; the old runtime and node state were restored')"
-    return 1
-  fi
-  rm -f "$tmp"
-  MIERU_VERSION="$ver"
-  isolated_stop_all
-  if ! ( apply_users_config "$tx" ) \
-     || ! verify_mita_running \
-     || { [ ! -f "$MITA_STATE" ] || ! save_install_state; }; then
-    mieru_upgrade_rollback "$runtime_tx" "$tx" "$state_channel" "$state_version" \
-      || warn "$(t 'Mieru runtime 回滚后服务恢复不完整，请立即运行 doctor' \
-        'Mieru services were not fully restored after runtime rollback; run doctor immediately')"
-    admin_lock_release
-    die "$(t 'Mieru 升级应用失败，已恢复旧 runtime、服务与状态' \
-      'Mieru upgrade application failed; the old runtime, services, and state were restored')"
-    return 1
-  fi
-  users_tx_commit "$tx"
-  mieru_runtime_commit "$runtime_tx" || {
-    admin_lock_release
-    return 1
-  }
-  admin_lock_release
-  t "已升级至 ${ver}（$(mieru_channel_label)）" \
-    "Upgraded to ${ver} ($(mieru_channel_label))"
-}
-
-mita_nobrand_specific_residue_present() {
-  local path pattern
-  for path in "$MITA_BIN" "$MITA_MARKER" "$MITA_STATE" "$MITA_USERS_STATE" \
-    "$MITA_INSTANCE_SYSTEMD_TEMPLATE" "$MITA_INSTANCE_TMPFILES" \
-    "$MITA_INSTANCE_RUNNER" "$MITA_USERS_TIMER" "$MITA_USERS_SERVICE" \
-    "$MITA_USERS_CRON" "$MITA_LOGROTATE_CONF" "$MITA_CLIENT_EXPORT_DIR"; do
-    [ ! -e "$path" ] && [ ! -L "$path" ] || return 0
-  done
-  for pattern in "${MITA_INSTANCE_OPENRC_PREFIX}*" '/var/log/nobrand-mieru-*.log' \
-    '/var/log/nobrand-mieru-*.err' '/root/nobrand_mieru_client_*.json'; do
-    compgen -G "$pattern" >/dev/null 2>&1 && return 0
-  done
-  return 1
-}
-
-mita_uninstall_ledger_active() {
-  nb_lifecycle_tx_valid \
-    && [ "$(nb_lifecycle_field STATUS)" = in-progress ] \
-    && [ "$(nb_lifecycle_field OPERATION)" = uninstall ] \
-    && [ "$(nb_lifecycle_scope)" = global ] \
-    && [ "$(nb_lifecycle_field MIERU_OWNED)" = 1 ]
-}
-
-mita_uninstall_ledger_capture() {
-  local preserve_package=0 preserve_user=0 preserve_group=0 preserve_shared=0
-  if nb_schema_v3_file_valid && [ -f "$MITA_MARKER" ] && [ ! -L "$MITA_MARKER" ]; then
-    [ ! -f "$MITA_PRESERVE_PACKAGE_MARKER" ] || preserve_package=1
-    [ ! -f "$MITA_PRESERVE_USER_MARKER" ] || preserve_user=1
-    [ ! -f "$MITA_PRESERVE_GROUP_MARKER" ] || preserve_group=1
-    [ ! -f "$MITA_PRESERVE_SHARED_MARKER" ] || preserve_shared=1
-    printf '1|%s|%s|%s|%s' "$preserve_package" "$preserve_user" \
-      "$preserve_group" "$preserve_shared"
-  elif mita_nobrand_specific_residue_present; then
-    # Exact NoBrand-named artifacts are positive ownership evidence, but a
-    # missing authoritative marker cannot prove ownership of the upstream
-    # package, shared directories, or generic mita account. Preserve them.
-    printf '1|1|1|1|1'
-  else
-    printf '0|0|0|0|0'
-  fi
-}
-
-mita_uninstall_target_present() {
-  mita_uninstall_ledger_active && return 0
-  nb_schema_v3_file_valid || return 1
-  installed_by_oneclick \
-    || [ -s "$MITA_USERS_STATE" ] \
-    || [ -s "$MITA_STATE" ] \
-    || [ -x "$MITA_BIN" ] \
-    || [ -e "$MITA_INSTANCE_SYSTEMD_TEMPLATE" ] \
-    || [ -e "$MITA_USERS_TIMER" ] \
-    || [ -e "$MITA_USERS_SERVICE" ]
-}
-
-stop_mita_for_uninstall() {
-  local sm
-  STAGE="停止 mita 服务"
-  isolated_stop_all
-  tc_clear_owned_filters 2>/dev/null || true
-  sm="$(service_manager)"
-  case "$sm" in
-    systemd)
-      run systemctl disable --now nobrand-mieru-users-scan.timer \
-        nobrand-mieru-users-scan.service nobrand-mieru-tc-restore.service 2>/dev/null || true
-      ;;
-    openrc) ;;
-  esac
-}
-
-remove_mita_common() {
-  STAGE="删除 mita 文件与账号"
-  local preserve_package="${UNINSTALL_PRESERVE_PACKAGE:-0}"
-  local preserve_user="${UNINSTALL_PRESERVE_USER:-0}"
-  local preserve_group="${UNINSTALL_PRESERVE_GROUP:-0}"
-  local preserve_shared="${UNINSTALL_PRESERVE_SHARED:-0}"
-  run rm -f /var/log/nobrand-mieru-*.log /var/log/nobrand-mieru-*.err
-  run rm -f /root/nobrand_mieru_client_*.json 2>/dev/null || true
-  run rm -rf "$MITA_CLIENT_EXPORT_DIR"
-  remove_users_scheduler 2>/dev/null || true
-  run rm -f "$MITA_LOGROTATE_CONF" 2>/dev/null || true
-  run rm -rf "$MITA_INSTANCES_DIR" "$MITA_INSTANCE_RUN_DIR" \
-    "$MITA_INSTANCE_METRICS_DIR" "$MITA_USERS_BACKUP_DIR" "$MITA_MANAGER_STATE_DIR"
-  if [ "$preserve_shared" -eq 0 ]; then
-    run rm -rf /etc/mita /var/lib/mita /run/mita /var/run/mita /var/run/mita.sock
-  fi
-  run rm -f "$MITA_USERS_STATE" "$MITA_USERS_LOCK" "$MITA_ADMIN_LOCK" \
-    "$MITA_FIREWALL_OWNED_STATE" "$TC_OWNED_STATE" "$MITA_STATE"
-  run rm -f "$MITA_BIN" "$MITA_MARKER"
-  run rm -f "$MITA_INSTANCE_SYSTEMD_TEMPLATE" "$MITA_INSTANCE_TMPFILES" \
-    "$MITA_INSTANCE_RUNNER" "${MITA_INSTANCE_OPENRC_PREFIX}"*
-  run rm -f "$MITA_USERS_LOG" 2>/dev/null || true
-  if [ -d /etc/systemd/system ]; then
-    find /etc/systemd/system -type l \
-      \( -name 'nobrand-mieru@*.service' -o -name 'nobrand-mieru-users-scan.timer' \
-         -o -name 'nobrand-mieru-tc-restore.service' \) -delete 2>/dev/null || true
-  fi
-  run systemctl daemon-reload 2>/dev/null || true
-  run systemctl reset-failed 2>/dev/null || true
-  if [ "$preserve_user" -eq 0 ] && _has_user mita; then
-    run deluser mita 2>/dev/null || run userdel mita 2>/dev/null || true
-  fi
-  if [ "$preserve_group" -eq 0 ] && _has_group mita; then
-    run delgroup mita 2>/dev/null || run groupdel mita 2>/dev/null || true
-  fi
-}
-
-verify_mita_uninstalled() {
-  STAGE="验收卸载结果"
-  local failed=0 path pattern save_cmd
-  local preserve_package="${UNINSTALL_PRESERVE_PACKAGE:-0}"
-  local preserve_user="${UNINSTALL_PRESERVE_USER:-0}"
-  local preserve_group="${UNINSTALL_PRESERVE_GROUP:-0}"
-  local preserve_shared="${UNINSTALL_PRESERVE_SHARED:-0}"
-  if [ "$preserve_package" -eq 0 ] \
-     && command -v dpkg-query >/dev/null 2>&1 \
-     && dpkg-query -W -f='${db:Status-Abbrev}' mita 2>/dev/null | grep -q .; then
-    warn "$(t '卸载验收失败: Debian 软件包记录仍存在' \
-      'Uninstall verification failed: Debian package record remains')"
-    failed=1
-  fi
-  if [ "$preserve_package" -eq 0 ] \
-     && command -v rpm >/dev/null 2>&1 && rpm -q mita >/dev/null 2>&1; then
-    warn "$(t '卸载验收失败: RPM 软件包仍存在' \
-      'Uninstall verification failed: RPM package remains')"
-    failed=1
-  fi
-  for path in \
-    "$MITA_MANAGER_STATE_DIR" \
-    "$MITA_INSTANCES_DIR" "$MITA_INSTANCE_RUN_DIR" "$MITA_INSTANCE_METRICS_DIR" \
-    "$MITA_USERS_STATE" "$MITA_USERS_LOCK" "$MITA_USERS_BACKUP_DIR" \
-    "$MITA_ADMIN_LOCK" "$MITA_FIREWALL_OWNED_STATE" "$TC_OWNED_STATE" \
-    "$MITA_BIN" "$MITA_CLIENT_EXPORT_DIR" \
-    "$MITA_INSTANCE_SYSTEMD_TEMPLATE" "$MITA_INSTANCE_TMPFILES" "$MITA_INSTANCE_RUNNER" \
-    "$MITA_USERS_TIMER" "$MITA_USERS_SERVICE" "$MITA_USERS_CRON" "$MITA_LOGROTATE_CONF" \
-    "$MITA_USERS_LOG" \
-    "$BBR_STATE_FILE" "$BBR_BACKUP_FILE"; do
-    if [ -e "$path" ] || [ -L "$path" ]; then
-      warn "$(t "卸载残留: ${path}" "Uninstall residue: ${path}")"
-      failed=1
-    fi
-  done
-  if [ "$preserve_shared" -eq 0 ]; then
-    for path in /etc/mita /var/lib/mita /run/mita /var/run/mita; do
-      if [ -e "$path" ] || [ -L "$path" ]; then
-        warn "$(t "卸载残留: ${path}" "Uninstall residue: ${path}")"
-        failed=1
-      fi
-    done
-  fi
-  for pattern in \
-    "${MITA_INSTANCE_OPENRC_PREFIX}*" '/var/log/nobrand-mieru-*.log' \
-    '/var/log/nobrand-mieru-*.err' '/root/nobrand_mieru_client_*.json'; do
-    if compgen -G "$pattern" >/dev/null 2>&1; then
-      warn "$(t "卸载仍有匹配残留: ${pattern}" "Uninstall residue matches: ${pattern}")"
-      failed=1
-    fi
-  done
-  local systemd_link_names=( -name 'nobrand-mieru@*.service' \
-    -o -name 'nobrand-mieru-users-scan.timer' -o -name 'nobrand-mieru-tc-restore.service' )
-  if [ -d /etc/systemd/system ] \
-     && find /etc/systemd/system -type l \( "${systemd_link_names[@]}" \) \
-       -print -quit 2>/dev/null | grep -q .; then
-    warn "$(t '卸载残留: systemd wants 目录仍有 mita 符号链接' \
-      'Uninstall residue: systemd wants directories still contain mita symlinks')"
-    failed=1
-  fi
-  if { [ "$preserve_user" -eq 0 ] && _has_user mita; } \
-     || { [ "$preserve_group" -eq 0 ] && _has_group mita; }; then
-    warn "$(t '卸载残留: mita 系统用户或用户组仍存在' \
-      'Uninstall residue: mita system user or group remains')"
-    failed=1
-  fi
-  for save_cmd in iptables-save ip6tables-save; do
-    if command -v "$save_cmd" >/dev/null 2>&1 \
-       && "$save_cmd" 2>/dev/null | grep -q -- "$MITA_FIREWALL_COMMENT"; then
-      warn "$(t "卸载残留: ${save_cmd} 中仍有 ${MITA_FIREWALL_COMMENT} 规则" \
-        "Uninstall residue: ${save_cmd} still contains ${MITA_FIREWALL_COMMENT} rules")"
-      failed=1
-    fi
-  done
-  if [ -e "$NOBRAND_INGRESS_FIREWALL_STATE_FILE" ]; then
-    if ! nb_strict_firewall_state_valid "$NOBRAND_INGRESS_FIREWALL_STATE_FILE"; then
-      warn "$(t '卸载验收失败: Strict Ingress 防火墙状态无效' \
-        'Uninstall verification failed: Strict Ingress firewall state is invalid')"
-      failed=1
-    elif jq -e 'any(.rules[]; .owner | startswith("mieru:"))' \
-      "$NOBRAND_INGRESS_FIREWALL_STATE_FILE" >/dev/null; then
-      warn "$(t '卸载残留: Strict Ingress 中仍有 Mieru 所有者规则' \
-        'Uninstall residue: Strict Ingress still contains Mieru-owned rules')"
-      failed=1
-    fi
-  fi
-  [ "$failed" -eq 0 ]
-}
-
-do_uninstall() {
-  local ledger_owned=0
-  require_root
-  UNINSTALL_CANCELLED=0
-  UNINSTALL_PRESERVE_EXTERNAL=0
-  UNINSTALL_PRESERVE_PACKAGE=0
-  UNINSTALL_PRESERVE_USER=0
-  UNINSTALL_PRESERVE_GROUP=0
-  UNINSTALL_PRESERVE_SHARED=0
-  mita_uninstall_target_present \
-    || die "$(t '未检测到 mita 或 OneClick 残留，无需卸载' \
-      'No mita or OneClick residue detected; nothing to uninstall')"
-  mita_uninstall_ledger_active && ledger_owned=1
-  if ! installed_by_oneclick && [ "$ledger_owned" -ne 1 ]; then
-    die "$(t '缺少 schema v3 Mieru ownership 标记，拒绝清理未知资源' \
-      'Schema-v3 Mieru ownership marker is missing; refusing to clean unknown resources')"
-  fi
-  if ! confirm '确认仅卸载 NoBrand 3 管理的 Mieru 协议资源？[y/N]: ' \
-    'Uninstall only NoBrand-3-managed Mieru protocol resources? [y/N]: ' n; then
-    if [ "${MENU_MODE:-0}" -eq 1 ]; then
-      UNINSTALL_CANCELLED=1
-      return 0
-    fi
-    exit 0
-  fi
-  if [ "$ledger_owned" -eq 1 ]; then
-    UNINSTALL_PRESERVE_PACKAGE="$(nb_lifecycle_field MIERU_PRESERVE_PACKAGE)"
-    UNINSTALL_PRESERVE_USER="$(nb_lifecycle_field MIERU_PRESERVE_USER)"
-    UNINSTALL_PRESERVE_GROUP="$(nb_lifecycle_field MIERU_PRESERVE_GROUP)"
-    UNINSTALL_PRESERVE_SHARED="$(nb_lifecycle_field MIERU_PRESERVE_SHARED)"
-    if [ "$UNINSTALL_PRESERVE_PACKAGE" -eq 1 ] \
-       || [ "$UNINSTALL_PRESERVE_USER" -eq 1 ] \
-       || [ "$UNINSTALL_PRESERVE_GROUP" -eq 1 ] \
-       || [ "$UNINSTALL_PRESERVE_SHARED" -eq 1 ]; then
-      UNINSTALL_PRESERVE_EXTERNAL=1
-    fi
-  elif preexisting_mita_resources_recorded; then
-    UNINSTALL_PRESERVE_EXTERNAL=1
-    [ -f "$MITA_PRESERVE_PACKAGE_MARKER" ] && UNINSTALL_PRESERVE_PACKAGE=1
-    [ -f "$MITA_PRESERVE_USER_MARKER" ] && UNINSTALL_PRESERVE_USER=1
-    [ -f "$MITA_PRESERVE_GROUP_MARKER" ] && UNINSTALL_PRESERVE_GROUP=1
-    [ -f "$MITA_PRESERVE_SHARED_MARKER" ] && UNINSTALL_PRESERVE_SHARED=1
-    warn "$(t '检测到安装前已存在的 mita 包或系统账号；将按记录分别保留外部资源，预存包的公共目录也会保留，并保持服务停止。' \
-      'A pre-existing mita package or system account was recorded; each external resource will be preserved separately, including shared directories for a pre-existing package, and left stopped.')"
-  fi
-  local pm
-  # 必须在停止服务、清理规则和卸载软件包之前确认 BBR 文件仍由本脚本拥有，
-  # 避免因人工修改触发保护后留下半卸载状态。
-  if ! restore_owned_bbr_fq; then
-    bail "$(t 'BBR/FQ 配置已被外部修改，卸载已在删除任何 mita 文件前停止' \
-      'BBR/FQ configuration was modified externally; uninstall stopped before removing any mita files')" || return 1
-    return 1
-  fi
-  pm="$(detect_pkg_manager)"
-  stop_mita_for_uninstall
-  STAGE="清理防火墙规则"
-  firewall_clear_all_owned
-  STAGE="清理 Strict Ingress 防火墙规则"
-  mieru_clear_strict_firewall
-  STAGE="卸载 mita 软件包"
-  if [ "$UNINSTALL_PRESERVE_PACKAGE" -eq 0 ]; then
-    case "$pm" in
-      deb)
-        if dpkg-query -W mita >/dev/null 2>&1; then
-          run dpkg -P mita
-        fi
-        ;;
-      rpm)
-        if rpm -q mita >/dev/null 2>&1; then
-          run rpm -e mita
-        fi
-        ;;
-      alpine) ;;
-    esac
-  fi
-  remove_mita_common
-  if ! verify_mita_uninstalled; then
-    warn "$(t '卸载未完全通过验收；已保留上方残留信息，请修复后重试' \
-      'Uninstall did not pass verification; review the residue above and retry')"
-    return 1
-  fi
-  if [ "$UNINSTALL_PRESERVE_EXTERNAL" -eq 1 ]; then
-    t 'NoBrand 管理的 Mieru 文件已卸载；安装前存在的 mita 外部资源已保留。' \
-      'NoBrand-managed Mieru files were removed; pre-existing mita resources were preserved.'
-  else
-    t 'NoBrand 3 管理的 Mieru runtime 与协议资源已卸载' \
-      'The NoBrand-3-managed Mieru runtime and protocol resources were removed'
-  fi
-  if [ "${UNINSTALL_CONTEXT:-protocol}" != global ]; then
-    t 'Mieru 协议资源已卸载；nobrand/nb 管理命令仍保留。' \
-      'Mieru protocol resources were removed; nobrand/nb management commands remain.'
-  fi
-}
-
-status_binding_text() {
-  local port="$1"
-  case "${PROTOCOL:-TCP}" in
-    BOTH) printf 'TCP %s / UDP %s' "$port" "$((port + 1))" ;;
-    UDP) printf 'UDP %s' "$port" ;;
-    *) printf 'TCP %s' "$port" ;;
-  esac
-}
-
-do_status() {
-  local sm status_out iid iname iport unknown_text unavailable_text
-  sm="$(service_manager)"
-  if ! mita_installed; then
-    t 'mita 未安装' 'mita is not installed'
-    [ "${MENU_MODE:-0}" -eq 1 ] && return 1
-    exit 1
-  fi
-  load_install_state 2>/dev/null || true
-  unknown_text="$(t '未知' 'unknown')"
-  unavailable_text="$(t '状态不可用' 'status unavailable')"
-  msg ""
-  t '【版本与配置】' '[Version and configuration]'
-  t "  OneClick 版本: ${SCRIPT_VERSION}" "  OneClick Version: ${SCRIPT_VERSION}"
-  t "  已安装的 Mieru: $(installed_version 2>/dev/null || printf '%s' "$unknown_text")" \
-    "  Installed Mieru: $(installed_version 2>/dev/null || printf unknown)"
-  t "  版本通道: $(mieru_channel_label)" "  Channel: $(mieru_channel_label)"
-  t "  已验证可用的 Mieru 回退版本: ${LAST_KNOWN_GOOD_MIERU_VERSION}" \
-    "  Qualified last-known-good Mieru: ${LAST_KNOWN_GOOD_MIERU_VERSION}"
-  t "  配置预设 / Profile: $(profile_label)" "  Profile: $(profile_label)"
-  msg ""
-  users_isolated_mode || {
-    warn "$(t 'schema v3 Mieru 状态不是 isolated-v2' \
-      'Schema-v3 Mieru state is not isolated-v2')"
-    return 1
-  }
-  t '部署模型: 用户专属实例 isolated-v2' 'Deployment: dedicated user instances (isolated-v2)'
-  if [ -z "$(users_enabled_instance_rows 2>/dev/null || true)" ]; then
-    warn "$(t '当前没有启用中的用户；所有专属实例均应处于停止状态' \
-      'No users are enabled; all dedicated instances should be stopped')"
-  fi
-  while IFS=$'\t' read -r iid iname iport; do
-    [ -n "$iid" ] || continue
-    msg ""
-    t "【${iname} / ${iid}】" "[${iname} / ${iid}]"
-    t "  监听: $(status_binding_text "$iport")" \
-      "  Listen: $(status_binding_text "$iport")"
-    case "$sm" in
-      systemd) systemctl status "$(instance_systemd_unit "$iid")" --no-pager 2>/dev/null | head -n 12 || true ;;
-      openrc) rc-service "$(instance_openrc_service "$iid")" status 2>/dev/null || true ;;
-    esac
-    status_out="$(instance_cmd "$iid" status 2>/dev/null || true)"
-    msg "${status_out:-$unavailable_text}"
-  done < <(users_enabled_instance_rows)
-  msg ""
-  t '状态页已隐藏密码；查看或导出节点配置请使用主菜单「查看节点」' \
-    'Passwords are hidden on the status page; use View node in the main menu to view or export node configuration'
-}
-
-do_client_config() {
-  require_root
-  mita_installed || bail "$(t 'mita 未安装' 'mita is not installed')" || return 1
-  repair_mita_binary_paths 2>/dev/null || true
-  load_config_from_mita || return 1
-  generate_client_config
-}
-
-rollback_mtu_change() {
-  local restore_mtu="$1" restore_policy="$2" restore_profile="${3:-custom}"
-  MTU="$restore_mtu"
-  MTU_POLICY="$restore_policy"
-  PROFILE="$restore_profile"
-  users_isolated_mode || return 1
-  reconcile_isolated_instances && verify_mita_running
-}
-
-do_mtu_config() {
-  require_root || return 1
-  require_linux || return 1
-  mita_installed || bail "$(t 'mita 未安装，请先安装' 'mita is not installed; run install first')" || return 1
-  repair_mita_binary_paths 2>/dev/null || true
-  load_config_from_mita || return 1
-
-  local old_mtu="$MTU" old_policy="$MTU_POLICY" old_profile="$PROFILE"
-  msg ""
-  t "当前 MTU: ${old_mtu}（$(mtu_policy_label)）" \
-    "Current MTU: ${old_mtu} ($(mtu_policy_label))"
-  if [ "${MTU_CLI:-0}" -eq 1 ]; then
-    resolve_mtu_request || return 1
-    print_mtu_selection
-  else
-    choose_mtu_interactive || return 1
-  fi
-
-  if [ "$MTU" = "$old_mtu" ]; then
-    save_install_state
-    msg ""
-    t "MTU 数值未变化，保持 ${MTU}；下面重新输出当前节点链接和配置。" \
-      "MTU is unchanged at ${MTU}; current share links and config follow."
-    generate_client_config
-    return 0
-  fi
-
-  PROFILE=custom
-
-  admin_lock_acquire || return 1
-  MULTI_USER_MODE=1
-  if ! reconcile_isolated_instances || ! verify_mita_running; then
-    warn "$(t "新 MTU ${MTU} 未能正常启动，正在回滚到 ${old_mtu}" \
-      "New MTU ${MTU} failed to start; rolling back to ${old_mtu}")"
-    rollback_mtu_change "$old_mtu" "$old_policy" "$old_profile" || true
-    admin_lock_release
-    return 1
-  fi
-  if ! save_install_state; then
-    warn "$(t '保存 MTU 状态失败，正在恢复原服务端配置' \
-      'Failed to save MTU state; restoring the previous server config')"
-    rollback_mtu_change "$old_mtu" "$old_policy" "$old_profile" || \
-      warn "$(t '自动回滚未能完全验证，请运行 mita doctor 检查服务' \
-        'Automatic rollback could not be fully verified; run mita doctor')"
-    admin_lock_release
-    return 1
-  fi
-  admin_lock_release
-  client_exports_clear_current 2>/dev/null || true
-
-  msg ""
-  t "========== MTU 调整完成：${old_mtu} → ${MTU} ==========" \
-    "========== MTU updated: ${old_mtu} -> ${MTU} =========="
-  t '服务端配置已重新应用并完成重启；请在客户端重新导入下面的新链接或 JSON。' \
-    'Server config was reapplied and restarted; re-import the new link or JSON on clients.'
-  generate_client_config
-}
-
-do_profile_config() {
-  require_root || return 1
-  require_linux || return 1
-  mita_installed || bail "$(t 'mita 未安装，请先安装' 'mita is not installed; run install first')" || return 1
-  repair_mita_binary_paths 2>/dev/null || true
-  load_config_from_mita || return 1
-  if [ "${PROFILE_CLI:-0}" -eq 1 ]; then
-    PROFILE="$(normalize_profile "$PROFILE")" || die "$(t '配置预设 Profile 无效' 'Invalid profile')"
-  else
-    choose_profile_interactive
-  fi
-  if [ "$PROFILE" = custom ]; then
-    t '高级自定义将逐项开放现有高级参数。' \
-      'Advanced Custom opens all existing advanced parameters.'
-    PROFILE_CLI=1
-    do_reconfigure
-    return
-  fi
-  apply_profile_values "$PROFILE"
-  PROFILE_CLI=1
-  PROTOCOL_CLI=1
-  MTU_REQUEST="$MTU"; MTU_CLI=1
-  MULTIPLEXING_CLI=1
-  HANDSHAKE_CLI=1
-  TRAFFIC_CLI=1
-  LOW_ENTROPY_CLI=1
-  local saved_yes="$YES"
-  YES=1
-  do_reconfigure
-  YES="$saved_yes"
-}
-
-do_tuning_config() {
-  local kind="$1" old_value="" saved_yes="$YES"
-  require_root || return 1
-  require_linux || return 1
-  mita_installed || bail "$(t 'mita 未安装，请先安装' 'mita is not installed; run install first')" || return 1
-  repair_mita_binary_paths 2>/dev/null || true
-  load_config_from_mita || return 1
-  PROFILE=custom
-  PROFILE_CLI=1
-  case "$kind" in
-    client-modes)
-      old_value="${MULTIPLEXING}|${HANDSHAKE_MODE}"
-      MULTIPLEXING_CLI=0 HANDSHAKE_CLI=0
-      choose_client_modes_interactive
-      [ "$old_value" != "${MULTIPLEXING}|${HANDSHAKE_MODE}" ] || return 0
-      MULTIPLEXING_CLI=1 HANDSHAKE_CLI=1
-      ;;
-    traffic)
-      old_value="${TRAFFIC_PATTERN}|${LOW_ENTROPY_MODE}"
-      TRAFFIC_CLI=0
-      choose_traffic_pattern_interactive
-      [ "$TRAFFIC_PATTERN" != off ] || LOW_ENTROPY_MODE=LOW_ENTROPY_MODE_OFF
-      [ "$old_value" != "${TRAFFIC_PATTERN}|${LOW_ENTROPY_MODE}" ] || return 0
-      TRAFFIC_CLI=1 LOW_ENTROPY_CLI=1
-      ;;
-    low-entropy)
-      if [ "$(normalize_traffic_pattern "${TRAFFIC_PATTERN:-off}")" = off ]; then
-        warn "$(t 'Traffic Pattern 当前为 OFF；Low Entropy 依赖该能力，请先配置 Traffic Pattern。' \
-          'Traffic Pattern is OFF; Low Entropy depends on it, so configure Traffic Pattern first.')"
-        return 0
-      fi
-      old_value="$LOW_ENTROPY_MODE"
-      LOW_ENTROPY_CLI=0
-      choose_low_entropy_interactive
-      [ "$old_value" != "$LOW_ENTROPY_MODE" ] || return 0
-      LOW_ENTROPY_CLI=1
-      ;;
-    *) return 1 ;;
-  esac
-  YES=1
-  do_reconfigure
-  YES="$saved_yes"
-}
-
 do_bbr_config() {
   require_root || return 1
   require_linux || return 1
   report_bbr_fq_status
   offer_bbr_fq
-}
-
-do_version_channel_config() {
-  require_root || return 1
-  load_install_state 2>/dev/null || true
-  local input="" version=""
-  msg ""
-  t "当前通道: $(mieru_channel_label)" "Current channel: $(mieru_channel_label)"
-  t "  1) stable — 官方最新稳定版（当前合格回退 ${LAST_KNOWN_GOOD_MIERU_VERSION}）" \
-    "  1) stable — official latest stable (qualified fallback ${LAST_KNOWN_GOOD_MIERU_VERSION})"
-  t '  2) latest — stable 的兼容别名（同样排除 draft/prerelease）' \
-    '  2) latest — compatibility alias for stable (also excludes draft/prerelease)'
-  t '  3) pinned — 指定精确版本（高级）' \
-    '  3) pinned — use an exact version (advanced)'
-  read_tty input "$(t '请选择 [1-3]: ' 'Choose [1-3]: ')" || input=""
-  case "$input" in
-    1) MIERU_CHANNEL=stable; MIERU_VERSION="" ;;
-    2) MIERU_CHANNEL=latest; MIERU_VERSION="" ;;
-    3)
-      read_tty version "$(t '精确版本（例如 3.36.0）: ' 'Exact version (for example 3.36.0): ')" || version=""
-      valid_mieru_version "$version" || die "$(t '版本号格式无效' 'Invalid version format')"
-      MIERU_CHANNEL=pinned; MIERU_VERSION="$version"
-      ;;
-    *) warn "$(t '已取消通道修改' 'Channel change cancelled')"; return 0 ;;
-  esac
-  MIERU_CHANNEL_CLI=1
-  [ "$MIERU_CHANNEL" != pinned ] || MIERU_VERSION_CLI=1
-  do_upgrade
-}
-
-do_start() {
-  require_root || return 1
-  mita_installed || bail "$(t 'mita 未安装，请先安装' 'mita is not installed')" || return 1
-  repair_mita_binary_paths 2>/dev/null || true
-  start_mita
-  verify_mita_running 1
-  t '所有用户专属 mita 实例已启动' 'All dedicated mita user instances started'
-}
-
-do_stop() {
-  require_root || return 1
-  mita_installed || bail "$(t 'mita 未安装' 'mita is not installed')" || return 1
-  users_isolated_mode || bail "$(t 'schema v3 Mieru 状态必须使用 isolated-v2' \
-    'Schema-v3 Mieru state must use isolated-v2')" || return 1
-  local iid iname iport
-  STAGE="停止专属实例"
-  while IFS=$'\t' read -r iid iname iport; do
-    [ -n "$iid" ] || continue
-    instance_daemon_stop "$iid" 0
-  done < <(users_enabled_instance_rows)
-  t '所有用户专属 mita 实例已停止' 'All dedicated mita user instances stopped'
-}
-
-do_restart() {
-  require_root || return 1
-  mita_installed || bail "$(t 'mita 未安装' 'mita is not installed')" || return 1
-  repair_mita_binary_paths 2>/dev/null || true
-  users_isolated_mode || bail "$(t 'schema v3 Mieru 状态必须使用 isolated-v2' \
-    'Schema-v3 Mieru state must use isolated-v2')" || return 1
-  local iid iname iport
-  STAGE="重启专属实例"
-  while IFS=$'\t' read -r iid iname iport; do
-    [ -n "$iid" ] || continue
-    instance_daemon_stop "$iid" 0
-    instance_start_proxy "$iid" || return 1
-  done < <(users_enabled_instance_rows)
-  verify_mita_running 1
-  t '所有用户专属 mita 实例已重启' 'All dedicated mita user instances restarted'
 }
 
 menu_pause() {
@@ -28530,93 +16050,23 @@ menu_pause() {
   read_tty _ignore "$(t '按回车返回主菜单...' 'Press Enter to return to the menu...')" || true
 }
 
-user_menu_pause() {
-  local _ignore=""
-  msg ""
-  read_tty _ignore "$(t '按回车返回用户管理菜单...' \
-    'Press Enter to return to user management...')" || true
-}
-
 menu_run_action() {
-  if dry_run_should_preview "$ACTION"; then
-    dry_run_action_preview "$ACTION"
-    return 0
-  fi
+  local runtime_rc=0
+  nb_splicore_route_main || runtime_rc=$?
+  [ "${NOBRAND_SPLICORE_HANDLED:-0}" -ne 1 ] || return "$runtime_rc"
   case "$ACTION" in
-    install) do_install ;;
-    reconfigure) do_reconfigure ;;
-    upgrade) do_upgrade ;;
-    uninstall)
-      do_uninstall
-      [ "${UNINSTALL_CANCELLED:-0}" -eq 1 ] && return 0
-      # do_uninstall 只有在最终残留验收通过后才返回成功。
-      return 2
-      ;;
-    status) do_status ;;
-    client-config) do_client_config ;;
-    mtu-config) do_mtu_config ;;
-    start) do_start ;;
-    stop) do_stop ;;
-    restart) do_restart ;;
-    user-list) do_user_list ;;
-    user-add) do_user_add ;;
-    user-del) do_user_del ;;
-    user-show) do_user_show ;;
     user-manage) do_user_manage ;;
-    user-set-endpoint) do_user_set_endpoint ;;
-    user-set-quota) do_user_set_quota ;;
-    user-set-expire) do_user_set_expire ;;
-    user-enable) do_user_enable ;;
-    user-disable) do_user_disable ;;
-    user-scan) do_user_scan ;;
-    user-quota-reset)
-      if [ "${YES:-0}" -eq 1 ]; then
-        do_user_quota_reset force
-      else
-        do_user_quota_reset
-      fi
-      ;;
-    user-set-rate) do_user_set_rate ;;
-    rate-status) do_rate_status ;;
-    rate-restore) do_rate_restore ;;
-    user-usage) do_user_usage ;;
-    user-export-clients) do_user_export_clients ;;
-    user-backup) do_user_backup ;;
-    user-restore) do_user_restore ;;
-    user-export) do_user_export ;;
-    user-import) do_user_import ;;
-    doctor) do_doctor ;;
     perf) do_perf ;;
-    profile-config) do_profile_config ;;
-    client-modes-config) do_tuning_config client-modes ;;
-    traffic-config) do_tuning_config traffic ;;
-    low-entropy-config) do_tuning_config low-entropy ;;
     bbr-config) do_bbr_config ;;
-    version-channel) do_version_channel_config ;;
-    help) usage ;;
-    *) warn "$(t '未知操作' 'Unknown action')"; return 1 ;;
+    help) nobrand_usage ;;
+    *) warn 'Unsupported action'; return 1 ;;
   esac
 }
 
 menu_loop() {
   MENU_MODE=1
-  MAIN_MENU_ACTIVE=1
   trap - ERR
-  # 仅当已安装(或半装/损坏状态)时才做二进制修复。否则在「全新系统」上，repair_mita_binary_paths
-  # 会因找不到二进制而走 recover_deb_mita → reinstall_mita_package，在显示菜单前就「自动重下安装」mita，
-  # 随后用户选「1) 新装安装」时便被误判「检测到已安装」。修复必须放进 mita_installed 守卫内（与非交互路径一致）。
-  if [ "${DRY_RUN:-0}" -ne 1 ] && mita_installed; then
-    if [ "${NOBRAND_MANAGER_SESSION_ACTIVE:-0}" -eq 1 ]; then
-      nb_lifecycle_lock_acquire || return 1
-      nobrand_menu_state_current || { nb_lifecycle_lock_release; return 1; }
-    fi
-    if mita_installed; then
-      repair_mita_binary_paths 2>/dev/null || true
-      ensure_management_scripts || true
-      MENU_SCRIPTS_READY=1
-    fi
-    [ "${NOBRAND_MANAGER_SESSION_ACTIVE:-0}" -ne 1 ] || nb_lifecycle_lock_release
-  fi
+  nb_splicore_legacy_preflight || return 1
   while true; do
     ACTION=""
     # 安全捕获：set -e 下裸调用 show_menu 返回非0(无效输入)会直接退脚本
@@ -28663,42 +16113,19 @@ menu_loop() {
       continue
     fi
     if [ "$rc" -ne 0 ]; then
-      warn "$(t '操作未完成，请重试或运行 mita doctor 排查' 'Action failed; retry or run mita doctor')"
+      warn "$(t '操作未完成，请重试或运行 nobrand doctor 排查' 'Action failed; retry or run nobrand doctor')"
     fi
     menu_pause
   done
 }
 
 show_performance_menu() {
-  msg ""
-  t '【性能与网络】' '[Performance and network]'
-  msg '  1) 性能诊断（只读）'
-  msg '  2) 配置预设 Profile'
-  msg '  3) MTU'
-  msg '  4) BBR / FQ'
-  msg '  5) 多路复用 / Multiplexing 与握手 / Handshake'
-  msg '  6) 流量模式 / Traffic Pattern'
-  msg '  7) 低熵模式 / Low Entropy'
-  msg '  8) 带宽限制状态'
-  msg '  9) Mieru 版本通道'
-  msg ' 10) 清理并恢复本项目 tc 规则'
+  msg '  1) 网络诊断（只读）'
+  msg '  2) BBR / FQ'
   msg '  0) 返回'
   local choice=""
-  read_tty choice "$(t '请选择 [0-10]: ' 'Choose [0-10]: ')" || return 2
-  case "$(printf '%s' "$choice" | tr -d '[:space:]')" in
-    1) ACTION=perf ;;
-    2) ACTION="profile-config" ;;
-    3) ACTION="mtu-config" ;;
-    4) ACTION="bbr-config" ;;
-    5) ACTION="client-modes-config" ;;
-    6) ACTION="traffic-config" ;;
-    7) ACTION="low-entropy-config" ;;
-    8) ACTION="rate-status" ;;
-    9) ACTION="version-channel" ;;
-    10) ACTION="rate-restore" ;;
-    0) return 2 ;;
-    *) warn "$(t '无效选择' 'Invalid choice')"; return 1 ;;
-  esac
+  read_tty choice '请选择 [0-2]: ' || return 2
+  case "$choice" in 1) ACTION=perf ;; 2) ACTION=bbr-config ;; 0) return 2 ;; *) return 1 ;; esac
 }
 
 show_service_menu() {
@@ -28722,50 +16149,16 @@ show_service_menu() {
 }
 
 show_backup_menu() {
-  msg ""
-  t '【备份 / 恢复】' '[Backup / restore]'
-  msg '  1) 备份用户状态'
-  msg '  2) 从备份恢复'
-  msg '  3) 导出用户状态 JSON'
-  msg '  4) 导入用户状态 JSON'
-  msg '  5) 批量导出客户端配置'
-  msg '  0) 返回'
-  local choice=""
-  read_tty choice "$(t '请选择 [0-5]: ' 'Choose [0-5]: ')" || return 2
-  case "$(printf '%s' "$choice" | tr -d '[:space:]')" in
-    1) ACTION="user-backup" ;;
-    2) ACTION="user-restore" ;;
-    3) ACTION="user-export" ;;
-    4) ACTION="user-import" ;;
-    5) ACTION="user-export-clients" ;;
-    0) return 2 ;;
-    *) warn "$(t '无效选择' 'Invalid choice')"; return 1 ;;
-  esac
+  t '完整新架构备份：nobrand backup create；恢复：nobrand backup restore --file PATH。' \
+    'Back up the native architecture with nobrand backup create; restore with nobrand backup restore --file PATH.'
+  return 2
 }
 
 show_menu() {
-  if [ "${DRY_RUN:-0}" -ne 1 ] \
-     && [ "${MENU_SCRIPTS_READY:-0}" -eq 0 ] \
-     && mita_installed; then
-    if [ "${NOBRAND_MANAGER_SESSION_ACTIVE:-0}" -eq 1 ]; then
-      nb_lifecycle_lock_acquire || return 1
-      nobrand_menu_state_current || { nb_lifecycle_lock_release; return 2; }
-    fi
-    if mita_installed; then
-      ensure_management_scripts || true
-      MENU_SCRIPTS_READY=1
-    fi
-    [ "${NOBRAND_MANAGER_SESSION_ACTIVE:-0}" -ne 1 ] || nb_lifecycle_lock_release
-  fi
-  load_install_state 2>/dev/null || true
-  local installed="no" users="-" selected_rc=0 profile_text="-" version_text=""
-  if mita_installed; then installed="yes"; fi
-  if [ "$installed" = yes ]; then
-    users="$(users_count 2>/dev/null || echo 0)"
-    profile_text="$(profile_label)"
-    version_text="$(installed_version 2>/dev/null || printf '-')"
-  else
-    version_text="$(t '未安装' 'not installed')"
+  local installed="no" users="-" selected_rc=0 profile_text="native" version_text="v0.3.0-rc.4"
+  if nb_splicore_installed; then
+    installed=yes
+    users="$(nb_splicore_call protocol --protocol mieru --operation status | jq '[.nodes[]?] | length')"
   fi
   msg ''
   t '========== NoBrand-OneClick / Mieru ==========' \
@@ -28776,10 +16169,10 @@ show_menu() {
     "Status: $([ "$installed" = yes ] && printf 'installed' || printf 'not installed')"
   t "用户: ${users}" "Users: ${users}"
   t "配置预设 / Profile: ${profile_text}" "Profile: ${profile_text}"
-  t "Mieru 版本: ${version_text}" "Mieru Version: ${version_text}"
+  t "运行时版本: ${version_text}" "Runtime Version: ${version_text}"
   msg ''
   if [ "$installed" = yes ]; then
-    msg '  1) 修复安装'
+    msg '  1) 添加节点'
   else
     msg '  1) 新装 / 安装'
   fi
@@ -28787,9 +16180,9 @@ show_menu() {
   msg '  3) 用户管理'
   msg '  4) 性能与网络'
   if [ "$installed" = yes ]; then
-    msg '  5) 重新配置'
+    msg '  5) 调整节点配置（使用显式命令参数）'
   else
-    msg '  5) 重新配置（需先安装）'
+    msg '  5) 调整节点配置（使用显式命令参数）'
   fi
   msg '  6) 服务管理'
   msg '  7) 备份 / 恢复'
@@ -28816,7 +16209,7 @@ show_menu() {
       show_performance_menu || selected_rc=$?
       [ "$selected_rc" -eq 0 ] || return 1
       ;;
-    5) ACTION=reconfigure ;;
+    5) nobrand_usage; return 1 ;;
     6)
       show_service_menu || selected_rc=$?
       [ "$selected_rc" -eq 0 ] || return 1
@@ -28857,39 +16250,14 @@ nobrand_menu_selection_clear() {
 nobrand_menu_selection_current() {
   local scope="${NOBRAND_MENU_SELECTION_SCOPE:-}" selected_id="${NOBRAND_MENU_SELECTION_ID:-}"
   local selected_name="${NOBRAND_MENU_SELECTION_NAME:-}" expected_hash="${NOBRAND_MENU_SELECTION_HASH:-}"
-  local path="" ids="" id="" name="" matching_id="" matches=0 current_hash=""
+  local path="${NOBRAND_STATE_DIR}/splicore/current/desired.json" current_hash
   [ -n "$scope" ] || return 0
-  [ -n "$selected_id" ] && [ -n "$selected_name" ] && [ -n "$expected_hash" ] || return 1
-  case "$scope" in
-    snell)
-      path="$(snell_state_path "$selected_id")" || return 1
-      ids="$(snell_instance_ids)" || return 1
-      ;;
-    vless-reality)
-      path="$(reality_state_file "$selected_id")" || return 1
-      ids="$(reality_instance_ids)" || return 1
-      ;;
-    tuic)
-      path="$(tuic_state_file "$selected_id")" || return 1
-      ids="$(tuic_instance_ids)" || return 1
-      ;;
-    *) return 1 ;;
-  esac
+  [ "$scope" = splicore ] && [ -n "$selected_id" ] && [ -n "$selected_name" ] && [ -n "$expected_hash" ] || return 1
   [ -f "$path" ] && [ ! -L "$path" ] || return 1
   current_hash="$(sha256sum <"$path" | cut -d' ' -f1)" || return 1
   [ "$current_hash" = "$expected_hash" ] || return 1
-  while IFS= read -r id; do
-    [ -n "$id" ] || continue
-    case "$scope" in
-      snell) name="$(snell_state_field "$id" name 2>/dev/null || true)" ;;
-      vless-reality) name="$(reality_state_field "$id" name 2>/dev/null || true)" ;;
-      tuic) name="$(tuic_state_field "$id" name 2>/dev/null || true)" ;;
-    esac
-    [ "$name" = "$selected_name" ] || continue
-    matches=$((matches + 1))
-    matching_id="$id"
-  done <<<"$ids"
-  [ "$matches" -eq 1 ] && [ "$matching_id" = "$selected_id" ]
+  jq -e --arg id "$selected_id" --arg name "$selected_name" \
+    '.nodes[] | select(.id==$id and (.id==$name or .client.name==$name))' "$path" >/dev/null
 }
 
 nobrand_menu_selection_record() {
@@ -29010,55 +16378,21 @@ nobrand_menu_run() {
 }
 
 snell_menu_select_instance() {
-  local id name major count=0 only_name="" choice="" selected_id="" prompt=""
-  nobrand_menu_selection_clear
-  msg ''
-  msg 'Snell 节点:'
-  while IFS= read -r id; do
-    [ -n "$id" ] || continue
-    name="$(snell_state_field "$id" name)"
-    major="$(snell_state_field "$id" version)"
-    printf '  - %s (v%s, %s)\n' "$name" "$major" "$id"
-    count=$((count + 1))
-    only_name="$name"
-  done < <(snell_instance_ids)
-  [ "$count" -gt 0 ] || { warn 'Snell 尚无节点'; return 1; }
-  prompt="$(t '输入节点名: ' 'Enter node name: ')"
-  [ "$count" -ne 1 ] || prompt="$(t "输入节点名 [${only_name}]: " "Enter node name [${only_name}]: ")"
-  read_tty choice "$prompt" || return 1
-  if [ -z "$choice" ]; then
-    [ "$count" -eq 1 ] || { warn '存在多个节点，请输入要操作的节点名'; return 1; }
-    choice="$only_name"
-  fi
-  selected_id="$(snell_find_id_by_name "$choice")" \
-    || { warn '节点名不存在'; return 1; }
-  nobrand_menu_selection_record snell "$selected_id" "$choice" "$(snell_state_path "$selected_id")" \
-    || { warn '节点状态已变化，请重新选择'; return 1; }
-  SNELL_NAME="$choice"
+  nb_splicore_menu_select snell
 }
 
 snell_menu_install_version() {
   local version="$1"
-  SNELL_VERSION="$version" SNELL_VERSION_CLI=1 SNELL_NAME="" SNELL_PSK=""
-  SNELL_QUIC_PROXY="" SNELL_QUIC_CLI=0
+  SNELL_VERSION="$version" SNELL_NAME="" SNELL_PSK=""
+  SNELL_QUIC_PROXY=""
   PORT="" PORT_CLI=0 ADVERTISE_HOST="" ADVERTISE_PORT="" ADVERTISE_CLI=0 ADVERTISE_AUTO_REQUESTED=0
   YES=0 SNELL_ACTION=install
   nobrand_menu_run nobrand_run_snell_action
 }
 
 snell_menu_set_quic() {
-  local choice=""
-  snell_menu_select_instance || return 0
-  msg '  1) 关闭 QUIC Proxy Mode [默认 / 推荐兼容]'
-  msg '  2) 启用 QUIC Proxy Mode [开放同号 UDP]'
-  read_tty choice "$(t '请选择 [1-2]: ' 'Choose [1-2]: ')" || choice=""
-  case "$choice" in
-    1) SNELL_QUIC_PROXY=off ;;
-    2) SNELL_QUIC_PROXY=on ;;
-    *) warn '无效选择'; return 0 ;;
-  esac
-  SNELL_QUIC_CLI=1 YES=0 SNELL_ACTION="set-quic"
-  nobrand_menu_run nobrand_run_snell_action
+  t '当前版本不支持 Snell QUIC Proxy Mode；保持关闭。TCP 与普通 UDP 转发可用。' \
+    'Snell QUIC Proxy Mode is unsupported and remains off. TCP and ordinary UDP relay are available.'
 }
 
 snell_menu_service() {
@@ -29088,10 +16422,10 @@ snell_menu_loop() {
     msg '  1) 安装 Snell v5 [推荐]'
     msg '  2) 安装 Snell v4 [兼容]'
     msg '  3) 查看 Snell 节点'
-    msg '  4) QUIC 设置'
+    msg '  4) QUIC 支持范围'
     msg '  5) 修改展示端点 / Display Endpoint'
     msg '  6) 服务管理'
-    msg '  7) 升级官方 Runtime'
+    msg '  7) 检查运行时更新'
     msg '  8) Doctor / 诊断'
     msg '  9) 删除节点'
     msg '  0) 返回'
@@ -29134,7 +16468,7 @@ hysteria2_menu_loop() {
   trap - ERR
   while true; do
     msg ''
-    msg '========== Hysteria2 / Xray-core =========='
+    msg '========== Hysteria2 + Salamander =========='
     msg '  1) 安装 / 重新部署'
     msg '  2) 查看节点'
     msg '  3) 修改展示端点 / Display Endpoint'
@@ -29142,7 +16476,7 @@ hysteria2_menu_loop() {
     msg '  5) 启动'
     msg '  6) 停止'
     msg '  7) 重启'
-    msg '  8) 升级 NoBrand 独立 Xray-core'
+    msg '  8) 验证 / 升级固定运行时'
     msg '  9) Doctor / 诊断'
     msg ' 10) 删除 Hysteria2'
     msg '  0) 返回'
@@ -29193,7 +16527,7 @@ vless_sudoku_menu_loop() {
     msg '  7) 重启'
     msg '  8) Doctor / 诊断'
     msg '  9) 配置冒烟测试 / Smoke'
-    msg ' 10) 升级共享 Xray Runtime'
+    msg ' 10) 验证 / 升级固定运行时'
     msg ' 11) 删除'
     msg '  0) 返回'
     read_tty choice "$(t '请选择 [0-11]: ' 'Choose [0-11]: ')" || return 0
@@ -29231,27 +16565,7 @@ vless_sudoku_menu_loop() {
 }
 
 reality_menu_select_instance() {
-  local id name choice="" count=0 only_name="" selected_id="" prompt=""
-  nobrand_menu_selection_clear
-  while IFS= read -r id; do
-    name="$(reality_state_field "$id" name)"
-    printf '  - %s (%s)\n' "$name" "$id"
-    count=$((count + 1))
-    only_name="$name"
-  done < <(reality_instance_ids)
-  [ "$count" -gt 0 ] || { warn 'VLESS REALITY 尚无实例'; return 1; }
-  prompt='请输入 VLESS REALITY 实例名称: '
-  [ "$count" -ne 1 ] || prompt="请输入 VLESS REALITY 实例名称 [${only_name}]: "
-  read_tty choice "$prompt" || return 1
-  if [ -z "$choice" ]; then
-    [ "$count" -eq 1 ] || { warn '存在多个实例，请输入要操作的实例名称'; return 1; }
-    choice="$only_name"
-  fi
-  selected_id="$(reality_find_id_by_name "$choice")" \
-    || { warn 'VLESS REALITY 实例不存在'; return 1; }
-  nobrand_menu_selection_record vless-reality "$selected_id" "$choice" "$(reality_state_file "$selected_id")" \
-    || { warn 'VLESS REALITY 实例状态已变化，请重新选择'; return 1; }
-  VLESS_REALITY_NAME="$choice"
+  nb_splicore_menu_select vless-reality
 }
 
 vless_reality_menu_loop() {
@@ -29263,22 +16577,21 @@ vless_reality_menu_loop() {
     msg 'Public Ingress：推荐；Mapped / Dedicated：允许，但会提示警告'
     msg '  1) 安装新实例'
     msg '  2) 查看节点 / URI'
-    msg '  3) 导出 Xray / Mihomo / sing-box'
+    msg '  3) 导出新 URI / 客户端配置'
     msg '  4) 修改展示端点 / Display Endpoint'
     msg '  5) 状态'
     msg '  6) 启动'
     msg '  7) 停止'
     msg '  8) 重启'
     msg '  9) Doctor / 诊断'
-    msg ' 10) 升级共享 Xray Runtime'
+    msg ' 10) 验证 / 升级固定运行时'
     msg ' 11) 删除实例'
     msg '  0) 返回'
     read_tty choice "$(t '请选择 [0-11]: ' 'Choose [0-11]: ')" || return 0
     case "$choice" in
       1)
-        PORT="" PORT_CLI=0 VLESS_REALITY_NAME="" VLESS_REALITY_TARGET="" VLESS_REALITY_TARGET_CLI=0
+        PORT="" PORT_CLI=0 VLESS_REALITY_NAME="" VLESS_REALITY_TARGET=""
         VLESS_REALITY_TARGET_PORT="$NOBRAND_REALITY_DEFAULT_CAMOUFLAGE_PORT" \
-          VLESS_REALITY_TARGET_PORT_CLI=0 VLESS_REALITY_FINGERPRINT=chrome VLESS_REALITY_SPIDER_X=/
         ADVERTISE_HOST="" ADVERTISE_PORT="" ADVERTISE_CLI=0 ADVERTISE_AUTO_REQUESTED=0
         INGRESS_PROFILE="" INGRESS_PROFILE_CLI=0 YES=0
         read_tty VLESS_REALITY_NAME '实例名称 [primary]: ' || VLESS_REALITY_NAME=""
@@ -29297,8 +16610,7 @@ vless_reality_menu_loop() {
       3) reality_menu_select_instance && { VLESS_REALITY_ACTION="export"; nobrand_menu_run nobrand_run_vless_reality_action; } ;;
       4)
         if reality_menu_select_instance; then
-          INGRESS_PROFILE_ID="$(reality_state_field "$(reality_find_id_by_name "$VLESS_REALITY_NAME")" ingress_profile_id)"
-          PORT="$(reality_state_field "$(reality_find_id_by_name "$VLESS_REALITY_NAME")" listen_port)"
+          PORT="$NOBRAND_SPLICORE_MENU_PORT"
           ADVERTISE_HOST="" ADVERTISE_PORT="" ADVERTISE_CLI=0 ADVERTISE_AUTO_REQUESTED=0
           nb_collect_advertise_endpoint_interactive 'VLESS REALITY' "$PORT"
           VLESS_REALITY_ACTION=set-endpoint
@@ -29327,27 +16639,7 @@ vless_reality_menu_loop() {
 }
 
 tuic_menu_select_instance() {
-  local id name choice="" count=0 only_name="" selected_id="" prompt=""
-  nobrand_menu_selection_clear
-  while IFS= read -r id; do
-    name="$(tuic_state_field "$id" name)"
-    printf '  - %s (%s)\n' "$name" "$id"
-    count=$((count + 1))
-    only_name="$name"
-  done < <(tuic_instance_ids)
-  [ "$count" -gt 0 ] || { warn 'TUIC 尚无实例'; return 1; }
-  prompt='请输入 TUIC 实例名称: '
-  [ "$count" -ne 1 ] || prompt="请输入 TUIC 实例名称 [${only_name}]: "
-  read_tty choice "$prompt" || return 1
-  if [ -z "$choice" ]; then
-    [ "$count" -eq 1 ] || { warn '存在多个实例，请输入要操作的实例名称'; return 1; }
-    choice="$only_name"
-  fi
-  selected_id="$(tuic_find_id_by_name "$choice")" \
-    || { warn 'TUIC 实例不存在'; return 1; }
-  nobrand_menu_selection_record tuic "$selected_id" "$choice" "$(tuic_state_file "$selected_id")" \
-    || { warn 'TUIC 实例状态已变化，请重新选择'; return 1; }
-  TUIC_NAME="$choice"
+  nb_splicore_menu_select tuic
 }
 
 tuic_menu_loop() {
@@ -29355,7 +16647,7 @@ tuic_menu_loop() {
   trap - ERR
   while true; do
     msg ''
-    msg '========== TUIC v5 / 官方 sing-box Runtime =========='
+    msg '========== TUIC v5 / Splicore =========='
     msg '  1) 安装 TUIC v5 实例'
     msg '  2) 查看 / 导出用户节点'
     msg '  3) 用户管理（列出 / 添加 / 删除 / 轮换凭据）'
@@ -29364,7 +16656,7 @@ tuic_menu_loop() {
     msg '  6) 启动'
     msg '  7) 停止'
     msg '  8) 重启'
-    msg '  9) 升级官方 sing-box Runtime'
+    msg '  9) 验证 / 升级统一 Splicore Runtime'
     msg ' 10) Doctor / 诊断'
     msg ' 11) 卸载实例'
     msg '  0) 返回'
@@ -29400,7 +16692,11 @@ tuic_menu_loop() {
       4)
         tuic_menu_select_instance || continue
         ADVERTISE_HOST="" ADVERTISE_PORT="" ADVERTISE_CLI=0 ADVERTISE_AUTO_REQUESTED=0
-        nb_collect_advertise_endpoint_interactive 'TUIC v5' "$(tuic_state_field "$(tuic_find_id_by_name "$TUIC_NAME")" listen_port)"
+        if nb_splicore_installed; then
+          nb_collect_advertise_endpoint_interactive 'TUIC v5' "$NOBRAND_SPLICORE_MENU_PORT"
+        else
+          nb_collect_advertise_endpoint_interactive 'TUIC v5' "$NOBRAND_SPLICORE_MENU_PORT"
+        fi
         TUIC_ACTION="set-endpoint"; nobrand_menu_run nobrand_run_tuic_action
         ;;
       5|6|7|8)
@@ -30169,8 +17465,8 @@ nobrand_menu_loop() {
     msg ''
     msg '  1) Mieru'
     msg '  2) Snell v4 / v5'
-    msg '  3) Hysteria2（Xray-core）'
-    msg '  4) TUIC v5（官方 sing-box Runtime）'
+    msg '  3) Hysteria2 + Salamander'
+    msg '  4) TUIC v5'
     msg '  5) VLESS REALITY + Vision（TCP；推荐 Public Ingress）'
     msg '  6) VLESS + FinalMask + Sudoku（TCP）'
     msg '  7) SSH Tunnel（现有 OpenSSH）'
@@ -30250,8 +17546,7 @@ nobrand_recovery_action_allowed() {
   nobrand_action_is_ssh_confirmation && return 0
   case "$state:$action" in
     CURRENT_PARTIAL_INSTALL:install|CURRENT_PARTIAL_REPAIR:install|\
-      CURRENT_PARTIAL_UNINSTALL:install|CURRENT_PARTIAL_UNINSTALL:nobrand-uninstall|\
-      LEGACY_SUPPORTED:install)
+      CURRENT_PARTIAL_UNINSTALL:install|CURRENT_PARTIAL_UNINSTALL:nobrand-uninstall)
       return 0
       ;;
   esac
@@ -30264,14 +17559,6 @@ nobrand_recovery_action_allowed() {
       [ "$(nb_lifecycle_field FORMAT)" = nobrand-lifecycle-v2 ] \
         && [ "$(nb_lifecycle_mutation_started)" = 0 ] || return 1
     fi
-    return 0
-  fi
-  if [ "$state:$action" = CURRENT_PARTIAL_REPAIR:reconfigure ] \
-     && [ "${NOBRAND_PROTOCOL_EXPLICIT_RETRY_SCOPE:-}" = mieru ] \
-     && nb_lifecycle_tx_valid \
-     && [ "$(nb_lifecycle_field STATUS)" = in-progress ] \
-     && [ "$(nb_lifecycle_field OPERATION)" = repair ] \
-     && [ "$(nb_lifecycle_scope)" = mieru ]; then
     return 0
   fi
   if [ "$state:$action" = CURRENT_PARTIAL_CONFIGURE:nobrand-ingress ] \
@@ -30343,41 +17630,6 @@ nobrand_set_scoped_recovery_action() {
   case "$scope" in
     manager) ACTION=nobrand-manager-bootstrap ;;
     ingress) ACTION=nobrand-ingress-recover ;;
-    mieru)
-      format="$(nb_lifecycle_field FORMAT 2>/dev/null || true)"
-      operation="$(nb_lifecycle_field OPERATION 2>/dev/null || true)"
-      phase="$(nb_lifecycle_field LAST_COMPLETED_PHASE 2>/dev/null || true)"
-      mutation_started="$(nb_lifecycle_mutation_started 2>/dev/null || true)"
-      if [ "$format" = nobrand-lifecycle-v2 ] && [ "$mutation_started" = 0 ]; then
-        # Nothing changed, so the install dispatcher may safely clear this
-        # record without needing to infer whether the lost request was install
-        # or reconfigure.
-        ACTION=install
-      elif [ "$operation" = repair ]; then
-        case "$phase" in
-          runtime-ready|state-committed|ready-to-validate)
-            # These phases belong to repair-install or are validation-only; the
-            # install dispatcher will never recollect when state is committed.
-            ACTION=install
-            ;;
-          *)
-            warn "$(t \
-              'Mieru 修复记录无法区分重装与重新配置，且未保存原参数。请显式执行 nobrand mieru install 或 nobrand mieru reconfigure。' \
-              'The Mieru repair record cannot distinguish reinstall from reconfigure and did not store the original request. Explicitly run nobrand mieru install or nobrand mieru reconfigure.')"
-            return 1
-            ;;
-        esac
-      elif [ "$operation" = install ]; then
-        ACTION=install
-      else
-        [ "$format" != nobrand-lifecycle-v1 ] || ACTION=install
-        [ -n "${ACTION:-}" ] || return 1
-      fi
-      ;;
-    snell) ACTION=nobrand-snell; SNELL_ACTION=install ;;
-    hy2) ACTION=nobrand-hy2; HY2_ACTION=install ;;
-    tuic) ACTION=nobrand-tuic; TUIC_ACTION=install ;;
-    vless-reality) ACTION=nobrand-vless-reality; VLESS_REALITY_ACTION=install ;;
     vless-sudoku) ACTION=nobrand-vless-sudoku; VLESS_SUDOKU_ACTION=install ;;
     ssh-tunnel) ACTION=nobrand-ssh-tunnel; SSH_TUNNEL_ACTION=install ;;
     forward)
@@ -30500,6 +17752,22 @@ main() {
     nobrand-version) nobrand_version; return 0 ;;
     nobrand-help) nobrand_usage; return 0 ;;
   esac
+  nb_splicore_legacy_preflight || return 1
+  # The primary runtime has its own persistent generation transaction and uses
+  # the same lifecycle lock. Route before any legacy repair/download branch.
+  if nobrand_ssh_confirmation_pending; then
+    case "${ACTION:-}" in
+      nobrand-runtime|nobrand-snell|nobrand-tuic|nobrand-hy2|nobrand-vless-reality|install|upgrade|reconfigure)
+        nobrand_pending_ssh_confirmation_notice
+        return 1
+        ;;
+    esac
+  fi
+  local runtime_rc=0
+  nb_splicore_route_main || runtime_rc=$?
+  if [ "${NOBRAND_SPLICORE_HANDLED:-0}" -eq 1 ]; then
+    return "$runtime_rc"
+  fi
   # Explicit protocol commands may dispatch mutations directly, so retain the
   # process lock across their common state boundary and dispatcher. A no-arg
   # manager launch is different: bootstrap must install dependencies (including
@@ -30512,10 +17780,13 @@ main() {
     nb_lifecycle_lock_acquire || return 1
     main_lifecycle_lock=1
   fi
+  if nb_splicore_installed && [ -z "$ACTION" ] && ! nobrand_manager_installation_valid; then
+    nobrand_install_manager_script || return 1
+  fi
   nb_validate_authoritative_state_boundary
   case "$NOBRAND_INSTALL_STATE" in
     CURRENT_PARTIAL_INSTALL|CURRENT_PARTIAL_REPAIR|CURRENT_PARTIAL_CONFIGURE|\
-      CURRENT_PARTIAL_UNINSTALL|LEGACY_SUPPORTED)
+      CURRENT_PARTIAL_UNINSTALL)
       nb_install_state_notice "$NOBRAND_INSTALL_STATE"
       ;;
     CURRENT_COMPLETE)
@@ -30538,7 +17809,7 @@ main() {
   fi
   case "$NOBRAND_INSTALL_STATE" in
     CURRENT_PARTIAL_INSTALL|CURRENT_PARTIAL_REPAIR|CURRENT_PARTIAL_CONFIGURE|\
-      CURRENT_PARTIAL_UNINSTALL|LEGACY_SUPPORTED)
+      CURRENT_PARTIAL_UNINSTALL)
       if ! nobrand_recovery_action_allowed "$NOBRAND_INSTALL_STATE" "$ACTION"; then
         nobrand_recovery_action_refused "$NOBRAND_INSTALL_STATE"
         [ "$main_lifecycle_lock" -eq 0 ] || nb_lifecycle_lock_release
@@ -30546,11 +17817,6 @@ main() {
       fi
       ;;
   esac
-  if [ -z "$ACTION" ]; then
-    case "$NOBRAND_INSTALL_STATE" in
-      LEGACY_SUPPORTED) ACTION=install ;;
-    esac
-  fi
   if [ -z "$ACTION" ]; then
     case "$NOBRAND_INSTALL_STATE" in
       CURRENT_PARTIAL_INSTALL|CURRENT_PARTIAL_REPAIR|CURRENT_PARTIAL_CONFIGURE|\
@@ -30628,63 +17894,16 @@ main() {
     [ "$main_lifecycle_lock" -eq 0 ] || nb_lifecycle_lock_release
     return 0
   fi
-  if [ "${DRY_RUN:-0}" -ne 1 ] \
-     && [ "$(id -u 2>/dev/null || echo 1)" -eq 0 ] \
-     && nb_schema_v3_file_valid \
-     && is_mita_elf_binary "$MITA_BIN"; then
-    repair_mita_binary_paths 2>/dev/null || true
-  fi
+  # Legacy runtime recovery belongs to explicit restore/recovery operations.
   if [ "$main_lifecycle_lock" -eq 1 ] && nobrand_action_opens_interactive_menu; then
     NOBRAND_MENU_EXPECTED_STATE="$NOBRAND_INSTALL_STATE"
     nb_lifecycle_lock_release
     main_lifecycle_lock=0
   fi
   case "$ACTION" in
-    install) do_install ;;
-    reconfigure) do_reconfigure ;;
-    upgrade) do_upgrade ;;
-    uninstall) do_uninstall ;;
-    status) do_status ;;
-    client-config|show) do_client_config ;;
-    mtu-config) do_mtu_config ;;
-    start) do_start ;;
-    stop) do_stop ;;
-    restart) do_restart ;;
-    user-list) do_user_list ;;
-    user-add) do_user_add ;;
-    user-del) do_user_del ;;
-    user-show) do_user_show ;;
     user-manage) do_user_manage ;;
-    user-set-endpoint) do_user_set_endpoint ;;
-    user-set-quota) do_user_set_quota ;;
-    user-set-expire) do_user_set_expire ;;
-    user-enable) do_user_enable ;;
-    user-disable) do_user_disable ;;
-    user-scan) do_user_scan ;;
-    user-quota-reset)
-      if [ "${YES:-0}" -eq 1 ]; then
-        do_user_quota_reset force
-      else
-        do_user_quota_reset
-      fi
-      ;;
-    user-set-rate) do_user_set_rate ;;
-    rate-status) do_rate_status ;;
-    rate-restore) do_rate_restore ;;
-    user-usage) do_user_usage ;;
-    user-export-clients) do_user_export_clients ;;
-    user-backup) do_user_backup ;;
-    user-restore) do_user_restore ;;
-    user-export) do_user_export ;;
-    user-import) do_user_import ;;
-    doctor) do_doctor ;;
     perf) do_perf ;;
-    profile-config) do_profile_config ;;
-    client-modes-config) do_tuning_config client-modes ;;
-    traffic-config) do_tuning_config traffic ;;
-    low-entropy-config) do_tuning_config low-entropy ;;
     bbr-config) do_bbr_config ;;
-    version-channel) do_version_channel_config ;;
     nobrand-status) nobrand_status ;;
     nobrand-nodes) nobrand_nodes ;;
     nobrand-doctor) nobrand_doctor ;;

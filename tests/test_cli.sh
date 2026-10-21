@@ -82,9 +82,9 @@ assert_eq 'user-add|bob|edge.example.com||1|0' \
 snell="$(parse install-nobrand.sh snell install --name alice --version 5 --port 3611 --advertise-auto -y)"
 assert_eq 'nobrand-snell|install|5|alice|||1|1||0|||||' "$snell" 'Snell CLI parser default QUIC'
 snell_quic="$(parse install-nobrand.sh snell install --name alice --version 5 --port 3611 --quic on --advertise-auto -y)"
-assert_eq 'nobrand-snell|install|5|alice|||1|1|on|1|||||' "$snell_quic" 'Snell CLI parser QUIC ON'
+assert_eq 'nobrand-snell|install|5|alice|||1|1|on|0|||||' "$snell_quic" 'Snell CLI parser QUIC ON'
 snell_toggle="$(parse install-nobrand.sh snell set-quic --name alice --quic off -y)"
-assert_eq 'nobrand-snell|set-quic|5|alice|||1|0|off|1|||||' "$snell_toggle" 'Snell CLI QUIC toggle'
+assert_eq 'nobrand-snell|set-quic|5|alice|||1|0|off|0|||||' "$snell_toggle" 'Snell CLI QUIC toggle'
 hy2="$(parse install-nobrand.sh hy2 install --port 3612 --sni www.microsoft.com --advertise-auto -y)"
 assert_eq 'nobrand-hy2||5||install||1|1||0|||||' "$hy2" 'HY2 CLI parser'
 vless="$(parse install-nobrand.sh vless-sudoku install --port 3613 --advertise-auto -y)"
@@ -164,7 +164,7 @@ help="$(bash "$TEST_ROOT/install-nobrand.sh" --help)"
 assert_contains "$help" 'NoBrand-OneClick' 'NoBrand help entry'
 assert_contains "$help" 'Snell v4-v5' 'NoBrand help protocols'
 assert_not_contains "$help" 'Snell v6' 'NoBrand help removed v6'
-assert_contains "$help" 'set-quic' 'NoBrand help QUIC toggle'
+assert_contains "$help" 'clean install' 'NoBrand clean installation policy'
 assert_contains "$help" 'VLESS + FinalMask + Sudoku' 'NoBrand VLESS help protocol'
 assert_contains "$help" 'VLESS REALITY' 'NoBrand REALITY help protocol'
 assert_contains "$help" 'nobrand vless-reality install' 'NoBrand REALITY CLI help'

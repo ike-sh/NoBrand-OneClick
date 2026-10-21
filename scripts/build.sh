@@ -16,6 +16,7 @@ MODULES=(
   src/16-core-ingress.sh
   src/17-core-endpoint.sh
   src/18-core-nodes.sh
+  src/19-splicore.sh
   src/20-platform-mieru.sh
   src/21-platform-xray-hy2.sh
   src/22-platform-snell.sh
@@ -126,6 +127,17 @@ trap cleanup EXIT HUP INT TERM
     '# Do not edit this generated file directly.' \
     '# Run scripts/build.sh after modifying src/.' \
     ''
+  # Keep the released installer self-contained. The Python adapter and release
+  # manifest have one editable source and require no companion download.
+  printf '%s\n' 'nb_splicore_python() {' '  python3 - "$@" <<'"'"'NOBRAND_SPLICORE_PY'"'"'' \
+    'import json' 'RELEASE = json.loads(r'"'"''"'"''"'"''
+  command cat "${ROOT}/runtime/splicore-release.json"
+  printf '%s\n' "''')"
+  printf '%s\n' "LAUNCHER = r'''"
+  command cat "${ROOT}/runtime/splicore-launch.py"
+  printf '%s\n' "'''"
+  command cat "${ROOT}/runtime/splicore.py"
+  printf '%s\n' 'NOBRAND_SPLICORE_PY' '}' ''
   first_module=1
   for module in "${MODULES[@]}"; do
     if [ "$first_module" -eq 0 ]; then

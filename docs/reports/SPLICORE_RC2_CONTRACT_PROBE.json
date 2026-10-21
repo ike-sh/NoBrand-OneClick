@@ -1,0 +1,61 @@
+{
+  "version": "v0.3.0-rc.2",
+  "migration_ready": false,
+  "artifacts": {
+    "amd64": {
+      "sha256": "bc438dba6d43f016f1f23473495b9af49abb95153bb62ac4d809e85cd472922e",
+      "archive_safety": "PASS",
+      "qualification": "Linux amd64; NoBrand migration not qualified"
+    },
+    "arm64": {
+      "sha256": "ff79beb51588d9539498976ee2b0697e3243e89dc74e467874a6a143bce5890f",
+      "archive_safety": "PASS",
+      "qualification": "BUILD ONLY; runtime not qualified"
+    }
+  },
+  "checks": {
+    "hysteria2_base": "ACCEPTED",
+    "tuic_base": "ACCEPTED",
+    "mieru_base": "ACCEPTED",
+    "snell_base": "ACCEPTED",
+    "hy2_salamander": "REJECTED",
+    "hy2_transport_salamander": "REJECTED",
+    "mieru_trafficPattern": "REJECTED",
+    "mieru_handshakeMode": "REJECTED",
+    "mieru_lowEntropy": "REJECTED",
+    "mieru_strict_quota": "REJECTED",
+    "mieru_one_listener_both": "REJECTED",
+    "snell_quic": "REJECTED",
+    "snell_short_psk": "REJECTED",
+    "snell_punctuated_psk": "REJECTED",
+    "snell_v4": "ACCEPTED",
+    "isolated_four_protocol_single_process": "PASS (no traffic qualification)",
+    "isolated_inbound_count": 4,
+    "tuic_existing_certificate": "REJECTED at apply",
+    "hysteria2_existing_certificate": "REJECTED at apply",
+    "inbound_remove": "REJECTED for existing inbound ID",
+    "inbound_delete": "REJECTED for existing inbound ID",
+    "inbound_start": "REJECTED for existing inbound ID",
+    "inbound_stop": "REJECTED for existing inbound ID",
+    "inbound_restart": "REJECTED for existing inbound ID",
+    "inbound_update": "REJECTED for existing inbound ID",
+    "inbound_delete_api": "405 Method Not Allowed (all four live resources)",
+    "temporary_daemon_stopped": "PASS",
+    "temporary_directory_removed": "PASS"
+  },
+  "binary_identity": {
+    "product": "Splicore",
+    "version": "v0.3.0-rc.2",
+    "commit": "926f3274fd44ac618cc276951eefe2d27134f687",
+    "dirty": false,
+    "build_time": "2026-10-17T07:36:07Z",
+    "go_version": "go1.26.3",
+    "platform": "linux/amd64",
+    "upstream_tag": "v1.14.1",
+    "upstream_commit": "1ac1a339cb1223e9c70eae14c44411c75033c02d",
+    "channel": "development",
+    "api_version": "v1",
+    "source_digest": "6dcf63ff8c2e10f74830b4a6ae52011e7ba7f120",
+    "build_tags": "with_quic,with_utls,with_gvisor"
+  }
+}

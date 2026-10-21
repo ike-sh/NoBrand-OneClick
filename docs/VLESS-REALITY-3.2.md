@@ -1,5 +1,9 @@
 # VLESS REALITY + Vision — 3.2 Release Candidate
 
+Historical Xray contract, superseded by the [rc.4 native contract](SPLICORE-RC4-CONTRACT.md).
+Fresh REALITY + Vision now uses Splicore Local Tunnel Guard. Legacy in-place
+migration remains unsupported; see [current scope](SPLICORE-MIGRATION.md).
+
 NoBrand-OneClick 3.2.0 is an unreleased release candidate. The immutable current release remains v3.1.0. VLESS REALITY is the final planned protocol feature for 3.2; `PROTOCOL_FEATURE_FREEZE=true` remains set.
 
 ## Fixed protocol contract

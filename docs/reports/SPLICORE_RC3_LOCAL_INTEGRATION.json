@@ -1,0 +1,26 @@
+{
+  "active_runtime_pointer_removed": true,
+  "download_trace": [
+    {
+      "proxy": "",
+      "transport": "verified public artifact cache fixture",
+      "url": "https://github.com/ike-sh/Splicore/releases/download/v0.3.0-rc.3/splicore-v0.3.0-rc.3-linux-amd64.tar.gz"
+    },
+    {
+      "proxy": "",
+      "transport": "verified public artifact cache fixture",
+      "url": "https://github.com/ike-sh/Splicore/releases/download/v0.3.0-rc.3/SHA256SUMS"
+    }
+  ],
+  "inbounds": 4,
+  "legacy_client_traffic": "EXTERNAL QUALIFICATION PENDING",
+  "local_process_crash_database_recovery": "PASS",
+  "local_process_restart": "PASS",
+  "native_systemd_openrc": "EXTERNAL QUALIFICATION PENDING",
+  "result": "local-probe-pass",
+  "scope": "private loopback process, public binary, actual runtime adapter",
+  "temporary_daemon_stopped": true,
+  "temporary_directory_removed": true,
+  "traffic_qualification": "PENDING",
+  "version": "v0.3.0-rc.3"
+}

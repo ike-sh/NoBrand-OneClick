@@ -1,0 +1,41 @@
+{
+  "version": "v0.3.0-rc.4",
+  "commit": "2634ea50d19623591c5db63329a288862726db74",
+  "architectures": {
+    "amd64": {
+      "asset": "splicore-v0.3.0-rc.4-linux-amd64.tar.gz",
+      "archive_sha256": "9dd1941c817143d18ea1c892a5fc13266c1b209600576946504a9d3c98c62161",
+      "binary_sha256": "0a347f06f0d1a17ef37edd779826ad79739217b65f80bf39dc6077f115ac175f",
+      "checksum": "PASS",
+      "archive_safety": "PASS",
+      "elf_architecture": "PASS",
+      "qualification": "Experimental; external runtime qualification pending",
+      "executed_identity": {
+        "product": "Splicore",
+        "version": "v0.3.0-rc.4",
+        "commit": "2634ea50d19623591c5db63329a288862726db74",
+        "dirty": false,
+        "build_time": "2026-10-21T13:35:10Z",
+        "go_version": "go1.26.3",
+        "platform": "linux/amd64",
+        "upstream_tag": "v1.14.1",
+        "upstream_commit": "1ac1a339cb1223e9c70eae14c44411c75033c02d",
+        "channel": "development",
+        "api_version": "v1",
+        "source_digest": "de27b79f768622f9501dd7283ed6d2f3a1a80dc1",
+        "build_tags": "with_quic,with_utls,with_gvisor"
+      }
+    },
+    "arm64": {
+      "asset": "splicore-v0.3.0-rc.4-linux-arm64.tar.gz",
+      "archive_sha256": "5b5e39bd8e6ef373ebc00e7e3a8a688ce09d0369dc2c4ecfab06ed535d948b64",
+      "binary_sha256": "85ec863d21707ac309a4c7a64b3b7228eb34bb0405379db6b569d8d550032a4c",
+      "checksum": "PASS",
+      "archive_safety": "PASS",
+      "elf_architecture": "PASS",
+      "qualification": "BUILD ONLY; runtime qualification pending",
+      "runtime": "NOT RUN / NOT CERTIFIED"
+    }
+  },
+  "result": "PASS"
+}

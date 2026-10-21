@@ -58,8 +58,8 @@ nobrand_xray_version() {
 nobrand_xray_release_info() {
   local asset metadata version url digest expected
   asset="$(nobrand_xray_arch_asset)" || {
-    warn "$(t 'NoBrand HY2 的 Xray runtime 仅测试 amd64/arm64' \
-      'NoBrand HY2 Xray runtime is tested only on amd64/arm64')"
+    warn "$(t 'NoBrand Sudoku 的 Xray runtime 仅测试 amd64/arm64' \
+      'NoBrand Sudoku Xray runtime is tested only on amd64/arm64')"
     return 1
   }
   metadata="$(mktemp_file .json)" || return 1
@@ -306,262 +306,41 @@ nobrand_xray_test_config() {
 }
 
 nobrand_xray_validate_managed_configs() {
-  local binary="${1:-$NOBRAND_XRAY_BIN}" config id
-  for config in "$NOBRAND_HY2_CONFIG_FILE" "$NOBRAND_VLESS_CONFIG_FILE"; do
-    [ -f "$config" ] || continue
-    nobrand_xray_test_config "$config" "$binary" || return 1
-  done
-  while IFS= read -r id; do
-    [ -n "$id" ] || continue
-    config="$(reality_config_file "$id")"
-    [ -f "$config" ] || return 1
-    nobrand_xray_test_config "$config" "$binary" || return 1
-  done < <(reality_instance_ids)
+  [ ! -f "$NOBRAND_VLESS_CONFIG_FILE" ] || nobrand_xray_test_config "$NOBRAND_VLESS_CONFIG_FILE" "${1:-$NOBRAND_XRAY_BIN}"
 }
 
 nobrand_restore_xray_upgrade_snapshot() {
-  local snapshot="$1" had_runtime="$2" had_assets="$3" hy2_had_state="$4" vless_had_state="$5"
-  local hy2_was_active="$6" vless_was_active="$7" id
-  if [ "$had_runtime" -eq 1 ]; then
-    install -m 0755 "$snapshot/xray" "$NOBRAND_XRAY_BIN" || return 1
-  else
-    rm -f "$NOBRAND_XRAY_BIN"
-  fi
+  local snapshot="$1" had_runtime="$2" had_assets="$3" was_active="$4"
+  if [ "$had_runtime" = 1 ]; then install -m 0755 "$snapshot/xray" "$NOBRAND_XRAY_BIN" || return 1
+  else rm -f "$NOBRAND_XRAY_BIN"; fi
   nobrand_xray_asset_dir_safe || return 1
   rm -rf -- "$NOBRAND_XRAY_ASSET_DIR"
-  if [ "$had_assets" -eq 1 ]; then
-    cp -a "$snapshot/xray-assets" "$NOBRAND_XRAY_ASSET_DIR" || return 1
-  fi
-  if [ "$hy2_had_state" -eq 1 ]; then
-    cp -a "$snapshot/hy2-state" "$NOBRAND_HY2_STATE_FILE" || return 1
-  fi
-  if [ "$vless_had_state" -eq 1 ]; then
-    cp -a "$snapshot/vless-state" "$NOBRAND_VLESS_STATE_FILE" || return 1
-  fi
-  if [ -d "$snapshot/reality-states" ]; then
-    for id in "$snapshot/reality-states"/*.json; do
-      [ -f "$id" ] || continue
-      cp -a "$id" "$(reality_state_file "$(basename "$id" .json)")" || return 1
-    done
-  fi
-  if [ "$had_runtime" -eq 1 ]; then
-    [ "$hy2_was_active" -eq 0 ] \
-      || nobrand_hy2_service_action restart >/dev/null 2>&1 || true
-    [ "$vless_was_active" -eq 0 ] \
-      || nobrand_vless_sudoku_service_action restart >/dev/null 2>&1 || true
-    if [ -s "$snapshot/reality-active.ids" ]; then
-      while IFS= read -r id; do
-        [ -n "$id" ] || continue
-        reality_service_action "$id" restart >/dev/null 2>&1 || true
-      done <"$snapshot/reality-active.ids"
-    fi
-  else
-    [ "$hy2_was_active" -eq 0 ] \
-      || nobrand_hy2_service_action stop >/dev/null 2>&1 || true
-    [ "$vless_was_active" -eq 0 ] \
-      || nobrand_vless_sudoku_service_action stop >/dev/null 2>&1 || true
-    if [ -s "$snapshot/reality-active.ids" ]; then
-      while IFS= read -r id; do
-        [ -n "$id" ] || continue
-        reality_service_action "$id" stop >/dev/null 2>&1 || true
-      done <"$snapshot/reality-active.ids"
-    fi
-  fi
+  [ "$had_assets" = 0 ] || cp -a "$snapshot/xray-assets" "$NOBRAND_XRAY_ASSET_DIR" || return 1
+  [ ! -f "$snapshot/state" ] || cp -a "$snapshot/state" "$NOBRAND_VLESS_STATE_FILE" || return 1
+  [ "$was_active" = 0 ] || nobrand_vless_sudoku_service_action restart
 }
 
 nobrand_upgrade_xray_runtime() {
-  local snapshot had_runtime=0 had_assets=0 hy2_had_state=0 vless_had_state=0
-  local hy2_was_active=0 vless_was_active=0 hy2_port="" vless_port=""
-  local failed=0 id port state tmp runtime
-  nobrand_prepare_common
+  local snapshot had_runtime=0 had_assets=0 was_active=0 failed=0
+  vless_sudoku_state_exists || return 1
+  nobrand_prepare_common || return 1
   admin_lock_acquire || return 1
   snapshot="$(mktemp_dir)" || { admin_lock_release; return 1; }
-  mkdir -p "$snapshot/reality-states" || { rm -rf -- "$snapshot"; admin_lock_release; return 1; }
-  : >"$snapshot/reality-active.ids"
-  if [ -e "$NOBRAND_XRAY_BIN" ]; then
-    cp -a "$NOBRAND_XRAY_BIN" "$snapshot/xray" \
-      || { rm -rf -- "$snapshot"; admin_lock_release; return 1; }
-    had_runtime=1
+  if [ -f "$NOBRAND_XRAY_BIN" ]; then cp -a "$NOBRAND_XRAY_BIN" "$snapshot/xray" || failed=1; had_runtime=1; fi
+  if [ -d "$NOBRAND_XRAY_ASSET_DIR" ]; then cp -a "$NOBRAND_XRAY_ASSET_DIR" "$snapshot/xray-assets" || failed=1; had_assets=1; fi
+  cp -a "$NOBRAND_VLESS_STATE_FILE" "$snapshot/state" || failed=1
+  nobrand_vless_sudoku_service_active && was_active=1
+  if [ "$failed" = 0 ]; then
+    nobrand_install_xray_runtime 1 && nobrand_xray_validate_managed_configs || failed=1
+    if [ "$failed" = 0 ] && [ "$was_active" = 1 ]; then
+      nobrand_vless_sudoku_service_action restart && vless_sudoku_running || failed=1
+    fi
+    [ "$failed" != 0 ] || vless_sudoku_refresh_runtime_metadata || failed=1
   fi
-  if [ -d "$NOBRAND_XRAY_ASSET_DIR" ] && [ ! -L "$NOBRAND_XRAY_ASSET_DIR" ]; then
-    cp -a "$NOBRAND_XRAY_ASSET_DIR" "$snapshot/xray-assets" \
-      || { rm -rf -- "$snapshot"; admin_lock_release; return 1; }
-    had_assets=1
+  if [ "$failed" != 0 ]; then
+    nobrand_restore_xray_upgrade_snapshot "$snapshot" "$had_runtime" "$had_assets" "$was_active" || warn 'Sudoku runtime rollback failed'
   fi
-  if hysteria2_state_exists; then
-    cp -a "$NOBRAND_HY2_STATE_FILE" "$snapshot/hy2-state" \
-      || { rm -rf -- "$snapshot"; admin_lock_release; return 1; }
-    hy2_had_state=1
-    hy2_port="$(hysteria2_state_field listen_port)"
-  fi
-  if vless_sudoku_state_exists; then
-    cp -a "$NOBRAND_VLESS_STATE_FILE" "$snapshot/vless-state" \
-      || { rm -rf -- "$snapshot"; admin_lock_release; return 1; }
-    vless_had_state=1
-    vless_port="$(vless_sudoku_state_field listen_port)"
-  fi
-  nobrand_hy2_service_active && hy2_was_active=1
-  nobrand_vless_sudoku_service_active && vless_was_active=1
-  while IFS= read -r id; do
-    [ -n "$id" ] || continue
-    cp -a "$(reality_state_file "$id")" "$snapshot/reality-states/${id}.json" \
-      || { rm -rf -- "$snapshot"; admin_lock_release; return 1; }
-    reality_service_active "$id" && printf '%s\n' "$id" >>"$snapshot/reality-active.ids"
-  done < <(reality_instance_ids)
-
-  if ! nobrand_install_xray_runtime 1; then
-    failed=1
-  elif ! runtime="$(nobrand_xray_version 2>/dev/null)" \
-       || [ -z "$runtime" ] || [ "$runtime" != "$TESTED_XRAY_VERSION" ]; then
-    failed=1
-  elif [ "$hy2_was_active" -eq 1 ] \
-       && { ! nobrand_hy2_service_action restart \
-         || ! nb_wait_for_listener UDP "$hy2_port" 25; }; then
-    failed=1
-  elif [ "$vless_was_active" -eq 1 ] \
-       && { ! nobrand_vless_sudoku_service_action restart \
-         || ! nb_wait_for_listener TCP "$vless_port" 25; }; then
-    failed=1
-  else
-    while IFS= read -r id; do
-      [ -n "$id" ] || continue
-      port="$(reality_state_field "$id" listen_port)"
-      if ! reality_service_action "$id" restart \
-         || ! nb_wait_for_listener TCP "$port" 25 \
-         || ! reality_listener_owned_by_service "$id" "$port"; then
-        failed=1
-        break
-      fi
-    done <"$snapshot/reality-active.ids"
-  fi
-  if [ "$failed" -eq 0 ] \
-     && { ! hysteria2_refresh_runtime_metadata || ! vless_sudoku_refresh_runtime_metadata; }; then
-    failed=1
-  fi
-  if [ "$failed" -eq 0 ]; then
-    while IFS= read -r id; do
-      [ -n "$id" ] || continue
-      state="$(reality_state_file "$id")"; tmp="$(mktemp_file .reality-state)" || { failed=1; break; }
-      jq --arg runtime "$TESTED_XRAY_VERSION" --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-        '.runtime_version=$runtime | .updated_at=$updated' "$state" >"$tmp" \
-        && nb_atomic_install_file "$tmp" "$state" 0600 || failed=1
-      rm -f "$tmp"
-      [ "$failed" -eq 0 ] || break
-    done < <(reality_instance_ids)
-  fi
-  if [ "$failed" -eq 1 ]; then
-    nobrand_restore_xray_upgrade_snapshot "$snapshot" "$had_runtime" "$had_assets" \
-      "$hy2_had_state" "$vless_had_state" "$hy2_was_active" "$vless_was_active" \
-      || warn '共享 Xray runtime 回滚不完整；请立即运行 nobrand doctor'
-    rm -rf -- "$snapshot"
-    admin_lock_release
-    warn '共享 Xray 升级或活动服务验收失败，已恢复升级前 runtime/state'
-    return 1
-  fi
-
   rm -rf -- "$snapshot"
   admin_lock_release
-  t 'NoBrand 共享 Xray-core 升级完成；活动 HY2/VLESS Sudoku/VLESS REALITY 服务均已验收' \
-    'NoBrand shared Xray-core upgraded; active HY2/VLESS Sudoku/VLESS REALITY services passed acceptance'
-}
-
-nobrand_write_hy2_service() {
-  local manager tmp
-  manager="$(nb_service_manager)"
-  case "$manager" in
-    systemd)
-      tmp="$(mktemp_file .service)" || return 1
-      cat >"$tmp" <<EOF
-# Managed by NoBrand-OneClick
-[Unit]
-Description=NoBrand Hysteria2 (Xray-core)
-Documentation=https://github.com/ike-sh/NoBrand-OneClick
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=${NOBRAND_HY2_CONFIG_DIR}
-ExecStart=${NOBRAND_XRAY_BIN} run -c ${NOBRAND_HY2_CONFIG_FILE}
-Restart=on-failure
-RestartSec=5
-LimitNOFILE=1048576
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=full
-ProtectHome=true
-ReadWritePaths=${NOBRAND_HY2_CONFIG_DIR} ${NOBRAND_HY2_STATE_DIR}
-
-[Install]
-WantedBy=multi-user.target
-EOF
-      grep -qF "ExecStart=${NOBRAND_XRAY_BIN} run -c ${NOBRAND_HY2_CONFIG_FILE}" "$tmp" \
-        || { rm -f "$tmp"; return 1; }
-      install -m 0644 "$tmp" "${NOBRAND_HY2_SYSTEMD_SERVICE}.new" \
-        && mv -f "${NOBRAND_HY2_SYSTEMD_SERVICE}.new" "$NOBRAND_HY2_SYSTEMD_SERVICE" \
-        || { rm -f "$tmp" "${NOBRAND_HY2_SYSTEMD_SERVICE}.new"; return 1; }
-      rm -f "$tmp"
-      systemctl daemon-reload
-      systemctl enable "$NOBRAND_HY2_SERVICE_NAME" >/dev/null 2>&1
-      ;;
-    openrc)
-      tmp="$(mktemp_file .openrc)" || return 1
-      cat >"$tmp" <<EOF
-#!/sbin/openrc-run
-# Managed by NoBrand-OneClick
-name="NoBrand Hysteria2"
-description="NoBrand Hysteria2 (Xray-core)"
-command="${NOBRAND_XRAY_BIN}"
-command_args="run -c ${NOBRAND_HY2_CONFIG_FILE}"
-command_background=true
-pidfile="/run/nobrand-hysteria2.pid"
-output_log="/var/log/nobrand-hysteria2.log"
-error_log="/var/log/nobrand-hysteria2.err"
-depend() { use net; after firewall; }
-EOF
-      install -m 0755 "$tmp" "${NOBRAND_HY2_OPENRC_SERVICE}.new" \
-        && mv -f "${NOBRAND_HY2_OPENRC_SERVICE}.new" "$NOBRAND_HY2_OPENRC_SERVICE" \
-        || { rm -f "$tmp" "${NOBRAND_HY2_OPENRC_SERVICE}.new"; return 1; }
-      rm -f "$tmp"
-      rc-update add "$NOBRAND_HY2_SERVICE_NAME" default >/dev/null 2>&1
-      ;;
-    *) return 1 ;;
-  esac
-}
-
-nobrand_hy2_service_action() {
-  local action="$1" manager
-  manager="$(nb_service_manager)"
-  case "$manager" in
-    systemd)
-      [ "$action" != restart ] || systemctl daemon-reload
-      systemctl "$action" "$NOBRAND_HY2_SERVICE_NAME"
-      ;;
-    openrc) rc-service "$NOBRAND_HY2_SERVICE_NAME" "$action" ;;
-    *) return 1 ;;
-  esac
-}
-
-nobrand_hy2_service_active() {
-  nb_service_is_active "$NOBRAND_HY2_SERVICE_NAME" "$NOBRAND_HY2_SERVICE_NAME"
-}
-
-nobrand_remove_hy2_service() {
-  local manager
-  manager="$(nb_service_manager)"
-  nobrand_hy2_service_action stop >/dev/null 2>&1 || true
-  case "$manager" in
-    systemd)
-      systemctl disable "$NOBRAND_HY2_SERVICE_NAME" >/dev/null 2>&1 || true
-      rm -f "$NOBRAND_HY2_SYSTEMD_SERVICE"
-      systemctl daemon-reload 2>/dev/null || true
-      ;;
-    openrc)
-      rc-update del "$NOBRAND_HY2_SERVICE_NAME" default >/dev/null 2>&1 || true
-      rm -f "$NOBRAND_HY2_OPENRC_SERVICE"
-      ;;
-  esac
+  return "$failed"
 }

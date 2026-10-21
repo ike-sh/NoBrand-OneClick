@@ -25,19 +25,15 @@ assert_eq 600 "$(stat -c %a "$NOBRAND_REGISTRY_FILE")" 'schema-v3 state marker m
 assert_eq 711 "$(stat -c %a "$NOBRAND_CONFIG_DIR")" 'schema-v3 config root is traversable but not listable'
 assert_eq 711 "$(stat -c %a "$NOBRAND_SSH_CONFIG_DIR")" 'SSH config root is traversable but not listable'
 assert_eq 755 "$(stat -c %a "$NOBRAND_SSH_AUTHORIZED_KEYS_DIR")" 'sshd can traverse authorized-keys directory'
-assert_eq 700 "$(stat -c %a "$NOBRAND_TUIC_CONFIG_DIR")" 'TUIC secret config directory remains private'
-assert_eq 700 "$(stat -c %a "$NOBRAND_REALITY_STATE_DIR")" 'REALITY state instance root remains private'
-assert_eq 700 "$(stat -c %a "$NOBRAND_REALITY_CONFIG_DIR")" 'REALITY secret config instance root remains private'
 assert_eq 755 "$(stat -c %a "$NOBRAND_LIB_DIR")" 'runtime library root is service-traversable'
 assert_eq 755 "$(stat -c %a "$NOBRAND_BIN_DIR")" 'runtime binary directory is service-traversable'
-assert_eq 755 "$(stat -c %a "$NOBRAND_SNELL_RUNTIME_DIR")" 'Snell runtime directory is service-traversable'
 
 mkdir -p "$(dirname "$NOBRAND_INSTALL_SCRIPT_PATH")"
-mkdir -p "$NOBRAND_SNELL_STATE_DIR" "$NOBRAND_SNELL_CONFIG_DIR"
-printf '%s\n' '{"schema_version":3,"protocol":"snell","psk":"preserve-manager-upgrade"}' \
-  >"$NOBRAND_SNELL_STATE_DIR/preserve.json"
+mkdir -p "$NOBRAND_VLESS_STATE_DIR" "$NOBRAND_VLESS_CONFIG_DIR"
+printf '%s\n' '{"schema_version":3,"protocol":"vless-sudoku","psk":"preserve-manager-upgrade"}' \
+  >"$NOBRAND_VLESS_STATE_DIR/preserve.json"
 printf '%s\n' '[snell-server]' 'psk = preserve-manager-upgrade' \
-  >"$NOBRAND_SNELL_CONFIG_DIR/preserve.conf"
+  >"$NOBRAND_VLESS_CONFIG_DIR/preserve.conf"
 protocol_state_before="$(find "$NOBRAND_STATE_DIR" "$NOBRAND_CONFIG_DIR" -type f -print0 | sort -z | xargs -0 sha256sum)"
 require_root() { :; }
 nobrand_manager_upgrade >/dev/null

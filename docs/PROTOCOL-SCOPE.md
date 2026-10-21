@@ -1,4 +1,10 @@
-# Frozen protocol scope for 3.2 development
+# Current native protocol scope
+
+Current authority: [README](../README.md) and [rc.4 contract](SPLICORE-RC4-CONTRACT.md). Ordinary fresh installation uses one pinned Splicore v0.3.0-rc.4 runtime; legacy in-place migration is unsupported. Existing Sudoku, SSH and Forward are separate retained features.
+
+## Historical 3.2 scope (superseded)
+
+The following records the previous multi-core product contract. It is not the current installation or compatibility promise.
 
 ```text
 PROTOCOL_FEATURE_FREEZE=true

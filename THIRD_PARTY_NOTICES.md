@@ -18,11 +18,12 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 ## Other sources and runtimes
 
+- `ike-sh/Splicore` v0.3.0-rc.4 is the primary proxy core for native ordinary configurations. Public release artifacts include their own LICENSE/NOTICE/THIRD_PARTY_NOTICES and dependency notices; those upstream terms continue to apply. No Splicore binary or protocol source is vendored here.
 - Hysteria2 behavior derives from GPL-3.0 `ike-sh/Xray-OneClick`, principally `lib/57-hysteria2.sh`.
 - VLESS TCP FinalMask/Sudoku structure derives from GPL-3.0 `ike-sh/Xray-OneClick`, principally `lib/50-vless-enc.sh`; NoBrand retains the FinalMask/Sudoku transport structure but intentionally omits the VLESS Encryption key-generation and secret layer.
 - `enfein/mieru` / `mita` and `XTLS/Xray-core` follow their upstream licenses.
-- `SagerNet/sing-box` is downloaded as the official TUIC v5 server runtime and follows its upstream license. No sing-box binary is vendored here.
+- `SagerNet/sing-box` was the historical TUIC v5 server runtime. Its runtime downloader and legacy recovery path have been removed. Ordinary TUIC now uses Splicore. Upstream terms still apply; no sing-box binary is vendored here.
 - SSH Tunnel integrates with the operating system's existing OpenSSH `sshd`; NoBrand does not vendor, replace, or redistribute the OpenSSH server binary.
-- Surge Snell Server is downloaded from `dl.nssurge.com`; use follows the developer's terms. No Snell binary is vendored here.
+- Historical Surge Snell Server downloads used `dl.nssurge.com`; that downloader has been removed. Ordinary Snell now uses Splicore. No Snell binary is vendored here.
 - `zhboner/realm` is downloaded from the official GitHub Release as the optional Port Forward userspace runtime and follows the MIT License (Copyright (c) 2020 zhboner). No Realm binary is vendored here; NoBrand verifies the release digest and installs it only to its private runtime path.
 - `zywe03/realm-xwPF` (MIT, Copyright (c) 2025 zywe) was audited as a Port Forward behavior and interaction reference. No realm-xwPF source was copied, no `pf`/xwPF command is installed, and its `/etc/realm` state model is not used by NoBrand.
