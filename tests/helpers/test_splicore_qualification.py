@@ -102,7 +102,7 @@ class QualificationTests(unittest.TestCase):
         import re
         entries = re.findall(r"^  (tests/\S+\.sh)$", script, re.M) + ["tests/test_splicore_cert_lifecycle.sh", "tests/test_splicore_qualification.sh"]
         log = "".join("[RUN] " + name + "\n" for name in entries)
-        log += "[PASS] ShellCheck:\n[PASS] Generated installers\nRan 27 tests in 1s\nRan 10 tests in 1s\nRan 21 tests in 1s\nRan 13 tests in 1s\nUSER_RUNTIME_LITERAL_LEAK_COUNT=0\n[PASS] NoBrand test suite\n"
+        log += "[PASS] ShellCheck:\n[PASS] Generated installers\nRan 27 tests in 1s\nRan 10 tests in 1s\nRan 21 tests in 1s\nRan 13 tests in 1s\nRan 20 tests in 1s\nUSER_RUNTIME_LITERAL_LEAK_COUNT=0\n[PASS] NoBrand test suite\n"
         self.assertEqual(q.summarize(log, baseline)["runtime_checks"], 42)
         partial = dict(baseline, checks=dict(baseline["checks"]))
         partial["checks"].pop(next(iter(partial["checks"])))

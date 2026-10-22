@@ -71,6 +71,8 @@ class RuntimeTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="sc-")
         self.root = Path(self.temp.name)
+        if os.environ.get("NOBRAND_ROOT_FIXTURE") == "runtime-restore":
+            self.root = Path(os.environ["NOBRAND_ROOT_FIXTURE_DIR"])
         self.environment = patch.dict(os.environ, {
             "NOBRAND_SYSTEM_ROOT": str(self.root), "NOBRAND_STATE_DIR": str(self.root / "state"), "NOBRAND_CONFIG_DIR": str(self.root / "config"),
             "NOBRAND_LIB_DIR": str(self.root / "lib"), "NOBRAND_LIFECYCLE_DIR": str(self.root / "journal"),
@@ -431,9 +433,15 @@ class RuntimeTests(unittest.TestCase):
 
     def test_product_restore_snapshots_stopped_primary_and_restores_generation(self):
         import subprocess
-        # Existing product restore fixture conventions require root ownership.
-        if os.geteuid() != 0:
-            self.skipTest("product restore fixture requires root")
+        # Delegate this one fixture, with its original assertions, to the same
+        # controlled executor used by Bash fixtures. Missing root is mandatory
+        # environment failure, never a skip. The child creates its own fixture.
+        if os.environ.get("NOBRAND_ROOT_FIXTURE") != "runtime-restore":
+            from root_fixture import run_fixture
+            self.assertEqual(run_fixture("runtime-restore", quiet_success=True), 0,
+                             "mandatory restore fixture failed; inspect privilege evidence")
+            return
+        self.assertEqual(os.geteuid(), 0)
         self.environment.stop()
         self.environment = patch.dict(os.environ, {
             "NOBRAND_SYSTEM_ROOT": str(self.root),

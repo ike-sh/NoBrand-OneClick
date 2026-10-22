@@ -27,7 +27,7 @@ COMMAND_LOGS = ("actionlint", "systemd-unit", "openrc-unit", "regression")
 CLASSES = {
     "IMPLEMENTATION_DEFECT", "TEST_HARNESS_DEFECT", "CI_CONFIGURATION_DEFECT",
     "RUNNER_ENVIRONMENT", "NETWORK_TRANSIENT", "UPSTREAM_DEPENDENCY",
-    "NON_REPRODUCIBLE", "UNKNOWN",
+    "NON_REPRODUCIBLE", "UNKNOWN", "QUALIFICATION_ENVIRONMENT",
 }
 SENSITIVE = r"(?:[A-Za-z0-9_]*?(?:password|passwd|passphrase|token|secret|psk|salamander|private[_-]?key|public[_-]?key|short[_-]?ids?|uuid|authorization|credential)[A-Za-z0-9_]*|auth|username)"
 FIELD = re.compile(r"(?i)(?:[\"']?" + SENSITIVE + r"[\"']?\s*[:=]\s*)(\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^\s,}\]]+)")
@@ -171,6 +171,52 @@ def environment():
     return result
 
 
+def privilege_projection(raw):
+    """Publish only typed capability facts, never arbitrary executor JSON."""
+    fixtures = []
+    enums = {
+        "executor": {"direct-root", "sudo", "namespace", "unavailable"},
+        "fixture_requirement": {"manager-bootstrap", "root-file-ownership", "ingress-root-guard",
+                                "watchdog-root-ownership", "restore-root-ownership", "menu-root-lock-path"},
+        "outcome": {"PASS", "FIXTURE_FAILED", "UNAVAILABLE", "OPTIONAL_UNAVAILABLE", "ROOT_CONFIRMATION_FAILED", "EXECUTOR_ERROR"},
+        "classification": {"NONE", "TEST_FAILURE", "QUALIFICATION_ENVIRONMENT", "TEST_HARNESS_DEFECT", "NOT_AVAILABLE"},
+        "systemd": {"NOT_REQUESTED"}, "network_namespace": {"NOT_REQUESTED"}, "nftables": {"NOT_REQUESTED"},
+    }
+    names = {"runtime-restore", "tests/test_splicore_shell_surface.sh", "tests/test_schema_v3.sh",
+             "tests/test_ingress_profiles.sh", "tests/test_ingress_enforcement.sh",
+             "tests/test_ingress_enforcement_transaction.sh", "tests/test_ssh_tunnel.sh", "tests/test_ssh_tunnel_transaction.sh",
+             "tests/test_menu_lifecycle_lock_scope.sh"}
+    try:
+        for line in raw.splitlines():
+            row = json.loads(line)
+            if not isinstance(row, dict) or row.get("fixture") not in names:
+                continue
+            item = {"fixture": row["fixture"]}
+            for key, allowed in enums.items():
+                if isinstance(row.get(key), str) and row[key] in allowed:
+                    item[key] = row[key]
+            for key in ("euid", "exit_code"):
+                if type(row.get(key)) is int:
+                    item[key] = row[key]
+            for key in ("sudo_available", "namespace_available", "sudo_present", "namespace_present", "required_in_profile",
+                        "namespace_compatible", "fixture_started", "cleanup", "checkout_ownership_unchanged"):
+                if type(row.get(key)) is bool:
+                    item[key] = row[key]
+            item["probes"] = {}
+            probes = row.get("probes", {})
+            for name in ("sudo", "namespace"):
+                value = probes.get(name) if isinstance(probes, dict) else None
+                if isinstance(value, dict):
+                    item["probes"][name] = {k: value[k] for k in ("euid", "exit_code", "usable")
+                                              if type(value.get(k)) is (bool if k == "usable" else int)}
+            fixtures.append(item)
+    except (ValueError, TypeError):
+        pass  # Incomplete final record must not erase earlier safe evidence.
+    executors = sorted({f["executor"] for f in fixtures if "executor" in f})
+    return {"executor": executors[0] if len(executors) == 1 else "MULTIPLE" if executors else "NOT_OBSERVED",
+            "fixtures": fixtures}
+
+
 def publish(evidence):
     evidence.mkdir(parents=True, mode=0o700, exist_ok=True)
     private, public = evidence / "private", evidence / "public"
@@ -218,6 +264,9 @@ def publish(evidence):
     sha = identity()
     common = {"candidate_sha": CANDIDATE, "base_sha": BASE, "tested_ci_sha": sha,
               "qualification_exit_code": exit_code, "classification": classification}
+    privilege_path = private / "privilege.jsonl"
+    privilege = privilege_projection(read(privilege_path, missing) if privilege_path.exists() else "")
+    common["privilege"] = privilege
     if failure.get("log") == "regression.log":
         suite = suites[-1] if suites else "UNKNOWN"
         if "Traceback (most recent call last):" in regression and "tests/helpers/splicore_rc4_probe.py" in regression:
@@ -237,7 +286,7 @@ def publish(evidence):
     save(public / "summary.json", dict(common, result="PASS" if exit_code == 0 else "FAIL",
                                        qualification_result=redact(summary.get("result", "UNAVAILABLE")).strip(),
                                        missing_evidence=missing, evidence_files=list(PUBLIC_FILES)))
-    save(public / "environment-summary.json", {k: redact(v).strip() if isinstance(v, str) else v for k, v in env.items()})
+    save(public / "environment-summary.json", dict({k: redact(v).strip() if isinstance(v, str) else v for k, v in env.items()}, privilege=privilege))
     metadata = {"observed_bash_suites": [redact(s).strip() for s in suites], "observed_python_cases": [redact(c).strip() for c in cases],
                 "python_runs": [int(n) for n in re.findall(r"^Ran (\d+) tests in ", regression, re.M)],
                 "completion_marker": regression.endswith("[PASS] NoBrand test suite\n"),

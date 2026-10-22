@@ -189,6 +189,14 @@ def run_logged(arguments, log, timeout, classification="TEST_HARNESS", env=None)
             except OSError:
                 # Diagnostic write failure must not replace the command result.
                 pass
+    if result.returncode != 0 and env and env.get("NOBRAND_PRIVILEGE_EVIDENCE"):
+        path = Path(env["NOBRAND_PRIVILEGE_EVIDENCE"])
+        if path.is_file() and not path.is_symlink():
+            records = [json.loads(line) for line in path.read_text().splitlines()]
+            if any(r.get("classification") == "QUALIFICATION_ENVIRONMENT" for r in records):
+                classification = "QUALIFICATION_ENVIRONMENT"
+            elif any(r.get("classification") == "TEST_HARNESS_DEFECT" for r in records):
+                classification = "TEST_HARNESS_DEFECT"
     require(result.returncode == 0, "command failed; inspect private log: " + log.name, classification)
     return execution
 
@@ -266,7 +274,8 @@ def summarize(log, probe):
     require(set(actual_bash) == expected_bash and len(actual_bash) == len(expected_bash), "frozen Bash entrypoints missing or repeated")
     require("[PASS] ShellCheck:" in log and "[PASS] Generated installers" in log, "quality gate skipped")
     python_runs = [int(n) for n in re.findall(r"^Ran (\d+) tests in .*", log, re.M)]
-    require(len(python_runs) >= 4 and python_runs[:2] == [27, 10] and python_runs[2] >= 21 and sum(python_runs[3:]) >= 13
+    require(len(python_runs) >= 5 and python_runs[:2] == [27, 10] and python_runs[2] >= 21 and sum(python_runs[3:-1]) >= 13
+            and python_runs[-1] >= 20
             and not re.search(r"^OK \(skipped=|^FAILED|^ERROR:|^Traceback", log, re.M), "Python tests skipped, incomplete or failed")
     return {"result": "PASS", "bash_entrypoints": len(re.findall(r"^\[RUN\] ", log, re.M)),
             "python_runs": python_runs, "python_total": sum(python_runs), "runtime_checks": len(probe["checks"]),
@@ -290,8 +299,19 @@ def campaign(args, evidence):
         mihomo = artifacts / MIHOMO_NAME
         result["artifact_origin"] = "exact public HTTPS releases; verified before execution"
     env = dict(os.environ, NOBRAND_SPLICORE_PUBLIC_ARTIFACTS=str(artifacts),
-               NOBRAND_REFERENCE_MIHOMO_GZIP=str(mihomo), NOBRAND_RUNTIME_EVIDENCE_DIR=str(evidence), PYTHONDONTWRITEBYTECODE="1")
+               NOBRAND_REFERENCE_MIHOMO_GZIP=str(mihomo), NOBRAND_RUNTIME_EVIDENCE_DIR=str(evidence),
+               NOBRAND_PRIVILEGE_EVIDENCE=str(evidence / "privilege.jsonl"), PYTHONDONTWRITEBYTECODE="1")
     result["execution"] = run_logged(["bash", "scripts/test.sh", "--runtime"], evidence / "regression.log", 1800, env=env)
+    spec = importlib.util.spec_from_file_location("qualification_root_fixtures", ROOT / "tests/helpers/root_fixture.py")
+    fixtures = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fixtures)
+    records = [json.loads(line) for line in (evidence / "privilege.jsonl").read_text().splitlines()]
+    require(len(records) == len(fixtures.FIXTURES) and {r.get("fixture") for r in records} == set(fixtures.FIXTURES)
+            and all(r.get("outcome") == "PASS" and type(r.get("euid")) is int and r["euid"] == 0
+                    and r.get("fixture_started") is True and r.get("cleanup") is True
+                    and r.get("checkout_ownership_unchanged") is True for r in records),
+            "mandatory privileged fixture evidence missing or incomplete", "TEST_HARNESS_DEFECT")
+    result["privilege"] = records
     result["regression"] = summarize((evidence / "regression.log").read_text(), json.loads((evidence / "runtime-probe.json").read_text()))
     require(result["regression"]["secret_scan"] == "PASS", "secret scan completion marker missing")
     result["integrity_after"] = review_integrity()

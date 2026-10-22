@@ -1,12 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [ "$(id -u)" -ne 0 ] && [ "${NOBRAND_TEST_USER_NAMESPACE:-0}" != 1 ]; then
-  if command -v unshare >/dev/null 2>&1 && unshare --user --map-root-user true 2>/dev/null; then
-    exec env NOBRAND_TEST_USER_NAMESPACE=1 unshare --user --map-root-user bash "$0" "$@"
-  fi
-fi
-
 TEST_SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "$TEST_SCRIPT_ROOT"
 
@@ -77,7 +71,13 @@ unit_tests=(
 
 for test_file in "${unit_tests[@]}"; do
   printf '[RUN] %s\n' "$test_file"
-  bash "$test_file"
+  case "$test_file" in
+    tests/test_splicore_shell_surface.sh|tests/test_schema_v3.sh|tests/test_ingress_profiles.sh|\
+    tests/test_ingress_enforcement.sh|tests/test_ingress_enforcement_transaction.sh|\
+    tests/test_ssh_tunnel.sh|tests/test_ssh_tunnel_transaction.sh|tests/test_menu_lifecycle_lock_scope.sh)
+      PYTHONDONTWRITEBYTECODE=1 python3 tests/helpers/root_fixture.py run "$test_file" ;;
+    *) bash "$test_file" ;;
+  esac
 done
 
 if [ "$run_runtime" -eq 1 ]; then
