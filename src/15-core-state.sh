@@ -33,6 +33,8 @@ nb_schema_v3_file_valid() {
       .schema_version == $schema
       and .project == "NoBrand-OneClick"
       and .ownership == "nobrand-v3"
+      and .architecture == "splicore-native"
+      and .config_schema == 1
     ' "$path" >/dev/null 2>&1
   elif command -v python3 >/dev/null 2>&1; then
     python3 - "$path" "$NOBRAND_SCHEMA_VERSION" <<'PY' >/dev/null 2>&1
@@ -40,12 +42,16 @@ import json, sys
 doc = json.load(open(sys.argv[1], encoding="utf-8"))
 raise SystemExit(0 if doc.get("schema_version") == int(sys.argv[2])
                  and doc.get("project") == "NoBrand-OneClick"
-                 and doc.get("ownership") == "nobrand-v3" else 1)
+                 and doc.get("ownership") == "nobrand-v3"
+                 and doc.get("architecture") == "splicore-native"
+                 and doc.get("config_schema") == 1 else 1)
 PY
   else
     grep -Eq '"schema_version"[[:space:]]*:[[:space:]]*3([,}])' "$path" \
       && grep -Eq '"project"[[:space:]]*:[[:space:]]*"NoBrand-OneClick"' "$path" \
-      && grep -Eq '"ownership"[[:space:]]*:[[:space:]]*"nobrand-v3"' "$path"
+      && grep -Eq '"ownership"[[:space:]]*:[[:space:]]*"nobrand-v3"' "$path" \
+      && grep -Eq '"architecture"[[:space:]]*:[[:space:]]*"splicore-native"' "$path" \
+      && grep -Eq '"config_schema"[[:space:]]*:[[:space:]]*1([,}])' "$path"
   fi
 }
 
@@ -63,6 +69,16 @@ nb_directory_empty() (
 
 nb_directory_has_entries() {
   [ -d "$1" ] && ! nb_directory_empty "$1"
+}
+
+nb_manager_state_version_compatible() {
+  # State uses canonical stable X.Y.Z, without a tag prefix or leading zeroes.
+  # Release major bounds the writer; native architecture/ownership/schema are
+  # checked separately. Unreleased native 3.x state is not a v4 migration path.
+  local version="${1:-}" numeric='(0|[1-9][0-9]*)'
+  [[ "$version" =~ ^${numeric}[.]${numeric}[.]${numeric}$ ]] \
+    && [[ "$SCRIPT_VERSION" =~ ^${numeric}[.]${numeric}[.]${numeric}$ ]] \
+    && [ "${version%%.*}" = "${SCRIPT_VERSION%%.*}" ]
 }
 
 nb_installed_manager_version() {
@@ -338,25 +354,12 @@ nb_lifecycle_tx_valid() {
     secure_stat_path "$NOBRAND_LIFECYCLE_DIR" dir || return 1
     secure_stat_path "$path" file || return 1
   fi
+  nb_splicore_legacy_preflight >/dev/null 2>&1 || return 1
+  if [ -e "$NOBRAND_REGISTRY_FILE" ] || [ -L "$NOBRAND_REGISTRY_FILE" ]; then
+    nb_schema_v3_file_valid || return 1
+  fi
   format="$(nb_lifecycle_field FORMAT "$path")"
   case "$format" in
-    nobrand-lifecycle-v1)
-      awk -F= '
-        BEGIN {
-          required["FORMAT"]=1; required["OPERATION"]=1; required["STATUS"]=1;
-          required["MANAGER_VERSION"]=1; required["SCHEMA_GENERATION"]=1;
-          required["TRANSACTION_ID"]=1; required["STARTED_AT"]=1;
-          required["LAST_COMPLETED_PHASE"]=1; required["MIERU_OWNED"]=1;
-          required["MIERU_PRESERVE_PACKAGE"]=1; required["MIERU_PRESERVE_USER"]=1;
-          required["MIERU_PRESERVE_GROUP"]=1; required["MIERU_PRESERVE_SHARED"]=1
-        }
-        NF != 2 || !($1 in required) || seen[$1]++ { bad=1 }
-        END {
-          for (key in required) if (seen[key] != 1) bad=1
-          exit bad ? 1 : 0
-        }
-      ' "$path" || return 1
-      ;;
     nobrand-lifecycle-v2)
       awk -F= '
         BEGIN {
@@ -392,17 +395,11 @@ nb_lifecycle_tx_valid() {
   preserve_group="$(nb_lifecycle_field MIERU_PRESERVE_GROUP "$path")"
   preserve_shared="$(nb_lifecycle_field MIERU_PRESERVE_SHARED "$path")"
   case "$operation" in install|repair|configure|uninstall) ;; *) return 1 ;; esac
-  [ "$format" != nobrand-lifecycle-v1 ] || {
-    case "$operation" in install|repair|uninstall) ;; *) return 1 ;; esac
-  }
   nb_lifecycle_scope_valid "$operation" "$scope" || return 1
   case "$mutation_started" in 0|1) ;; *) return 1 ;; esac
   case "$status" in in-progress|complete) ;; *) return 1 ;; esac
   [ "$operation:$status" != uninstall:complete ] || return 1
-  case "$manager" in
-    3.2.*) ;;
-    *) return 1 ;;
-  esac
+  nb_manager_state_version_compatible "$manager" || return 1
   [ "$schema" = "$NOBRAND_SCHEMA_VERSION" ] || return 1
   [[ "$txid" =~ ^[A-Za-z0-9._-]{8,128}$ ]] || return 1
   [[ "$started" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || return 1
@@ -461,6 +458,7 @@ nb_lifecycle_write() {
   [ "$operation:$scope" = uninstall:global ] \
     || [ "$mieru_owned:$preserve_package:$preserve_user:$preserve_group:$preserve_shared" = 0:0:0:0:0 ] \
     || return 1
+  nb_manager_state_version_compatible "$SCRIPT_VERSION" || return 1
   nb_lifecycle_prepare_dir || return 1
   tmp="$(mktemp "${NOBRAND_LIFECYCLE_DIR}/.transaction.XXXXXX")" || return 1
   if ! printf '%s\n' \
@@ -505,6 +503,11 @@ nb_lifecycle_begin() {
     return 0
   }
   if ! nb_test_mode_enabled && [ "$(id -u 2>/dev/null || printf 1)" -ne 0 ]; then
+    return 1
+  fi
+  if { [ -e "$NOBRAND_LIFECYCLE_TX_FILE" ] || [ -L "$NOBRAND_LIFECYCLE_TX_FILE" ]; } \
+     && ! nb_lifecycle_tx_valid; then
+    nb_fail_ambiguous_state
     return 1
   fi
   if nb_lifecycle_tx_valid && [ "$(nb_lifecycle_field STATUS)" = in-progress ]; then
@@ -927,12 +930,9 @@ nb_classify_installation_state() {
       fi
     fi
   done
-  if [ "$lifecycle_valid" -eq 1 ]; then
-    case "$manager_version" in
-      ''|3.2.*) ;;
-      3.0.*|3.1.*) printf 'LEGACY_UNSUPPORTED'; return 0 ;;
-      *) printf 'AMBIGUOUS_OR_FOREIGN'; return 0 ;;
-    esac
+  if [ -n "$manager_version" ] && ! nb_manager_state_version_compatible "$manager_version"; then
+    printf 'AMBIGUOUS_OR_FOREIGN'
+    return 0
   fi
   if nb_legacy_state_detected; then
     if [ "$current_evidence" -eq 1 ]; then
@@ -952,7 +952,7 @@ nb_classify_installation_state() {
        && [ "$(nb_lifecycle_field STATUS)" = in-progress ] \
        && [ "$(nb_lifecycle_field OPERATION)" != repair ]; then
       printf 'AMBIGUOUS_OR_FOREIGN'
-    elif [ "$schema_valid" -eq 1 ] || [[ "$manager_version" == 3.2.* ]]; then
+    elif [ "$schema_valid" -eq 1 ] || nb_manager_state_version_compatible "$manager_version"; then
       printf 'CURRENT_PARTIAL_REPAIR'
     else
       printf 'AMBIGUOUS_OR_FOREIGN'
@@ -979,27 +979,19 @@ nb_classify_installation_state() {
     return 0
   fi
   if [ "$schema_valid" -eq 1 ]; then
-    case "$manager_version" in
-      3.0.*|3.1.*) printf 'LEGACY_UNSUPPORTED' ;;
-      3.2.*)
-        if [ -n "$canonical_manager_version" ] \
-           && [ "$manager_command_valid" -eq 1 ] \
-           && [ "$short_command_valid" -eq 1 ]; then
-          printf 'CURRENT_COMPLETE'
-        else
-          printf 'CURRENT_PARTIAL_INSTALL'
-        fi
-        ;;
-      '') printf 'CURRENT_PARTIAL_INSTALL' ;;
-      *) printf 'AMBIGUOUS_OR_FOREIGN' ;;
-    esac
+    if [ -n "$canonical_manager_version" ] \
+       && [ "$manager_command_valid" -eq 1 ] \
+       && [ "$short_command_valid" -eq 1 ]; then
+      printf 'CURRENT_COMPLETE'
+    else
+      printf 'CURRENT_PARTIAL_INSTALL'
+    fi
     return 0
   fi
-  if [[ "$manager_version" == 3.2.* ]] \
+  if nb_manager_state_version_compatible "$manager_version" \
      && [ -d "$NOBRAND_STATE_DIR" ] && nb_directory_empty "$NOBRAND_STATE_DIR"; then
-    # Public v3.2.0 removed this root's contents before an unguarded scan of a
-    # possibly absent config root. The still-installed compatible 3.2 manager
-    # is positive current identity even after the installer advances to 3.2.1.
+    # A compatible native manager can survive removal of the state contents.
+    # Architecture refusal still precedes this partial-uninstall recovery path.
     printf 'CURRENT_PARTIAL_UNINSTALL'
     return 0
   fi
@@ -1029,8 +1021,8 @@ nb_fail_legacy_state() {
 
 nb_fail_ambiguous_state() {
   die "$(t \
-    '检测到无法确认归属的已有安装数据。为避免覆盖现有配置，本次操作已停止。' \
-    'Existing installation data has ambiguous ownership; this operation stopped to avoid overwriting it.')" || return 1
+    '现有 NoBrand 生命周期版本、架构或 schema 不受支持，或归属无法确认；操作已停止。请使用匹配版本检查/备份，勿覆盖现有状态。' \
+    'Unsupported NoBrand lifecycle state version, architecture or schema, or ambiguous ownership; operation stopped. Inspect/back up with the matching manager version before changing existing state.')" || return 1
 }
 
 nb_install_state_notice() {

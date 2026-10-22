@@ -29,6 +29,35 @@ class QualificationTests(unittest.TestCase):
         self.assertEqual(result["historical_reports"], 16)
         with self.assertRaises(q.QualificationFailure): q.frozen_integrity()
 
+    def test_lifecycle_fix_accepts_only_exact_reviewed_state_bytes(self):
+        self.assertEqual(set(q.lifecycle_fix_integrity()), {"src/15-core-state.sh"})
+        scope = (ROOT / "tests/fixtures/splicore-rc4-lifecycle-fix.json").read_bytes()
+        for replacement in (b"unauthorized lifecycle change", None, "symlink"):
+            with self.subTest(replacement=replacement), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                path = root / "src/15-core-state.sh"
+                path.parent.mkdir()
+                fixture = root / "tests/fixtures/splicore-rc4-lifecycle-fix.json"
+                fixture.parent.mkdir(parents=True)
+                fixture.write_bytes(scope)
+                if replacement == "symlink":
+                    path.symlink_to(ROOT / "src/15-core-state.sh")
+                elif replacement is not None:
+                    path.write_bytes(replacement)
+                with patch.object(q, "ROOT", root), self.assertRaises(q.QualificationFailure):
+                    q.lifecycle_fix_integrity()
+
+    def test_lifecycle_fix_cannot_exempt_other_product_paths(self):
+        scope = json.loads((ROOT / "tests/fixtures/splicore-rc4-lifecycle-fix.json").read_text())
+        for field, value in (("base_commit", q.BASE), ("product_files", {"src/05-constants.sh": "0" * 64})):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                path = root / "tests/fixtures/splicore-rc4-lifecycle-fix.json"
+                path.parent.mkdir(parents=True)
+                path.write_text(json.dumps(dict(scope, **{field: value})))
+                with patch.object(q, "ROOT", root), self.assertRaises(q.QualificationFailure):
+                    q.lifecycle_fix_integrity()
+
     def test_changed_missing_and_symlink_files_reject(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

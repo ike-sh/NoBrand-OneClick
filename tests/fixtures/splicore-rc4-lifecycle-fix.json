@@ -1,0 +1,7 @@
+{
+  "base_commit": "326a3566447b7fb0834affbaee43cfa9594dc1e0",
+  "phase": "lifecycle-manager-version-fix",
+  "product_files": {
+    "src/15-core-state.sh": "f30c5f64c0c1b3410118091cd03f3619b1b53ac39f40fe1b6c7bfbe1f316e54b"
+  }
+}

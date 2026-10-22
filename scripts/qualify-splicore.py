@@ -81,7 +81,18 @@ def verify_files(root, hashes):
         require(hashlib.sha256(path.read_bytes()).hexdigest() == expected, "protected file changed: " + name)
 
 
-def frozen_integrity(allow_certificate_fix=False):
+def lifecycle_fix_integrity():
+    """Accept the reviewed lifecycle fix by exact bytes, never a path exemption."""
+    scope = json.loads((ROOT / "tests/fixtures/splicore-rc4-lifecycle-fix.json").read_text())
+    require(scope["base_commit"] == "326a3566447b7fb0834affbaee43cfa9594dc1e0"
+            and scope["phase"] == "lifecycle-manager-version-fix"
+            and set(scope["product_files"]) == {"src/15-core-state.sh"}, "lifecycle fix scope differs")
+    verify_files(ROOT, scope["product_files"])
+    return scope["product_files"]
+
+
+def frozen_integrity(allow_certificate_fix=False, allow_lifecycle_fix=False):
+    lifecycle = lifecycle_fix_integrity() if allow_lifecycle_fix else {}
     manifest = json.loads((ROOT / "tests/fixtures/splicore-rc4-frozen.json").read_text())
     require(manifest["frozen_commit"] == BASE and manifest["sole_parent"] == PARENT, "wrong frozen baseline")
     require(git("rev-list", "--parents", "-n", "1", BASE).decode().split() == [BASE, PARENT], "frozen commit identity differs")
@@ -106,16 +117,17 @@ def frozen_integrity(allow_certificate_fix=False):
         require(hashlib.sha256(raw[end + 1:end + 1 + size]).hexdigest() == hashes[name], "manifest differs from frozen Git bytes: " + name)
         offset = end + size + 2
     permitted = {"runtime/splicore.py", "install-nobrand.sh", "dist/install-nobrand.sh"} if allow_certificate_fix else set()
+    permitted.update(lifecycle)
     verify_files(ROOT, {p: h for p, h in hashes.items() if p not in permitted})
     changed = [p for p in sorted(permitted) if hashlib.sha256((ROOT / p).read_bytes()).hexdigest() != hashes[p]]
     return {"product_files": len(manifest["product_files"]), "protected_reports": len(manifest["protected_reports"]),
             "historical_reports": len(manifest["historical_reports"]), "changed": len(changed),
-            "authorized_product_changes": changed, "result": "PASS"}
+            "authorized_product_changes": changed, "lifecycle_fix_files": sorted(lifecycle), "result": "PASS"}
 
 
 def review_integrity():
-    """Authorized Fix Phase: preserve the baseline and constrain product scope."""
-    result = frozen_integrity(allow_certificate_fix=True)
+    """Preserve the reviewed certificate/lifecycle fixes by exact scope."""
+    result = frozen_integrity(allow_certificate_fix=True, allow_lifecycle_fix=True)
     scope = json.loads((ROOT / "tests/fixtures/splicore-rc4-cert-fix.json").read_text())
     require(scope["frozen_commit"] == BASE and set(scope["permitted_product_paths"]) ==
             {"runtime/splicore.py", "install-nobrand.sh", "dist/install-nobrand.sh"}, "certificate fix scope differs")
@@ -129,7 +141,7 @@ def review_integrity():
     verify_files(ROOT, scope["preserved_qualification_files"])
     run = subprocess.run(["bash", "scripts/build.sh", "--check"], cwd=ROOT, capture_output=True, timeout=60)
     require(run.returncode == 0, "generated installers differ from reviewed runtime")
-    result.update(scope="AUTHORIZED CERTIFICATE FIX ONLY", unapproved_changes=0,
+    result.update(scope="REVIEWED CERTIFICATE + LIFECYCLE FIXES", unapproved_changes=0,
                   preserved_qualification_files=len(scope["preserved_qualification_files"]))
     return result
 
