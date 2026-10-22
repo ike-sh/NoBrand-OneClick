@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BASE = "b5440ec41aeed2dd266b3a7008f75a26de63add2"
 PARENT = "f98cf70e7159c07826101676a4a08394f0a203f9"
 CHECKOUT = "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"
+UPLOAD = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
 MIHOMO_NAME = "mihomo-linux-amd64-v1.19.30.gz"
 MIHOMO_SHA = "cf06ce2c7d1421bdbda14ee4a5b6046672dc35ebf8eecd8e77504ec3c0ed9a84"
 SPEC = importlib.util.spec_from_file_location("qualification_runtime", ROOT / "runtime/splicore.py")
@@ -143,12 +144,24 @@ def workflow_contract(text):
     require(job["runs-on"] == "ubuntu-24.04" and 1 <= int(job["timeout-minutes"]) <= 40, "runner or timeout differs")
     require(not any(k in job for k in ("container", "services", "permissions", "environment")), "unexpected job privilege or external service")
     steps = job["steps"]
-    require([s["uses"] for s in steps if "uses" in s] == [CHECKOUT], "action identity is not the reviewed SHA")
+    require([s["uses"] for s in steps if "uses" in s] == [CHECKOUT, UPLOAD], "action identity is not the reviewed SHA")
     checkout = next(s for s in steps if "uses" in s)
     require(checkout["with"] == {"fetch-depth": "0", "persist-credentials": "false"}, "checkout must fetch baseline and discard credentials")
     joined = "\n".join(s.get("run", "") for s in steps)
-    require('python3 scripts/qualify-splicore.py ci --evidence "$RUNNER_TEMP/nobrand-rc4"' in joined, "CI entrypoint missing")
-    require("git diff --exit-code" in joined, "CI generated-file mutation guard missing")
+    require('python3 scripts/ci-diagnostics.py run --evidence "$RUNNER_TEMP/nobrand-rc4"' in joined, "CI entrypoint missing")
+    require(not any("continue-on-error" in s for s in steps), "CI must propagate failures")
+    for name in ("Publish sanitized diagnostics", "Upload sanitized qualification evidence", "Propagate qualification exit status"):
+        require(next((s.get("if") for s in steps if s.get("name") == name), None) == "always()", "diagnostics/final status must always run")
+    require(next(s.get("run") for s in steps if s.get("name") == "Publish sanitized diagnostics") ==
+            'python3 scripts/ci-diagnostics.py publish --evidence "$RUNNER_TEMP/nobrand-rc4"', "sanitized publisher missing")
+    require(steps[-1].get("run") == 'python3 scripts/ci-diagnostics.py finish --evidence "$RUNNER_TEMP/nobrand-rc4"', "final exit propagation missing")
+    upload = next(s for s in steps if s.get("uses") == UPLOAD)
+    spec = importlib.util.spec_from_file_location("ci_contract_diagnostics", ROOT / "scripts/ci-diagnostics.py")
+    diagnostics = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(diagnostics)
+    require(upload["with"]["path"].splitlines() == ["${{ runner.temp }}/nobrand-rc4/public/" + p for p in diagnostics.PUBLIC_FILES], "artifact must list only reviewed public files")
+    require(upload["with"].get("if-no-files-found") == "error" and upload["with"].get("include-hidden-files", "false") == "false", "missing/hidden artifact policy differs")
+    require("git diff --exit-code --quiet" in joined, "CI generated-file mutation guard must fail without exposing raw diffs")
     require("actionlint/cmd/actionlint@v1.7.7" in joined, "workflow validator is not pinned")
     require(not re.search(r"\b(?:docker|podman|redis-cli|teleledger)\b|self-hosted|\b(?:git push|gh release|git tag)\b|\b(?:reboot|systemctl|nft)\s", text, re.I), "forbidden host/service/publication action")
     require(not re.search(r"\b(?:secrets|id-token|write-all)\b|(?:releases/latest|latest/download)|curl[^\n]*\|\s*(?:ba)?sh|@(?:main|master)\b", text), "secret, mutable artifact or unverified execution")
@@ -158,14 +171,26 @@ def workflow_contract(text):
 
 def run_logged(arguments, log, timeout, classification="TEST_HARNESS", env=None):
     started = timestamp()
+    execution = {"command": [str(a) for a in arguments], "started_utc": started, "exit_code": None}
+    # Private command metadata survives a failed campaign; no stdout or argv is
+    # exposed here. The CI publisher projects and sanitizes this evidence.
     with log.open("wb") as stream:
         try:
             result = subprocess.run([str(a) for a in arguments], cwd=ROOT, env=env,
                                     stdout=stream, stderr=subprocess.STDOUT, timeout=timeout)
+            execution["exit_code"] = result.returncode
         except subprocess.TimeoutExpired as exc:
+            execution["timed_out"] = True
             raise QualificationFailure("INFRASTRUCTURE", "bounded command timeout; inspect private log: " + log.name) from exc
+        finally:
+            execution["finished_utc"] = timestamp()
+            try:
+                sc.save(log.with_suffix(".command.json"), execution)
+            except OSError:
+                # Diagnostic write failure must not replace the command result.
+                pass
     require(result.returncode == 0, "command failed; inspect private log: " + log.name, classification)
-    return {"command": [str(a) for a in arguments], "exit_code": result.returncode, "started_utc": started, "finished_utc": timestamp()}
+    return execution
 
 
 def static_checks(evidence, strict=False):

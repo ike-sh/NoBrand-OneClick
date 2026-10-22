@@ -32,8 +32,28 @@ jobs:
       - name: Validate frozen product, workflow, public artifacts and regression
         env:
           PYTHONDONTWRITEBYTECODE: "1"
-        run: python3 scripts/qualify-splicore.py ci --evidence "$RUNNER_TEMP/nobrand-rc4"
+        run: python3 scripts/ci-diagnostics.py run --evidence "$RUNNER_TEMP/nobrand-rc4"
       - name: Reject generated or other tracked file changes
-        run: git diff --exit-code
-      - name: Display sanitized qualification summary
-        run: cat "$RUNNER_TEMP/nobrand-rc4/summary.json"
+        if: always()
+        run: git diff --exit-code --quiet
+      - name: Publish sanitized diagnostics
+        if: always()
+        run: python3 scripts/ci-diagnostics.py publish --evidence "$RUNNER_TEMP/nobrand-rc4"
+      - name: Upload sanitized qualification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: splicore-rc4-ci-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            ${{ runner.temp }}/nobrand-rc4/public/summary.json
+            ${{ runner.temp }}/nobrand-rc4/public/failure-summary.json
+            ${{ runner.temp }}/nobrand-rc4/public/regression.sanitized.log
+            ${{ runner.temp }}/nobrand-rc4/public/qualification-console.sanitized.log
+            ${{ runner.temp }}/nobrand-rc4/public/command-diagnostics.sanitized.log
+            ${{ runner.temp }}/nobrand-rc4/public/environment-summary.json
+            ${{ runner.temp }}/nobrand-rc4/public/test-result-metadata.json
+      - name: Propagate qualification exit status
+        if: always()
+        run: python3 scripts/ci-diagnostics.py finish --evidence "$RUNNER_TEMP/nobrand-rc4"
