@@ -23,6 +23,56 @@ spec.loader.exec_module(d)
 
 
 class QualificationTests(unittest.TestCase):
+    def v4_metadata_fixture(self, root):
+        for name, (old, new) in q.V4_METADATA_FIELDS.items():
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(q.git("show", q.PRODUCT_BASE + ":" + name).replace(old, new, 1))
+
+    def test_v4_release_accepts_exact_metadata_without_changing_frozen_manifest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.v4_metadata_fixture(root)
+            with patch.object(q, "ROOT", root):
+                # Git baseline retrieval still uses the real frozen repository.
+                with patch.object(q, "git", side_effect=lambda *a: subprocess.check_output(["git", *a], cwd=ROOT)):
+                    self.assertEqual(set(q.v4_metadata_integrity()), set(q.V4_METADATA_FIELDS))
+
+    def test_v4_release_rejects_unrelated_product_edits_in_every_metadata_file(self):
+        for name in q.V4_METADATA_FIELDS:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self.v4_metadata_fixture(root)
+                path = root / name
+                path.write_bytes(path.read_bytes() + b"\nunauthorized product change\n")
+                with patch.object(q, "ROOT", root), patch.object(q, "git", side_effect=lambda *a: subprocess.check_output(["git", *a], cwd=ROOT)):
+                    with self.assertRaises(q.QualificationFailure): q.v4_metadata_integrity()
+
+    def test_v4_release_rejects_old_or_other_version_in_every_metadata_file(self):
+        for name, (old, new) in q.V4_METADATA_FIELDS.items():
+            for value in (old, new.replace(b"4.0.0", b"4.0.1")):
+                with self.subTest(name=name, value=value), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    self.v4_metadata_fixture(root)
+                    path = root / name
+                    path.write_bytes(path.read_bytes().replace(new, value, 1))
+                    with patch.object(q, "ROOT", root), patch.object(q, "git", side_effect=lambda *a: subprocess.check_output(["git", *a], cwd=ROOT)):
+                        with self.assertRaises(q.QualificationFailure): q.v4_metadata_integrity()
+
+    def test_v4_release_rejects_missing_and_symlink_metadata_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.v4_metadata_fixture(root)
+            path = root / "src/05-constants.sh"
+            original = path.read_bytes()
+            path.unlink()
+            with patch.object(q, "ROOT", root), patch.object(q, "git", side_effect=lambda *a: subprocess.check_output(["git", *a], cwd=ROOT)):
+                with self.assertRaises(q.QualificationFailure): q.v4_metadata_integrity()
+                target = root / "other"
+                target.write_bytes(original)
+                path.symlink_to(target)
+                with self.assertRaises(q.QualificationFailure): q.v4_metadata_integrity()
+
     def test_frozen_identity_and_all_protected_bytes(self):
         result = q.review_integrity()
         self.assertEqual(result["unapproved_changes"], 0)

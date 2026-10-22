@@ -1141,7 +1141,7 @@ class Runtime:
                 try:
                     with tarfile.open(temporary, "w:gz") as archive:
                         if unified:
-                            text = ("project=NoBrand-OneClick\nversion=" + os.environ.get("SCRIPT_VERSION", "3.2.6")
+                            text = ("project=NoBrand-OneClick\nversion=" + os.environ.get("SCRIPT_VERSION", "4.0.0")
                                     + "\nschema_version=3\nownership=nobrand-v3\ncontents=state,config\n")
                             info = tarfile.TarInfo("manifest.txt")
                             info.size, info.mode = len(text.encode()), 0o600
@@ -2012,7 +2012,7 @@ NOBRAND_SPLICORE_PY
 set -euo pipefail
 umask 077
 
-SCRIPT_VERSION="3.2.6"
+SCRIPT_VERSION="4.0.0"
 SCRIPT_AUTHOR="ike"
 SCRIPT_NAME="NoBrand-OneClick"
 SCRIPT_REPO="ike-sh/NoBrand-OneClick"
@@ -6629,7 +6629,7 @@ nobrand_version() {
 
 nobrand_usage() {
   cat <<EOF
-NoBrand-OneClick 3.2.6 — Multi-Ingress / Mieru / Snell v4-v5 / Hysteria2 / TUIC v5 / VLESS REALITY / VLESS + FinalMask + Sudoku / SSH Tunnel / Port Forward
+NoBrand-OneClick 4.0.0 — Multi-Ingress / Mieru / Snell v4-v5 / Hysteria2 / TUIC v5 / VLESS REALITY / VLESS + FinalMask + Sudoku / SSH Tunnel / Port Forward
 
 用法:
   nobrand                         打开统一菜单

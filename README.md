@@ -1,10 +1,20 @@
 # NoBrand-OneClick
 
-新版以 **Splicore v0.3.0-rc.4** 为普通代理协议的唯一主运行时，NoBrand 负责安装、配置、客户端输出和生命周期管理。当前架构已在本地 Freeze，尚未发布；见[冻结报告](docs/reports/SPLICORE_RC4_FRESH_ARCHITECTURE_FREEZE_REPORT.md)。
+**v4.0.0 是 Splicore-native 架构的首个正式版本。** 普通代理协议以固定的 **Splicore v0.3.0-rc.4** 为唯一主运行时，NoBrand 负责安装、配置、客户端输出和生命周期管理。
 
-当前稳定版本：[v3.2.6](https://github.com/ike-sh/NoBrand-OneClick/releases/tag/v3.2.6)。该已发布版本属于旧架构；本工作区暂时保留管理器版本号 3.2.6，新架构发布版本号将在后续发布准备时确定。
+当前稳定版本：[v4.0.0](https://github.com/ike-sh/NoBrand-OneClick/releases/tag/v4.0.0)。更新内容见 [CHANGELOG](CHANGELOG.md)。
 
-**需要干净安装。旧版 NoBrand 多 Core 安装不支持原地升级、自动迁移或由新版卸载。** 检测到 NoBrand 拥有的旧状态、二进制或服务时，在创建锁、安装依赖、下载和服务操作前拒绝。请使用对应旧版备份客户端信息并卸载，然后新装并导入新生成的客户端配置。第三方独立安装的同名软件不会被当作 NoBrand 资源。
+## 重要升级说明：v3.x → v4.0.0
+
+**需要干净安装。旧版 NoBrand 多 Core 安装不支持原地升级、自动迁移或由新版直接卸载／转换。**
+
+1. 使用原 3.x 版本保存／导出现有客户端信息。
+2. 使用对应旧版本完成卸载。
+3. 确认旧 NoBrand-owned runtime、service 和 state 已清理。
+4. 使用 v4.0.0 干净安装。
+5. 使用 v4.0.0 重新生成并导入客户端配置。
+
+检测到 NoBrand 拥有的旧状态、二进制或服务时，新版在创建锁、安装依赖、下载和服务操作前拒绝。第三方独立安装的同名软件不会被当作 NoBrand 资源。
 
 ## 当前协议范围
 
@@ -23,10 +33,20 @@ Mieru 流量伪装、低熵、配额、到期、tc 限速及独立 Mita 版本�
 
 ## 安装和管理
 
-使用维护者审核过的本地单文件安装器。本工作区没有发布本轮变更，不要把线上旧版安装器当作新架构。
+从 GitHub Latest Release 下载正式单文件安装器，再执行安装：
 
 ```bash
+curl -fsSLO https://github.com/ike-sh/NoBrand-OneClick/releases/latest/download/install-nobrand.sh
 sudo bash install-nobrand.sh
+```
+
+也可从 [v4.0.0 Release](https://github.com/ike-sh/NoBrand-OneClick/releases/tag/v4.0.0) 下载 `install-nobrand.sh` 和 `SHA256SUMS`，在同一目录执行 `sha256sum -c SHA256SUMS` 后安装。
+
+Alpine Linux 请先安装 `bash` 与 `curl`，然后以 root 身份执行 `bash install-nobrand.sh`。
+
+管理命令与示例配置：
+
+```bash
 # 也可先安装管理命令
 sudo bash install-nobrand.sh manager install
 sudo nobrand mieru install --user primary --port 31001 --advertise-host entry.example -y
@@ -74,7 +94,15 @@ bash scripts/build.sh
 bash scripts/test.sh
 ```
 
-完整测试在临时目录运行；普通用户可在可用的 Linux user namespace 中以映射 root 运行 fixture。真实公开 rc.4 二进制的回环资格见[验收报告](docs/reports/SPLICORE_RC4_FRESH_ARCHITECTURE_REPORT.md)。原生 systemd、OpenRC、arm64 运行及 nftables 端口范围资格仍为 PENDING / NOT CERTIFIED；不操作开发机网络规则或生产环境。
+自动回归覆盖 30 个 Bash 入口、112 项 Python 测试、42 项真实 rc.4 回环 runtime 检查和 113 个 shell 语法检查；同时执行 ShellCheck、构建一致性、脱敏扫描及 GitHub Actions。普通测试保持调用者身份，九个必需 fixture 边界使用已验证的直接 root、非交互 sudo 或兼容 user namespace。真实流量结果及其范围见[验收报告](docs/reports/SPLICORE_RC4_FRESH_ARCHITECTURE_REPORT.md)。
+
+测试范围与当前限制：
+
+- 专用原生 Linux amd64 systemd 安装／破坏性生命周期／真实 reboot 资格尚未单独完成；回环结果不等同于实机 reboot 认证。
+- arm64 公开 artifact 已有构建与静态检查，runtime 资格尚未完成。
+- OpenRC adapter 与模板受支持，原生运行资格仍待独立环境。
+- HY2 Gecko 与端口跳跃／nftables 端口范围未在 NoBrand 当前界面开放。
+- GitHub Actions 的 Node runtime 警告是非阻断维护事项。
 
 - [安装、升级、FAQ 与排查](docs/SPLICORE-MIGRATION.md)
 - [公开 rc.4 合同](docs/SPLICORE-RC4-CONTRACT.md)

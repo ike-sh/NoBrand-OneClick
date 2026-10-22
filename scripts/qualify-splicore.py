@@ -24,6 +24,15 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 BASE = "b5440ec41aeed2dd266b3a7008f75a26de63add2"
 PARENT = "f98cf70e7159c07826101676a4a08394f0a203f9"
+PRODUCT_BASE = "e90695ba8d2ac98a443d6aa53edd7653356377b2"
+# Test expectations for this authorized release, not another product version
+# source. Each entire file must equal its frozen bytes plus this one field edit.
+V4_METADATA_FIELDS = {
+    "src/05-constants.sh": (b'SCRIPT_VERSION="3.2.6"', b'SCRIPT_VERSION="4.0.0"'),
+    "src/18-core-nodes.sh": ("NoBrand-OneClick 3.2.6 —".encode(), "NoBrand-OneClick 4.0.0 —".encode()),
+    "runtime/splicore.py": (b'os.environ.get("SCRIPT_VERSION", "3.2.6")',
+                            b'os.environ.get("SCRIPT_VERSION", "4.0.0")'),
+}
 CHECKOUT = "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"
 UPLOAD = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
 MIHOMO_NAME = "mihomo-linux-amd64-v1.19.30.gz"
@@ -81,6 +90,17 @@ def verify_files(root, hashes):
         require(hashlib.sha256(path.read_bytes()).hexdigest() == expected, "protected file changed: " + name)
 
 
+def v4_metadata_integrity():
+    """Allow only the three exact release fields, keeping product bytes frozen."""
+    expected = {}
+    for name, (old, new) in V4_METADATA_FIELDS.items():
+        original = git("show", PRODUCT_BASE + ":" + name)
+        require(original.count(old) == 1, "release metadata baseline field differs: " + name)
+        expected[name] = hashlib.sha256(original.replace(old, new, 1)).hexdigest()
+    verify_files(ROOT, expected)
+    return expected
+
+
 def lifecycle_fix_integrity():
     """Accept the reviewed lifecycle fix by exact bytes, never a path exemption."""
     scope = json.loads((ROOT / "tests/fixtures/splicore-rc4-lifecycle-fix.json").read_text())
@@ -91,7 +111,8 @@ def lifecycle_fix_integrity():
     return scope["product_files"]
 
 
-def frozen_integrity(allow_certificate_fix=False, allow_lifecycle_fix=False):
+def frozen_integrity(allow_certificate_fix=False, allow_release_metadata=False, allow_lifecycle_fix=False):
+    metadata = v4_metadata_integrity() if allow_release_metadata else {}
     lifecycle = lifecycle_fix_integrity() if allow_lifecycle_fix else {}
     manifest = json.loads((ROOT / "tests/fixtures/splicore-rc4-frozen.json").read_text())
     require(manifest["frozen_commit"] == BASE and manifest["sole_parent"] == PARENT, "wrong frozen baseline")
@@ -117,23 +138,30 @@ def frozen_integrity(allow_certificate_fix=False, allow_lifecycle_fix=False):
         require(hashlib.sha256(raw[end + 1:end + 1 + size]).hexdigest() == hashes[name], "manifest differs from frozen Git bytes: " + name)
         offset = end + size + 2
     permitted = {"runtime/splicore.py", "install-nobrand.sh", "dist/install-nobrand.sh"} if allow_certificate_fix else set()
+    permitted.update(metadata)
     permitted.update(lifecycle)
     verify_files(ROOT, {p: h for p, h in hashes.items() if p not in permitted})
     changed = [p for p in sorted(permitted) if hashlib.sha256((ROOT / p).read_bytes()).hexdigest() != hashes[p]]
     return {"product_files": len(manifest["product_files"]), "protected_reports": len(manifest["protected_reports"]),
             "historical_reports": len(manifest["historical_reports"]), "changed": len(changed),
-            "authorized_product_changes": changed, "lifecycle_fix_files": sorted(lifecycle), "result": "PASS"}
+            "authorized_product_changes": changed, "release_metadata_files": sorted(metadata),
+            "lifecycle_fix_files": sorted(lifecycle), "result": "PASS"}
 
 
 def review_integrity():
-    """Preserve the reviewed certificate/lifecycle fixes by exact scope."""
-    result = frozen_integrity(allow_certificate_fix=True, allow_lifecycle_fix=True)
+    """Preserve the reviewed certificate/lifecycle fixes and release metadata."""
+    release = (ROOT / "src/05-constants.sh").read_bytes().startswith(b'SCRIPT_VERSION="4.0.0"\n')
+    result = frozen_integrity(allow_certificate_fix=True, allow_release_metadata=release, allow_lifecycle_fix=True)
     scope = json.loads((ROOT / "tests/fixtures/splicore-rc4-cert-fix.json").read_text())
     require(scope["frozen_commit"] == BASE and set(scope["permitted_product_paths"]) ==
             {"runtime/splicore.py", "install-nobrand.sh", "dist/install-nobrand.sh"}, "certificate fix scope differs")
     methods = {"certificate_material", "certificate_provenance", "certificate_owner", "certificate", "protocol", "uninstall"}
     require(set(scope["permitted_runtime_methods"]) == methods, "runtime method scope differs")
-    trees = [ast.parse(git("show", BASE + ":runtime/splicore.py")), ast.parse((ROOT / "runtime/splicore.py").read_text())]
+    current = (ROOT / "runtime/splicore.py").read_bytes()
+    if release:
+        old, new = V4_METADATA_FIELDS["runtime/splicore.py"]
+        current = current.replace(new, old, 1)
+    trees = [ast.parse(git("show", BASE + ":runtime/splicore.py")), ast.parse(current)]
     for tree in trees:
         runtime = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Runtime")
         runtime.body = [n for n in runtime.body if not (isinstance(n, ast.FunctionDef) and n.name in methods)]
@@ -141,7 +169,7 @@ def review_integrity():
     verify_files(ROOT, scope["preserved_qualification_files"])
     run = subprocess.run(["bash", "scripts/build.sh", "--check"], cwd=ROOT, capture_output=True, timeout=60)
     require(run.returncode == 0, "generated installers differ from reviewed runtime")
-    result.update(scope="REVIEWED CERTIFICATE + LIFECYCLE FIXES", unapproved_changes=0,
+    result.update(scope="REVIEWED CERTIFICATE + LIFECYCLE FIXES" + (" + EXACT V4 RELEASE METADATA" if release else ""), unapproved_changes=0,
                   preserved_qualification_files=len(scope["preserved_qualification_files"]))
     return result
 

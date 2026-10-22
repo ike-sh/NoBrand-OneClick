@@ -6,11 +6,13 @@
 
 ## Current acceptance
 
-- 28 个 Bash 验收入口。
+- 30 个 Bash 验收入口；112 个 Python 测试，批次为 27 + 10 + 22 + 33 + 20；42 个真实 rc.4 回环 runtime 检查。
 - `test_splicore_runtime.sh` 内含 27 个 Python 测试：原生 generation、artifact、精确版本/架构、校验失败前无服务变更、并发、持久恢复、单一 supervisor、备份/恢复、候选失败回滚和幂等卸载。
 - `test_splicore_fresh.sh` 内含 10 个 Python 测试：13 类旧 ownership 证据 × 7 类操作零变更、第三方误判、marker、新证书/信任、失败清理、旧备份拒绝、Ingress 和 REALITY guard。
+- `test_splicore_cert_lifecycle.sh` 内含 22 个证书所有权、校验和重装生命周期测试。
+- `test_splicore_qualification.sh` 内含 33 个资格/脱敏诊断/发布元数据/生命周期修复完整性测试及 20 个 root 能力边界测试；不跳过必需 fixture。
 - `test_splicore_legacy_refusal.sh` 从真实 main 验证 8 类入口在 lock/package/runtime/backup/uninstall 之前拒绝；旧文件字节保持一致。
-- `test_splicore_shell_surface.sh` 验证 manager 新装、schema、备份、native 端口 registry、guard 端口保留、菜单选择与旧状态拒绝。
+- `test_splicore_shell_surface.sh` 验证 manager 新装、schema、备份、native 端口 registry、guard 端口保留、菜单选择、v4 生命周期和卸载重装，以及旧架构、畸形版本和未来 schema 的零变更拒绝。
 - `test_splicore_rc4_contract.sh` 验证唯一 rc.4 manifest、公开资产、限定架构、旧转换/API/下载器和兼容升级状态均已删除。
 - Ingress、Forward、SSH、Sudoku、CLI、菜单并发/选择、schema、版本、本地化、代码结构及仓库脱敏测试保留或重写为当前接口。
 
@@ -20,8 +22,10 @@
 test_splicore_runtime.sh
 test_splicore_legacy_refusal.sh
 test_splicore_fresh.sh
+test_splicore_cert_lifecycle.sh
 test_splicore_shell_surface.sh
 test_splicore_rc4_contract.sh
+test_splicore_qualification.sh
 test_architecture_audit.sh
 test_repository_sanitization.sh
 test_schema_v3.sh
@@ -47,7 +51,15 @@ test_version_consistency.sh
 test_localization.sh
 ```
 
+## v4.0.0 release metadata integrity
+
+历史 frozen/certificate-fix manifests 保持原字节。发布资格额外要求 `src/05-constants.sh`、`src/18-core-nodes.sh` 和 `runtime/splicore.py` 的完整字节精确等于 e90695，仅允许各一个已声明版本字段从 3.2.6 改为 4.0.0；生成安装器仍须由未修改的构建脚本精确重建。版本字段之外的改动、其他版本、缺失文件和 symlink 均拒绝。其他冻结产品文件及历史报告继续校验原哈希，certificate AST 边界和全部回归断言保留；root executor、九个必需边界和退出传播语义不变。
+
+已提交的生命周期修复通过 `tests/fixtures/splicore-rc4-lifecycle-fix.json` 对 `src/15-core-state.sh` 校验精确完整哈希；该路径不享有通用豁免。
+
 ## Retired legacy acceptance fixtures
+
+旧多 Core 的 `scripts/docker-smoke.sh`、`platform-case.sh`、`platform-smoke.sh` 和 `platform-rootfs-smoke.sh` 保留为历史平台材料，不属于 v4.0.0 执行入口；其 3.x 版本断言不代表当前产品版本。本轮不运行这些入口或操作其目标环境，仅保留全仓 shell 语法与 ShellCheck 检查。
 
 以下 35 个现存入口未计入本轮执行结果。文件作为可复查的旧测试材料保留；
 它们不提供旧安装迁移功能。旧 migration-blocker Python/包装测试已移除。
@@ -105,10 +117,9 @@ bash scripts/test.sh --runtime
 
 缓存只替代 HTTPS 传输；production archive/checksum/ELF/binary/version gate 仍真实执行。
 下载 trace 限 rc.4 archive 和 SHA256SUMS。验证环境是临时回环进程 supervisor；
-真实 systemd、OpenRC、arm64 runtime 和 nftables range 均不能据此宣称通过。
+真实 systemd、OpenRC 与 arm64 runtime 均不能据此宣称通过；nftables range 未开放，维持 N/A。
 
 ## Execution isolation
 
-普通用户在支持的 Linux user namespace 中映射 root 运行 fixture，使产品恢复的 root
-ownership gate 得以实测。`NOBRAND_SYSTEM_ROOT` 指向临时目录，避免探测开发机既有 unit。
+完整 suite 保持调用者身份。九个必需边界由 canonical root executor 按直接 root、已验证的非交互 sudo、兼容 user namespace 顺序取得权限，重新确认子进程 EUID 并检查清理与 checkout ownership；不可用时失败而不跳过。`NOBRAND_SYSTEM_ROOT` 指向临时目录，避免探测开发机既有 unit。
 测试不操作真实 init、账户、网络规则或生产节点。

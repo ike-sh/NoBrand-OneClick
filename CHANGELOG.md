@@ -2,6 +2,50 @@
 
 ## Unreleased
 
+## 4.0.0 - 2026-10-22
+
+### Breaking Changes
+
+- 首个 Splicore-native 主运行时架构正式版本。v3.x 多 Core 安装不支持原地升级、自动迁移或由新版直接卸载／转换；须使用对应旧版导出信息并卸载，再干净安装 v4.0.0。
+- 检测到 NoBrand-owned legacy state、binary 或 service 时，在锁、依赖、下载和服务变更前 fail closed；不修改旧环境，也不误认第三方独立安装。
+
+### Architecture
+
+- 普通代理协议统一固定到 Splicore v0.3.0-rc.4，多个协议共享单一 `nobrand-splicore` runtime。NoBrand 负责安装、配置、客户端导出、事务和生命周期编排。
+- FinalMask/Sudoku 保持专用 pinned Xray 例外；SSH Tunnel 使用系统 OpenSSH，Port Forward 保持 Realm / nftables 独立组件。
+
+### Protocols
+
+- Mieru TCP/UDP/BOTH、Snell v4/v5、Hysteria2 + Salamander、TUIC v5、VLESS TCP REALITY + Vision。
+- VLESS + FinalMask/Sudoku 例外、SSH Tunnel 和 Port Forward 保持既有公开范围。未开放的 Mieru 选项、HY2 Gecko、端口跳跃和端口范围不会隐式启用。
+
+### REALITY
+
+- 使用 Splicore 原生 Local Tunnel Guard；允许的 cover SNI 仅到固定目标，不提供 arbitrary sniffed-SNI forwarding。
+- malformed TLS、no-SNI、HTTP 和 random TCP fail closed；认证后的 VLESS 代理流量保持其正常目的地语义。
+
+### TLS
+
+- HY2/TUIC 新装使用私有 CA 与服务器叶证书，校验 key、SAN、EKU、有效期及证书链；客户端使用显式 CA 或证书 pin。
+- 同名 reinstall 保留有效 NoBrand-managed certificate identity；未知或第三方材料不被自动接管，purge 遵循既有 ownership contract。
+
+### Lifecycle
+
+- Fresh install、原子候选校验、失败回滚、restart、crash recovery、uninstall、same-name reinstall、purge 和 legacy refusal。
+- 同版本 artifact/config 先 verify，再按合同 NO-OP；未来 Core 升级须更新审核过的固定 manifest，不使用 latest。
+- 完成 v4 生命周期与状态兼容性验证；校验当前主版本、原生架构、归属和 schema，拒绝旧架构、畸形状态与不支持的未来版本，保留旧状态不变。
+
+### CI / Quality
+
+- 30 Bash、112 Python、42 runtime、113 shell syntax；ShellCheck、生成构建一致性、secret/redaction scan 和 workflow/actionlint 门禁。
+- 发布提交须通过其确切 SHA 的 GitHub main CI，保留 qualification exit 与九个 root fixture 的脱敏证据。
+
+### Qualification Scope
+
+- Automated/local/runtime qualification 和 GitHub CI 通过后发布；专用原生 amd64 systemd 破坏性／真实 reboot campaign 尚未完成。
+- arm64 runtime 尚未完成资格；OpenRC adapter 受支持，原生资格待独立环境。
+- HY2 nftables port-range 未开放；GitHub Actions Node runtime 警告记为非阻断维护事项。
+
 ## 3.2.6 - 2026-09-29
 
 ### Fixed
