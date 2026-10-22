@@ -1,0 +1,23 @@
+{
+  "frozen_commit": "b5440ec41aeed2dd266b3a7008f75a26de63add2",
+  "permitted_product_paths": [
+    "runtime/splicore.py",
+    "install-nobrand.sh",
+    "dist/install-nobrand.sh"
+  ],
+  "permitted_runtime_methods": [
+    "certificate_material",
+    "certificate_provenance",
+    "certificate_owner",
+    "certificate",
+    "protocol",
+    "uninstall"
+  ],
+  "phase": "certificate-reinstall-fix",
+  "preserved_qualification_files": {
+    "docs/NATIVE-LINUX-QUALIFICATION.md": "0e7b61c2fdf8fb523c8be090049af08f76bf2d9ad1570bc0aa415769036c7a8d",
+    "docs/reports/SPLICORE_RC4_NATIVE_LINUX_CI_EVIDENCE.json": "8fa348d74308537d5c6d2eecb593832b537492a40a31163463c15786e876cda7",
+    "docs/reports/SPLICORE_RC4_NATIVE_LINUX_CI_QUALIFICATION_REPORT.md": "bced01b85799f56403a5460a65a963f4020f10672426fb3efe10e532fb0db1e2",
+    "tests/helpers/qualify_splicore_reinstall.py": "581fc32c577c1239f1c62620547049fee292ed9508203d5bc3402b065561f422"
+  }
+}

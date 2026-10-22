@@ -1071,13 +1071,91 @@ class Runtime:
                     service.call("start")
             return {"result": "backup-created", "database_and_key": "included"}
 
+    def certificate_material(self, target, sni):
+        """Read managed material without changing its identity or permissions."""
+        require(target.is_dir() and not target.is_symlink(), "CONFIG_INVALID", "TLS directory must be a real owned directory; inspect retained state")
+        paths = [target, *(target / n for n in ("certificate.pem", "private.key", "ca.pem"))]
+        for path in paths:
+            require(not path.is_symlink() and path.exists(), "CONFIG_INVALID", "incomplete retained TLS; restore the owned material or explicitly purge it")
+            info = path.stat()
+            require(info.st_uid == os.geteuid() and info.st_gid == os.getegid()
+                    and stat.S_IMODE(info.st_mode) == (0o700 if path == target else 0o600)
+                    and (path == target or (stat.S_ISREG(info.st_mode) and info.st_nlink == 1)),
+                    "CONFIG_INVALID", "retained TLS ownership, type or private permissions differ; inspect without overwriting")
+        return {"server_name": sni, "certificate_file": str(target / "certificate.pem"),
+                "private_key_file": str(target / "private.key"), "ca_certificate": (target / "ca.pem").read_text()}
+
+    def certificate_provenance(self, name, tls):
+        """Pre-marker rc.4 material needs an exact native canonical reference."""
+        if not self.generations.is_dir():
+            return None
+        for generation in self.generations.iterdir():
+            if generation.is_symlink() or not generation.is_dir() or not re.fullmatch(r"g[0-9a-f]{32}", generation.name):
+                continue
+            paths = [generation / n for n in ("desired.json", "artifact.json")]
+            if not all(p.is_file() and not p.is_symlink() and p.stat().st_uid == os.geteuid()
+                       and stat.S_IMODE(p.stat().st_mode) == 0o600 for p in paths):
+                continue
+            graph, artifact_metadata = (load(p) for p in paths)
+            if (graph.get("owner") != "nobrand-splicore-v1" or graph.get("architecture") != "splicore-native"
+                    or graph.get("config_schema") != 1 or artifact_metadata.get("version") != RELEASE["version"]):
+                continue
+            for node in graph.get("nodes", []):
+                protocol, label = node.get("protocol"), node.get("client", {}).get("name")
+                if protocol not in ("hysteria2", "tuic") or not isinstance(label, str):
+                    continue
+                expected = "n" + hashlib.sha256((protocol + "\0" + label).encode()).hexdigest()[:16]
+                recorded = node.get("document", {}).get("settings", {}).get("tls", {})
+                sni = recorded.get("server_name")
+                if (node.get("id") == name == expected and isinstance(sni, str) and sni
+                        and recorded == dict(tls, server_name=sni)
+                        and tls["server_name"] in (None, sni)):
+                    return sni
+        return None
+
+    def certificate_owner(self, target, tls):
+        marker, name = target / "owner.json", target.name
+        marked = marker.exists() or marker.is_symlink()
+        if marked:
+            info = marker.lstat()
+            require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_uid == os.geteuid()
+                    and info.st_gid == os.getegid() and stat.S_IMODE(info.st_mode) == 0o600,
+                    "CONFIG_INVALID", "unsafe retained TLS ownership marker; inspect without overwriting")
+            recorded = load(marker)
+            require(isinstance(recorded, dict), "CONFIG_INVALID", "invalid retained TLS ownership metadata")
+            sni = tls["server_name"] if tls["server_name"] is not None else recorded.get("server_name")
+        else:
+            sni = self.certificate_provenance(name, tls)
+            require(sni, "CONFIG_INVALID", "TLS ownership cannot be proven for this instance; directory left untouched")
+        require(isinstance(sni, str) and sni, "CONFIG_INVALID", "retained TLS has no server identity")
+        owner = {"owner": "nobrand-splicore-tls-v1", "node_id": name, "server_name": sni,
+                 "files": {n: sha(target / n) for n in ("certificate.pem", "private.key", "ca.pem")}}
+        require(not marked or recorded == owner, "CONFIG_INVALID", "retained TLS instance, SNI or material differs; restore or explicitly purge owned state")
+        tls["server_name"] = sni
+        return owner, marked
+
     def certificate(self, name, sni):
         self.refuse_legacy()
+        self.safe()
         require(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]{0,252}", sni), "CONFIG_INVALID", "invalid TLS SNI")
         parent = self.config / "splicore/tls"
-        parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         target = parent / identifier(name)
-        require(not target.exists(), "CONFIG_INVALID", "certificate directory already exists; explicit certificate reuse required")
+        marker = target / "owner.json"
+        if target.exists() or target.is_symlink():
+            try:
+                tls = self.certificate_material(target, sni)
+                owner, marked = self.certificate_owner(target, tls)
+                tls_check(tls)
+                text = command(["openssl", "x509", "-in", tls["certificate_file"], "-noout", "-text"]).stdout
+                require(all(item in text for item in (b"CA:FALSE", b"X509v3 Subject Alternative Name:",
+                            b"Digital Signature", b"TLS Web Server Authentication")),
+                        "CONFIG_INVALID", "retained TLS leaf extensions do not match the managed certificate policy")
+                if not marked:
+                    save(marker, owner)
+                return tls
+            except (OSError, ValueError, TypeError, KeyError) as exc:
+                raise Failure("CONFIG_INVALID", "invalid retained TLS or ownership metadata; inspect without overwriting") from exc
+        parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         with tempfile.TemporaryDirectory(prefix=".tls-", dir=str(parent)) as directory:
             work = Path(directory)
             ca, ca_key = work / "ca.pem", work / "ca.key"
@@ -1104,6 +1182,8 @@ class Runtime:
             atomic(target / cert.name, cert.read_bytes() + ca.read_bytes())
             atomic(target / key.name, key.read_bytes())
             atomic(target / ca.name, ca.read_bytes())
+            save(marker, {"owner": "nobrand-splicore-tls-v1", "node_id": name, "server_name": sni,
+                          "files": {n: sha(target / n) for n in ("certificate.pem", "private.key", "ca.pem")}})
         return {"server_name": sni, "certificate_file": str(target / "certificate.pem"),
                 "private_key_file": str(target / "private.key"), "ca_certificate": (target / "ca.pem").read_text()}
 
@@ -1153,6 +1233,13 @@ class Runtime:
             document = {"schema": 1, "listener": {"host": env.get("NOBRAND_SPLICORE_LISTEN", "0.0.0.0"), "port": port},
                         "display_endpoint": {"host": display_host, "port": int(env.get("ADVERTISE_PORT") or port)}}
             node = {"id": name, "protocol": protocol, "enabled": True, "client": {"name": label}, "document": document}
+            if protocol in ("hysteria2", "tuic"):
+                require(not preview, "CONFIG_INVALID", "fresh TLS preview requires a supplied canonical file with TLS paths")
+                tls_path = self.config / "splicore/tls" / name
+                retained = tls_path.exists() or tls_path.is_symlink()
+                tls = self.certificate(name, env.get("HY2_SNI" if protocol == "hysteria2" else "TUIC_SNI")
+                                       or ("bing.com" if protocol == "hysteria2" else "www.microsoft.com"))
+                created_tls = None if retained else tls_path
             if env.get("NOBRAND_SPLICORE_INGRESS_ID"):
                 node["ingress"] = {"profile_id": env["NOBRAND_SPLICORE_INGRESS_ID"]}
             if protocol == "snell":
@@ -1191,9 +1278,6 @@ class Runtime:
                                 "server_name": cover, "target": node["guard"]["listen"]}},
                     "server_secret": {"private_key": private}, "users": [{"uuid": str(uuid.uuid4())}]})
             elif protocol == "hysteria2":
-                require(not preview, "CONFIG_INVALID", "fresh HY2 preview requires a supplied canonical file with TLS paths")
-                tls = self.certificate(name, env.get("HY2_SNI") or "bing.com")
-                created_tls = Path(tls["certificate_file"]).parent
                 document.update({"settings": {"tls": tls,
                                                "stream_transport": {"kind": "hysteria", "hysteria": {"version": 2,
                                                    "obfs": {"type": "salamander", "password": uuid.uuid4().hex}}}},
@@ -1201,11 +1285,9 @@ class Runtime:
                 node["options"] = {"obfs": "salamander"}
             else:
                 require(protocol == "tuic", "CAPABILITY_UNSUPPORTED", "unsupported protocol")
-                require(not preview, "CONFIG_INVALID", "fresh TUIC preview requires a supplied canonical file with TLS paths")
                 document.update({"settings": {"version": 5, "congestion_control": "cubic", "udp_relay_mode": "native",
-                                               "zero_rtt_handshake": False, "tls": self.certificate(name, env.get("TUIC_SNI") or "www.microsoft.com")},
+                                               "zero_rtt_handshake": False, "tls": tls},
                                  "users": [{"uuid": str(uuid.uuid4()), "password": uuid.uuid4().hex}]})
-                created_tls = Path(document["settings"]["tls"]["certificate_file"]).parent
                 node["client"]["user_names"] = [env.get("TUIC_USER") or "primary"]
             desired["nodes"].append(node)
         else:
@@ -1297,6 +1379,14 @@ class Runtime:
             self.recover()
             current = self.target(self.current)
             cleanup_debt = []
+            # Prove TLS ownership before any destructive purge step. Retained
+            # user/foreign material must never become owned merely by its path.
+            tls = self.config / "splicore/tls"
+            if purge and tls.exists():
+                for target in tls.iterdir():
+                    identifier(target.name)
+                    material = self.certificate_material(target, None)
+                    self.certificate_owner(target, material)
             if current:
                 service = Service(self.adapter, current, self.fixture)
                 service.call("stop")
@@ -1321,7 +1411,6 @@ class Runtime:
                 shutil.rmtree(self.home)
                 if self.transaction.exists():
                     self.transaction.unlink()
-                tls = self.config / "splicore/tls"
                 if tls.exists():
                     require(not tls.is_symlink(), "CONFIG_INVALID", "unsafe owned TLS directory")
                     shutil.rmtree(tls)

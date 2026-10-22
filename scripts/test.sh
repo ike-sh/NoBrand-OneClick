@@ -46,8 +46,10 @@ unit_tests=(
   tests/test_splicore_runtime.sh
   tests/test_splicore_legacy_refusal.sh
   tests/test_splicore_fresh.sh
+  tests/test_splicore_cert_lifecycle.sh
   tests/test_splicore_shell_surface.sh
   tests/test_splicore_rc4_contract.sh
+  tests/test_splicore_qualification.sh
   tests/test_architecture_audit.sh
   tests/test_repository_sanitization.sh
   tests/test_schema_v3.sh

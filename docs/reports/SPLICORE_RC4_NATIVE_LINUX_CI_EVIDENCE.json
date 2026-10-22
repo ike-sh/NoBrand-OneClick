@@ -1,0 +1,335 @@
+{
+  "allowed_candidate_files": [
+    ".github/workflows/ci.yml",
+    "scripts/test.sh",
+    "scripts/qualify-splicore.py",
+    "tests/fixtures/splicore-rc4-frozen.json",
+    "tests/helpers/test_splicore_qualification.py",
+    "tests/test_splicore_qualification.sh",
+    "tests/helpers/qualify_splicore_reinstall.py",
+    "docs/NATIVE-LINUX-QUALIFICATION.md",
+    "docs/reports/SPLICORE_RC4_NATIVE_LINUX_CI_QUALIFICATION_REPORT.md",
+    "docs/reports/SPLICORE_RC4_NATIVE_LINUX_CI_EVIDENCE.json"
+  ],
+  "arm64_runtime": "PENDING ENVIRONMENT",
+  "artifacts": {
+    "architectures": {
+      "amd64": {
+        "archive_sha256": "9dd1941c817143d18ea1c892a5fc13266c1b209600576946504a9d3c98c62161",
+        "binary_sha256": "0a347f06f0d1a17ef37edd779826ad79739217b65f80bf39dc6077f115ac175f",
+        "executed_identity": {
+          "api_version": "v1",
+          "build_tags": "with_quic,with_utls,with_gvisor",
+          "build_time": "2026-10-21T13:35:10Z",
+          "channel": "development",
+          "commit": "2634ea50d19623591c5db63329a288862726db74",
+          "dirty": false,
+          "go_version": "go1.26.3",
+          "platform": "linux/amd64",
+          "product": "Splicore",
+          "source_digest": "de27b79f768622f9501dd7283ed6d2f3a1a80dc1",
+          "upstream_commit": "1ac1a339cb1223e9c70eae14c44411c75033c02d",
+          "upstream_tag": "v1.14.1",
+          "version": "v0.3.0-rc.4"
+        },
+        "runtime": "VERSION IDENTITY ONLY; not native service qualification",
+        "static": "PASS"
+      },
+      "arm64": {
+        "archive_sha256": "5b5e39bd8e6ef373ebc00e7e3a8a688ce09d0369dc2c4ecfab06ed535d948b64",
+        "binary_sha256": "85ec863d21707ac309a4c7a64b3b7228eb34bb0405379db6b569d8d550032a4c",
+        "runtime": "NOT RUN",
+        "static": "PASS"
+      }
+    },
+    "mihomo_sha256": "cf06ce2c7d1421bdbda14ee4a5b6046672dc35ebf8eecd8e77504ec3c0ed9a84",
+    "result": "PASS"
+  },
+  "baseline": {
+    "frozen_commit": "b5440ec41aeed2dd266b3a7008f75a26de63add2",
+    "implementation_modified": false,
+    "qualification_branch": "codex/qualification-splicore-rc4-linux-ci",
+    "sole_parent": "f98cf70e7159c07826101676a4a08394f0a203f9"
+  },
+  "core_dns_failure_and_domain_target": "NOT EXECUTED; dedicated qualification pending",
+  "date": "2026-10-22",
+  "defects": [
+    {
+      "cases": [
+        {
+          "category": "CONFIG_INVALID",
+          "cli_equivalent_exit_code": 1,
+          "detail": "certificate directory already exists; explicit certificate reuse required",
+          "first_install": "PASS",
+          "installed_binary_sha256": "0a347f06f0d1a17ef37edd779826ad79739217b65f80bf39dc6077f115ac175f",
+          "live_state_after_refusal": "UNCHANGED",
+          "nodes_after_remove": 0,
+          "protocol": "hysteria2",
+          "reinstall": "FAIL",
+          "removal": "protocol-uninstall",
+          "remove_result": "committed",
+          "retained_tls_files": 3
+        },
+        {
+          "category": "CONFIG_INVALID",
+          "cli_equivalent_exit_code": 1,
+          "detail": "certificate directory already exists; explicit certificate reuse required",
+          "first_install": "PASS",
+          "installed_binary_sha256": "0a347f06f0d1a17ef37edd779826ad79739217b65f80bf39dc6077f115ac175f",
+          "live_state_after_refusal": "UNCHANGED",
+          "nodes_after_remove": 0,
+          "protocol": "hysteria2",
+          "reinstall": "FAIL",
+          "removal": "runtime-uninstall",
+          "remove_result": "uninstalled",
+          "retained_tls_files": 3
+        },
+        {
+          "category": "CONFIG_INVALID",
+          "cli_equivalent_exit_code": 1,
+          "detail": "certificate directory already exists; explicit certificate reuse required",
+          "first_install": "PASS",
+          "installed_binary_sha256": "0a347f06f0d1a17ef37edd779826ad79739217b65f80bf39dc6077f115ac175f",
+          "live_state_after_refusal": "UNCHANGED",
+          "nodes_after_remove": 0,
+          "protocol": "tuic",
+          "reinstall": "FAIL",
+          "removal": "protocol-uninstall",
+          "remove_result": "committed",
+          "retained_tls_files": 3
+        },
+        {
+          "category": "CONFIG_INVALID",
+          "cli_equivalent_exit_code": 1,
+          "detail": "certificate directory already exists; explicit certificate reuse required",
+          "first_install": "PASS",
+          "installed_binary_sha256": "0a347f06f0d1a17ef37edd779826ad79739217b65f80bf39dc6077f115ac175f",
+          "live_state_after_refusal": "UNCHANGED",
+          "nodes_after_remove": 0,
+          "protocol": "tuic",
+          "reinstall": "FAIL",
+          "removal": "runtime-uninstall",
+          "remove_result": "uninstalled",
+          "retained_tls_files": 3
+        }
+      ],
+      "classification": "IMPLEMENTATION_DEFECT",
+      "command": "PYTHONDONTWRITEBYTECODE=1 python3 tests/helpers/qualify_splicore_reinstall.py --artifacts .lab/splicore-rc4-native-ci/public-download/assets --evidence .lab/splicore-rc4-native-ci/reinstall-public",
+      "exit_code": 1,
+      "finished_utc": "2026-10-21T16:33:55+00:00",
+      "fix_applied": false,
+      "id": "DEFECT-1",
+      "native_service_qualification": "NOT EXECUTED",
+      "result": "IMPLEMENTATION DEFECT FOUND",
+      "scope": "WSL2/Linux amd64 temporary loopback; runtime CLI; local Supervisor",
+      "started_utc": "2026-10-21T16:33:48+00:00"
+    }
+  ],
+  "environment": {
+    "architecture": "x86_64",
+    "kernel": "6.6.87.2-microsoft-standard-WSL2",
+    "label": "Linux WSL2; loopback only",
+    "native_runtime": "PENDING ENVIRONMENT",
+    "nobrand_commit": "b5440ec41aeed2dd266b3a7008f75a26de63add2",
+    "os": {
+      "ID": "ubuntu",
+      "VERSION_ID": "24.04"
+    },
+    "pid1": "systemd",
+    "splicore_version": "v0.3.0-rc.4",
+    "versions": {
+      "nft": "nftables v1.0.9 (Old Doc Yak #3)",
+      "systemctl": "systemd 255 (255.4-1ubuntu8.18)"
+    },
+    "wsl2": true
+  },
+  "external_github_actions": "PENDING UNTIL PUSH",
+  "final_local_ci_campaign": {
+    "artifact_origin": "explicit public cache; integrity reverified",
+    "command": "python3 scripts/qualify-splicore.py ci --artifacts .lab/splicore-rc4-native-ci/public-download/assets --mihomo-gzip .lab/splicore-rc4-native-ci/public-download/assets/mihomo-linux-amd64-v1.19.30.gz --evidence .lab/splicore-rc4-native-ci/campaign-reviewed",
+    "environment_setup": "PYTHONDONTWRITEBYTECODE=1; PATH includes pinned actionlint v1.7.7",
+    "execution": {
+      "command": [
+        "bash",
+        "scripts/test.sh",
+        "--runtime"
+      ],
+      "exit_code": 0,
+      "finished_utc": "2026-10-21T16:40:36+00:00",
+      "started_utc": "2026-10-21T16:37:07+00:00"
+    },
+    "exit_code": 0,
+    "finished_utc": "2026-10-21T16:40:37+00:00",
+    "regression": {
+      "bash_entrypoints": 29,
+      "build_consistency": "PASS",
+      "optional_skips": [
+        "[SKIP] optional real Sudoku Xray validation (set NOBRAND_XRAY_TEST_BIN; outside rc.4 campaign)"
+      ],
+      "python_runs": [
+        27,
+        10,
+        13
+      ],
+      "python_total": 50,
+      "result": "PASS",
+      "runtime_checks": 42,
+      "secret_scan": "PASS",
+      "shell_syntax_files": 112,
+      "shellcheck": "PASS"
+    },
+    "started_utc": "2026-10-21T16:37:02+00:00"
+  },
+  "final_result": "NATIVE LINUX & CI QUALIFICATION BLOCKED — IMPLEMENTATION DEFECT FOUND",
+  "frozen_integrity": {
+    "all_baseline_files": 190,
+    "changed": 0,
+    "freeze_report_changed": false,
+    "historical_reports": 16,
+    "modified_baseline_files": [
+      ".github/workflows/ci.yml",
+      "scripts/test.sh"
+    ],
+    "product_files": 44,
+    "protected_reports": 21,
+    "result": "PASS",
+    "unchanged_baseline_files": 188
+  },
+  "generated_utc": "2026-10-21T16:41:16+00:00",
+  "git": {
+    "commit": "NONE",
+    "head": "b5440ec41aeed2dd266b3a7008f75a26de63add2",
+    "index_empty": true,
+    "main": "b5440ec41aeed2dd266b3a7008f75a26de63add2",
+    "push": "NONE",
+    "release": "NONE",
+    "stage": "NONE",
+    "tag": "NONE"
+  },
+  "initial_public_https_campaign": {
+    "artifact_origin": "exact public HTTPS releases; verified before execution",
+    "command": "python3 scripts/qualify-splicore.py ci --evidence .lab/splicore-rc4-native-ci/campaign-final",
+    "exit_code": 0,
+    "finished_utc": "2026-10-21T16:33:53+00:00",
+    "regression": {
+      "bash_entrypoints": 29,
+      "build_consistency": "PASS",
+      "optional_skips": [
+        "[SKIP] optional real Sudoku Xray validation (set NOBRAND_XRAY_TEST_BIN; outside rc.4 campaign)"
+      ],
+      "python_runs": [
+        27,
+        10,
+        12
+      ],
+      "python_total": 49,
+      "result": "PASS",
+      "runtime_checks": 42,
+      "secret_scan": "PASS",
+      "shell_syntax_files": 112,
+      "shellcheck": "PASS"
+    },
+    "started_utc": "2026-10-21T16:30:10+00:00"
+  },
+  "ipv6": "NOT AVAILABLE IN TEST ENVIRONMENT",
+  "loopback_runtime": {
+    "checks": {
+      "config_rollback_and_traffic": "PASS",
+      "download_audit_splicore_rc4_only": "PASS",
+      "fresh_install_hysteria2": "PASS",
+      "fresh_install_mieru": "PASS",
+      "fresh_install_snell": "PASS",
+      "fresh_install_tuic": "PASS",
+      "fresh_install_vless-reality": "PASS",
+      "guard_http_fail_closed": "PASS",
+      "guard_malformed_tls_fail_closed": "PASS",
+      "guard_no_arbitrary_sniffed_sni_forwarding": "PASS",
+      "guard_no_sni_fail_closed": "PASS",
+      "guard_random_tcp_fail_closed": "PASS",
+      "hy2_wrong_auth_rejected": "PASS",
+      "hy2_wrong_certificate_pin_rejected": "PASS",
+      "hy2_wrong_obfs_rejected": "PASS",
+      "initial_profile_hysteria2": "PASS",
+      "initial_profile_mieru": "PASS",
+      "initial_profile_snell": "PASS",
+      "initial_profile_tuic": "PASS",
+      "initial_profile_vless-reality": "PASS",
+      "native_guard_pre_cutover_validation": "PASS",
+      "new_architecture_uninstall_purge": "PASS",
+      "public_http_fail_closed": "PASS",
+      "public_malformed_tls_fail_closed": "PASS",
+      "public_no_sni_fail_closed": "PASS",
+      "public_random_tcp_fail_closed": "PASS",
+      "reality_approved_plain_tls_fixed_cover": "PASS",
+      "reality_wrong_short_id_no_proxy": "PASS",
+      "reality_wrong_sni_no_proxy": "PASS",
+      "reality_wrong_sni_tls_rejected": "PASS",
+      "reality_wrong_uuid_no_proxy": "PASS",
+      "restart_profile_hysteria2": "PASS",
+      "restart_profile_mieru": "PASS",
+      "restart_profile_snell": "PASS",
+      "restart_profile_tuic": "PASS",
+      "restart_profile_vless-reality": "PASS",
+      "same_version_verify_noop": "PASS",
+      "sigkill_recovery_profile_hysteria2": "PASS",
+      "sigkill_recovery_profile_mieru": "PASS",
+      "sigkill_recovery_profile_snell": "PASS",
+      "sigkill_recovery_profile_tuic": "PASS",
+      "sigkill_recovery_profile_vless-reality": "PASS"
+    },
+    "commit": "2634ea50d19623591c5db63329a288862726db74",
+    "download_trace": [
+      "https://github.com/ike-sh/Splicore/releases/download/v0.3.0-rc.4/splicore-v0.3.0-rc.4-linux-amd64.tar.gz",
+      "https://github.com/ike-sh/Splicore/releases/download/v0.3.0-rc.4/SHA256SUMS"
+    ],
+    "managed_inbounds": 5,
+    "native_local_guard_listeners": 1,
+    "result": "PASS",
+    "scope": "Linux amd64 temporary loopback; local process supervisor",
+    "single_primary_runtime": 1,
+    "snell": "v5 server / rc.4 documented v4 client wire: TCP and UDP PASS",
+    "udp_payload_bytes": [
+      64,
+      512
+    ],
+    "version": "v0.3.0-rc.4"
+  },
+  "native_openrc": "PENDING ENVIRONMENT",
+  "native_systemd": "PENDING ENVIRONMENT",
+  "nftables_port_range": "N/A: CORE CAPABILITY NOT EXPOSED BY NOBRAND",
+  "reboot": "NOT EXECUTED",
+  "safety": {
+    "excluded_business_components_queried_or_modified": false,
+    "firewall_changes": false,
+    "host_package_changes": false,
+    "host_service_changes": false,
+    "production_hosts_touched": false,
+    "raw_logs_in_public_evidence": false
+  },
+  "static": {
+    "actionlint": {
+      "command": "actionlint .github/workflows/ci.yml",
+      "exit_code": 0,
+      "version": "1.7.7"
+    },
+    "openrc_unit": {
+      "command": "sh -n <temporary-generated-openrc-script>",
+      "exit_code": 0,
+      "scope": "SYNTAX ONLY; no host service operations"
+    },
+    "python_ast": "PASS",
+    "systemd_unit": {
+      "command": "systemd-analyze verify --man=no --generators=no <temporary-generated-unit>",
+      "exit_code": 0,
+      "scope": "STATIC ONLY; no host unit installed"
+    },
+    "workflow": {
+      "checkout": "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+      "contract": "PASS",
+      "external_run": "PENDING UNTIL PUSH",
+      "permissions": "contents: read",
+      "syntax": "PASS"
+    }
+  },
+  "timezone": "Asia/Shanghai"
+}

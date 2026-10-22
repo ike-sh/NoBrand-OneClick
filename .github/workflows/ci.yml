@@ -1,4 +1,4 @@
-name: NoBrand CI
+name: NoBrand rc.4 validation
 
 on:
   push:
@@ -9,51 +9,31 @@ permissions:
   contents: read
 
 jobs:
-  unit:
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        image: [debian:12, ubuntu:24.04, alpine:3.20]
+  regression:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
-      - name: Build and unit tests
+          persist-credentials: false
+      - name: Install validation dependencies on the ephemeral runner
+        timeout-minutes: 5
         run: |
-          if [[ "${{ matrix.image }}" == alpine:* ]]; then
-            setup='apk add --no-cache bash curl git jq unzip openssl openssh-keygen python3 iproute2 util-linux tar coreutils shellcheck'
-          else
-            setup='apt-get update && apt-get install -y bash curl ca-certificates git jq unzip openssl openssh-client python3 iproute2 util-linux tar coreutils shellcheck'
-          fi
-          docker run --rm -v "$PWD:/work" -w /work "${{ matrix.image }}" sh -lc "$setup && command -v ssh-keygen && git config --global --add safe.directory /work && bash scripts/test.sh"
-          git diff --exit-code -- install-nobrand.sh dist/install-nobrand.sh
-
-  mieru-regression:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Original Mieru isolated-v2 regression
-        run: bash scripts/docker-smoke.sh
-      - name: Debian Ubuntu Rocky Alpine platform matrix
-        run: bash scripts/platform-smoke.sh
-
-  runtime:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Real HY2 and VLESS FinalMask Xray data plane plus Surge Snell runtimes
+          sudo apt-get update
+          sudo apt-get install -y bash curl ca-certificates git jq unzip openssl openssh-client python3 python3-yaml iproute2 util-linux tar coreutils shellcheck
+      - name: Install pinned workflow validator
+        timeout-minutes: 5
+        env:
+          GOTOOLCHAIN: local
         run: |
-          # The suite mounts isolated filesystems and writes ip_forward inside
-          # disposable network namespaces; Docker's default /proc/sys is read-only.
-          docker run --rm --privileged -v "$PWD:/work" -w /work debian:12 sh -lc '
-            apt-get update &&
-            apt-get install -y bash curl ca-certificates git jq unzip openssl openssh-client openssh-server python3 iproute2 util-linux tar coreutils shellcheck libstdc++6 nftables procps &&
-            command -v ssh-keygen && command -v sshd && command -v nft &&
-            git config --global --add safe.directory /work &&
-            bash scripts/test.sh --runtime
-          '
+          GOBIN="$RUNNER_TEMP/nobrand-tools" go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+          echo "$RUNNER_TEMP/nobrand-tools" >> "$GITHUB_PATH"
+      - name: Validate frozen product, workflow, public artifacts and regression
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python3 scripts/qualify-splicore.py ci --evidence "$RUNNER_TEMP/nobrand-rc4"
+      - name: Reject generated or other tracked file changes
+        run: git diff --exit-code
+      - name: Display sanitized qualification summary
+        run: cat "$RUNNER_TEMP/nobrand-rc4/summary.json"
