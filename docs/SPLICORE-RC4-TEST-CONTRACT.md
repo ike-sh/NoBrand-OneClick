@@ -57,6 +57,12 @@ test_localization.sh
 
 已提交的生命周期修复通过 `tests/fixtures/splicore-rc4-lifecycle-fix.json` 对 `src/15-core-state.sh` 校验精确完整哈希；该路径不享有通用豁免。
 
+## 发布后的展示修复候选
+
+上述历史证明现在针对固定的 `v4.0.0` 发布提交 `1d817b27b43cf33a72025c22acc2f04aa2ef0d26` 的 Git tree 验证；旧 frozen/certificate/lifecycle manifests 和历史报告保持原字节。
+当前展示修复另用 `tests/fixtures/client-profile-output-candidate.json` 声明六个产品路径与七个测试/资格路径的精确 SHA256。该阶段清单不替代历史清单，也不接受目录通配豁免。其余受保护文件必须等于发布提交，新增未声明源码、缺失文件、symlink、声明路径上的额外字节和过期生成安装器均拒绝。版本仍为 `4.0.0`。
+新增 sandbox 正反测试验证合法构建集成通过，未声明产品变更失败，恢复 fixture 后通过；既有证书 AST、metadata、root executor、脱敏和运行时测试继续执行。
+
 ## Retired legacy acceptance fixtures
 
 旧多 Core 的 `scripts/docker-smoke.sh`、`platform-case.sh`、`platform-smoke.sh` 和 `platform-rootfs-smoke.sh` 保留为历史平台材料，不属于 v4.0.0 执行入口；其 3.x 版本断言不代表当前产品版本。本轮不运行这些入口或操作其目标环境，仅保留全仓 shell 语法与 ShellCheck 检查。

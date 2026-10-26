@@ -25,6 +25,21 @@ ROOT = Path(__file__).resolve().parents[1]
 BASE = "b5440ec41aeed2dd266b3a7008f75a26de63add2"
 PARENT = "f98cf70e7159c07826101676a4a08394f0a203f9"
 PRODUCT_BASE = "e90695ba8d2ac98a443d6aa53edd7653356377b2"
+RELEASE_BASE = "1d817b27b43cf33a72025c22acc2f04aa2ef0d26"
+PRESENTATION_MANIFEST = "tests/fixtures/client-profile-output-candidate.json"
+# Phase-specific exact paths, following the existing lifecycle-fix manifest model.
+# Historical manifests describe committed trees; this manifest describes only
+# the intentional working candidate changes. Neither replaces the other.
+INTENTIONAL_PRODUCT_CHANGES = frozenset({
+    "scripts/build.sh", "src/19-splicore.sh", "src/70-client-export-install.sh",
+    "runtime/client-output.py", "install-nobrand.sh", "dist/install-nobrand.sh",
+})
+INTENTIONAL_QUALIFICATION_CHANGES = frozenset({
+    "scripts/qualify-splicore.py", "scripts/test.sh",
+    "tests/helpers/test_splicore_qualification.py", "tests/helpers/test_client_profile_output.py",
+    "tests/fixtures/client-profile-output.json", "tests/test_client_profile_output.sh",
+    "docs/SPLICORE-RC4-TEST-CONTRACT.md",
+})
 # Test expectations for this authorized release, not another product version
 # source. Each entire file must equal its frozen bytes plus this one field edit.
 V4_METADATA_FIELDS = {
@@ -53,8 +68,43 @@ def require(condition, detail, classification="TEST_HARNESS"):
         raise QualificationFailure(classification, detail)
 
 
-def git(*arguments):
-    return subprocess.check_output(["git", *arguments], cwd=ROOT, timeout=30)
+def git(*arguments, input_data=None):
+    return subprocess.check_output(["git", *arguments], cwd=ROOT, input=input_data, timeout=30)
+
+
+def read_at(name, tree=None):
+    return git("show", tree + ":" + name) if tree else (ROOT / name).read_bytes()
+
+
+def tree_hashes(tree, names):
+    """Hash immutable Git blobs, including the distinction from symlinks."""
+    names = sorted(names)
+    if not names:
+        return {}
+    entries = git("ls-tree", "-r", tree, "--", *names).decode().splitlines()
+    modes = {line.split("\t", 1)[1]: line.split()[0] for line in entries}
+    require(set(modes) == set(names) and all(mode in ("100644", "100755") for mode in modes.values()),
+            "protected Git path missing or not a regular file")
+    query = "\n".join(tree + ":" + name for name in names) + "\n"
+    raw = git("cat-file", "--batch", input_data=query.encode())
+    offset, hashes = 0, {}
+    for name in names:
+        end = raw.index(b"\n", offset)
+        header = raw[offset:end].split()
+        require(len(header) == 3 and header[1] == b"blob", "baseline blob unavailable: " + name)
+        size = int(header[2])
+        hashes[name] = hashlib.sha256(raw[end + 1:end + 1 + size]).hexdigest()
+        offset = end + size + 2
+    return hashes
+
+
+def verify_at(hashes, tree=None):
+    if tree is None:
+        verify_files(ROOT, hashes)
+    else:
+        actual = tree_hashes(tree, hashes)
+        for name, expected in hashes.items():
+            require(actual[name] == expected, "protected Git file changed: " + name)
 
 
 def timestamp():
@@ -90,35 +140,35 @@ def verify_files(root, hashes):
         require(hashlib.sha256(path.read_bytes()).hexdigest() == expected, "protected file changed: " + name)
 
 
-def v4_metadata_integrity():
+def v4_metadata_integrity(tree=None):
     """Allow only the three exact release fields, keeping product bytes frozen."""
     expected = {}
     for name, (old, new) in V4_METADATA_FIELDS.items():
         original = git("show", PRODUCT_BASE + ":" + name)
         require(original.count(old) == 1, "release metadata baseline field differs: " + name)
         expected[name] = hashlib.sha256(original.replace(old, new, 1)).hexdigest()
-    verify_files(ROOT, expected)
+    verify_at(expected, tree)
     return expected
 
 
-def lifecycle_fix_integrity():
+def lifecycle_fix_integrity(tree=None):
     """Accept the reviewed lifecycle fix by exact bytes, never a path exemption."""
-    scope = json.loads((ROOT / "tests/fixtures/splicore-rc4-lifecycle-fix.json").read_text())
+    scope = json.loads(read_at("tests/fixtures/splicore-rc4-lifecycle-fix.json", tree))
     require(scope["base_commit"] == "326a3566447b7fb0834affbaee43cfa9594dc1e0"
             and scope["phase"] == "lifecycle-manager-version-fix"
             and set(scope["product_files"]) == {"src/15-core-state.sh"}, "lifecycle fix scope differs")
-    verify_files(ROOT, scope["product_files"])
+    verify_at(scope["product_files"], tree)
     return scope["product_files"]
 
 
-def frozen_integrity(allow_certificate_fix=False, allow_release_metadata=False, allow_lifecycle_fix=False):
-    metadata = v4_metadata_integrity() if allow_release_metadata else {}
-    lifecycle = lifecycle_fix_integrity() if allow_lifecycle_fix else {}
-    manifest = json.loads((ROOT / "tests/fixtures/splicore-rc4-frozen.json").read_text())
+def frozen_integrity(allow_certificate_fix=False, allow_release_metadata=False, allow_lifecycle_fix=False, tree=None):
+    metadata = v4_metadata_integrity(tree) if allow_release_metadata else {}
+    lifecycle = lifecycle_fix_integrity(tree) if allow_lifecycle_fix else {}
+    manifest = json.loads(read_at("tests/fixtures/splicore-rc4-frozen.json", tree))
     require(manifest["frozen_commit"] == BASE and manifest["sole_parent"] == PARENT, "wrong frozen baseline")
     require(git("rev-list", "--parents", "-n", "1", BASE).decode().split() == [BASE, PARENT], "frozen commit identity differs")
-    require(subprocess.run(["git", "merge-base", "--is-ancestor", BASE, "HEAD"], cwd=ROOT,
-                           capture_output=True, timeout=30).returncode == 0, "checkout does not descend from frozen commit")
+    require(git("merge-base", BASE, tree or "HEAD").decode().strip() == BASE,
+            "checkout does not descend from frozen commit")
     baseline_paths = git("ls-tree", "-r", "--name-only", BASE).decode().splitlines()
     expected = {p for p in baseline_paths if p.startswith(("src/", "runtime/", "docs/reports/"))
                 or p in ("install-nobrand.sh", "dist/install-nobrand.sh", "scripts/build.sh")}
@@ -126,52 +176,105 @@ def frozen_integrity(allow_certificate_fix=False, allow_release_metadata=False, 
     require(len(manifest["historical_reports"]) == 16 and all(
         hashes.get(p) == h for p, h in manifest["historical_reports"].items()), "historical hash protection differs")
     require(set(hashes) == expected, "protected manifest omits or adds baseline paths")
-    query = "\n".join(BASE + ":" + p for p in sorted(hashes)) + "\n"
-    raw = subprocess.run(["git", "cat-file", "--batch"], input=query.encode(), cwd=ROOT,
-                         stdout=subprocess.PIPE, check=True, timeout=30).stdout
-    offset = 0
-    for name in sorted(hashes):
-        end = raw.index(b"\n", offset)
-        header = raw[offset:end].split()
-        require(len(header) == 3 and header[1] == b"blob", "baseline blob unavailable")
-        size = int(header[2])
-        require(hashlib.sha256(raw[end + 1:end + 1 + size]).hexdigest() == hashes[name], "manifest differs from frozen Git bytes: " + name)
-        offset = end + size + 2
+    verify_at(hashes, BASE)
     permitted = {"runtime/splicore.py", "install-nobrand.sh", "dist/install-nobrand.sh"} if allow_certificate_fix else set()
     permitted.update(metadata)
     permitted.update(lifecycle)
-    verify_files(ROOT, {p: h for p, h in hashes.items() if p not in permitted})
-    changed = [p for p in sorted(permitted) if hashlib.sha256((ROOT / p).read_bytes()).hexdigest() != hashes[p]]
+    verify_at({p: h for p, h in hashes.items() if p not in permitted}, tree)
+    changed = [p for p in sorted(permitted) if hashlib.sha256(read_at(p, tree)).hexdigest() != hashes[p]]
     return {"product_files": len(manifest["product_files"]), "protected_reports": len(manifest["protected_reports"]),
             "historical_reports": len(manifest["historical_reports"]), "changed": len(changed),
             "authorized_product_changes": changed, "release_metadata_files": sorted(metadata),
             "lifecycle_fix_files": sorted(lifecycle), "result": "PASS"}
 
 
-def review_integrity():
-    """Preserve the reviewed certificate/lifecycle fixes and release metadata."""
-    release = (ROOT / "src/05-constants.sh").read_bytes().startswith(b'SCRIPT_VERSION="4.0.0"\n')
-    result = frozen_integrity(allow_certificate_fix=True, allow_release_metadata=release, allow_lifecycle_fix=True)
-    scope = json.loads((ROOT / "tests/fixtures/splicore-rc4-cert-fix.json").read_text())
+def reviewed_integrity(tree=None):
+    """Preserve certificate/lifecycle/metadata proofs at the specified source."""
+    release = read_at("src/05-constants.sh", tree).startswith(b'SCRIPT_VERSION="4.0.0"\n')
+    result = frozen_integrity(allow_certificate_fix=True, allow_release_metadata=release,
+                              allow_lifecycle_fix=True, tree=tree)
+    scope = json.loads(read_at("tests/fixtures/splicore-rc4-cert-fix.json", tree))
     require(scope["frozen_commit"] == BASE and set(scope["permitted_product_paths"]) ==
             {"runtime/splicore.py", "install-nobrand.sh", "dist/install-nobrand.sh"}, "certificate fix scope differs")
     methods = {"certificate_material", "certificate_provenance", "certificate_owner", "certificate", "protocol", "uninstall"}
     require(set(scope["permitted_runtime_methods"]) == methods, "runtime method scope differs")
-    current = (ROOT / "runtime/splicore.py").read_bytes()
+    current = read_at("runtime/splicore.py", tree)
     if release:
         old, new = V4_METADATA_FIELDS["runtime/splicore.py"]
         current = current.replace(new, old, 1)
     trees = [ast.parse(git("show", BASE + ":runtime/splicore.py")), ast.parse(current)]
-    for tree in trees:
-        runtime = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Runtime")
+    for ast_tree in trees:
+        runtime = next(n for n in ast_tree.body if isinstance(n, ast.ClassDef) and n.name == "Runtime")
         runtime.body = [n for n in runtime.body if not (isinstance(n, ast.FunctionDef) and n.name in methods)]
     require(ast.dump(trees[0]) == ast.dump(trees[1]), "product change escapes certificate lifecycle methods")
-    verify_files(ROOT, scope["preserved_qualification_files"])
-    run = subprocess.run(["bash", "scripts/build.sh", "--check"], cwd=ROOT, capture_output=True, timeout=60)
-    require(run.returncode == 0, "generated installers differ from reviewed runtime")
+    verify_at(scope["preserved_qualification_files"], tree)
+    if tree:
+        require(read_at("install-nobrand.sh", tree) == read_at("dist/install-nobrand.sh", tree),
+                "historical generated installers differ")
+    else:
+        run = subprocess.run(["bash", "scripts/build.sh", "--check"], cwd=ROOT, capture_output=True, timeout=60)
+        require(run.returncode == 0, "generated installers differ from reviewed runtime")
     result.update(scope="REVIEWED CERTIFICATE + LIFECYCLE FIXES" + (" + EXACT V4 RELEASE METADATA" if release else ""), unapproved_changes=0,
                   preserved_qualification_files=len(scope["preserved_qualification_files"]))
     return result
+
+
+def candidate_protected_paths():
+    paths = set(git("ls-tree", "-r", "--name-only", RELEASE_BASE).decode().splitlines())
+    scope = json.loads(read_at("tests/fixtures/splicore-rc4-cert-fix.json", RELEASE_BASE))
+    return {p for p in paths if p.startswith(("src/", "runtime/", "docs/reports/"))
+            or p in ("scripts/build.sh", "install-nobrand.sh", "dist/install-nobrand.sh")} | {
+                "tests/fixtures/splicore-rc4-frozen.json", "tests/fixtures/splicore-rc4-cert-fix.json",
+                "tests/fixtures/splicore-rc4-lifecycle-fix.json", *scope["preserved_qualification_files"]}
+
+
+def presentation_candidate_integrity():
+    """Permit exact declared candidate bytes; reject all other protected changes."""
+    require(git("merge-base", RELEASE_BASE, "HEAD").decode().strip() == RELEASE_BASE,
+            "candidate does not descend from v4.0.0")
+    path = ROOT / PRESENTATION_MANIFEST
+    require(path.is_file() and not path.is_symlink(), "candidate manifest missing or symlink")
+    scope = json.loads(path.read_text())
+    require(isinstance(scope, dict)
+            and set(scope) == {"schema", "phase", "base_commit", "product_files", "qualification_files"}
+            and type(scope.get("schema")) is int and scope["schema"] == 1
+            and scope.get("phase") == "client-profile-human-output"
+            and scope.get("base_commit") == RELEASE_BASE
+            and isinstance(scope.get("product_files"), dict)
+            and isinstance(scope.get("qualification_files"), dict)
+            and set(scope["product_files"]) == INTENTIONAL_PRODUCT_CHANGES
+            and set(scope["qualification_files"]) == INTENTIONAL_QUALIFICATION_CHANGES,
+            "presentation candidate scope differs")
+    declared = dict(scope["product_files"], **scope["qualification_files"])
+    require(all(isinstance(h, str) and re.fullmatch(r"[0-9a-f]{64}", h) for h in declared.values()),
+            "invalid candidate digest")
+    protected = candidate_protected_paths()
+    expected = tree_hashes(RELEASE_BASE, protected)
+    tracked = set(git("ls-tree", "-r", "--name-only", RELEASE_BASE).decode().splitlines())
+    originals = tree_hashes(RELEASE_BASE, declared.keys() & tracked)
+    require(all(h != originals.get(p) for p, h in declared.items()), "declared candidate path is unchanged")
+    expected.update(declared)
+    verify_files(ROOT, expected)
+    # Existing frozen manifests did not detect newly added source files.
+    sources = {p.relative_to(ROOT).as_posix() for folder in ("src", "runtime")
+               for p in (ROOT / folder).rglob("*")
+               if "__pycache__" not in p.parts and (p.is_file() or p.is_symlink())}
+    require(sources == {p for p in expected if p.startswith(("src/", "runtime/"))},
+            "unexpected candidate source path")
+    return {"base_commit": RELEASE_BASE, "manifest": PRESENTATION_MANIFEST,
+            "declared_product_changes": sorted(scope["product_files"]),
+            "declared_qualification_changes": sorted(scope["qualification_files"]),
+            "unexpected_changes": 0, "result": "PASS"}
+
+
+def review_integrity():
+    historical = reviewed_integrity(tree=RELEASE_BASE)
+    candidate = presentation_candidate_integrity()
+    run = subprocess.run(["bash", "scripts/build.sh", "--check"], cwd=ROOT, capture_output=True, timeout=60)
+    require(run.returncode == 0, "generated installers differ from candidate source")
+    return dict(historical, historical_commit=RELEASE_BASE, historical_integrity="PASS",
+                candidate=candidate, scope="V4 HISTORICAL TREE + EXACT PRESENTATION CANDIDATE",
+                unapproved_changes=0)
 
 
 def workflow_contract(text):
@@ -309,13 +412,16 @@ def summarize(log, probe):
     baseline_probe = json.loads(git("show", BASE + ":docs/reports/SPLICORE_RC4_FRESH_RUNTIME_PROBE.json"))
     require(set(probe["checks"]) == set(baseline_probe["checks"]), "frozen runtime checks missing or changed")
     baseline_script = git("show", BASE + ":scripts/test.sh").decode()
-    expected_bash = set(re.findall(r"^  (tests/\S+\.sh)$", baseline_script, re.M)) | {"tests/test_splicore_qualification.sh", "tests/test_splicore_cert_lifecycle.sh"}
+    expected_bash = set(re.findall(r"^  (tests/\S+\.sh)$", baseline_script, re.M)) | {
+        "tests/test_splicore_qualification.sh", "tests/test_splicore_cert_lifecycle.sh",
+        "tests/test_client_profile_output.sh"}
     actual_bash = re.findall(r"^\[RUN\] (tests/\S+\.sh)$", log, re.M)
-    require(set(actual_bash) == expected_bash and len(actual_bash) == len(expected_bash), "frozen Bash entrypoints missing or repeated")
+    require(set(actual_bash) == expected_bash and len(actual_bash) == len(expected_bash), "candidate Bash entrypoints missing or repeated")
     require("[PASS] ShellCheck:" in log and "[PASS] Generated installers" in log, "quality gate skipped")
     python_runs = [int(n) for n in re.findall(r"^Ran (\d+) tests in .*", log, re.M)]
-    require(len(python_runs) >= 5 and python_runs[:2] == [27, 10] and python_runs[2] >= 21 and sum(python_runs[3:-1]) >= 13
-            and python_runs[-1] >= 20
+    minimum_runs = [27, 10, 22, 24, 43, 20]
+    require(len(python_runs) == len(minimum_runs) and python_runs[:2] == minimum_runs[:2]
+            and all(actual >= minimum for actual, minimum in zip(python_runs, minimum_runs))
             and not re.search(r"^OK \(skipped=|^FAILED|^ERROR:|^Traceback", log, re.M), "Python tests skipped, incomplete or failed")
     return {"result": "PASS", "bash_entrypoints": len(re.findall(r"^\[RUN\] ", log, re.M)),
             "python_runs": python_runs, "python_total": sum(python_runs), "runtime_checks": len(probe["checks"]),

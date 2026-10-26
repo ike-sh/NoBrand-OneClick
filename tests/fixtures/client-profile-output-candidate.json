@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "phase": "client-profile-human-output",
+  "base_commit": "1d817b27b43cf33a72025c22acc2f04aa2ef0d26",
+  "product_files": {
+    "dist/install-nobrand.sh": "7c7f92809c75cee91af405fc0c52c0f6a52a854a5492df28c3f01f965df879f6",
+    "install-nobrand.sh": "7c7f92809c75cee91af405fc0c52c0f6a52a854a5492df28c3f01f965df879f6",
+    "runtime/client-output.py": "a7abab298f9adbae02a468de43c2720e8b74119004737c23839fe49a6452d9f7",
+    "scripts/build.sh": "a64986f1ee7c313f18d757e263a4768baf3df812c6162f5a713ee7b9f7e5dc4b",
+    "src/19-splicore.sh": "da488127fe296aaf411e960f5d911808ae391fcd10bf965406af8b3a4b39f032",
+    "src/70-client-export-install.sh": "dad3009d72b99e9864342e4e9b3d2463a831027f864bf631c35ea0797e453ea7"
+  },
+  "qualification_files": {
+    "docs/SPLICORE-RC4-TEST-CONTRACT.md": "d7750b6cc9b0e9eae5ee2749faadc95e442422ec7693153cf05017d2c25d96b7",
+    "scripts/qualify-splicore.py": "2a6df3296f87e85285c5e459efb88e67076c34ed59e2578d4bcb9cec236eac6a",
+    "scripts/test.sh": "7b1da418114fdb0ac2d4920dbc174e146e340bc2bad885c5adf68e6cff5a8a46",
+    "tests/fixtures/client-profile-output.json": "e4aab9c2e3d7eb15f9d85b4692c6e90a4d51398dd070d00c29e2db98450330c5",
+    "tests/helpers/test_client_profile_output.py": "ed3485d5f3ee22f44b020b6e5f5a104675e131e72aba3b0ae27ad8e418fa1253",
+    "tests/helpers/test_splicore_qualification.py": "43a047a599e85e45297ee522cdb009d3e2738e9bba118b2729a1ae6b2eb5be30",
+    "tests/test_client_profile_output.sh": "dffdbbf953366b5d0e64cd0446aef7652c1666e0464b679660d00950c54a8ab0"
+  }
+}

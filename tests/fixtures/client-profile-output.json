@@ -1,0 +1,441 @@
+{
+  "nodes": [
+    {
+      "id": "snell4",
+      "protocol": "snell",
+      "client": {
+        "name": "snell4"
+      },
+      "document": {
+        "schema": 1,
+        "listener": {
+          "host": "0.0.0.0",
+          "port": 10201
+        },
+        "display_endpoint": {
+          "host": "203.0.113.10",
+          "port": 10201
+        },
+        "settings": {
+          "version": 4
+        },
+        "psk": "synthetic-psk"
+      }
+    },
+    {
+      "id": "snell5",
+      "protocol": "snell",
+      "client": {
+        "name": "snell5"
+      },
+      "document": {
+        "schema": 1,
+        "listener": {
+          "host": "0.0.0.0",
+          "port": 10201
+        },
+        "display_endpoint": {
+          "host": "203.0.113.10",
+          "port": 10201
+        },
+        "settings": {
+          "version": 5
+        },
+        "psk": "synthetic-psk"
+      }
+    },
+    {
+      "id": "mieru",
+      "protocol": "mieru",
+      "client": {
+        "name": "mieru"
+      },
+      "document": {
+        "schema": 1,
+        "listener": {
+          "host": "0.0.0.0",
+          "port": 10201
+        },
+        "display_endpoint": {
+          "host": "203.0.113.10",
+          "port": 10201
+        },
+        "settings": {
+          "transport": "tcp",
+          "mtu": 1400,
+          "multiplex": "off"
+        },
+        "users": [
+          {
+            "username": "user_test_001",
+            "password": "pass_test_001"
+          }
+        ]
+      }
+    },
+    {
+      "id": "hy2",
+      "protocol": "hysteria2",
+      "client": {
+        "name": "hy2"
+      },
+      "document": {
+        "schema": 1,
+        "listener": {
+          "host": "0.0.0.0",
+          "port": 10201
+        },
+        "display_endpoint": {
+          "host": "203.0.113.10",
+          "port": 10201
+        },
+        "settings": {
+          "tls": {
+            "server_name": "edge.example",
+            "ca_certificate": [
+              "synthetic-public-ca"
+            ],
+            "certificate_file": "/synthetic/leaf.pem",
+            "private_key_file": "TLS_PRIVATE_KEY_SHOULD_NEVER_RENDER"
+          },
+          "stream_transport": {
+            "kind": "hysteria",
+            "hysteria": {
+              "version": 2,
+              "obfs": {
+                "type": "salamander",
+                "password": "synthetic-obfs"
+              }
+            }
+          }
+        },
+        "users": [
+          {
+            "password": "CLIENT_SECRET_VISIBLE_123"
+          }
+        ]
+      }
+    },
+    {
+      "id": "tuic",
+      "protocol": "tuic",
+      "client": {
+        "name": "tuic",
+        "user_names": [
+          "Profile A",
+          "Profile B"
+        ]
+      },
+      "document": {
+        "schema": 1,
+        "listener": {
+          "host": "0.0.0.0",
+          "port": 10201
+        },
+        "display_endpoint": {
+          "host": "203.0.113.10",
+          "port": 10201
+        },
+        "settings": {
+          "version": 5,
+          "congestion_control": "cubic",
+          "udp_relay_mode": "native",
+          "zero_rtt_handshake": false,
+          "tls": {
+            "server_name": "edge.example",
+            "ca_certificate": [
+              "synthetic-public-ca"
+            ],
+            "certificate_file": "/synthetic/leaf.pem",
+            "private_key_file": "TLS_PRIVATE_KEY_SHOULD_NEVER_RENDER"
+          }
+        },
+        "users": [
+          {
+            "uuid": "00000000-0000-4000-8000-000000000001",
+            "password": "synthetic-tuic-a"
+          },
+          {
+            "uuid": "00000000-0000-4000-8000-000000000002",
+            "password": "synthetic-tuic-b"
+          }
+        ]
+      }
+    },
+    {
+      "id": "reality",
+      "protocol": "vless-reality",
+      "client": {
+        "name": "reality"
+      },
+      "document": {
+        "schema": 1,
+        "listener": {
+          "host": "0.0.0.0",
+          "port": 10201
+        },
+        "display_endpoint": {
+          "host": "203.0.113.10",
+          "port": 10201
+        },
+        "settings": {
+          "flow": "xtls-rprx-vision",
+          "reality": {
+            "server_name": "edge.example",
+            "public_key": "synthetic-public-key",
+            "short_ids": [
+              "0123456789abcdef"
+            ]
+          }
+        },
+        "users": [
+          {
+            "uuid": "00000000-0000-4000-8000-000000000003"
+          }
+        ],
+        "server_secret": {
+          "private_key": "REALITY_PRIVATE_KEY_SHOULD_NEVER_RENDER"
+        }
+      }
+    }
+  ],
+  "client_profiles": [
+    {
+      "id": "snell4",
+      "protocol": "snell",
+      "server_version": 4,
+      "client_wire_version": 4,
+      "surge": "snell4 = snell, 203.0.113.10, 10201, psk = synthetic-psk, version = 4",
+      "sing_box": {
+        "type": "snell",
+        "tag": "snell4",
+        "server": "203.0.113.10",
+        "server_port": 10201,
+        "version": 4,
+        "psk": "synthetic-psk"
+      },
+      "mihomo": "- name: \"snell4\"\n  type: snell\n  server: \"203.0.113.10\"\n  port: 10201\n  psk: \"synthetic-psk\"\n  version: 4\n  udp: true\n"
+    },
+    {
+      "id": "snell5",
+      "protocol": "snell",
+      "server_version": 5,
+      "client_wire_version": 4,
+      "surge": "snell5 = snell, 203.0.113.10, 10201, psk = synthetic-psk, version = 4",
+      "sing_box": {
+        "type": "snell",
+        "tag": "snell5",
+        "server": "203.0.113.10",
+        "server_port": 10201,
+        "version": 4,
+        "psk": "synthetic-psk"
+      },
+      "mihomo": "- name: \"snell5\"\n  type: snell\n  server: \"203.0.113.10\"\n  port: 10201\n  psk: \"synthetic-psk\"\n  version: 4\n  udp: true\n"
+    },
+    {
+      "id": "mieru",
+      "protocol": "mieru",
+      "uri": "mierus://user_test_001:pass_test_001@203.0.113.10?handshake-mode=HANDSHAKE_NO_WAIT&mtu=1400&multiplexing=MULTIPLEXING_OFF&port=10201&profile=default&protocol=TCP",
+      "mieru": {
+        "profiles": [
+          {
+            "profileName": "default",
+            "user": {
+              "name": "user_test_001",
+              "password": "pass_test_001"
+            },
+            "servers": [
+              {
+                "ipAddress": "203.0.113.10",
+                "domainName": "",
+                "portBindings": [
+                  {
+                    "port": 10201,
+                    "protocol": "TCP"
+                  }
+                ]
+              }
+            ],
+            "mtu": 1400,
+            "multiplexing": {
+              "level": "MULTIPLEXING_OFF"
+            },
+            "handshakeMode": "HANDSHAKE_NO_WAIT"
+          }
+        ],
+        "activeProfile": "default",
+        "rpcPort": 8964,
+        "socks5Port": 1080,
+        "loggingLevel": "INFO",
+        "socks5ListenLAN": false,
+        "httpProxyPort": 8080,
+        "httpProxyListenLAN": false
+      },
+      "mihomo": "proxies:\n  - name: mieru-mita-tcp\n    type: mieru\n    server: \"203.0.113.10\"\n    port: 10201\n    transport: TCP\n    udp: true\n    username: \"user_test_001\"\n    password: \"pass_test_001\"\n    multiplexing: MULTIPLEXING_OFF\n    handshake-mode: HANDSHAKE_NO_WAIT\n"
+    },
+    {
+      "id": "hy2",
+      "protocol": "hysteria2",
+      "uri": "hysteria2://CLIENT_SECRET_VISIBLE_123@203.0.113.10:10201?sni=edge.example&alpn=h3&insecure=1&pinSHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&obfs=salamander&obfs-password=synthetic-obfs#NoBrand-Hysteria2",
+      "sing_box": {
+        "type": "hysteria2",
+        "tag": "NoBrand-Hysteria2",
+        "server": "203.0.113.10",
+        "server_port": 10201,
+        "password": "CLIENT_SECRET_VISIBLE_123",
+        "tls": {
+          "enabled": true,
+          "server_name": "edge.example",
+          "insecure": false,
+          "certificate": [
+            "synthetic-public-ca"
+          ],
+          "alpn": [
+            "h3"
+          ]
+        },
+        "obfs": {
+          "type": "salamander",
+          "password": "synthetic-obfs"
+        }
+      },
+      "mihomo": "- name: NoBrand-Hysteria2\n  type: hysteria2\n  server: \"203.0.113.10\"\n  port: 10201\n  password: \"CLIENT_SECRET_VISIBLE_123\"\n  sni: \"edge.example\"\n  alpn: [h3]\n  skip-cert-verify: false\n  fingerprint: \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n  udp: true\n  obfs: salamander\n  obfs-password: \"synthetic-obfs\"\n",
+      "trust": {
+        "sing_box": "explicit CA and hostname",
+        "mihomo": "SHA256 leaf pin",
+        "uri": "pinSHA256 is mandatory; PKI bypass is bounded by this explicit pin"
+      }
+    },
+    {
+      "id": "tuic",
+      "protocol": "tuic",
+      "profiles": [
+        {
+          "user": "Profile A",
+          "mihomo": "proxies:\n  - name: \"nobrand-tuic-Profile A\"\n    type: tuic\n    server: \"203.0.113.10\"\n    port: 10201\n    uuid: \"00000000-0000-4000-8000-000000000001\"\n    password: \"synthetic-tuic-a\"\n    sni: \"edge.example\"\n    alpn: [h3]\n    skip-cert-verify: false\n    fingerprint: \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n    congestion-controller: cubic\n    udp-relay-mode: native\n    reduce-rtt: false\n    max-udp-relay-packet-size: 1400\n",
+          "sing_box": {
+            "log": {
+              "level": "warn",
+              "timestamp": true
+            },
+            "inbounds": [
+              {
+                "type": "mixed",
+                "tag": "mixed-in",
+                "listen": "127.0.0.1",
+                "listen_port": 1080
+              }
+            ],
+            "outbounds": [
+              {
+                "type": "tuic",
+                "tag": "nobrand-tuic-Profile A",
+                "server": "203.0.113.10",
+                "server_port": 10201,
+                "uuid": "00000000-0000-4000-8000-000000000001",
+                "password": "synthetic-tuic-a",
+                "congestion_control": "cubic",
+                "udp_relay_mode": "native",
+                "zero_rtt_handshake": false,
+                "tls": {
+                  "enabled": true,
+                  "server_name": "edge.example",
+                  "insecure": false,
+                  "certificate": [
+                    "synthetic-public-ca"
+                  ],
+                  "alpn": [
+                    "h3"
+                  ]
+                }
+              }
+            ],
+            "route": {
+              "final": "nobrand-tuic-Profile A"
+            }
+          }
+        },
+        {
+          "user": "Profile B",
+          "mihomo": "proxies:\n  - name: \"nobrand-tuic-Profile B\"\n    type: tuic\n    server: \"203.0.113.10\"\n    port: 10201\n    uuid: \"00000000-0000-4000-8000-000000000002\"\n    password: \"synthetic-tuic-b\"\n    sni: \"edge.example\"\n    alpn: [h3]\n    skip-cert-verify: false\n    fingerprint: \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n    congestion-controller: cubic\n    udp-relay-mode: native\n    reduce-rtt: false\n    max-udp-relay-packet-size: 1400\n",
+          "sing_box": {
+            "log": {
+              "level": "warn",
+              "timestamp": true
+            },
+            "inbounds": [
+              {
+                "type": "mixed",
+                "tag": "mixed-in",
+                "listen": "127.0.0.1",
+                "listen_port": 1080
+              }
+            ],
+            "outbounds": [
+              {
+                "type": "tuic",
+                "tag": "nobrand-tuic-Profile B",
+                "server": "203.0.113.10",
+                "server_port": 10201,
+                "uuid": "00000000-0000-4000-8000-000000000002",
+                "password": "synthetic-tuic-b",
+                "congestion_control": "cubic",
+                "udp_relay_mode": "native",
+                "zero_rtt_handshake": false,
+                "tls": {
+                  "enabled": true,
+                  "server_name": "edge.example",
+                  "insecure": false,
+                  "certificate": [
+                    "synthetic-public-ca"
+                  ],
+                  "alpn": [
+                    "h3"
+                  ]
+                }
+              }
+            ],
+            "route": {
+              "final": "nobrand-tuic-Profile B"
+            }
+          }
+        }
+      ],
+      "uri": null
+    },
+    {
+      "id": "reality",
+      "protocol": "vless-reality",
+      "uri": "vless://00000000-0000-4000-8000-000000000003@203.0.113.10:10201?encryption=none&security=reality&type=tcp&flow=xtls-rprx-vision&sni=edge.example&fp=chrome&pbk=synthetic-public-key&sid=0123456789abcdef#reality",
+      "mihomo": "proxies:\n  - {\"name\": \"reality\", \"type\": \"vless\", \"server\": \"203.0.113.10\", \"port\": 10201, \"uuid\": \"00000000-0000-4000-8000-000000000003\", \"tls\": true, \"servername\": \"edge.example\", \"client-fingerprint\": \"chrome\", \"reality-opts\": {\"public-key\": \"synthetic-public-key\", \"short-id\": \"0123456789abcdef\"}, \"network\": \"tcp\", \"udp\": false, \"flow\": \"xtls-rprx-vision\"}\n",
+      "xray": {
+        "protocol": "vless",
+        "settings": {
+          "vnext": [
+            {
+              "address": "203.0.113.10",
+              "port": 10201,
+              "users": [
+                {
+                  "id": "00000000-0000-4000-8000-000000000003",
+                  "encryption": "none",
+                  "flow": "xtls-rprx-vision"
+                }
+              ]
+            }
+          ]
+        },
+        "streamSettings": {
+          "network": "tcp",
+          "security": "reality",
+          "realitySettings": {
+            "serverName": "edge.example",
+            "fingerprint": "chrome",
+            "publicKey": "synthetic-public-key",
+            "shortId": "0123456789abcdef"
+          }
+        }
+      }
+    }
+  ]
+}

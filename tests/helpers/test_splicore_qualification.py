@@ -7,6 +7,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -78,6 +79,139 @@ class QualificationTests(unittest.TestCase):
         self.assertEqual(result["unapproved_changes"], 0)
         self.assertEqual(result["historical_reports"], 16)
         with self.assertRaises(q.QualificationFailure): q.frozen_integrity()
+
+    @contextlib.contextmanager
+    def presentation_candidate_fixture(self):
+        """Keep negative mutations outside the user's actual working tree."""
+        paths = (q.candidate_protected_paths() | q.INTENTIONAL_PRODUCT_CHANGES
+                 | q.INTENTIONAL_QUALIFICATION_CHANGES | {q.PRESENTATION_MANIFEST})
+        with tempfile.TemporaryDirectory(prefix="nb-candidate-") as directory:
+            root = Path(directory)
+            for name in paths:
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(ROOT / name, path)
+            def repository_git(*arguments, input_data=None):
+                return subprocess.check_output(["git", *arguments], cwd=ROOT, input=input_data, timeout=30)
+            with patch.object(q, "ROOT", root), patch.object(q, "git", side_effect=repository_git):
+                yield root
+
+    def test_presentation_candidate_declared_build_changes_pass(self):
+        result = q.presentation_candidate_integrity()
+        self.assertEqual(result["base_commit"], q.RELEASE_BASE)
+        self.assertEqual(set(result["declared_product_changes"]), q.INTENTIONAL_PRODUCT_CHANGES)
+        self.assertIn("scripts/build.sh", result["declared_product_changes"])
+        self.assertEqual(result["unexpected_changes"], 0)
+
+    def test_historical_release_integrity_uses_release_tree(self):
+        with self.presentation_candidate_fixture() as root:
+            (root / "scripts/build.sh").write_bytes(b"synthetic unexpected working bytes")
+            historical = q.reviewed_integrity(tree=q.RELEASE_BASE)
+            self.assertEqual(historical["result"], "PASS")
+            self.assertEqual(historical["historical_reports"], 16)
+            with self.assertRaisesRegex(q.QualificationFailure, "protected file changed: scripts/build.sh"):
+                q.presentation_candidate_integrity()
+
+    def test_candidate_undeclared_protected_change_rejects_then_restore_passes(self):
+        with self.presentation_candidate_fixture() as root:
+            self.assertEqual(q.presentation_candidate_integrity()["result"], "PASS")
+            path = root / "src/16-core-port.sh"
+            original = path.read_bytes()
+            path.write_bytes(original + b"\n# synthetic undeclared mutation\n")
+            with self.assertRaisesRegex(q.QualificationFailure, "protected file changed: src/16-core-port.sh"):
+                q.presentation_candidate_integrity()
+            path.write_bytes(original)
+            self.assertEqual(q.presentation_candidate_integrity()["result"], "PASS")
+
+    def test_declared_candidate_paths_require_exact_bytes(self):
+        with self.presentation_candidate_fixture() as root:
+            for name in sorted(q.INTENTIONAL_PRODUCT_CHANGES):
+                with self.subTest(name=name):
+                    path = root / name
+                    original = path.read_bytes()
+                    path.write_bytes(original + b"\n# synthetic unreviewed bytes\n")
+                    with self.assertRaisesRegex(q.QualificationFailure, "protected file changed"):
+                        q.presentation_candidate_integrity()
+                    path.write_bytes(original)
+            self.assertEqual(q.presentation_candidate_integrity()["result"], "PASS")
+
+    def test_candidate_manifest_cannot_expand_or_replace_scope(self):
+        with self.presentation_candidate_fixture() as root:
+            path = root / q.PRESENTATION_MANIFEST
+            original = json.loads(path.read_text())
+            invalid = [dict(original, base_commit=q.BASE), dict(original, phase="different-fix"),
+                       dict(original, schema=True), dict(original, product_files={"src/*": "0" * 64}),
+                       dict(original, product_files={**original["product_files"], "src/16-core-port.sh": "0" * 64}),
+                       dict(original, qualification_files={}),
+                       dict(original, product_files={**original["product_files"], "scripts/build.sh": "invalid"}), []]
+            for scope in invalid:
+                with self.subTest(scope=scope):
+                    path.write_text(json.dumps(scope))
+                    with self.assertRaises(q.QualificationFailure): q.presentation_candidate_integrity()
+            path.write_text(json.dumps(original))
+            self.assertEqual(q.presentation_candidate_integrity()["result"], "PASS")
+
+    def test_candidate_rejects_new_undeclared_source(self):
+        with self.presentation_candidate_fixture() as root:
+            path = root / "runtime/undeclared.py"
+            path.write_text("# synthetic unexpected new source\n")
+            with self.assertRaisesRegex(q.QualificationFailure, "unexpected candidate source path"):
+                q.presentation_candidate_integrity()
+            path.unlink()
+            self.assertEqual(q.presentation_candidate_integrity()["result"], "PASS")
+
+    def test_candidate_missing_or_symlink_manifest_and_product_reject(self):
+        with self.presentation_candidate_fixture() as root:
+            for name in (q.PRESENTATION_MANIFEST, "scripts/build.sh", "runtime/client-output.py"):
+                with self.subTest(name=name):
+                    path = root / name
+                    original = path.read_bytes()
+                    path.unlink()
+                    with self.assertRaises(q.QualificationFailure): q.presentation_candidate_integrity()
+                    target = root / "equivalent-synthetic-bytes"
+                    target.write_bytes(original)
+                    path.symlink_to(target)
+                    with self.assertRaises(q.QualificationFailure): q.presentation_candidate_integrity()
+                    path.unlink()
+                    path.write_bytes(original)
+            self.assertEqual(q.presentation_candidate_integrity()["result"], "PASS")
+
+    def test_candidate_cannot_rewrite_historical_manifests_or_evidence(self):
+        with self.presentation_candidate_fixture() as root:
+            for name in ("tests/fixtures/splicore-rc4-frozen.json", "tests/fixtures/splicore-rc4-cert-fix.json",
+                         "tests/fixtures/splicore-rc4-lifecycle-fix.json", "docs/reports/SPLICORE_RC4_FRESH_RUNTIME_PROBE.json"):
+                with self.subTest(name=name):
+                    path = root / name
+                    original = path.read_bytes()
+                    path.write_bytes(original + b"\n ")
+                    with self.assertRaisesRegex(q.QualificationFailure, "protected file changed"):
+                        q.presentation_candidate_integrity()
+                    path.write_bytes(original)
+            self.assertEqual(q.presentation_candidate_integrity()["result"], "PASS")
+
+    def test_renderer_requires_current_build_inclusion(self):
+        with self.presentation_candidate_fixture() as root:
+            self.assertEqual(subprocess.run(["bash", "scripts/build.sh", "--check"], cwd=root,
+                                           capture_output=True, timeout=30).returncode, 0)
+            self.assertIn(b"nb_client_profiles_python()", (root / "install-nobrand.sh").read_bytes())
+            (root / "scripts/build.sh").write_bytes(q.git("show", q.RELEASE_BASE + ":scripts/build.sh"))
+            self.assertEqual(subprocess.run(["bash", "scripts/build.sh"], cwd=root,
+                                           capture_output=True, timeout=30).returncode, 0)
+            generated = (root / "install-nobrand.sh").read_bytes()
+            self.assertIn(b"nb_render_client_profiles()", generated)
+            self.assertNotIn(b"nb_client_profiles_python()", generated)
+
+    def test_candidate_digest_cannot_replace_build_consistency(self):
+        with self.presentation_candidate_fixture() as root:
+            path = root / "install-nobrand.sh"
+            path.write_bytes(path.read_bytes() + b"\n# synthetic generated-only edit\n")
+            manifest = root / q.PRESENTATION_MANIFEST
+            scope = json.loads(manifest.read_text())
+            scope["product_files"]["install-nobrand.sh"] = hashlib.sha256(path.read_bytes()).hexdigest()
+            manifest.write_text(json.dumps(scope))
+            self.assertEqual(q.presentation_candidate_integrity()["result"], "PASS")
+            with self.assertRaisesRegex(q.QualificationFailure, "generated installers differ from candidate source"):
+                q.review_integrity()
 
     def test_lifecycle_fix_accepts_only_exact_reviewed_state_bytes(self):
         self.assertEqual(set(q.lifecycle_fix_integrity()), {"src/15-core-state.sh"})
@@ -179,14 +313,17 @@ class QualificationTests(unittest.TestCase):
         baseline = json.loads(q.git("show", q.BASE + ":docs/reports/SPLICORE_RC4_FRESH_RUNTIME_PROBE.json"))
         script = q.git("show", q.BASE + ":scripts/test.sh").decode()
         import re
-        entries = re.findall(r"^  (tests/\S+\.sh)$", script, re.M) + ["tests/test_splicore_cert_lifecycle.sh", "tests/test_splicore_qualification.sh"]
+        entries = re.findall(r"^  (tests/\S+\.sh)$", script, re.M) + ["tests/test_splicore_cert_lifecycle.sh", "tests/test_splicore_qualification.sh", "tests/test_client_profile_output.sh"]
         log = "".join("[RUN] " + name + "\n" for name in entries)
-        log += "[PASS] ShellCheck:\n[PASS] Generated installers\nRan 27 tests in 1s\nRan 10 tests in 1s\nRan 21 tests in 1s\nRan 13 tests in 1s\nRan 20 tests in 1s\nUSER_RUNTIME_LITERAL_LEAK_COUNT=0\n[PASS] NoBrand test suite\n"
+        log += "[PASS] ShellCheck:\n[PASS] Generated installers\nRan 27 tests in 1s\nRan 10 tests in 1s\nRan 22 tests in 1s\nRan 24 tests in 1s\nRan 43 tests in 1s\nRan 20 tests in 1s\nUSER_RUNTIME_LITERAL_LEAK_COUNT=0\n[PASS] NoBrand test suite\n"
         self.assertEqual(q.summarize(log, baseline)["runtime_checks"], 42)
         partial = dict(baseline, checks=dict(baseline["checks"]))
         partial["checks"].pop(next(iter(partial["checks"])))
         for changed_log, changed_probe in ((log, partial), (log.replace("[RUN] " + entries[0] + "\n", ""), baseline),
-                                            (log.replace("Ran 27 tests", "Ran 26 tests"), baseline)):
+                                            (log.replace("[RUN] tests/test_client_profile_output.sh\n", ""), baseline),
+                                            (log.replace("Ran 27 tests", "Ran 26 tests"), baseline),
+                                            (log.replace("Ran 24 tests", "Ran 23 tests"), baseline),
+                                            (log.replace("Ran 43 tests", "Ran 42 tests"), baseline)):
             with self.subTest(log=changed_log[:20]), self.assertRaises(q.QualificationFailure):
                 q.summarize(changed_log, changed_probe)
 

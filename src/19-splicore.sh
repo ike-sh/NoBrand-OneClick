@@ -107,7 +107,7 @@ nb_splicore_installed() {
 
 nb_splicore_protocol() {
   nb_splicore_legacy_preflight || return 1
-  local protocol="$1" operation="$2" selector="${3:-}"
+  local protocol="$1" operation="$2" selector="${3:-}" output human_output=0
   local -a runtime_options=()
   if nobrand_ssh_confirmation_pending; then
     nobrand_pending_ssh_confirmation_notice
@@ -185,8 +185,19 @@ nb_splicore_protocol() {
   fi
   [ "${DRY_RUN:-0}" -ne 1 ] || runtime_options+=(--dry-run)
   [ -z "${NOBRAND_SPLICORE_ARTIFACTS:-}" ] || runtime_options+=(--artifacts "$NOBRAND_SPLICORE_ARTIFACTS")
-  nb_splicore_call protocol --protocol "$protocol" --operation "$operation" \
-    --selector "$selector" "${runtime_options[@]}" || return $?
+  output="$(nb_splicore_call protocol --protocol "$protocol" --operation "$operation" \
+    --selector "$selector" "${runtime_options[@]}")" || return $?
+  case "$operation:$protocol" in
+    show:*|client-config:*|export:*|user-show:*) human_output=1 ;;
+    install:*|user-add:mieru)
+      if [ "${DRY_RUN:-0}" -ne 1 ]; then human_output=1; fi
+      ;;
+  esac
+  if [ "$human_output" -eq 1 ]; then
+    printf '%s\n' "$output" | nb_render_client_profiles || return $?
+  else
+    printf '%s\n' "$output"
+  fi
   if { [ "$operation" = install ] || [ "$operation" = user-add ]; } && [ "${DRY_RUN:-0}" -ne 1 ]; then
     nobrand_install_manager_script || return 1
   fi

@@ -138,6 +138,9 @@ trap cleanup EXIT HUP INT TERM
   printf '%s\n' "'''"
   command cat "${ROOT}/runtime/splicore.py"
   printf '%s\n' 'NOBRAND_SPLICORE_PY' '}' ''
+  printf '%s\n' 'nb_client_profiles_python() {' '  python3 -c "$(cat <<'"'"'NOBRAND_CLIENT_OUTPUT_PY'"'"''
+  command cat "${ROOT}/runtime/client-output.py"
+  printf '%s\n' 'NOBRAND_CLIENT_OUTPUT_PY' ')" "$@"' '}' ''
   first_module=1
   for module in "${MODULES[@]}"; do
     if [ "$first_module" -eq 0 ]; then
