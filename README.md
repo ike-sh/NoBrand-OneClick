@@ -2,17 +2,19 @@
 
 **v4.0.0 是 Splicore-native 架构的首个正式版本。** 普通代理协议以固定的 **Splicore v0.3.0-rc.4** 为唯一主运行时，NoBrand 负责安装、配置、客户端输出和生命周期管理。
 
-当前稳定版本：[v4.0.0](https://github.com/ike-sh/NoBrand-OneClick/releases/tag/v4.0.0)。更新内容见 [CHANGELOG](CHANGELOG.md)。
+当前稳定版本：[v4.0.1](https://github.com/ike-sh/NoBrand-OneClick/releases/tag/v4.0.1)。更新内容见 [CHANGELOG](CHANGELOG.md)。
 
-## 重要升级说明：v3.x → v4.0.0
+v4.0.1 修复创建节点完成后、“查看节点”和协议快捷命令的客户端配置终端展示；分享链接可直接复制，Mihomo / Clash Meta 配置显示为正常多行 YAML，并改善端点与多配置展示。机器可读 `client_profiles` 数据保持兼容。
+
+## 重要升级说明：v3.x → v4.x
 
 **需要干净安装。旧版 NoBrand 多 Core 安装不支持原地升级、自动迁移或由新版直接卸载／转换。**
 
 1. 使用原 3.x 版本保存／导出现有客户端信息。
 2. 使用对应旧版本完成卸载。
 3. 确认旧 NoBrand-owned runtime、service 和 state 已清理。
-4. 使用 v4.0.0 干净安装。
-5. 使用 v4.0.0 重新生成并导入客户端配置。
+4. 使用当前 v4.x 稳定版干净安装。
+5. 使用当前 v4.x 稳定版重新生成并导入客户端配置。
 
 检测到 NoBrand 拥有的旧状态、二进制或服务时，新版在创建锁、安装依赖、下载和服务操作前拒绝。第三方独立安装的同名软件不会被当作 NoBrand 资源。
 
@@ -40,7 +42,7 @@ curl -fsSLO https://github.com/ike-sh/NoBrand-OneClick/releases/latest/download/
 sudo bash install-nobrand.sh
 ```
 
-也可从 [v4.0.0 Release](https://github.com/ike-sh/NoBrand-OneClick/releases/tag/v4.0.0) 下载 `install-nobrand.sh` 和 `SHA256SUMS`，在同一目录执行 `sha256sum -c SHA256SUMS` 后安装。
+也可从 [v4.0.1 Release](https://github.com/ike-sh/NoBrand-OneClick/releases/tag/v4.0.1) 下载 `install-nobrand.sh` 和 `SHA256SUMS`，在同一目录执行 `sha256sum -c SHA256SUMS` 后安装。
 
 Alpine Linux 请先安装 `bash` 与 `curl`，然后以 root 身份执行 `bash install-nobrand.sh`。
 
@@ -94,7 +96,7 @@ bash scripts/build.sh
 bash scripts/test.sh
 ```
 
-自动回归覆盖 30 个 Bash 入口、112 项 Python 测试、42 项真实 rc.4 回环 runtime 检查和 113 个 shell 语法检查；同时执行 ShellCheck、构建一致性、脱敏扫描及 GitHub Actions。普通测试保持调用者身份，九个必需 fixture 边界使用已验证的直接 root、非交互 sudo 或兼容 user namespace。真实流量结果及其范围见[验收报告](docs/reports/SPLICORE_RC4_FRESH_ARCHITECTURE_REPORT.md)。
+自动回归覆盖 31 个 Bash 入口、149 项 Python 测试（含 24 项客户端展示测试）、42 项真实 rc.4 回环 runtime 检查和 114 个 shell 语法检查；同时执行 ShellCheck、构建一致性、脱敏扫描及 GitHub Actions。普通测试保持调用者身份，九个必需 fixture 边界使用已验证的直接 root、非交互 sudo 或兼容 user namespace。真实流量结果及其范围见[验收报告](docs/reports/SPLICORE_RC4_FRESH_ARCHITECTURE_REPORT.md)。
 
 测试范围与当前限制：
 

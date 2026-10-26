@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 4.0.1 - 2026-10-26
+
+### Fixed
+
+- 恢复创建节点完成后、“查看节点”和协议快捷命令的人类可读客户端配置输出。
+- 分享链接直接显示，可复制使用，不再暴露内部 `client_profiles` JSON 包装。
+- Mihomo / Clash Meta 配置显示为正常多行 YAML，避免 JSON 转义的 `\n` 字符串。
+- 改善客户端端点格式，包括 IPv6 与多个配置的展示。
+- 机器可读 `client_profiles` schema 保持不变；Splicore 仍固定为 v0.3.0-rc.4，v3.x → v4.x 仍需干净安装。
+
 ## 4.0.0 - 2026-10-22
 
 ### Breaking Changes

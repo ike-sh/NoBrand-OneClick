@@ -63,6 +63,10 @@ test_localization.sh
 当前展示修复另用 `tests/fixtures/client-profile-output-candidate.json` 声明六个产品路径与七个测试/资格路径的精确 SHA256。该阶段清单不替代历史清单，也不接受目录通配豁免。其余受保护文件必须等于发布提交，新增未声明源码、缺失文件、symlink、声明路径上的额外字节和过期生成安装器均拒绝。版本仍为 `4.0.0`。
 新增 sandbox 正反测试验证合法构建集成通过，未声明产品变更失败，恢复 fixture 后通过；既有证书 AST、metadata、root executor、脱敏和运行时测试继续执行。
 
+## v4.0.1 patch release metadata integrity
+
+展示修复提交 `35086bc72cd189ad9b2acecfe66ad2b8c7a7bec7` 及其候选清单保持原字节。`tests/fixtures/v4.0.1-release-candidate.json` 单独声明本次发布元数据与版本断言的精确 SHA256。三个产品版本字段只允许从该提交的 `4.0.0` 精确替换为 `4.0.1`；CLI/schema/version 测试仅更新同一版本字面值。renderer、协议行为、证书、生命周期、root executor 和 workflow 不变；额外产品字节即使改写新清单哈希仍拒绝。生成安装器继续独立验证可重建，旧历史清单和历史报告不改写。
+
 ## Retired legacy acceptance fixtures
 
 旧多 Core 的 `scripts/docker-smoke.sh`、`platform-case.sh`、`platform-smoke.sh` 和 `platform-rootfs-smoke.sh` 保留为历史平台材料，不属于 v4.0.0 执行入口；其 3.x 版本断言不代表当前产品版本。本轮不运行这些入口或操作其目标环境，仅保留全仓 shell 语法与 ShellCheck 检查。

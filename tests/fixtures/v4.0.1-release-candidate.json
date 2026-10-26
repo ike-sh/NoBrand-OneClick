@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "phase": "v4.0.1-release-metadata",
+  "base_commit": "35086bc72cd189ad9b2acecfe66ad2b8c7a7bec7",
+  "version": "4.0.1",
+  "files": {
+    "CHANGELOG.md": "b0c22b26e01bce610559375f4c85ef0eecf22f162772517f7955aa7e56ecf5af",
+    "README.md": "de1b1edf55c585cc7bcc85d8620c162f0bd72151d419ee08300f77948027fc9e",
+    "dist/install-nobrand.sh": "638e874fbab6afe7e56757ea45af790227763734edb655fe211a2a1c1519af36",
+    "docs/SPLICORE-RC4-TEST-CONTRACT.md": "0774b95b7665bb9eb1cd8a664770180575f193d2854ddb7c1a688b0e6f1a4c99",
+    "install-nobrand.sh": "638e874fbab6afe7e56757ea45af790227763734edb655fe211a2a1c1519af36",
+    "runtime/splicore.py": "4752379726d3f121e2bf15dc841c970310110f7724a6320ff0ad2b5055898b30",
+    "scripts/qualify-splicore.py": "c350aaca55431f1fde44ecea47ac937eff360905f23900af920323eb35b49a54",
+    "src/05-constants.sh": "8d105a40ade6052c4bbb8b23c5f733efb11917d2f91605c9bcb8b632f13e2c53",
+    "src/18-core-nodes.sh": "6ff2094aad0f6f93e1f062b4b218fc65923aa664adf1bc9887f9eb95bf6710ad",
+    "tests/helpers/test_splicore_qualification.py": "7e26f7a028dc2a7e3c622933d2e1ad60a67b53873c9843ac830f09f7fc18dec8",
+    "tests/test_cli.sh": "4d438e0084eb62081f71dff79aceeb532e4c14749c34323af71a73f67b521d3d",
+    "tests/test_schema_v3.sh": "be9a7d09d2ccb2e7ac2e540081bdfa512aa8c1480f36503f9d2c063f5cc490f8",
+    "tests/test_version_consistency.sh": "57a56a83f8e9faad3bd84ceee63d0736be776ae1c4228fdccb76fb326f6db75a"
+  }
+}

@@ -27,6 +27,21 @@ PARENT = "f98cf70e7159c07826101676a4a08394f0a203f9"
 PRODUCT_BASE = "e90695ba8d2ac98a443d6aa53edd7653356377b2"
 RELEASE_BASE = "1d817b27b43cf33a72025c22acc2f04aa2ef0d26"
 PRESENTATION_MANIFEST = "tests/fixtures/client-profile-output-candidate.json"
+PATCH_BASE = "35086bc72cd189ad9b2acecfe66ad2b8c7a7bec7"
+PATCH_MANIFEST = "tests/fixtures/v4.0.1-release-candidate.json"
+PATCH_VERSION_FIELDS = {
+    "src/05-constants.sh": b'SCRIPT_VERSION="4.0.0"',
+    "src/18-core-nodes.sh": "NoBrand-OneClick 4.0.0 —".encode(),
+    "runtime/splicore.py": b'os.environ.get("SCRIPT_VERSION", "4.0.0")',
+}
+PATCH_VERSION_TESTS = frozenset({
+    "tests/test_cli.sh", "tests/test_schema_v3.sh", "tests/test_version_consistency.sh",
+})
+PATCH_FILES = frozenset(PATCH_VERSION_FIELDS) | PATCH_VERSION_TESTS | {
+    "README.md", "CHANGELOG.md", "install-nobrand.sh", "dist/install-nobrand.sh",
+    "scripts/qualify-splicore.py", "tests/helpers/test_splicore_qualification.py",
+    "docs/SPLICORE-RC4-TEST-CONTRACT.md",
+}
 # Phase-specific exact paths, following the existing lifecycle-fix manifest model.
 # Historical manifests describe committed trees; this manifest describes only
 # the intentional working candidate changes. Neither replaces the other.
@@ -228,6 +243,38 @@ def candidate_protected_paths():
                 "tests/fixtures/splicore-rc4-lifecycle-fix.json", *scope["preserved_qualification_files"]}
 
 
+def patch_release_integrity():
+    """Authorize exact patch metadata, preserving the committed display fix."""
+    require(git("merge-base", PATCH_BASE, "HEAD").decode().strip() == PATCH_BASE,
+            "patch release does not descend from display fix")
+    path = ROOT / PATCH_MANIFEST
+    require(path.is_file() and not path.is_symlink(), "patch manifest missing or symlink")
+    scope = json.loads(path.read_text())
+    require(isinstance(scope, dict)
+            and set(scope) == {"schema", "phase", "base_commit", "version", "files"}
+            and type(scope.get("schema")) is int and scope["schema"] == 1
+            and scope.get("phase") == "v4.0.1-release-metadata"
+            and scope.get("base_commit") == PATCH_BASE and scope.get("version") == "4.0.1"
+            and isinstance(scope.get("files"), dict) and set(scope["files"]) == PATCH_FILES,
+            "patch release scope differs")
+    hashes = scope["files"]
+    require(all(isinstance(h, str) and re.fullmatch(r"[0-9a-f]{64}", h) for h in hashes.values()),
+            "invalid patch digest")
+    originals = tree_hashes(PATCH_BASE, hashes)
+    require(all(h != originals[name] for name, h in hashes.items()), "declared patch path is unchanged")
+    for name in PATCH_VERSION_FIELDS.keys() | PATCH_VERSION_TESTS:
+        original = read_at(name, PATCH_BASE)
+        if name in PATCH_VERSION_FIELDS:
+            field = PATCH_VERSION_FIELDS[name]
+            require(original.count(field) == 1, "patch version baseline differs: " + name)
+            expected = original.replace(field, field.replace(b"4.0.0", b"4.0.1"), 1)
+        else:
+            expected = original.replace(b"4.0.0", b"4.0.1")
+        require(hashes[name] == hashlib.sha256(expected).hexdigest(),
+                "patch escapes exact version metadata: " + name)
+    return hashes
+
+
 def presentation_candidate_integrity():
     """Permit exact declared candidate bytes; reject all other protected changes."""
     require(git("merge-base", RELEASE_BASE, "HEAD").decode().strip() == RELEASE_BASE,
@@ -254,6 +301,8 @@ def presentation_candidate_integrity():
     originals = tree_hashes(RELEASE_BASE, declared.keys() & tracked)
     require(all(h != originals.get(p) for p, h in declared.items()), "declared candidate path is unchanged")
     expected.update(declared)
+    expected.update(tree_hashes(PATCH_BASE, {PRESENTATION_MANIFEST}))
+    expected.update(patch_release_integrity())
     verify_files(ROOT, expected)
     # Existing frozen manifests did not detect newly added source files.
     sources = {p.relative_to(ROOT).as_posix() for folder in ("src", "runtime")
@@ -264,6 +313,7 @@ def presentation_candidate_integrity():
     return {"base_commit": RELEASE_BASE, "manifest": PRESENTATION_MANIFEST,
             "declared_product_changes": sorted(scope["product_files"]),
             "declared_qualification_changes": sorted(scope["qualification_files"]),
+            "patch_version": "4.0.1", "patch_manifest": PATCH_MANIFEST,
             "unexpected_changes": 0, "result": "PASS"}
 
 
@@ -273,7 +323,7 @@ def review_integrity():
     run = subprocess.run(["bash", "scripts/build.sh", "--check"], cwd=ROOT, capture_output=True, timeout=60)
     require(run.returncode == 0, "generated installers differ from candidate source")
     return dict(historical, historical_commit=RELEASE_BASE, historical_integrity="PASS",
-                candidate=candidate, scope="V4 HISTORICAL TREE + EXACT PRESENTATION CANDIDATE",
+                candidate=candidate, scope="V4 HISTORICAL TREE + DISPLAY FIX + EXACT V4.0.1 METADATA",
                 unapproved_changes=0)
 
 
@@ -419,7 +469,7 @@ def summarize(log, probe):
     require(set(actual_bash) == expected_bash and len(actual_bash) == len(expected_bash), "candidate Bash entrypoints missing or repeated")
     require("[PASS] ShellCheck:" in log and "[PASS] Generated installers" in log, "quality gate skipped")
     python_runs = [int(n) for n in re.findall(r"^Ran (\d+) tests in .*", log, re.M)]
-    minimum_runs = [27, 10, 22, 24, 43, 20]
+    minimum_runs = [27, 10, 22, 24, 46, 20]
     require(len(python_runs) == len(minimum_runs) and python_runs[:2] == minimum_runs[:2]
             and all(actual >= minimum for actual, minimum in zip(python_runs, minimum_runs))
             and not re.search(r"^OK \(skipped=|^FAILED|^ERROR:|^Traceback", log, re.M), "Python tests skipped, incomplete or failed")

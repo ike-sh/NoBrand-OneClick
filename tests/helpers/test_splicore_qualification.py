@@ -84,7 +84,8 @@ class QualificationTests(unittest.TestCase):
     def presentation_candidate_fixture(self):
         """Keep negative mutations outside the user's actual working tree."""
         paths = (q.candidate_protected_paths() | q.INTENTIONAL_PRODUCT_CHANGES
-                 | q.INTENTIONAL_QUALIFICATION_CHANGES | {q.PRESENTATION_MANIFEST})
+                 | q.INTENTIONAL_QUALIFICATION_CHANGES | q.PATCH_FILES
+                 | {q.PRESENTATION_MANIFEST, q.PATCH_MANIFEST})
         with tempfile.TemporaryDirectory(prefix="nb-candidate-") as directory:
             root = Path(directory)
             for name in paths:
@@ -148,7 +149,7 @@ class QualificationTests(unittest.TestCase):
                 with self.subTest(scope=scope):
                     path.write_text(json.dumps(scope))
                     with self.assertRaises(q.QualificationFailure): q.presentation_candidate_integrity()
-            path.write_text(json.dumps(original))
+            path.write_bytes(q.git("show", q.PATCH_BASE + ":" + q.PRESENTATION_MANIFEST))
             self.assertEqual(q.presentation_candidate_integrity()["result"], "PASS")
 
     def test_candidate_rejects_new_undeclared_source(self):
@@ -205,13 +206,62 @@ class QualificationTests(unittest.TestCase):
         with self.presentation_candidate_fixture() as root:
             path = root / "install-nobrand.sh"
             path.write_bytes(path.read_bytes() + b"\n# synthetic generated-only edit\n")
-            manifest = root / q.PRESENTATION_MANIFEST
+            manifest = root / q.PATCH_MANIFEST
             scope = json.loads(manifest.read_text())
-            scope["product_files"]["install-nobrand.sh"] = hashlib.sha256(path.read_bytes()).hexdigest()
+            scope["files"]["install-nobrand.sh"] = hashlib.sha256(path.read_bytes()).hexdigest()
             manifest.write_text(json.dumps(scope))
             self.assertEqual(q.presentation_candidate_integrity()["result"], "PASS")
             with self.assertRaisesRegex(q.QualificationFailure, "generated installers differ from candidate source"):
                 q.review_integrity()
+
+    def test_patch_release_only_accepts_exact_version_field_changes(self):
+        with self.presentation_candidate_fixture() as root:
+            self.assertEqual(q.presentation_candidate_integrity()["patch_version"], "4.0.1")
+            manifest = root / q.PATCH_MANIFEST
+            manifest_bytes = manifest.read_bytes()
+            for name in q.PATCH_VERSION_FIELDS.keys() | q.PATCH_VERSION_TESTS:
+                with self.subTest(name=name):
+                    path = root / name
+                    original = path.read_bytes()
+                    # Even a newly declared digest cannot authorize other bytes.
+                    path.write_bytes(original + b"\n# unrelated product change\n")
+                    scope = json.loads(manifest_bytes)
+                    scope["files"][name] = hashlib.sha256(path.read_bytes()).hexdigest()
+                    manifest.write_text(json.dumps(scope))
+                    with self.assertRaisesRegex(q.QualificationFailure, "patch escapes exact version metadata"):
+                        q.presentation_candidate_integrity()
+                    path.write_bytes(original)
+            manifest.write_bytes(manifest_bytes)
+            self.assertEqual(q.presentation_candidate_integrity()["result"], "PASS")
+
+    def test_patch_release_rejects_changed_scope_and_missing_or_symlink_manifest(self):
+        with self.presentation_candidate_fixture() as root:
+            path = root / q.PATCH_MANIFEST
+            original = path.read_bytes()
+            scope = json.loads(original)
+            for invalid in (dict(scope, version="4.0.2"), dict(scope, base_commit=q.RELEASE_BASE),
+                            dict(scope, schema=True), dict(scope, files={**scope["files"], "runtime/*": "0" * 64})):
+                path.write_text(json.dumps(invalid))
+                with self.assertRaises(q.QualificationFailure): q.presentation_candidate_integrity()
+            path.unlink()
+            with self.assertRaises(q.QualificationFailure): q.presentation_candidate_integrity()
+            target = root / "synthetic-release-manifest"
+            target.write_bytes(original)
+            path.symlink_to(target)
+            with self.assertRaises(q.QualificationFailure): q.presentation_candidate_integrity()
+            path.unlink()
+            path.write_bytes(original)
+            self.assertEqual(q.presentation_candidate_integrity()["result"], "PASS")
+
+    def test_patch_release_cannot_rewrite_committed_display_fix_proof(self):
+        with self.presentation_candidate_fixture() as root:
+            path = root / q.PRESENTATION_MANIFEST
+            original = path.read_bytes()
+            path.write_bytes(original + b"\n ")
+            with self.assertRaisesRegex(q.QualificationFailure, "protected file changed"):
+                q.presentation_candidate_integrity()
+            path.write_bytes(original)
+            self.assertEqual(q.presentation_candidate_integrity()["result"], "PASS")
 
     def test_lifecycle_fix_accepts_only_exact_reviewed_state_bytes(self):
         self.assertEqual(set(q.lifecycle_fix_integrity()), {"src/15-core-state.sh"})
@@ -315,7 +365,7 @@ class QualificationTests(unittest.TestCase):
         import re
         entries = re.findall(r"^  (tests/\S+\.sh)$", script, re.M) + ["tests/test_splicore_cert_lifecycle.sh", "tests/test_splicore_qualification.sh", "tests/test_client_profile_output.sh"]
         log = "".join("[RUN] " + name + "\n" for name in entries)
-        log += "[PASS] ShellCheck:\n[PASS] Generated installers\nRan 27 tests in 1s\nRan 10 tests in 1s\nRan 22 tests in 1s\nRan 24 tests in 1s\nRan 43 tests in 1s\nRan 20 tests in 1s\nUSER_RUNTIME_LITERAL_LEAK_COUNT=0\n[PASS] NoBrand test suite\n"
+        log += "[PASS] ShellCheck:\n[PASS] Generated installers\nRan 27 tests in 1s\nRan 10 tests in 1s\nRan 22 tests in 1s\nRan 24 tests in 1s\nRan 46 tests in 1s\nRan 20 tests in 1s\nUSER_RUNTIME_LITERAL_LEAK_COUNT=0\n[PASS] NoBrand test suite\n"
         self.assertEqual(q.summarize(log, baseline)["runtime_checks"], 42)
         partial = dict(baseline, checks=dict(baseline["checks"]))
         partial["checks"].pop(next(iter(partial["checks"])))
@@ -323,7 +373,7 @@ class QualificationTests(unittest.TestCase):
                                             (log.replace("[RUN] tests/test_client_profile_output.sh\n", ""), baseline),
                                             (log.replace("Ran 27 tests", "Ran 26 tests"), baseline),
                                             (log.replace("Ran 24 tests", "Ran 23 tests"), baseline),
-                                            (log.replace("Ran 43 tests", "Ran 42 tests"), baseline)):
+                                            (log.replace("Ran 46 tests", "Ran 45 tests"), baseline)):
             with self.subTest(log=changed_log[:20]), self.assertRaises(q.QualificationFailure):
                 q.summarize(changed_log, changed_probe)
 
