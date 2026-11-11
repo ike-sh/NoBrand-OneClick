@@ -54,7 +54,9 @@ def probe(sc, binary, work, log, echo, node, positive=True):
             except (OSError,RuntimeError): pass
             if succeeded!=positive: raise AssertionError('native Sudoku TCP result differs')
             if positive:
-                args.target_port=echo.udp.server_address[1]
+                # The UDP echo binds IPv4 only; localhost may resolve to an
+                # IPv6 address with no echo listener on the hosted runner.
+                args.target_host,args.target_port=echo.udp.server_address[:2]
                 socks.udp_probe(args)
         finally:
             child.terminate()
