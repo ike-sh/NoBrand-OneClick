@@ -1,10 +1,10 @@
 # NoBrand-OneClick
 
-**v4.0.0 是 Splicore-native 架构的首个正式版本。** 普通代理协议以固定的 **Splicore v0.3.0-rc.4** 为唯一主运行时，NoBrand 负责安装、配置、客户端输出和生命周期管理。
+全部代理服务统一使用固定的 **Splicore v0.5.0**（`70b09da7d2758e19ba03df9ff9b9e541a669fa29`），支持原生 VLESS Encryption 与 FinalMask/Sudoku，共享一个运行时，无 Xray 服务端依赖。
 
-当前稳定版本：[v4.0.1](https://github.com/ike-sh/NoBrand-OneClick/releases/tag/v4.0.1)。更新内容见 [CHANGELOG](CHANGELOG.md)。
+当前稳定版本：[v4.1.0](https://github.com/ike-sh/NoBrand-OneClick/releases/tag/v4.1.0)。更新内容见 [CHANGELOG](CHANGELOG.md)。
 
-v4.0.1 修复创建节点完成后、“查看节点”和协议快捷命令的客户端配置终端展示；分享链接可直接复制，Mihomo / Clash Meta 配置显示为正常多行 YAML，并改善端点与多配置展示。机器可读 `client_profiles` 数据保持兼容。
+v4.1.0 集成 Splicore v0.5.0；新建 VLESS + Sudoku 默认启用原生 VLESS Encryption，支持完整客户端 JSON 和 JSON 订阅输出。
 
 ## 重要升级说明：v3.x → v4.x
 
@@ -20,29 +20,31 @@ v4.0.1 修复创建节点完成后、“查看节点”和协议快捷命令的�
 
 ## 当前协议范围
 
-| 协议 / 模式 | 当前实现 | 本轮实际验证 |
-|---|---|---|
-| Mieru TCP / UDP / BOTH | Splicore；MTU、多路复用、客户端握手模式；默认 traffic off | TCP 新配置流量、重启和 SIGKILL 恢复；UDP/BOTH 配置校验 |
-| Snell v4 / v5 | Splicore；v5 服务端按公开合同使用 v4 客户端 wire；QUIC Proxy Mode 不支持 | v5 服务端 TCP/UDP、新配置、重启和恢复 |
-| Hysteria2 + Salamander | Splicore；新 CA + 服务器叶证书；独立 auth/obfs secret | TCP/UDP、证书 pin、错误凭据拒绝、重启和恢复 |
-| TUIC v5 | Splicore；UUID + password；新 TLS 信任 | TCP/UDP、新配置、重启和恢复 |
-| VLESS + TCP + REALITY + Vision | Splicore 原生 Local Tunnel Guard | 新配置流量、安全探针、重启和恢复 |
-| VLESS + FinalMask/Sudoku | 项目已有的专用 pinned Xray 例外 | 既有静态/事务测试；不属于普通协议主运行时 |
-| SSH Tunnel | 系统 OpenSSH 策略与账号 | 保留原组件，隔离单元/事务测试 |
-| Port Forward | Realm / nftables | 保留原组件，隔离单元/事务测试 |
+| 协议 / 模式 | 当前实现 |
+|---|---|
+| Mieru TCP / UDP / BOTH | Splicore；MTU、多路复用、客户端握手模式；默认 traffic off |
+| Snell v4 / v5 | Splicore；v5 服务端使用 v4 客户端 wire；QUIC Proxy Mode 不支持 |
+| Hysteria2 + Salamander | Splicore；新 CA + 服务器叶证书；独立 auth/obfs secret |
+| TUIC v5 | Splicore；UUID + password；独立 TLS 信任 |
+| VLESS + TCP + REALITY + Vision | Splicore 原生 Local Tunnel Guard |
+| VLESS Encryption + FinalMask/Sudoku | Splicore 原生 TCP；新建默认 mlkem768 + random + 1rtt |
+| SSH Tunnel | 系统 OpenSSH 策略与账号 |
+| Port Forward | Realm / nftables |
 
 Mieru 流量伪装、低熵、配额、到期、tc 限速及独立 Mita 版本通道不在当前原生界面中；显式请求不支持的配置会报错。HY2 Gecko 为 Core Experimental 能力，端口跳跃为 Core 支持能力，两者均未在 NoBrand 中开放，默认不启用端口范围。
 
 ## 安装和管理
 
-从 GitHub Latest Release 下载正式单文件安装器，再执行安装：
+下载并校验 v4.1.0 正式安装器：
 
 ```bash
-curl -fsSLO https://github.com/ike-sh/NoBrand-OneClick/releases/latest/download/install-nobrand.sh
+curl -fLO https://github.com/ike-sh/NoBrand-OneClick/releases/download/v4.1.0/install-nobrand.sh
+curl -fLO https://github.com/ike-sh/NoBrand-OneClick/releases/download/v4.1.0/SHA256SUMS
+sha256sum -c SHA256SUMS
 sudo bash install-nobrand.sh
 ```
 
-也可从 [v4.0.1 Release](https://github.com/ike-sh/NoBrand-OneClick/releases/tag/v4.0.1) 下载 `install-nobrand.sh` 和 `SHA256SUMS`，在同一目录执行 `sha256sum -c SHA256SUMS` 后安装。
+从源码构建使用 `bash scripts/build.sh`，生成 `install-nobrand.sh` 与 `dist/install-nobrand.sh`。
 
 Alpine Linux 请先安装 `bash` 与 `curl`，然后以 root 身份执行 `bash install-nobrand.sh`。
 
@@ -56,9 +58,10 @@ sudo nobrand snell install --name snell --version 5 --port 31002 --advertise-hos
 sudo nobrand hy2 install --port 31003 --sni tls.example --advertise-host entry.example -y
 sudo nobrand tuic install --name tuic --user primary --port 31004 --advertise-host entry.example -y
 sudo nobrand vless-reality install --name reality --target www.microsoft.com --port 31005 --advertise-host entry.example -y
+sudo nobrand vless-sudoku install --port 31006 --advertise-host entry.example -y
 ```
 
-`entry.example`、端口和 TLS/cover 域名是占位值。监听端口与展示端点分开；`--advertise-auto` 可探测展示地址。REALITY cover 需要可用的 TLS 服务。多个普通协议由一个 `nobrand-splicore` 服务承载；仅在候选校验时短暂启动私有验证进程。
+`entry.example`、端口和 TLS/cover 域名是占位值。监听端口与展示端点分开；`--advertise-auto` 可探测展示地址。REALITY cover 需要可用的 TLS 服务。全部代理协议（含 Sudoku）由一个 `nobrand-splicore` 服务承载；仅在候选校验时短暂启动私有验证进程。
 
 ```bash
 nobrand status
@@ -66,8 +69,13 @@ nobrand doctor
 nobrand nodes
 nobrand runtime capabilities
 nobrand runtime plan
+nobrand runtime transactions   # 只读查看两类事务，不启动服务
+sudo nobrand runtime recover  # 验证快照后恢复；依据不足则保留现场并报错
 nobrand hy2 show
 nobrand vless-reality export --name reality
+nobrand vless-sudoku show
+nobrand vless-sudoku export > sudoku-client.json
+nobrand vless-sudoku subscription > sudoku-subscription.json
 sudo nobrand runtime restart
 sudo nobrand runtime rollback
 sudo nobrand backup create /root/nobrand-native.tar.gz
@@ -75,7 +83,7 @@ sudo nobrand backup restore /root/nobrand-native.tar.gz
 sudo nobrand uninstall
 ```
 
-客户端导出是显式敏感操作；请私下保存。状态、doctor 和 plan 不输出密码或 REALITY 私钥。备份含私钥、客户端凭据与数据库主密钥，文件权限为 0600。
+客户端导出包含 UUID、Sudoku 密码等连接凭据，请私下保存。Sudoku 的 JSON 导出与订阅采用 Xray 26.10.21 格式，完整保留公开 Encryption 和 FinalMask 参数；无法完整表达的 URI 或其他格式会明确报错。服务端 decryption 通过 Splicore 私有凭据保存，不进入客户端输出。备份含私钥、客户端凭据与数据库主密钥，文件权限为 0600。
 
 ## TLS 与 REALITY 安全边界
 
@@ -85,31 +93,14 @@ REALITY 目标是一个仅监听回环的原生 guard。guard 只将允许的 co
 
 ## 更新与回滚
 
-旧 NoBrand → 新架构：**不支持原地迁移**。新版只检测并拒绝，不备份、转换或删除旧资源。
+旧 Xray/Mita 等多内核部署 → 新架构：**不支持自动原地迁移**。新版只读检测并拒绝，不转换或删除旧节点、凭据、服务或防火墙。使用匹配的旧安装器导出、备份并处理旧部署；第三方软件不被接管。
 
-新架构 → 未来 Splicore：保留原子 artifact、候选 generation、持久事务和已知可用版本回滚。升级前必须审核新 release manifest；当前仅允许 rc.4，不能任意传入未来版本。相同版本和配置执行校验后 NO-OP。失败的新装恢复到未安装状态，失败的配置更新恢复上一代 Splicore。
+已有原生 v0.4.0 安装先用已校验的 v4.1.0 安装器执行 `sudo bash install-nobrand.sh manager upgrade`，再执行 `sudo nobrand vless-sudoku upgrade` 升级到固定 v0.5.0，按原有状态重建独立 SQLite 数据库，保留 UUID、端口、Sudoku 密码和原加密模式。新建节点才默认启用 Encryption。下载按正式 Manifest、SHA256SUMS、包内校验和与二进制身份核对，不使用浮动版本。
 
-## 验证与限制
-
-```bash
-bash scripts/build.sh
-bash scripts/test.sh
-```
-
-自动回归覆盖 31 个 Bash 入口、149 项 Python 测试（含 24 项客户端展示测试）、42 项真实 rc.4 回环 runtime 检查和 114 个 shell 语法检查；同时执行 ShellCheck、构建一致性、脱敏扫描及 GitHub Actions。普通测试保持调用者身份，九个必需 fixture 边界使用已验证的直接 root、非交互 sudo 或兼容 user namespace。真实流量结果及其范围见[验收报告](docs/reports/SPLICORE_RC4_FRESH_ARCHITECTURE_REPORT.md)。
-
-测试范围与当前限制：
-
-- 专用原生 Linux amd64 systemd 安装／破坏性生命周期／真实 reboot 资格尚未单独完成；回环结果不等同于实机 reboot 认证。
-- arm64 公开 artifact 已有构建与静态检查，runtime 资格尚未完成。
-- OpenRC adapter 与模板受支持，原生运行资格仍待独立环境。
-- HY2 Gecko 与端口跳跃／nftables 端口范围未在 NoBrand 当前界面开放。
-- GitHub Actions 的 Node runtime 警告是非阻断维护事项。
+升级保留上一代二进制、数据库、密钥和状态用于整代回滚。相同版本和配置校验后不重复部署；失败的新装恢复到未安装状态，失败的更新恢复上一代。未知版本或不支持的配置明确拒绝。
 
 - [安装、升级、FAQ 与排查](docs/SPLICORE-MIGRATION.md)
-- [公开 rc.4 合同](docs/SPLICORE-RC4-CONTRACT.md)
 - [当前架构与模块边界](docs/MODULE-DEPENDENCIES.md)
-- [历史迁移报告](docs/reports/SPLICORE_SINGLE_CORE_MIGRATION_REPORT.md)：保留原有 BLOCKED/PENDING 结论，不能当作本轮验收结果。
 
 ## License
 

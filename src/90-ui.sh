@@ -109,10 +109,12 @@ show_backup_menu() {
 }
 
 show_menu() {
-  local installed="no" users="-" selected_rc=0 profile_text="native" version_text="v0.3.0-rc.4"
+  local installed="no" users="-" selected_rc=0 profile_text="native" version_text="v0.5.0" runtime_status
   if nb_splicore_installed; then
     installed=yes
-    users="$(nb_splicore_call protocol --protocol mieru --operation status | jq '[.nodes[]?] | length')"
+    runtime_status="$(nb_splicore_call protocol --protocol mieru --operation status)" || return 1
+    users="$(printf '%s\n' "$runtime_status" | jq '[.nodes[]?] | length')"
+    version_text="$(printf '%s\n' "$runtime_status" | jq -r .version)"
   fi
   msg ''
   t '========== NoBrand-OneClick / Mieru ==========' \
@@ -471,7 +473,7 @@ vless_sudoku_menu_loop() {
   while true; do
     msg ''
     msg '========== VLESS + FinalMask + Sudoku（TCP） =========='
-    msg 'VLESS Encryption：未使用（NOT USED）'
+    msg '新建默认 VLESS Encryption：mlkem768 + random + 1rtt；已有节点保留原模式。'
     msg '  1) 安装 / 重新配置'
     msg '  2) 查看节点'
     msg '  3) 修改客户端展示入口'
@@ -487,7 +489,7 @@ vless_sudoku_menu_loop() {
     read_tty choice "$(t '请选择 [0-11]: ' 'Choose [0-11]: ')" || return 0
     case "$choice" in
       1)
-        PORT="" PORT_CLI=0 VLESS_SUDOKU_UUID="" VLESS_SUDOKU_PASSWORD=""
+        PORT="" PORT_CLI=0 PASSWORD="" PASSWORD_CLI=0
         ADVERTISE_HOST="" ADVERTISE_PORT="" ADVERTISE_CLI=0 ADVERTISE_AUTO_REQUESTED=0
         YES=0 VLESS_SUDOKU_ACTION=install
         nobrand_menu_run nobrand_run_vless_sudoku_action

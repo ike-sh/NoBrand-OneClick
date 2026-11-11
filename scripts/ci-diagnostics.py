@@ -29,7 +29,7 @@ CLASSES = {
     "RUNNER_ENVIRONMENT", "NETWORK_TRANSIENT", "UPSTREAM_DEPENDENCY",
     "NON_REPRODUCIBLE", "UNKNOWN", "QUALIFICATION_ENVIRONMENT",
 }
-SENSITIVE = r"(?:[A-Za-z0-9_]*?(?:password|passwd|passphrase|token|secret|psk|salamander|private[_-]?key|public[_-]?key|short[_-]?ids?|uuid|authorization|credential)[A-Za-z0-9_]*|auth|username)"
+SENSITIVE = r"(?:[A-Za-z0-9_]*?(?:password|passwd|passphrase|token|secret|psk|salamander|decryption|encryption|private[_-]?key|public[_-]?key|short[_-]?ids?|uuid|authorization|credential)[A-Za-z0-9_]*|auth|username)"
 FIELD = re.compile(r"(?i)(?:[\"']?" + SENSITIVE + r"[\"']?\s*[:=]\s*)(\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^\s,}\]]+)")
 
 

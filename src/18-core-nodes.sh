@@ -15,7 +15,7 @@ nobrand_version() {
 
 nobrand_usage() {
   cat <<EOF
-NoBrand-OneClick 4.0.1 — Multi-Ingress / Mieru / Snell v4-v5 / Hysteria2 / TUIC v5 / VLESS REALITY / VLESS + FinalMask + Sudoku / SSH Tunnel / Port Forward
+NoBrand-OneClick 4.1.0 — Multi-Ingress / Mieru / Snell v4-v5 / Hysteria2 / TUIC v5 / VLESS REALITY / VLESS + FinalMask + Sudoku / SSH Tunnel / Port Forward
 
 用法:
   nobrand                         打开统一菜单
@@ -25,7 +25,7 @@ NoBrand-OneClick 4.0.1 — Multi-Ingress / Mieru / Snell v4-v5 / Hysteria2 / TUI
   nobrand status                  综合状态
   nobrand nodes [--protocol P]    查看全部或指定协议节点
   nobrand doctor                  综合诊断（默认不输出 secret）
-  nobrand runtime capabilities    查看固定 rc.4 的能力与限制
+  nobrand runtime capabilities    查看固定 Splicore v0.5.0 的能力与限制
   nobrand runtime status|doctor|plan|recover|rollback
   nobrand runtime apply|render --file DESIRED.json
   nobrand runtime backup|restore --file BACKUP.tar.gz
@@ -64,6 +64,8 @@ NoBrand-OneClick 4.0.1 — Multi-Ingress / Mieru / Snell v4-v5 / Hysteria2 / TUI
   nobrand vless-sudoku install [--port PORT]
       [--advertise-host HOST --advertise-port PORT | --advertise-auto] [-y]
   nobrand vless-sudoku show|status|doctor|smoke|start|stop|restart|remove
+  nobrand vless-sudoku export|subscription [--format json] [--client-version 26.10.21]
+      输出完整 Xray JSON，保留 VLESS Encryption 与 FinalMask/Sudoku。
   nobrand vless-sudoku set-endpoint
       [--advertise-host HOST --advertise-port PORT | --advertise-auto]
 
@@ -96,7 +98,7 @@ NoBrand-OneClick 4.0.1 — Multi-Ingress / Mieru / Snell v4-v5 / Hysteria2 / TUI
 
 说明:
   - Snell 只支持 v5（默认/推荐）与 v4（兼容）。
-  - 普通代理由一个固定 Splicore v0.3.0-rc.4 daemon 管理；Release Candidate / Experimental。
+  - 普通代理由一个固定 Splicore v0.5.0 daemon 管理。
   - 新架构要求 clean install；旧 multi-core 安装只检测并拒绝，不支持原地迁移或新版卸载。
   - REALITY 使用原生 Local Tunnel Guard；HY2 使用新证书和独立 Salamander secret。
   - Mieru 新装可用 --profile iplc 或 --traffic-pattern off；默认 traffic off；balanced/stealth 不支持。
@@ -104,9 +106,9 @@ NoBrand-OneClick 4.0.1 — Multi-Ingress / Mieru / Snell v4-v5 / Hysteria2 / TUI
   - --advertise-host 接受 IPv4、IPv6 或 ASCII DNS hostname；Host 与 Port 分别填写，配置时不要求域名解析成功。
   - Display Endpoint 不配置 VPS 系统出站 IP、默认路由或 policy routing。
   - 非交互 -y 必须明确给出完整 Display Endpoint 或 --advertise-auto。
-  - VLESS Sudoku = plain VLESS + FinalMask(sudoku) + TCP。
+  - VLESS Sudoku = 原生 VLESS Encryption + FinalMask(sudoku) + TCP；已有节点保留原加密模式。
   - VLESS REALITY = VLESS + TCP + REALITY + xtls-rprx-vision；public Profile 推荐，mapped 仅警告。
-  - VLESS Encryption: NOT USED；不调用密钥生成子命令，不保存加密密钥。
+  - 新建 Sudoku 默认通过 Splicore vlessenc 生成 mlkem768 + random + 1rtt；客户端仅包含公开 encryption。
   - TUIC 只支持 v5：Splicore、UDP/QUIC、每用户独立 UUID + password。
   - SSH Tunnel 复用现有 sshd；允许 -L/-D/-R TCP forwarding，不允许 shell/exec/TTY/SFTP/SCP。
   - SSH Tunnel 使用 AllowTcpForwarding=yes，因此可访问服务器自身可达的 TCP destinations；GatewayPorts=no。
@@ -220,8 +222,8 @@ nobrand_manager_upgrade() {
 
 nb_all_node_rows() {
   case "${1:-}" in
-    ""|all) vless_sudoku_node_rows; ssh_tunnel_node_rows; forward_node_rows ;;
-    vless-sudoku|sudoku|vless) vless_sudoku_node_rows ;;
+    ""|all) ssh_tunnel_node_rows; forward_node_rows ;;
+    vless-sudoku|sudoku|vless) return 0 ;;
     ssh|ssh-tunnel) ssh_tunnel_node_rows ;;
     forward|port-forward) forward_node_rows ;;
     mieru|snell|hy2|hysteria2|tuic|vless-reality|reality) return 0 ;;
@@ -233,7 +235,6 @@ nb_owner_ingress_profile_id() {
   local owner="$1" id
   case "$owner" in
     splicore:*) jq -r --arg id "${owner#splicore:}" '.nodes[]|select(.id==$id)|.ingress.profile_id // empty' "${NOBRAND_STATE_DIR}/splicore/current/desired.json" ;;
-    vless-sudoku:*) vless_sudoku_state_field ingress_profile_id 2>/dev/null || true ;;
     forward:*)
       jq -r --arg id "${owner#forward:}" '.rules[]|select(.rule_id==$id)|.ingress_profile_id // empty' \
         "$NOBRAND_FORWARD_STATE_FILE" 2>/dev/null || true
@@ -243,7 +244,6 @@ nb_owner_ingress_profile_id() {
 
 nb_owner_state_file() {
   case "$1" in
-    vless-sudoku:*) printf '%s' "$NOBRAND_VLESS_STATE_FILE" ;;
     *) return 1 ;;
   esac
 }
@@ -350,7 +350,7 @@ nobrand_nodes() {
   if nb_splicore_installed; then
     nb_splicore_call status --protocol "${NOBRAND_PROTOCOL_FILTER:-}" || return 1
     local retained
-    for retained in vless-sudoku ssh forward; do
+    for retained in ssh forward; do
       [ -z "${NOBRAND_PROTOCOL_FILTER:-}" ] || [ "$NOBRAND_PROTOCOL_FILTER" = "$retained" ] || continue
       nb_all_node_rows "$retained"
     done
@@ -402,7 +402,6 @@ nobrand_nodes() {
 nobrand_status() {
   nb_splicore_legacy_preflight || return 1
   nb_splicore_call status || return 1
-  if vless_sudoku_state_exists; then vless_sudoku_service_command status; fi
   ssh_tunnel_status
   [ ! -s "$NOBRAND_FORWARD_STATE_FILE" ] || forward_list_rules
   return 0
@@ -418,7 +417,6 @@ nobrand_doctor() {
   nb_splicore_legacy_preflight || return 1
   local failed=0
   nb_splicore_call doctor || failed=1
-  if vless_sudoku_state_exists; then vless_sudoku_doctor || failed=1; fi
   if ssh_tunnel_state_exists; then ssh_tunnel_doctor || failed=1; fi
   [ ! -s "$NOBRAND_FORWARD_STATE_FILE" ] || forward_doctor || failed=1
   return "$failed"
@@ -1015,10 +1013,6 @@ nobrand_restore_protocol_runtimes() {
   if [ -e "${NOBRAND_STATE_DIR}/splicore/current" ] || nb_splicore_installed; then
     nb_splicore_call adopt-snapshot || return 1
   fi
-  if vless_sudoku_state_exists; then
-    NOBRAND_XRAY_SPECIALIZED=1 nobrand_install_xray_runtime 0 || return 1
-    nobrand_write_vless_sudoku_service || return 1
-  fi
   forward_realm_restore_runtime
 }
 
@@ -1033,14 +1027,8 @@ nobrand_fresh_restore_runtime_preflight() {
 
 nobrand_remove_fresh_restore_protocol_resources() {
   nb_splicore_legacy_preflight || return 1
-  local failed=0 port
+  local failed=0
   if nb_splicore_installed; then nb_splicore_call purge || failed=1; fi
-  if vless_sudoku_state_exists; then
-    port="$(vless_sudoku_state_field listen_port 2>/dev/null || true)"
-    nobrand_remove_vless_sudoku_service || failed=1
-    [ -z "$port" ] || nb_firewall_close_pairs "TCP|${port}" || failed=1
-    nobrand_remove_xray_runtime_files || failed=1
-  fi
   return "$failed"
 }
 
@@ -1431,7 +1419,7 @@ nobrand_uninstall_postcondition() {
 
 nobrand_uninstall_impl() {
   nb_splicore_legacy_preflight || return 1
-  local port safe_state safe_config safe_lib pairs="" failed=0
+  local safe_state safe_config safe_lib pairs="" failed=0
   safe_state="$(nb_assert_safe_nobrand_root "$NOBRAND_STATE_DIR" NOBRAND_STATE_DIR)" || return 1
   safe_config="$(nb_assert_safe_nobrand_root "$NOBRAND_CONFIG_DIR" NOBRAND_CONFIG_DIR)" || return 1
   safe_lib="$(nb_assert_safe_nobrand_root "$NOBRAND_LIB_DIR" NOBRAND_LIB_DIR)" || return 1
@@ -1457,11 +1445,6 @@ nobrand_uninstall_impl() {
   elif command -v nft >/dev/null 2>&1 \
        && nft list table "$NOBRAND_FORWARD_NFT_FAMILY" "$NOBRAND_FORWARD_NFT_TABLE" >/dev/null 2>&1; then
     forward_remove_owned_nft_table || failed=1
-  fi
-  if vless_sudoku_state_exists; then
-    port="$(vless_sudoku_state_field listen_port 2>/dev/null || true)"
-    nobrand_remove_vless_sudoku_service || failed=1
-    [ -z "$port" ] || nb_firewall_close_pairs "TCP|${port}" || failed=1
   fi
   # 清理可能由失败事务留下、但仍明确记录为 NoBrand-owned 的 firewall rows。
   if [ -s "$NOBRAND_FIREWALL_OWNED_STATE" ]; then
@@ -1627,7 +1610,6 @@ nobrand_stop_all_services() {
   nb_splicore_legacy_preflight || return 1
   local failed=0
   if nb_splicore_installed; then nb_splicore_call stop || return 1; fi
-  if vless_sudoku_state_exists; then nobrand_vless_sudoku_service_action stop || failed=1; fi
   if [ -s "$NOBRAND_FORWARD_STATE_FILE" ]; then forward_realm_service_action stop || failed=1; fi
   return "$failed"
 }
@@ -1635,6 +1617,5 @@ nobrand_stop_all_services() {
 nobrand_start_enabled_services() {
   nb_splicore_legacy_preflight || return 1
   if nb_splicore_installed; then nb_splicore_call start || return 1; fi
-  if vless_sudoku_state_exists; then nobrand_vless_sudoku_service_action start || return 1; fi
   forward_realm_restore_runtime
 }

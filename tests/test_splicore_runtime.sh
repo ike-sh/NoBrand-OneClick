@@ -12,8 +12,8 @@ workspace="$(mktemp -d)"
 trap 'rm -rf -- "$workspace" "$runtime_system_root"' EXIT
 cp "$TEST_ROOT/dist/install-nobrand.sh" "$workspace/installer.sh"
 output="$(bash "$workspace/installer.sh" runtime capabilities)"
-assert_contains "$output" 'v0.3.0-rc.4' 'standalone public pin'
-assert_contains "$output" 'requires_external_xray' 'explicit specialized boundary'
+assert_contains "$output" 'v0.5.0' 'standalone public pin'
+assert_contains "$output" 'requires_external_xray' 'explicit native Sudoku capability'
 source_installer
 nb_splicore_protocol() { printf 'primary:%s:%s\n' "$1" "$2"; }
 nb_lifecycle_tx_valid() { return 1; }
@@ -22,10 +22,10 @@ download_package() { fail 'unexpected Mita download'; }
 nobrand_install_xray_runtime() { fail 'unexpected ordinary Xray download'; }
 tuic_install_runtime() { fail 'unexpected sing-box download'; }
 snell_install_runtime() { fail 'unexpected old Snell download'; }
-for route in nobrand-snell nobrand-tuic nobrand-hy2 nobrand-vless-reality install upgrade user-add; do
+for route in nobrand-snell nobrand-tuic nobrand-hy2 nobrand-vless-reality nobrand-vless-sudoku install upgrade user-add; do
   # Read by the dynamically sourced dispatcher.
   # shellcheck disable=SC2034
-  ACTION="$route" SNELL_ACTION=install TUIC_ACTION=install HY2_ACTION=install VLESS_REALITY_ACTION=install
+  ACTION="$route" SNELL_ACTION=install TUIC_ACTION=install HY2_ACTION=install VLESS_REALITY_ACTION=install VLESS_SUDOKU_ACTION=install
   output="$(nb_splicore_route_main)"
   assert_contains "$output" 'primary:' "primary route $route"
 done

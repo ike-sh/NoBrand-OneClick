@@ -1119,7 +1119,6 @@ nb_ingress_apply_owner() {
       nb_prepare_ingress_deployment "$profile_id" native-bind || return 1
       NOBRAND_SPLICORE_LISTEN="$INGRESS_LISTEN_HOST" nb_splicore_call protocol --protocol "$(jq -r --arg id "${owner#splicore:}" '.nodes[]|select(.id==$id)|.protocol' "${NOBRAND_STATE_DIR}/splicore/current/desired.json")" --operation set-listen --selector "${owner#splicore:}"
       ;;
-    vless-sudoku:*) vless_sudoku_apply_ingress_enforcement ;;
     forward:*) forward_apply_ingress_enforcement "${owner#forward:}" ;;
     ssh-tunnel:*) return 0 ;;
     *) return 1 ;;

@@ -240,7 +240,7 @@ set_inputs invalid -1 999 '' 1 2 3 4 5 6 7 8 9 10 11 yes 0
 # shellcheck disable=SC2218
 vless_sudoku_menu_loop >"$fixture/vless.out"
 vless_output="$(<"$fixture/vless.out")"
-assert_contains "$vless_output" 'VLESS Encryption：未使用（NOT USED）' 'VLESS submenu plain-mode notice'
+assert_contains "$vless_output" '新建默认 VLESS Encryption：mlkem768 + random + 1rtt' 'VLESS submenu encryption default notice'
 for action in install show set-endpoint status start stop restart doctor smoke upgrade remove; do
   grep -qx "vless:${action}" "$action_log" || fail "VLESS submenu handler not reached: $action"
 done

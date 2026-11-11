@@ -72,11 +72,14 @@ nb_endpoint_conflict_owner() {
   host="$2"
   port="$(normalize_uint "$3")" || return 1
   expected_host="$(nb_normalize_endpoint_host "$host")"
-  auto_host="$(public_ip 2>/dev/null || true)"
+  auto_host=""
   while IFS='|' read -r owner row_transport listen_port advertise_host advertise_port; do
     [ -n "$owner" ] || continue
     [ "$owner" = "$ignore_owner" ] && continue
     [ "$row_transport" = "$transport" ] || continue
+    if [ -z "$advertise_host" ] && [ -z "$auto_host" ]; then
+      auto_host="$(public_ip 2>/dev/null || true)"
+    fi
     effective_host="${advertise_host:-$auto_host}"
     effective_port="${advertise_port:-$listen_port}"
     [ -n "$effective_host" ] || continue
@@ -181,10 +184,6 @@ nb_effective_advertise_port() {
   else
     printf '%s' "$listen_port"
   fi
-}
-
-nb_endpoint_mode_from_values() {
-  [ -n "${1:-}" ] && printf 'custom' || printf 'auto'
 }
 
 nb_firewall_open_pairs() {

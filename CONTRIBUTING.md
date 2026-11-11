@@ -45,7 +45,7 @@ git diff --check
 - transport-aware allocator 与 xx00 reservation
 - Display Endpoint runtime isolation
 - Snell v4/v5 与 v5 QUIC ownership
-- HY2/VLESS golden config 与真实 Xray 验证
+- HY2/VLESS canonical golden config、Splicore 原生流量及明确标识的客户端互通验证；生产路径禁止 Xray 服务端
 - rollback、backup boundary 与 unified uninstall ownership
 - deterministic two-build hash
 

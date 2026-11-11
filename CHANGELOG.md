@@ -1,6 +1,13 @@
 # Changelog
 
-## Unreleased
+## 4.1.0 - 2026-11-11
+
+- 升级并固定 Splicore 正式版 v0.5.0，校验官方 Manifest、发行包和二进制身份。
+- VLESS + Sudoku 与其他代理协议共用 Splicore 原生运行时，移除 Xray 服务端生产运行依赖。
+- 新建 VLESS + Sudoku 默认通过官方生成器启用原生 VLESS Encryption，服务端私有凭据与客户端公开参数分离。
+- 更新 VLESS 客户端 JSON、JSON 订阅及节点展示，完整保留 Encryption 与 FinalMask/Sudoku。
+- 保留已有节点的 UUID、端口、密码和原加密模式，以及 v0.4.0 历史快照回滚校验。
+- 完善安装事务诊断、异常回滚和恢复流程。
 
 ## 4.0.1 - 2026-10-26
 

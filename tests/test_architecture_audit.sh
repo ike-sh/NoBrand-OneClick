@@ -11,7 +11,10 @@ texts = {p: p.read_text(encoding="utf-8") for p in files}
 joined = "\n".join(texts.values())
 defs = []
 generated_hook_names = {"depend", "start_pre"}
-golden_parity_primitives = {"infer_profile_from_values", "write_server_config"}
+# Retained shared contracts exercised directly by current ingress/SSH tests.
+# They create no runtime or service and remain useful to independent components.
+golden_parity_primitives = {"infer_profile_from_values", "write_server_config",
+    "nb_ingress_stamp_state_file", "nb_wait_for_enforced_listener", "nb_firewall_binding_owned"}
 for path, text in texts.items():
     for line_no, line in enumerate(text.splitlines(), 1):
         match = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\(\)\s*\{", line)

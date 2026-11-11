@@ -21,7 +21,11 @@ spec.loader.exec_module(sc)
 FAKE_BINARY = '''#!/usr/bin/env python3
 import json,sys,pathlib
 args=sys.argv[1:]
-if args[:2]==["key","init"]:
+if args[:1]==["vlessenc"]:
+    # Synthetic generator output only; never used by production or native probes.
+    print(json.dumps({"decryption":"mlkem768x25519plus.random.600s.synthetic-server-material",
+                      "encryption":"mlkem768x25519plus.random.1rtt.synthetic-client-material"}))
+elif args[:2]==["key","init"]:
     pathlib.Path(args[args.index("--file")+1]).write_bytes(b"synthetic-master-key")
 elif args[:2]==["inbound","validate"]:
     doc=json.loads(pathlib.Path(args[args.index("--file")+1]).read_text())
@@ -122,7 +126,7 @@ class RuntimeTests(unittest.TestCase):
         old, events = self.runtime.current.readlink(), self.events()
         graph = desired()
         graph["nodes"][0]["options"] = {"quic_proxy_enabled": True}
-        with self.assertRaisesRegex(sc.Failure, "no rc.4 equivalent"):
+        with self.assertRaisesRegex(sc.Failure, "no v0.5.0 equivalent"):
             self.deploy(graph)
         self.assertEqual(self.runtime.current.readlink(), old)
         self.assertEqual(self.events(), events)
@@ -260,7 +264,7 @@ class RuntimeTests(unittest.TestCase):
 
     def test_external_port_ownership_is_checked_before_download(self):
         sc.save(self.runtime.state / "vless-sudoku/state.json", {"listen_port": 31231})
-        with self.assertRaisesRegex(sc.Failure, "retained Sudoku"):
+        with self.assertRaisesRegex(sc.Failure, "Legacy NoBrand"):
             self.deploy()
         self.assertEqual(self.artifact_calls, 0)
 
@@ -327,34 +331,39 @@ class RuntimeTests(unittest.TestCase):
         payload[:6] = b"\x7fELF\x02\x01"
         struct.pack_into("<H", payload, 18, 62)
         path = self.root / "fake-amd64.tar.gz"
-        def package(extra=None):
+        prefix = path.name[:-7] + "/"
+        def package(extra=None, corrupt=False, duplicate=False, wrong_identity=False):
+            binary_hash = hashlib.sha256(payload).hexdigest()
+            build = {"version": sc.RELEASE["version"], "commit": sc.RELEASE["commit"],
+                     "target": "linux-arm64" if wrong_identity else "linux-amd64", "binary_sha256": binary_hash}
+            files = {"splicore": bytes(payload), "BUILD_INFO.json": json.dumps(build).encode(), "RUNNING.md": b"docs"}
+            files["SHA256SUMS"] = "".join(hashlib.sha256(v).hexdigest() + "  " + k + "\n" for k,v in files.items()).encode()
+            if corrupt: files["RUNNING.md"] = b"corrupted"
             with tarfile.open(path, "w:gz") as archive:
-                info = tarfile.TarInfo("splicore")
-                info.size = len(payload)
-                archive.addfile(info, io.BytesIO(payload))
-                if extra:
-                    archive.addfile(extra, io.BytesIO())
-            entry = {"name": path.name, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+                for name, data in files.items():
+                    info=tarfile.TarInfo(prefix + name); info.size=len(data)
+                    archive.addfile(info, io.BytesIO(data))
+                    if duplicate: archive.addfile(info, io.BytesIO(data))
+                if extra: archive.addfile(extra, io.BytesIO())
+            entry = {"name": path.name, "sha256": sc.sha(path), "binary_sha256": binary_hash}
             return entry, entry["sha256"] + "  " + entry["name"] + "\n"
         entry, sums = package()
-        sc.inspect_archive(path, entry, sums)
-        for invalid in ("/bad", "../bad", "licenses/third-party/../../bad", "unexpected.sh"):
+        self.assertEqual(sc.inspect_archive(path, entry, sums), prefix + "splicore")
+        for invalid in ("/bad", "../bad", prefix + "licenses/../../bad", prefix + "unexpected.sh"):
             entry, sums = package(tarfile.TarInfo(invalid))
-            with self.assertRaises(sc.Failure):
-                sc.inspect_archive(path, entry, sums)
+            with self.assertRaises(sc.Failure): sc.inspect_archive(path, entry, sums)
         for kind in (tarfile.SYMTYPE, tarfile.LNKTYPE, tarfile.FIFOTYPE):
-            info = tarfile.TarInfo("licenses/third-party/link")
-            info.type = kind
-            entry, sums = package(info)
-            with self.assertRaises(sc.Failure):
-                sc.inspect_archive(path, entry, sums)
-        entry, sums = package()
-        for manifest in ("", sums + sums, "not-a-hash  " + path.name):
-            with self.assertRaises(sc.Failure):
-                sc.inspect_archive(path, entry, manifest)
+            info=tarfile.TarInfo(prefix + "licenses/third-party/link"); info.type=kind
+            entry, sums=package(info)
+            with self.assertRaises(sc.Failure): sc.inspect_archive(path, entry, sums)
+        for flags in ({"duplicate": True}, {"corrupt": True}, {"wrong_identity": True}):
+            entry,sums=package(**flags)
+            with self.assertRaises(sc.Failure): sc.inspect_archive(path, entry, sums)
+        entry, sums=package()
+        for manifest in ("", sums+sums, "not-a-hash  " + path.name):
+            with self.assertRaises(sc.Failure): sc.inspect_archive(path, entry, manifest)
         path.write_bytes(b"interrupted archive")
-        with self.assertRaisesRegex(sc.Failure, "checksum"):
-            sc.inspect_archive(path, entry, sums)
+        with self.assertRaisesRegex(sc.Failure, "checksum"): sc.inspect_archive(path, entry, sums)
 
     def test_https_download_and_proxy_share_the_same_gate(self):
         from types import SimpleNamespace

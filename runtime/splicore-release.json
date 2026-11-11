@@ -1,10 +1,28 @@
 {
   "repository": "ike-sh/Splicore",
-  "version": "v0.3.0-rc.4",
-  "commit": "2634ea50d19623591c5db63329a288862726db74",
+  "version": "v0.5.0",
+  "commit": "70b09da7d2758e19ba03df9ff9b9e541a669fa29",
   "checksum_asset": "SHA256SUMS",
-  "qualification": "Release Candidate / Experimental",
-  "rollback_releases": {},
+  "qualification": "Official Splicore v0.5.0",
+  "rollback_releases": {
+    "v0.4.0": {
+      "version": "v0.4.0",
+      "commit": "cbac3fd1fcfdc76166513cdaa2d4f113497682cb",
+      "assets": {
+        "amd64": {
+          "name": "splicore-v0.4.0-linux-amd64.tar.gz",
+          "sha256": "71f7067d478de7ef85b9b34d49eae90c5b20c419a7503afcfdce9c3d144de8eb",
+          "binary_sha256": "fd37493b7565c88fa6ec8291ea02300e3b7c246dcd07af02f856127ff75f766e"
+        },
+        "arm64": {
+          "name": "splicore-v0.4.0-linux-arm64.tar.gz",
+          "sha256": "efd8a38eb8a874f85c9851e560e9a4327346ef55df22885354ad9e52ebb261df",
+          "binary_sha256": "dad5eaa6e6917e7aa58eadcb00407dffbb6397dab74fa491a6e5e99bf2a82f4a"
+        }
+      },
+      "purpose": "Verify existing pre-upgrade snapshots only; never used for new downloads"
+    }
+  },
   "capabilities": {
     "snell": {
       "managed": true,
@@ -44,23 +62,27 @@
       "fresh_install": "raw TCP + Vision + native protected destination"
     },
     "vless-sudoku": {
-      "managed": false,
-      "requires_external_xray": true,
-      "scope": "existing specialized pinned Xray exception"
+      "managed": true,
+      "requires_external_xray": false,
+      "fresh_install": "Native VLESS Encryption (mlkem768 + random + 1rtt) over TCP with FinalMask Sudoku",
+      "client_export": "Xray 26.10.21 JSON; NoBrand adapter preserves Encryption and FinalMask Sudoku",
+      "vless_encryption": true
     }
   },
   "assets": {
     "amd64": {
-      "name": "splicore-v0.3.0-rc.4-linux-amd64.tar.gz",
-      "sha256": "9dd1941c817143d18ea1c892a5fc13266c1b209600576946504a9d3c98c62161",
-      "binary_sha256": "0a347f06f0d1a17ef37edd779826ad79739217b65f80bf39dc6077f115ac175f",
-      "qualification": "Experimental; external runtime qualification pending"
+      "name": "splicore-v0.5.0-linux-amd64.tar.gz",
+      "sha256": "a99a419a4fe6aaaacaee25de6d7886ca5dc6e2cf31f1b67ae57f13f2a5fda5d7",
+      "binary_sha256": "f27b8b9bb0bab32e7323370aa8870c1b8d5a78e95a163fa28cb31dbb60825de3",
+      "qualification": "Official release"
     },
     "arm64": {
-      "name": "splicore-v0.3.0-rc.4-linux-arm64.tar.gz",
-      "sha256": "5b5e39bd8e6ef373ebc00e7e3a8a688ce09d0369dc2c4ecfab06ed535d948b64",
-      "binary_sha256": "85ec863d21707ac309a4c7a64b3b7228eb34bb0405379db6b569d8d550032a4c",
-      "qualification": "BUILD ONLY; runtime qualification pending"
+      "name": "splicore-v0.5.0-linux-arm64.tar.gz",
+      "sha256": "c71c27dfa87c6bb55242b4be955a32fc4a9795c600f7bee73fcba3e43a4082f8",
+      "binary_sha256": "21a38d8cb80270f67f34be32ff07816fcdecd2e4756817e4c98e4f99b8cfcedc",
+      "qualification": "Official release; BUILD ONLY"
     }
-  }
+  },
+  "manifest_asset": "RELEASE_MANIFEST.json",
+  "manifest_sha256": "bb236878409e58779444d584cabeb71c657f5dc2baba62ae49346de29cab7f46"
 }

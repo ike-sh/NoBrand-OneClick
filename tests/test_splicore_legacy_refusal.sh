@@ -33,3 +33,24 @@ for action in install upgrade uninstall nobrand-uninstall nobrand-manager-upgrad
 done
 rm -f "$fixture-output"
 printf '[PASS] CLI refuses legacy before locks/packages/runtime/backup/uninstall; files unchanged\n'
+# The historical Sudoku exception is now a read-only refusal too.
+rm -f "$NOBRAND_STATE_DIR/mieru/users.json"
+mkdir -p "$NOBRAND_STATE_DIR/vless-sudoku" "$NOBRAND_LIB_DIR/bin"
+printf '%s\n' '{"listen_port":31009,"uuid":"synthetic-must-not-change","finalmask_json":{"tcp":[]}}' >"$NOBRAND_STATE_DIR/vless-sudoku/state.json"
+printf '%s\n' 'historical-binary-must-not-be-executed' >"$NOBRAND_LIB_DIR/bin/xray"
+for action in 'vless-sudoku install --port 31009 --advertise-host fixture.invalid -y' 'runtime apply --file missing.json' 'uninstall'; do
+  before="$(find "$fixture" -type f -exec sha256sum {} + | sort)"
+  read -r -a legacy_args <<<"$action"
+  if bash "$TEST_INSTALLER" "${legacy_args[@]}" >"$fixture-output" 2>&1; then
+    printf '[FAIL] historical Sudoku mutation was accepted\n'; exit 1
+  fi
+  [[ "$(cat "$fixture-output")" == *'No changes were made.'* ]]
+  after="$(find "$fixture" -type f -exec sha256sum {} + | sort)"
+  [ "$before" = "$after" ]
+done
+before="$(find "$fixture" -type f -exec sha256sum {} + | sort)"
+bash "$TEST_INSTALLER" runtime transactions >/dev/null
+after="$(find "$fixture" -type f -exec sha256sum {} + | sort)"
+[ "$before" = "$after" ]
+rm -f "$fixture-output"
+printf '[PASS] historical Xray Sudoku preserved byte-for-byte; read-only transactions remains available\n'

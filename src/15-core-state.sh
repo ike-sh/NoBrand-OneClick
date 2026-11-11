@@ -1065,7 +1065,7 @@ nb_write_schema_v3_file() {
   local tmp
   tmp="$(mktemp "${NOBRAND_REGISTRY_FILE}.tmp.XXXXXX")" || return 1
   if ! printf '%s\n' \
-      "{\"schema_version\":${NOBRAND_SCHEMA_VERSION},\"project\":\"NoBrand-OneClick\",\"ownership\":\"nobrand-v3\",\"author\":\"ike\",\"architecture\":\"splicore-native\",\"splicore_version\":\"v0.3.0-rc.4\",\"config_schema\":1}" \
+      "{\"schema_version\":${NOBRAND_SCHEMA_VERSION},\"project\":\"NoBrand-OneClick\",\"ownership\":\"nobrand-v3\",\"author\":\"ike\",\"architecture\":\"splicore-native\",\"splicore_version\":\"v0.5.0\",\"config_schema\":1}" \
       >"$tmp" \
     || ! chmod 0600 "$tmp" \
     || ! mv -f "$tmp" "$NOBRAND_REGISTRY_FILE"; then

@@ -168,7 +168,7 @@ assert_contains "$help" 'clean install' 'NoBrand clean installation policy'
 assert_contains "$help" 'VLESS + FinalMask + Sudoku' 'NoBrand VLESS help protocol'
 assert_contains "$help" 'VLESS REALITY' 'NoBrand REALITY help protocol'
 assert_contains "$help" 'nobrand vless-reality install' 'NoBrand REALITY CLI help'
-assert_contains "$help" 'VLESS Encryption: NOT USED' 'NoBrand plain VLESS help notice'
+assert_contains "$help" 'mlkem768 + random + 1rtt' 'NoBrand native encrypted VLESS help notice'
 assert_contains "$help" 'nobrand tuic install' 'NoBrand TUIC v5 help'
 assert_contains "$help" 'nobrand ssh install' 'NoBrand SSH Tunnel help'
 assert_contains "$help" 'nobrand forward add' 'NoBrand Port Forward help'
@@ -186,20 +186,20 @@ if parse install-nobrand.sh manager upgrade extra >/dev/null 2>&1; then
 fi
 
 version="$(bash "$TEST_ROOT/install-nobrand.sh" --version)"
-assert_eq $'NoBrand-OneClick 4.0.1\n作者: ike' "$version" 'NoBrand Chinese-first version output'
+assert_eq $'NoBrand-OneClick 4.1.0\n作者: ike' "$version" 'NoBrand Chinese-first version output'
 english_version="$(bash -c '
   installer="$1"
   set --
   MITA_SOURCE_ONLY=1 source "$installer"
   LANG_ZH=0 nobrand_version
 ' test "$TEST_ROOT/install-nobrand.sh")"
-assert_eq $'NoBrand-OneClick 4.0.1\nAuthor: ike' "$english_version" \
+assert_eq $'NoBrand-OneClick 4.1.0\nAuthor: ike' "$english_version" \
   'NoBrand English version output'
 mieru_version="$(bash "$TEST_ROOT/install-nobrand.sh" mieru --version)"
-assert_eq $'NoBrand-OneClick Mieru 4.0.1\n作者: ike' "$mieru_version" \
+assert_eq $'NoBrand-OneClick Mieru 4.1.0\n作者: ike' "$mieru_version" \
   'Mieru Chinese-first version output'
 mieru_english_version="$(bash "$TEST_ROOT/install-nobrand.sh" mieru --lang en --version)"
-assert_eq $'NoBrand-OneClick Mieru 4.0.1\nAuthor: ike' "$mieru_english_version" \
+assert_eq $'NoBrand-OneClick Mieru 4.1.0\nAuthor: ike' "$mieru_english_version" \
   'Mieru English version output'
 cp "$TEST_ROOT/install-nobrand.sh" "$cli_fixture/nb"
 short_version="$(bash "$cli_fixture/nb" --version)"

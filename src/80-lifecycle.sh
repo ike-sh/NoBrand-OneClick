@@ -318,8 +318,8 @@ nb_lifecycle_protocol_scope_state_valid() (
   shopt -s nullglob dotglob
   case "$scope" in
     vless-sudoku)
-      [ -f "$NOBRAND_VLESS_STATE_FILE" ] && [ ! -L "$NOBRAND_VLESS_STATE_FILE" ] \
-        && vless_sudoku_state_exists && vless_sudoku_state_matches
+      warn 'NB-TX-LEGACY-SUDOKU: historical Xray state cannot be replayed by the native installer'
+      return 1
       ;;
     ssh-tunnel)
       [ -f "$NOBRAND_SSH_STATE_FILE" ] && [ ! -L "$NOBRAND_SSH_STATE_FILE" ] \
@@ -407,7 +407,7 @@ nb_lifecycle_protocol_retry_authorized() {
 # credentials.  Structural validation intentionally precedes the admin lock
 # and every mutating service/firewall action.
 nb_lifecycle_reconcile_protocol_scope() {
-  local scope="$1" enabled port failed=0
+  local scope="$1"
   nb_lifecycle_protocol_scope_state_valid "$scope" || return 1
 
   case "$scope" in
@@ -432,43 +432,9 @@ nb_lifecycle_reconcile_protocol_scope() {
     *) return 1 ;;
   esac
 
-  # Complete the read-only preflight for the whole scope before repairing even
-  # one unit.  Enumerators are intentionally forgiving for status displays, so
-  # recovery additionally requires every derived field/config it will consume.
-  case "$scope" in
-    vless-sudoku)
-      enabled="$(vless_sudoku_state_field enabled 2>/dev/null)" || return 1
-      case "$enabled" in true|false) ;; *) return 1 ;; esac
-      port="$(vless_sudoku_state_field listen_port 2>/dev/null)" || return 1
-      [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || return 1
-      vless_sudoku_server_config_matches \
-        && vless_sudoku_client_config_matches \
-        && nobrand_xray_test_config "$NOBRAND_VLESS_CONFIG_FILE" || return 1
-      ;;
-  esac
-
-  admin_lock_acquire || return 1
-  case "$scope" in
-    vless-sudoku)
-      enabled="$(vless_sudoku_state_field enabled 2>/dev/null)" || failed=1
-      case "$enabled" in true|false) ;; *) failed=1 ;; esac
-      if [ "$failed" -eq 0 ]; then
-        nobrand_write_vless_sudoku_service || failed=1
-      fi
-      if [ "$failed" -eq 0 ] && [ "$enabled" = true ]; then
-        port="$(vless_sudoku_state_field listen_port)" || failed=1
-        [ "$failed" -ne 0 ] \
-          || nb_firewall_open_pairs "TCP|${port}" >/dev/null 2>&1 || failed=1
-        [ "$failed" -ne 0 ] \
-          || nobrand_vless_sudoku_service_action start >/dev/null 2>&1 || failed=1
-        [ "$failed" -ne 0 ] || vless_sudoku_running || failed=1
-      elif [ "$failed" -eq 0 ]; then
-        nobrand_vless_sudoku_service_action stop >/dev/null 2>&1 || failed=1
-      fi
-      ;;
-  esac
-  admin_lock_release
-  return "$failed"
+  # Historical Sudoku callbacks cannot start an external runtime.
+  warn 'NB-TX-LEGACY-SUDOKU: no complete native recovery evidence; original transaction retained'
+  return 1
 }
 
 nb_lifecycle_validate_protocol_scope() {
@@ -479,7 +445,7 @@ nb_lifecycle_validate_protocol_scope() {
   nb_lifecycle_protocol_scope_state_valid "$scope" || return 1
   case "$scope" in
     vless-sudoku)
-      vless_sudoku_state_exists && vless_sudoku_doctor
+      nb_splicore_call protocol --protocol vless-sudoku --operation doctor
       ;;
     ssh-tunnel)
       ssh_tunnel_state_exists && ssh_tunnel_doctor

@@ -110,7 +110,7 @@ nobrand_set_scoped_recovery_action() {
   case "$scope" in
     manager) ACTION=nobrand-manager-bootstrap ;;
     ingress) ACTION=nobrand-ingress-recover ;;
-    vless-sudoku) ACTION=nobrand-vless-sudoku; VLESS_SUDOKU_ACTION=install ;;
+    vless-sudoku) ACTION=nobrand-runtime; NOBRAND_RUNTIME_ARGS=(recover) ;;
     ssh-tunnel) ACTION=nobrand-ssh-tunnel; SSH_TUNNEL_ACTION=install ;;
     forward)
       # Forward add parameters are intentionally not copied into lifecycle
@@ -159,6 +159,7 @@ nb_select_partial_recovery_action() {
   local state="${1:-$NOBRAND_INSTALL_STATE}" choice=""
   case "$state" in
     CURRENT_PARTIAL_INSTALL|CURRENT_PARTIAL_REPAIR|CURRENT_PARTIAL_CONFIGURE)
+      nb_splicore_call transactions || return 1
       t '检测到未完成的安装或修复。请选择恢复操作：' \
         'An incomplete install or repair was detected. Choose a recovery action:'
       t '  1) 继续安全修复（默认）' '  1) Continue safe repair (default)'
@@ -232,12 +233,17 @@ main() {
     nobrand-version) nobrand_version; return 0 ;;
     nobrand-help) nobrand_usage; return 0 ;;
   esac
+  # Diagnosis remains available even when old state prevents all mutations.
+  if [ "${ACTION:-}" = nobrand-runtime ] && [ "${NOBRAND_RUNTIME_ARGS[0]:-}" = transactions ]; then
+    nb_splicore_call "${NOBRAND_RUNTIME_ARGS[@]}"
+    return $?
+  fi
   nb_splicore_legacy_preflight || return 1
   # The primary runtime has its own persistent generation transaction and uses
   # the same lifecycle lock. Route before any legacy repair/download branch.
   if nobrand_ssh_confirmation_pending; then
     case "${ACTION:-}" in
-      nobrand-runtime|nobrand-snell|nobrand-tuic|nobrand-hy2|nobrand-vless-reality|install|upgrade|reconfigure)
+      nobrand-runtime|nobrand-snell|nobrand-tuic|nobrand-hy2|nobrand-vless-reality|nobrand-vless-sudoku|install|upgrade|reconfigure)
         nobrand_pending_ssh_confirmation_notice
         return 1
         ;;
@@ -384,6 +390,7 @@ main() {
     user-manage) do_user_manage ;;
     perf) do_perf ;;
     bbr-config) do_bbr_config ;;
+    nobrand-runtime) nb_splicore_call "${NOBRAND_RUNTIME_ARGS[@]}" ;;
     nobrand-status) nobrand_status ;;
     nobrand-nodes) nobrand_nodes ;;
     nobrand-doctor) nobrand_doctor ;;

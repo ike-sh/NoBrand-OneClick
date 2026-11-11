@@ -1,10 +1,10 @@
 # The menu intentionally mutates globals inside isolated action subshells; the
 # parent only consumes exit codes, so SC2030/SC2031 are false positives here.
 # shellcheck disable=SC2030,SC2031
-# NoBrand-OneClick — Mieru / Snell / Hysteria2 / TUIC v5 / Plain VLESS Sudoku / SSH Tunnel
+# NoBrand-OneClick — Mieru / Snell / Hysteria2 / TUIC v5 / VLESS Encryption + Sudoku / SSH Tunnel
 # 作者: ike / https://github.com/ike-sh/NoBrand-OneClick
 # Mieru 母体代码源自 ike-sh/mieru-OneClick (MIT)；Hysteria2 与 VLESS
 # FinalMask/Sudoku 逻辑参考 ike-sh/Xray-OneClick (GPL-3.0)。本融合项目按
-# GPL-3.0 发布；VLESS 为 plain VLESS/TCP，不使用 VLESS Encryption。
+# GPL-3.0 发布；VLESS Encryption 与原生 FinalMask/Sudoku 共用 Splicore。
 set -euo pipefail
 umask 077

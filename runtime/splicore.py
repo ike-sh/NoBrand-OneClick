@@ -156,26 +156,58 @@ def inspect_archive(path, entry, sums):
             "CHECKSUM_MISMATCH", "archive does not match official checksum and immutable pin")
     with tarfile.open(path, "r:gz") as archive:
         members, names, size = archive.getmembers(), set(), 0
+        prefix = entry["name"][:-7] + "/"
+        files = {}
         require(len(members) <= 512, "ARCHIVE_INVALID", "too many archive entries")
         for member in members:
-            name = member.name
+            name = member.name.rstrip("/")
             require(name and not PurePosixPath(name).is_absolute() and "\\" not in name and ":" not in name
                     and all(p not in ("", ".", "..") for p in name.rstrip("/").split("/"))
                     and name not in names and (member.isfile() or member.isdir()),
                     "ARCHIVE_INVALID", "unsafe archive entry")
             names.add(name)
-            root_file = name in {"splicore", "LICENSE", "NOTICE.md", "THIRD_PARTY_NOTICES.md"}
-            require((root_file and member.isfile()) or name.startswith("licenses/third-party/")
-                    or (member.isdir() and name.rstrip("/") in {"licenses", "licenses/third-party"}),
+            require(name == prefix[:-1] and member.isdir() or name.startswith(prefix),
+                    "ARCHIVE_INVALID", "wrong versioned archive root")
+            relative = name[len(prefix):]
+            root_file = relative in {"splicore", "BUILD_INFO.json", "SHA256SUMS", "RUNNING.md",
+                                     "LICENSE", "NOTICE.md", "THIRD_PARTY_NOTICES.md"}
+            require((root_file and member.isfile()) or relative.startswith(("licenses/", "examples/"))
+                    or (member.isdir() and relative in {"", "licenses", "examples"}),
                     "ARCHIVE_INVALID", "unexpected archive entry")
             size += member.size
             require(0 <= member.size and size <= 128 * 1024 * 1024, "ARCHIVE_INVALID", "archive size limit")
-        require("splicore" in names, "ARCHIVE_INVALID", "missing binary")
-        with archive.extractfile("splicore") as src:
+            if member.isfile():
+                files[relative] = member
+        require({"splicore", "BUILD_INFO.json", "SHA256SUMS", "RUNNING.md"} <= files.keys(),
+                "ARCHIVE_INVALID", "incomplete release package")
+        internal = {}
+        for line in archive.extractfile(files["SHA256SUMS"]).read().decode("ascii").splitlines():
+            match = re.fullmatch(r"([0-9a-f]{64})  (.+)", line)
+            require(match and match[2] in files and match[2] not in internal,
+                    "ARCHIVE_INVALID", "invalid internal checksum entry")
+            internal[match[2]] = match[1]
+        require(internal.keys() == files.keys() - {"SHA256SUMS"},
+                "ARCHIVE_INVALID", "internal hashes do not cover the package")
+        for name, digest in internal.items():
+            with archive.extractfile(files[name]) as src:
+                h = hashlib.sha256()
+                for chunk in iter(lambda: src.read(1024 * 1024), b""):
+                    h.update(chunk)
+                require(h.hexdigest() == digest,
+                        "CHECKSUM_MISMATCH", "internal package checksum differs")
+        build = json.load(archive.extractfile(files["BUILD_INFO.json"]))
+        target_arch = "amd64" if "amd64" in entry["name"] else "arm64"
+        require(build.get("version") == RELEASE["version"] and build.get("commit") == RELEASE["commit"]
+                and build.get("target") == "linux-" + target_arch
+                and build.get("binary_sha256") == entry["binary_sha256"]
+                and internal["splicore"] == entry["binary_sha256"],
+                "BINARY_IDENTITY", "build metadata does not match immutable release pin")
+        with archive.extractfile(files["splicore"]) as src:
             header = src.read(20)
         require(len(header) == 20 and header[:6] == b"\x7fELF\x02\x01"
                 and struct.unpack_from("<H", header, 18)[0] == (62 if "amd64" in entry["name"] else 183),
                 "BINARY_IDENTITY", "wrong executable architecture")
+        return prefix + "splicore"
 
 
 def download(url, path, proxy=""):
@@ -215,20 +247,31 @@ def artifact(destination, directory=None, proxy="", target_arch=None):
     with tempfile.TemporaryDirectory(prefix="nb-splicore-download-") as tmp:
         staging = Path(tmp)
         archive, sums = staging / entry["name"], staging / RELEASE["checksum_asset"]
+        manifest = staging / RELEASE["manifest_asset"]
         if directory:
             source = Path(directory)
             require((source / entry["name"]).is_file(), "ASSET_NOT_FOUND", "pinned archive missing")
             require((source / RELEASE["checksum_asset"]).is_file(), "CHECKSUM_MISMATCH", "official SHA256SUMS missing")
             shutil.copyfile(source / entry["name"], archive)
             shutil.copyfile(source / RELEASE["checksum_asset"], sums)
+            require((source / manifest.name).is_file(), "CHECKSUM_MISMATCH", "release manifest missing")
+            shutil.copyfile(source / manifest.name, manifest)
         else:
             base = "https://github.com/" + RELEASE["repository"] + "/releases/download/" + RELEASE["version"] + "/"
             download(base + entry["name"], archive, proxy)
             download(base + RELEASE["checksum_asset"], sums, proxy)
-        inspect_archive(archive, entry, sums.read_text(encoding="ascii"))
+            download(base + manifest.name, manifest, proxy)
+        require(sha(manifest) == RELEASE["manifest_sha256"], "CHECKSUM_MISMATCH", "release manifest differs from pin")
+        published = load(manifest)
+        require(published.get("release", {}).get("version") == RELEASE["version"]
+                and published["release"].get("commit") == RELEASE["commit"],
+                "BINARY_IDENTITY", "release manifest source identity differs")
+        require(published.get("assets", {}).get(entry["name"]) == entry["sha256"],
+                "CHECKSUM_MISMATCH", "release manifest archive digest differs")
+        binary_member = inspect_archive(archive, entry, sums.read_text(encoding="ascii"))
         candidate = staging / "splicore"
         with tarfile.open(archive, "r:gz") as package:
-            with package.extractfile("splicore") as src:
+            with package.extractfile(binary_member) as src:
                 atomic(candidate, src.read(), 0o700)
         require(sha(candidate) == entry["binary_sha256"], "BINARY_IDENTITY", "extracted binary differs from release pin")
         identity = binary_identity(candidate, target_arch)
@@ -267,7 +310,8 @@ def inspect_backup_archive(path):
     require(isinstance(registry, dict) and registry.get("architecture") == "splicore-native",
             "UNSUPPORTED_LEGACY_INSTALLATION", LEGACY_NOTICE)
     require(not any(name.startswith(("state/mieru/", "state/snell/", "state/tuic/", "state/hysteria2/",
-                                    "state/vless-reality/", "config/hysteria2/", "config/vless-reality/")) for name in names),
+                                    "state/vless-reality/", "state/vless-sudoku/", "config/vless-sudoku/",
+                                    "config/hysteria2/", "config/vless-reality/")) for name in names),
             "UNSUPPORTED_LEGACY_INSTALLATION", LEGACY_NOTICE)
 
 
@@ -311,7 +355,7 @@ def tls_check(tls):
         command(["openssl", "verify", "-CAfile", ca, "-purpose", "sslserver", verify_name,
                  tls["server_name"], certificate], "CONFIG_INVALID")
         text = command(["openssl", "x509", "-in", certificate, "-noout", "-text"]).stdout
-        require(b"CA:TRUE" not in text, "CAPABILITY_UNSUPPORTED", "rc.4 requires a non-CA TLS leaf")
+        require(b"CA:TRUE" not in text, "CAPABILITY_UNSUPPORTED", "Splicore requires a non-CA TLS leaf")
         if b"X509v3 Key Usage:" in text:
             require(b"Digital Signature" in text.split(b"X509v3 Key Usage:", 1)[1].splitlines()[1],
                     "CONFIG_INVALID", "TLS leaf KeyUsage must allow digitalSignature")
@@ -321,7 +365,7 @@ def tls_check(tls):
 
 
 def hysteria_obfs(settings):
-    """NoBrand exposes plain/Salamander; other rc.4 capabilities stay explicit."""
+    """NoBrand exposes plain/Salamander; other core capabilities stay explicit."""
     stream = settings.get("stream_transport")
     if stream is None:
         return {"type": "none"}
@@ -334,7 +378,7 @@ def hysteria_obfs(settings):
     obfs = transport.get("obfs", {"type": "none"})
     keys(obfs, {"type", "password"}, "HY2 obfs")
     require(obfs.get("type") in ("none", "salamander"), "CAPABILITY_UNSUPPORTED",
-            "NoBrand exposes none/salamander; rc.4 Gecko is supported experimental but not exposed")
+            "NoBrand exposes none/salamander; core Gecko is supported experimental but not exposed")
     if obfs["type"] == "none":
         require(not obfs.get("password"), "CONFIG_INVALID", "plain HY2 cannot carry an obfs password")
     else:
@@ -410,6 +454,86 @@ def reality_check(node, document):
             "CONFIG_INVALID", "REALITY requires a private server key")
 
 
+def sudoku_mask(password):
+    return {"tcp": [{"type": "sudoku", "settings": {"password": password,
+            "ascii": "prefer_entropy", "paddingMin": 10, "paddingMax": 40}}]}
+
+
+def sudoku_check(settings):
+    keys(settings, {"security", "flow", "transport", "packet_encoding", "stream_transport", "encryption"}, "Sudoku settings")
+    stream = settings.get("stream_transport", {})
+    keys(stream, {"kind", "final_mask"}, "Sudoku raw transport")
+    mask = stream.get("final_mask", {})
+    keys(mask, {"tcp"}, "FinalMask")
+    chain = mask.get("tcp", [])
+    require(len(chain) == 1 and isinstance(chain[0], dict), "CONFIG_INVALID", "one Sudoku mask required")
+    keys(chain[0], {"type", "settings"}, "Sudoku mask")
+    params = chain[0].get("settings", {})
+    keys(params, {"password", "ascii", "paddingMin", "paddingMax"}, "Sudoku parameters")
+    require(settings.get("security") == "none" and settings.get("flow") == "none"
+            and settings.get("transport") == "tcp" and settings.get("packet_encoding") == "xudp"
+            and stream.get("kind") == "tcp" and chain[0].get("type") == "sudoku"
+            and isinstance(params.get("password"), str) and 0 < len(params["password"].encode()) <= 1024
+            and params.get("ascii") in ("prefer_entropy", "prefer_ascii", "entropy", "ascii")
+            and type(params.get("paddingMin")) is int and type(params.get("paddingMax")) is int
+            and 0 <= params["paddingMin"] <= params["paddingMax"] <= 100,
+            "CAPABILITY_UNSUPPORTED", "invalid native VLESS raw TCP Sudoku parameters")
+
+
+def public_encryption(value):
+    # This only checks the public field boundary. Splicore validates keys,
+    # padding and the private/public correspondence through inbound validate.
+    require(isinstance(value, str) and (value == "none" or (len(value) <= 16384 and re.fullmatch(
+        r"mlkem768x25519plus\.(native|xorpub|random)\.(1rtt|0rtt)\.[A-Za-z0-9_.-]+", value))),
+        "CONFIG_INVALID", "invalid public VLESS encryption parameter")
+    return value
+
+
+def server_encryption(value):
+    # v0.5.0 stores the public inbound projection with ClientString(true).
+    # Keep the generator's independent client 1rtt/0rtt choice in node.client.
+    parts = public_encryption(value).split(".")
+    if value != "none":
+        parts[2] = "0rtt"
+    return ".".join(parts)
+
+
+def sudoku_encryption(node):
+    document = node["document"]
+    settings = document["settings"]
+    public = public_encryption(settings.get("encryption", "none"))
+    client = public_encryption(node.get("client", {}).get("encryption", public))
+    require(server_encryption(client) == server_encryption(public),
+            "CONFIG_INVALID", "stored VLESS client/server public parameters differ")
+    secret = document.get("server_secret", {})
+    keys(secret, {"decryption"}, "VLESS encryption server secret")
+    if client == "none":
+        require(not secret, "CONFIG_INVALID", "private VLESS decryption requires public encryption")
+    else:
+        private = secret.get("decryption")
+        require(isinstance(private, str) and 0 < len(private) <= 16384
+                and re.fullmatch(r"mlkem768x25519plus\.(native|xorpub|random)\.[0-9]+(?:-[0-9]+)?s?\.[A-Za-z0-9_.-]+", private),
+                "CONFIG_INVALID", "enabled VLESS encryption requires a private server credential")
+    return client
+
+
+def generate_vless_encryption(binary):
+    result = command([binary, "vlessenc", "--auth", "mlkem768", "--mode", "random", "--handshake", "1rtt"],
+                     "VLESS_ENCRYPTION", ok=False)
+    # The generator explicitly outputs secrets. Never forward stdout/stderr.
+    require(result.returncode == 0, "VLESS_ENCRYPTION", "official VLESS encryption generator failed")
+    try:
+        pair = json.loads(result.stdout)
+        require(isinstance(pair, dict) and set(pair) == {"decryption", "encryption"}
+                and isinstance(pair["decryption"], str) and isinstance(pair["encryption"], str)
+                and pair["encryption"].startswith("mlkem768x25519plus.random.1rtt."),
+                "VLESS_ENCRYPTION", "official generator returned invalid encryption parameters")
+        public_encryption(pair["encryption"])
+    except (ValueError, TypeError, KeyError) as exc:
+        raise Failure("VLESS_ENCRYPTION", "invalid official generator output") from exc
+    return pair
+
+
 def guard_mutations(desired):
     mutations, rules, listeners, ids = [], [], set(), set()
     for node in desired["nodes"]:
@@ -458,7 +582,7 @@ def render(desired, validate_tls=True):
         protocol = node.get("protocol")
         capability = RELEASE["capabilities"].get(protocol, {})
         require(capability.get("managed", False), "CAPABILITY_UNSUPPORTED",
-                capability.get("integration_blocker", "protocol/security policy is not qualified by rc.4"))
+                capability.get("integration_blocker", "protocol/security policy is not qualified by v0.5.0"))
         options = node.get("options", {})
         keys(options, {"traffic_pattern", "low_entropy", "quota_mb", "expire_at", "bandwidth_mbps",
                        "quic_proxy_enabled", "obfs", "ingress_enforcement"}, "capability options")
@@ -468,7 +592,7 @@ def render(desired, validate_tls=True):
                 and options.get("bandwidth_mbps", 0) == 0
                 and not options.get("quic_proxy_enabled") and (protocol == "hysteria2" or not options.get("obfs"))
                 and options.get("ingress_enforcement", "native") == "native",
-                "CAPABILITY_UNSUPPORTED", "stored protocol/accounting/security option has no rc.4 equivalent")
+                "CAPABILITY_UNSUPPORTED", "stored protocol/accounting/security option has no v0.5.0 equivalent")
         document = copy.deepcopy(node.get("document"))
         require(isinstance(document, dict), "CONFIG_INVALID", "managed document required")
         keys(document, {"schema", "name", "account_name", "listener", "display_endpoint", "settings", "users", "psk", "server_secret"}, "managed document")
@@ -490,7 +614,7 @@ def render(desired, validate_tls=True):
         except ValueError as exc:
             raise Failure("CONFIG_INVALID", "listener requires an IP address") from exc
         settings = document.get("settings", {})
-        transport = "tcp" if protocol in ("snell", "vless-reality") else "udp"
+        transport = "tcp" if protocol in ("snell", "vless-reality", "vless-sudoku") else "udp"
         if protocol == "mieru":
             keys(settings, {"transport", "mtu", "multiplex"}, "Mieru settings")
             transport = settings.get("transport")
@@ -499,10 +623,13 @@ def render(desired, validate_tls=True):
             keys(settings, {"version"}, "Snell settings")
             require(settings.get("version") in (4, 5) and isinstance(document.get("psk"), str)
                     and re.fullmatch(r"[A-Za-z0-9_+/=-]{12,128}", document["psk"]),
-                    "CAPABILITY_UNSUPPORTED", "stored Snell PSK/version outside rc.4 domain; rotation required explicitly")
+                    "CAPABILITY_UNSUPPORTED", "stored Snell PSK/version outside v0.5.0 domain; rotation required explicitly")
             document["account_name"] = "nb-" + name
         elif protocol == "vless-reality":
             reality_check(node, document)
+        elif protocol == "vless-sudoku":
+            sudoku_check(settings)
+            sudoku_encryption(node)
         else:
             allowed = {"tls", "stream_transport"} if protocol == "hysteria2" else {"version", "tls", "congestion_control", "udp_relay_mode", "zero_rtt_handshake"}
             keys(settings, allowed, protocol + " settings")
@@ -514,12 +641,12 @@ def render(desired, validate_tls=True):
                 tls_check(settings.get("tls", {}))
         if protocol != "snell":
             users = document.get("users")
-            require(isinstance(users, list) and 1 <= len(users) <= 16, "CONFIG_INVALID", "rc.4 supports 1..16 users per inbound")
+            require(isinstance(users, list) and 1 <= len(users) <= 16, "CONFIG_INVALID", "v0.5.0 supports 1..16 users per inbound")
             for index, user in enumerate(users):
                 keys(user, {"account_name", "username", "uuid", "password"}, "managed user")
                 # Internal account identity is independent of wire credentials.
                 user["account_name"] = "nb-" + name + "-" + str(index)
-                if protocol == "vless-reality":
+                if protocol in ("vless-reality", "vless-sudoku"):
                     require(str(uuid.UUID(user.get("uuid", ""))) == user.get("uuid"), "CONFIG_INVALID", "invalid VLESS UUID")
                 else:
                     require(isinstance(user.get("password"), str) and user["password"], "CONFIG_INVALID", "credentials must be explicit")
@@ -531,8 +658,8 @@ def render(desired, validate_tls=True):
         occupied.append((transport, address, listener["port"]))
         if not node.get("enabled", True):
             continue
-        documents.append((name, "vless" if protocol == "vless-reality" else protocol, document))
-    require(len(documents) <= 64, "CONFIG_INVALID", "rc.4 inbound limit exceeded")
+        documents.append((name, "vless" if protocol in ("vless-reality", "vless-sudoku") else protocol, document))
+    require(len(documents) <= 64, "CONFIG_INVALID", "v0.5.0 inbound limit exceeded")
     guard_mutations(desired)
     for node in desired["nodes"]:
         if node.get("guard"):
@@ -580,8 +707,24 @@ def client_profiles(node):
     host, port = endpoint["host"], endpoint["port"]
     name = node.get("client", {}).get("name") or node["id"]
     out = {"id": node["id"], "protocol": protocol}
-    if protocol == "snell":
-        # Public rc.4 ClientVersion(5)=4: native v5 admits v4 TCP/UDP
+    if protocol == "vless-sudoku":
+        sudoku_check(settings)
+        encryption = sudoku_encryption(node)
+        mask = copy.deepcopy(settings["stream_transport"]["final_mask"])
+        user = document["users"][0]
+        # The Core exporter rejects FinalMask. NoBrand maps its canonical TCP
+        # mask explicitly to Xray 26.10.21 JSON without losing either layer.
+        out["uri"] = None
+        out["share_notice"] = "FinalMask/Sudoku 与 VLESS Encryption 请使用完整 Xray 26.10.21 JSON；不生成可能丢失参数的 URI。"
+        out["xray"] = {"protocol": "vless", "settings": {"vnext": [{"address": host, "port": port,
+            "users": [{"id": user["uuid"], "encryption": encryption}]}]}, "streamSettings": {
+            "network": "raw", "security": "none", "finalmask": mask}}
+        out["xray_config"] = xray_client_config([dict(out["xray"], tag=node["id"])])
+        out["client_version"] = "26.10.21"
+        out["compatibility"] = {"vless_encryption": "enabled" if encryption != "none" else "none (preserved legacy mode)",
+                                "projection": "NoBrand FinalMask adapter; Xray 26.10.21 JSON"}
+    elif protocol == "snell":
+        # Public Splicore ClientVersion(5)=4: native v5 admits v4 TCP/UDP
         # clients while QUIC Proxy Mode stays unavailable.
         wire = 4
         out["server_version"], out["client_wire_version"] = settings["version"], wire
@@ -684,6 +827,28 @@ def client_profiles(node):
     return out
 
 
+def xray_client_config(outbounds):
+    return {"log": {"loglevel": "warning"}, "inbounds": [{"tag": "socks-in", "listen": "127.0.0.1", "port": 1080,
+            "protocol": "socks", "settings": {"auth": "noauth", "udp": True}}], "outbounds": outbounds}
+
+
+def sudoku_export(nodes):
+    requested = os.environ.get("NOBRAND_SPLICORE_EXPORT_FORMAT") or "json"
+    version = os.environ.get("NOBRAND_SPLICORE_CLIENT_VERSION") or "26.10.21"
+    require(requested in ("json", "xray"), "EXPORT_UNSUPPORTED",
+            "VLESS Encryption with FinalMask Sudoku requires complete Xray JSON; URI and other subscription formats are unsupported")
+    require(version == "26.10.21", "EXPORT_UNSUPPORTED", "VLESS Sudoku JSON export targets Xray 26.10.21")
+    outbounds = []
+    for node in nodes:
+        # One outbound per UUID keeps multi-user subscriptions complete.
+        for index, user in enumerate(node["document"]["users"]):
+            member = copy.deepcopy(node)
+            member["document"]["users"] = [user]
+            outbound = client_profiles(member)["xray"]
+            outbounds.append(dict(outbound, tag=node["id"] + ("-" + str(index) if index else "")))
+    return xray_client_config(outbounds)
+
+
 class Service:
     """One canonical supervisor. Fixture adapter is explicit and never auto-selected."""
     def __init__(self, adapter, generation, fixture=None):
@@ -779,7 +944,7 @@ class Runtime:
             require(all(p.name in allowed for p in self.state.iterdir()), "CONFIG_INVALID", "unmarked state contains foreign data")
 
     @contextlib.contextmanager
-    def locked(self):
+    def locked(self, recovery=False):
         self.refuse_legacy()
         self.safe()
         self.lifecycle.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -800,7 +965,74 @@ class Runtime:
                 fcntl.flock(out, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as exc:
                 raise Failure("LOCKED", "another runtime transaction is active") from exc
+            if not recovery:
+                legacy = self.lifecycle_record()
+                require(not legacy or legacy.get("STATUS") == "complete", "LIFECYCLE_PENDING",
+                        "unfinished lifecycle transaction; run nobrand runtime transactions then nobrand runtime recover")
             yield
+
+    def lifecycle_record(self):
+        path = Path(os.environ.get("NOBRAND_LIFECYCLE_TX_FILE", str(self.lifecycle / "transaction.env")))
+        if not path.exists() and not path.is_symlink():
+            return None
+        require(not path.is_symlink() and path.is_file(), "TRANSACTION_INVALID", "unsafe lifecycle record")
+        record = {}
+        for line in path.read_text().splitlines():
+            key, sep, value = line.partition("=")
+            require(sep and key not in record and re.fullmatch(r"[A-Z_]+", key),
+                    "TRANSACTION_INVALID", "invalid lifecycle record")
+            record[key] = value
+        require(record.get("FORMAT") == "nobrand-lifecycle-v2" and record.get("STATUS") in ("in-progress", "complete")
+                and record.get("MUTATION_STARTED") in ("0", "1"),
+                "TRANSACTION_INVALID", "unsupported lifecycle record")
+        return record
+
+    def transactions(self):
+        """Read only; no locks, packages, daemon calls or recovery side effects."""
+        legacy = self.lifecycle_record()
+        result = {"lifecycle": None, "generation": None}
+        if legacy:
+            result["lifecycle"] = {key: legacy.get(key) for key in (
+                "OPERATION", "SCOPE", "STATUS", "LAST_COMPLETED_PHASE", "MUTATION_STARTED", "TRANSACTION_ID")}
+            result["lifecycle"]["recovery"] = ("NO_MUTATION_CANCEL" if legacy["MUTATION_STARTED"] == "0"
+                                                else "BLOCKED: original request/snapshot required")
+            result["lifecycle"]["error_code"] = "NB-TX-" + str(legacy.get("SCOPE", "UNKNOWN")).upper() + "-" + str(legacy.get("LAST_COMPLETED_PHASE", "UNKNOWN")).upper()
+            if legacy.get("SCOPE") == "manager":
+                result["lifecycle"]["recovery"] = "manager bootstrap may replay its deterministic manager-only steps"
+        if self.transaction.exists():
+            require(not self.transaction.is_symlink(), "TRANSACTION_INVALID", "unsafe generation record")
+            tx = load(self.transaction)
+            self.validate_transaction(tx)
+            result["generation"] = {key: tx.get(key) for key in ("phase", "candidate", "old", "error_code", "failed_phase")}
+        return result
+
+    def recover_lifecycle(self):
+        record = self.lifecycle_record()
+        if not record or record["STATUS"] == "complete":
+            return {"lifecycle": "not-needed"}
+        require(record["MUTATION_STARTED"] == "0", "RECOVERY_EVIDENCE_MISSING",
+                "lifecycle mutation started but original request and verified snapshot are unavailable; retain transaction and use matching historical installer")
+        required = {"FORMAT", "STATUS", "OPERATION", "SCOPE", "MUTATION_STARTED", "MANAGER_VERSION",
+                    "SCHEMA_GENERATION", "TRANSACTION_ID", "STARTED_AT", "LAST_COMPLETED_PHASE", "MIERU_OWNED",
+                    "MIERU_PRESERVE_PACKAGE", "MIERU_PRESERVE_USER", "MIERU_PRESERVE_GROUP", "MIERU_PRESERVE_SHARED"}
+        require(record.keys() == required and record["SCHEMA_GENERATION"] == "3"
+                and re.fullmatch(r"4\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", record["MANAGER_VERSION"])
+                and re.fullmatch(r"[A-Za-z0-9._-]{8,128}", record["TRANSACTION_ID"])
+                and re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", record["STARTED_AT"])
+                and record["LAST_COMPLETED_PHASE"] in ("prepare", "state-layout", "manager-ready", "runtime-ready")
+                and all(record[k] == "0" for k in required if k.startswith("MIERU_")),
+                "RECOVERY_EVIDENCE_MISSING", "incomplete or unsupported lifecycle evidence; original record retained")
+        require(record.get("OPERATION") == "install" and record.get("SCOPE") in (
+            "manager", "mieru", "snell", "hy2", "tuic", "vless-reality", "vless-sudoku"),
+            "RECOVERY_EVIDENCE_MISSING", "this lifecycle scope requires its component recovery command")
+        path = Path(os.environ.get("NOBRAND_LIFECYCLE_TX_FILE", str(self.lifecycle / "transaction.env")))
+        original = path.read_bytes()
+        digest = hashlib.sha256(original).hexdigest()
+        atomic(self.lifecycle / ("cancelled-" + digest + ".env"), original)
+        # Keep transaction.env as a terminal record; never bypass recovery by deleting it.
+        record.update(STATUS="complete", LAST_COMPLETED_PHASE="complete")
+        atomic(path, "".join(k + "=" + v + "\n" for k, v in record.items()))
+        return {"lifecycle": "cancelled-before-mutation", "original_sha256": digest}
 
     def target(self, link):
         if not link.is_symlink():
@@ -834,15 +1066,15 @@ class Runtime:
             "tuic/runtime.json", "snell/instances", "tuic/instances", "vless-reality/instances")]
         paths += [self.config / "hysteria2/config.json", self.config / "vless-reality/instances"]
         paths += [self.lib / name for name in ("bin/mita", "bin/sing-box", "bin/hysteria", "mieru-instance-run")]
-        if not (self.state / "vless-sudoku/state.json").is_file():
-            paths.append(self.lib / "bin/xray")
+        paths += [self.lib / "bin/xray", self.lib / "xray-assets", self.state / "vless-sudoku/state.json",
+                  self.config / "vless-sudoku/config.json"]
         system = Path(os.environ.get("NOBRAND_SYSTEM_ROOT", "/"))
         paths.append(Path(os.environ.get("NOBRAND_LEGACY_MIERU_STATE_DIR", str(system / "var/lib/mita-oneclick"))))
         for folder, patterns in ((system / "etc/systemd/system", ("nobrand-mieru*.service", "nobrand-mieru*.timer",
                                   "nobrand-snell*.service", "nobrand-tuic*.service", "nobrand-vless-reality*.service",
-                                  "nobrand-hysteria2.service")),
+                                  "nobrand-hysteria2.service", "nobrand-vless-sudoku.service")),
                                  (system / "etc/init.d", ("nobrand-mieru*", "nobrand-snell*", "nobrand-tuic*",
-                                                      "nobrand-vless-reality*", "nobrand-hysteria2"))):
+                                                      "nobrand-vless-reality*", "nobrand-hysteria2", "nobrand-vless-sudoku"))):
             for pattern in patterns:
                 paths.extend(folder.glob(pattern))
         if any(path.exists() or path.is_symlink() for path in paths):
@@ -863,7 +1095,7 @@ class Runtime:
         result = set()
         for node in desired["nodes"]:
             protocol, doc = node["protocol"], node["document"]
-            transport = doc["settings"]["transport"] if protocol == "mieru" else "tcp" if protocol in ("snell", "vless-reality") else "udp"
+            transport = doc["settings"]["transport"] if protocol == "mieru" else "tcp" if protocol in ("snell", "vless-reality", "vless-sudoku") else "udp"
             result.add(transport.upper() + "|" + str(doc["listener"]["port"]))
         return result
 
@@ -907,6 +1139,12 @@ class Runtime:
         metadata = load(generation / "artifact.json")
         release = RELEASE if metadata["version"] == RELEASE["version"] else RELEASE.get("rollback_releases", {}).get(metadata["version"])
         require(release and release.get("version") == metadata["version"], "BINARY_IDENTITY", "generation release is not an approved rollback pin")
+        require(metadata.get("architecture") in release["assets"], "BINARY_IDENTITY", "unapproved generation architecture")
+        graph = load(generation / "desired.json")
+        require(graph.get("splicore_version") == metadata["version"], "BINARY_IDENTITY", "generation state and binary versions differ")
+        if metadata["version"] != RELEASE["version"]:
+            require(all(sudoku_encryption(node) == "none" for node in graph["nodes"] if node["protocol"] == "vless-sudoku"),
+                    "STATE_VERSION_UNSUPPORTED", "encrypted VLESS state cannot run on the pre-encryption rollback release")
         digest = sha(generation / "splicore")
         require(metadata["binary_sha256"] == digest,
                 "BINARY_IDENTITY", "installed binary or version changed")
@@ -951,9 +1189,12 @@ class Runtime:
             require(current, "ROLLBACK", "no installed generation to roll back")
             require(old, "ROLLBACK", "no previous known-good Splicore generation")
             service = Service(self.adapter, current, self.fixture)
+            registry = load(self.state / "state.json")
+            registry["splicore_version"] = load(old / "artifact.json")["version"]
             tx = {"owner": "nobrand-splicore-v1", "adapter": self.adapter, "candidate": current.name,
                   "old": old.name, "active": service.call("active", ok=False),
                   "enabled": service.call("enabled", ok=False),
+                  "previous": current.name, "registry_backup": json.dumps(registry),
                   "unit_backup": self.unit_path().read_text() if self.unit_path().exists() else None}
             self.checkpoint(tx, "ROLLING_BACK")
             self.restore_transaction(tx)
@@ -1026,7 +1267,7 @@ class Runtime:
                 try:
                     with tarfile.open(temporary, "w:gz") as archive:
                         if unified:
-                            text = ("project=NoBrand-OneClick\nversion=" + os.environ.get("SCRIPT_VERSION", "4.0.1")
+                            text = ("project=NoBrand-OneClick\nversion=" + os.environ.get("SCRIPT_VERSION", "4.1.0")
                                     + "\nschema_version=3\nownership=nobrand-v3\ncontents=state,config\n")
                             info = tarfile.TarInfo("manifest.txt")
                             info.size, info.mode = len(text.encode()), 0o600
@@ -1086,7 +1327,7 @@ class Runtime:
                 "private_key_file": str(target / "private.key"), "ca_certificate": (target / "ca.pem").read_text()}
 
     def certificate_provenance(self, name, tls):
-        """Pre-marker rc.4 material needs an exact native canonical reference."""
+        """Pre-marker native material needs an exact native canonical reference."""
         if not self.generations.is_dir():
             return None
         for generation in self.generations.iterdir():
@@ -1098,7 +1339,8 @@ class Runtime:
                 continue
             graph, artifact_metadata = (load(p) for p in paths)
             if (graph.get("owner") != "nobrand-splicore-v1" or graph.get("architecture") != "splicore-native"
-                    or graph.get("config_schema") != 1 or artifact_metadata.get("version") != RELEASE["version"]):
+                    or graph.get("config_schema") != 1 or artifact_metadata.get("version") not in
+                    {RELEASE["version"], *RELEASE.get("rollback_releases", {})}):
                 continue
             for node in graph.get("nodes", []):
                 protocol, label = node.get("protocol"), node.get("client", {}).get("name")
@@ -1212,12 +1454,19 @@ class Runtime:
                     and (not selector or node["id"] == selector or node.get("client", {}).get("name") == selector
                          or node.get("client", {}).get("pair") == selector
                          or (protocol == "mieru" and node["document"].get("users", [{}])[0].get("username") == selector))]
+        if protocol == "vless-sudoku" and operation == "install" and matching:
+            operation = "reconfigure"
         if operation in ("show", "export", "user-show", "user-list"):
             require(matching, "CONFIG_INVALID", "node not found")
             if operation == "user-list":
                 return {"nodes": [{"id": n["id"], "enabled": n.get("enabled", True),
                                    "users": n.get("client", {}).get("user_names") or [u.get("username", "") for u in n["document"].get("users", [])]} for n in matching]}
+            if protocol == "vless-sudoku" and operation == "export":
+                return sudoku_export(matching)
             return {"client_profiles": [client_profiles(n) for n in matching]}
+        if protocol == "vless-sudoku" and operation == "subscription":
+            require(matching, "CONFIG_INVALID", "node not found")
+            return sudoku_export(matching)
         if operation in ("upgrade", "upgrade-runtime"):
             return redacted_plan(desired) if preview else self.deploy(desired, artifacts, proxy)
         if operation == "install":
@@ -1255,7 +1504,7 @@ class Runtime:
                                    "low_entropy": env.get("LOW_ENTROPY_MODE", "LOW_ENTROPY_MODE_OFF"),
                                    "quota_mb": int(env.get("USER_QUOTA_MB") or 0), "expire_at": env.get("USER_EXPIRE", ""),
                                    "bandwidth_mbps": int(env.get("USER_BANDWIDTH_MBPS") or 0)}
-                require(env.get("USER_PACKAGE", "") in ("", "unlimited", "custom"), "CAPABILITY_UNSUPPORTED", "quota packages are unsupported by rc.4")
+                require(env.get("USER_PACKAGE", "") in ("", "unlimited", "custom"), "CAPABILITY_UNSUPPORTED", "quota packages are unsupported by v0.5.0")
                 node["client"].update({"handshake_mode": handshake(env.get("HANDSHAKE_MODE", "HANDSHAKE_NO_WAIT")),
                                          "transport": env.get("PROTOCOL", "TCP").upper(), "pair": name})
                 if env.get("PROTOCOL", "TCP").upper() == "BOTH":
@@ -1265,6 +1514,10 @@ class Runtime:
                     pair["document"]["listener"]["port"] += 1
                     pair["document"]["display_endpoint"]["port"] += 1
                     desired["nodes"].append(pair)
+            elif protocol == "vless-sudoku":
+                document.update(settings={"security": "none", "flow": "none", "transport": "tcp", "packet_encoding": "xudp",
+                                "stream_transport": {"kind": "tcp", "final_mask": sudoku_mask(env.get("PASSWORD") or secrets.token_urlsafe(24))}},
+                                users=[{"uuid": str(uuid.uuid4())}])
             elif protocol == "vless-reality":
                 cover = env.get("VLESS_REALITY_TARGET") or "www.microsoft.com"
                 cover_port = int(env.get("VLESS_REALITY_TARGET_PORT") or 443)
@@ -1300,6 +1553,17 @@ class Runtime:
             elif operation in ("start", "stop", "restart", "user-enable", "user-disable"):
                 for member in matching:
                     member["enabled"] = operation not in ("stop", "user-disable")
+            elif protocol == "vless-sudoku" and operation == "reconfigure":
+                require(len(matching) == 1, "CONFIG_INVALID", "select one Sudoku node")
+                document, env = node["document"], os.environ
+                if env.get("PORT_CLI") == "1":
+                    document["listener"]["port"] = int(env.get("PORT") or 0)
+                if env.get("PASSWORD_CLI") == "1":
+                    document["settings"]["stream_transport"]["final_mask"]["tcp"][0]["settings"]["password"] = env.get("PASSWORD", "")
+                if env.get("ADVERTISE_CLI") == "1":
+                    endpoint = document["display_endpoint"]
+                    endpoint.update(host=env.get("ADVERTISE_HOST") or endpoint["host"],
+                                    port=int(env.get("ADVERTISE_PORT") or endpoint["port"]))
             elif protocol == "tuic" and operation in ("user-add", "user-delete", "user-rotate"):
                 client = node.setdefault("client", {})
                 original_names = [u["name"] for u in client.get("users", [])]
@@ -1351,16 +1615,20 @@ class Runtime:
                     if profile or env.get("LOW_ENTROPY_CLI") == "1":
                         options["low_entropy"] = env.get("LOW_ENTROPY_MODE", "LOW_ENTROPY_MODE_OFF")
             elif protocol == "snell" and operation == "set-quic":
-                require(os.environ.get("SNELL_QUIC_PROXY", "off") == "off", "CAPABILITY_UNSUPPORTED", "Snell QUIC is not exposed by rc.4")
+                require(os.environ.get("SNELL_QUIC_PROXY", "off") == "off", "CAPABILITY_UNSUPPORTED", "Snell QUIC is not exposed by v0.5.0")
                 for member in matching:
                     member.setdefault("options", {})["quic_proxy_enabled"] = False
             else:
                 raise Failure("CAPABILITY_UNSUPPORTED", "operation needs an explicit supported desired-state change; no legacy fallback")
         if preview:
-            return redacted_plan(desired)
+            plan = redacted_plan(desired)
+            if protocol == "vless-sudoku" and operation == "install":
+                plan["vless_encryption"] = "mlkem768 + random + 1rtt; generated by the pinned Splicore during installation"
+            return plan
         try:
             outcome = self.deploy(desired, artifacts, proxy, force=operation == "restart",
-                                  expected_generation=installed.name if installed else "")
+                                  expected_generation=installed.name if installed else "",
+                                  new_encryption_nodes=[name] if protocol == "vless-sudoku" and operation == "install" else ())
         except BaseException:
             # Only remove material minted by this request after a completed
             # rollback. Unfinished recovery may still need the candidate TLS.
@@ -1371,7 +1639,9 @@ class Runtime:
                 shutil.rmtree(created_tls)
             raise
         if operation == "install":
-            outcome["client_profiles"] = [client_profiles(n) for n in desired["nodes"] if n["id"] in (name, name + "-udp")]
+            outcome["client_profiles"] = [client_profiles(n) for n in self.desired()["nodes"] if n["id"] in (name, name + "-udp")]
+        elif protocol == "vless-sudoku" and operation == "reconfigure":
+            outcome["client_profiles"] = [client_profiles(node)]
         return outcome
 
     def uninstall(self, purge=False):
@@ -1512,7 +1782,7 @@ class Runtime:
                     continue
                 protocol, doc = node["protocol"], node["document"]
                 transport = doc["settings"]["transport"] if protocol == "mieru" else (
-                    "tcp" if protocol in ("snell", "vless-reality") else "udp")
+                    "tcp" if protocol in ("snell", "vless-reality", "vless-sudoku") else "udp")
                 result.add((transport, doc["listener"]["host"], doc["listener"]["port"]))
                 if node.get("guard"):
                     result.add(("tcp", node["guard"]["listen"]["host"], node["guard"]["listen"]["port"]))
@@ -1548,6 +1818,11 @@ class Runtime:
             finally:
                 remove_file(plan)
         self.health(generation, documents, record=True)
+        exports = {node["id"]: {"status": "adapter", "format": "xray-json", "client_version": "26.10.21",
+                               "client_projection": "NoBrand adapter preserves VLESS Encryption and FinalMask Sudoku"}
+                   for node in desired["nodes"] if node["protocol"] == "vless-sudoku" and node.get("enabled", True)}
+        if exports:
+            save(generation / "export-status.json", exports)
 
     def health(self, generation, documents=None, record=False):
         documents = documents if documents is not None else render(load(generation / "desired.json"))
@@ -1584,11 +1859,34 @@ class Runtime:
         tx["phase"] = phase
         save(self.transaction, tx)
 
+    def validate_transaction(self, tx):
+        require(isinstance(tx, dict) and tx.get("owner") == "nobrand-splicore-v1"
+                and tx.get("adapter") in ("systemd", "openrc", "fixture", "process")
+                and tx.get("phase") in ("PREPARING", "VALIDATED", "STOPPING", "STOPPED", "STARTING",
+                                        "VERIFIED", "ROLLING_BACK", "COMMITTED", "ROLLED_BACK"),
+                "TRANSACTION_INVALID", "transaction owner, phase or init invalid")
+        require(tx.get("candidate"), "TRANSACTION_INVALID", "candidate missing")
+        for field in ("candidate", "old", "previous"):
+            if tx.get(field):
+                require(re.fullmatch(r"g[0-9a-f]{32}", tx[field]), "TRANSACTION_INVALID", "invalid generation reference")
+                path = self.generations / tx[field]
+                require(not path.is_symlink() and within(path, self.generations),
+                        "TRANSACTION_INVALID", "unsafe generation reference")
+        require(tx.get("old") != tx["candidate"] and type(tx.get("active")) is bool
+                and type(tx.get("enabled")) is bool and "unit_backup" in tx,
+                "TRANSACTION_INVALID", "recovery snapshot incomplete")
+
     def restore_transaction(self, tx):
+        self.validate_transaction(tx)
+        if tx["phase"] == "PREPARING":
+            # No service, pointer, registry or firewall mutation can precede VALIDATED.
+            self.checkpoint(tx, "ROLLED_BACK")
+            return
         candidate = self.generations / tx["candidate"]
         old = self.generations / tx["old"] if tx.get("old") else None
         if old:
             self.verify_installed_binary(old)
+        self.checkpoint(tx, "ROLLING_BACK")
         service = Service(tx["adapter"], candidate, self.fixture)
         require(service.call("stop", ok=False), "ROLLBACK", "candidate stop failed; recovery record retained")
         if old:
@@ -1636,19 +1934,21 @@ class Runtime:
         if not self.transaction.exists():
             return {"recovery": "not-needed"}
         tx = load(self.transaction)
-        require(tx.get("owner") == "nobrand-splicore-v1" and tx.get("adapter") == self.adapter,
+        self.validate_transaction(tx)
+        require(tx.get("adapter") == self.adapter,
                 "ROLLBACK", "transaction owner/init mismatch")
-        for field in ("candidate", "old"):
-            if tx.get(field):
-                identifier(tx[field])
         if tx["phase"] not in ("COMMITTED", "ROLLED_BACK"):
             self.restore_transaction(tx)
         return {"recovery": load(self.transaction)["phase"]}
 
-    def deploy(self, desired, artifacts=None, proxy="", force=False, probe=False, key_material=None, expected_generation=None):
+    def deploy(self, desired, artifacts=None, proxy="", force=False, probe=False, key_material=None, expected_generation=None,
+               new_encryption_nodes=()):
         self.refuse_legacy()
         self.safe()
         desired = copy.deepcopy(desired)
+        require(desired.get("splicore_version") == RELEASE["version"]
+                or desired.get("splicore_version") in RELEASE.get("rollback_releases", {}),
+                "STATE_VERSION_UNSUPPORTED", "canonical state version has no reviewed migration contract")
         desired["splicore_version"] = RELEASE["version"]
         documents = render(desired)
         self.check_external_ports(desired)
@@ -1662,6 +1962,11 @@ class Runtime:
             old = self.target(self.current)
             require(expected_generation is None or expected_generation == (old.name if old else ""),
                     "STATE_CHANGED", "runtime changed since request was collected; retry with current state")
+            old_ids = {node["id"] for node in load(old / "desired.json")["nodes"]} if old else set()
+            encrypt_ids = set(new_encryption_nodes)
+            require(not encrypt_ids.intersection(old_ids)
+                    and encrypt_ids <= {node["id"] for node in desired["nodes"] if node["protocol"] == "vless-sudoku"},
+                    "CONFIG_INVALID", "default encryption generation is only allowed for new Sudoku nodes")
             require(not probe or old is None, "CONFIG_INVALID", "probe requires an empty private runtime root")
             if old and load(old / "artifact.json")["version"] == RELEASE["version"] and desired == load(old / "desired.json") and not force and key_material is None:
                 self.verify_installed_binary(old)
@@ -1676,6 +1981,20 @@ class Runtime:
             candidate_service = Service(self.adapter, generation, self.fixture)
             tx = None
             try:
+                unit = self.unit_path()
+                require(self.adapter == "process" or not unit.exists() or (
+                    not unit.is_symlink() and "# NoBrand-owned Splicore v1" in unit.read_text()),
+                    "CONFIG_INVALID", "refuse foreign service unit before preparation")
+                tx = {"owner": "nobrand-splicore-v1", "adapter": self.adapter,
+                      "candidate": generation.name, "old": old.name if old else None,
+                      "previous": self.target(self.previous).name if self.target(self.previous) else None,
+                      "active": candidate_service.call("active", ok=False),
+                      "enabled": candidate_service.call("enabled", ok=False),
+                      "unit_backup": unit.read_text() if self.adapter != "process" and unit.exists() else None,
+                      "registry_backup": (self.state / "state.json").read_text() if (self.state / "state.json").exists() else None,
+                      "registry_created": not (self.state / "state.json").exists(), "opened_ports": []}
+                self.checkpoint(tx, "PREPARING")
+                save(generation / "desired.json", desired)
                 if old and not artifacts and load(old / "artifact.json")["version"] == RELEASE["version"]:
                     metadata = self.verify_installed_binary(old)
                     atomic(generation / "splicore", (old / "splicore").read_bytes(), 0o700)
@@ -1683,6 +2002,14 @@ class Runtime:
                 else:
                     metadata = artifact(generation / "splicore", artifacts, proxy)
                 save(generation / "artifact.json", metadata)
+                for node in desired["nodes"]:
+                    if node["id"] in encrypt_ids:
+                        require(sudoku_encryption(node) == "none", "CONFIG_INVALID", "refuse to overwrite existing VLESS encryption")
+                        pair = generate_vless_encryption(generation / "splicore")
+                        node["document"]["server_secret"] = {"decryption": pair["decryption"]}
+                        node["document"]["settings"]["encryption"] = server_encryption(pair["encryption"])
+                        node.setdefault("client", {})["encryption"] = pair["encryption"]
+                documents = render(desired)
                 save(generation / "desired.json", desired)
                 (generation / "runtime").mkdir(mode=0o700)
                 atomic(generation / "bootstrap.yaml", self.bootstrap_text(generation))
@@ -1704,15 +2031,7 @@ class Runtime:
                     "CONFIG_INVALID", "refuse foreign service unit before cutover")
                 prior_ports = self.port_pairs(load(old / "desired.json")) if old else set()
                 added_ports = self.port_pairs(desired) - prior_ports
-                tx = {"owner": "nobrand-splicore-v1", "adapter": self.adapter,
-                      "candidate": generation.name, "old": old.name if old else None,
-                      "previous": self.target(self.previous).name if self.target(self.previous) else None,
-                      "active": candidate_service.call("active", ok=False),
-                      "enabled": candidate_service.call("enabled", ok=False),
-                      "unit_backup": unit.read_text() if self.adapter != "process" and unit.exists() else None,
-                      "registry_backup": (self.state / "state.json").read_text() if (self.state / "state.json").exists() else None,
-                      "registry_created": not (self.state / "state.json").exists(),
-                      "opened_ports": sorted(added_ports - self.owned_firewall_pairs())}
+                tx["opened_ports"] = sorted(added_ports - self.owned_firewall_pairs())
                 self.checkpoint(tx, "VALIDATED")
                 self.checkpoint(tx, "STOPPING")
                 if tx["active"]:
@@ -1762,8 +2081,11 @@ class Runtime:
                 except (Failure, OSError):
                     cleanup_debt.append("old generations")
                 return {"result": "committed", "inbounds": len(documents), "traffic_qualification": "PENDING", "cleanup_debt": cleanup_debt}
-            except BaseException:
+            except BaseException as error:
                 if tx and tx.get("phase") != "COMMITTED":
+                    tx["failed_phase"] = tx["phase"]
+                    tx["error_code"] = "NB-GEN-" + tx["phase"] + "-" + (error.category if isinstance(error, Failure) else "INTERRUPTED")
+                    save(self.transaction, tx)
                     try:
                         self.restore_transaction(tx)
                     except (Failure, OSError) as exc:
@@ -1777,8 +2099,8 @@ class Runtime:
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="NoBrand Splicore runtime manager (pinned RC)")
-    parser.add_argument("action", choices=["inspect-backup", "capabilities", "status", "doctor", "render", "apply", "probe", "recover", "unit", "plan",
+    parser = argparse.ArgumentParser(description="NoBrand Splicore runtime manager (pinned official release)")
+    parser.add_argument("action", choices=["transactions", "inspect-backup", "capabilities", "status", "doctor", "render", "apply", "probe", "recover", "unit", "plan",
                                            "rollback", "backup", "restore", "adopt-snapshot", "stop", "start", "restart", "uninstall", "purge", "protocol"])
     parser.add_argument("--file", type=Path)
     parser.add_argument("--artifacts", type=Path)
@@ -1795,6 +2117,9 @@ def main(argv=None):
     args = parser.parse_args(argv)
     require(args.version == RELEASE["version"], "BINARY_IDENTITY", "version change requires a reviewed release manifest; no implicit downgrade/latest")
     runtime = Runtime(adapter=args.adapter, fixture=args.fixture_driver)
+    if args.action == "transactions":
+        print(json.dumps(runtime.transactions(), indent=2))
+        return 0
     runtime.refuse_legacy()
     runtime.safe()
     if args.action == "inspect-backup":
@@ -1807,8 +2132,11 @@ def main(argv=None):
         require(args.file or args.action == "plan", "CONFIG_INVALID", "--file canonical desired state is required")
         desired = load(args.file) if args.file else runtime.desired()
         if args.action in ("render", "plan"):
-            # Render writes only to stdout by explicit operator request. Plan is redacted.
-            result = {"documents": [{"id": name, "protocol": protocol, "document": doc} for name, protocol, doc in render(desired)]} if args.action == "render" else redacted_plan(desired)
+            # Private creation documents remain 0600 on disk; display only the
+            # public projection even when explicitly rendering configuration.
+            result = {"documents": [{"id": name, "protocol": protocol,
+                                      "document": {k: v for k, v in doc.items() if k != "server_secret"}}
+                                     for name, protocol, doc in render(desired)]} if args.action == "render" else redacted_plan(desired)
             if args.action == "plan" and result["blockers"]:
                 print(json.dumps(result, indent=2))
                 return 1
@@ -1839,8 +2167,9 @@ def main(argv=None):
             service.call("start")
             result = runtime.wait_health(current)
     elif args.action == "recover":
-        with runtime.locked():
+        with runtime.locked(recovery=True):
             result = runtime.recover()
+            result.update(runtime.recover_lifecycle())
     elif args.action == "unit":
         require(runtime.adapter in ("systemd", "openrc"), "SERVICE_START", "specify supported init system")
         print(runtime.service_text(), end="")

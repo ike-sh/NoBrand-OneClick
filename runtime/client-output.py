@@ -31,7 +31,7 @@ def host_port(host, port):
 
 def client_only(value):
     """Fail closed if server private material enters a native client document."""
-    forbidden = {"privatekey", "serversecret", "signingkey", "masterkey", "keyfile"}
+    forbidden = {"privatekey", "serversecret", "decryption", "signingkey", "masterkey", "keyfile"}
     if isinstance(value, dict):
         for key, child in value.items():
             normalized = key.replace("_", "").replace("-", "").lower()
@@ -51,7 +51,7 @@ def render_client_profiles(result, listeners=None, chinese=True):
         raise ProfileError("client_profiles")
     lines = []
     titles = {"mieru": "Mieru", "snell": "Snell", "hysteria2": "Hysteria2",
-              "tuic": "TUIC v5", "vless-reality": "VLESS REALITY"}
+              "tuic": "TUIC v5", "vless-reality": "VLESS REALITY", "vless-sudoku": "VLESS FinalMask Sudoku"}
     def label(zh, en):
         return zh if chinese else en
     def field(zh, en, value, required=False):
@@ -70,6 +70,7 @@ def render_client_profiles(result, listeners=None, chinese=True):
     def connection(host, port):
         field("客户端入口", "Client endpoint", endpoint(host, port))
     for index, profile in enumerate(profiles, 1):
+        client_only(profile)
         protocol = profile.get("protocol")
         if protocol not in titles:
             raise ProfileError("unsupported protocol")
@@ -98,6 +99,19 @@ def render_client_profiles(result, listeners=None, chinese=True):
                             field("传输协议", "Transport", binding.get("protocol"), True)
                             connection(host, binding.get("port"))
                 native_label = ("Mieru 原生客户端配置", "Mieru native client configuration")
+            elif protocol == "vless-sudoku":
+                native = needed(profile.get("xray"), "xray")
+                target = native["settings"]["vnext"][0]
+                connection(target.get("address"), target.get("port"))
+                field("UUID", "UUID", target["users"][0].get("id"), True)
+                field("FinalMask", "FinalMask", native["streamSettings"]["finalmask"], True)
+                encryption = needed(target["users"][0].get("encryption"), "VLESS Encryption")
+                field("VLESS Encryption", "VLESS Encryption", encryption if encryption != "none"
+                      else label("none（保留旧节点模式）", "none (preserved legacy mode)"))
+                field("客户端格式", "Client format", "Xray " + profile.get("client_version", "26.10.21") + " JSON")
+                field("分享方式", "Sharing", profile.get("share_notice"))
+                native = needed(profile.get("xray_config"), "complete Xray JSON")
+                native_label = ("Xray 完整客户端 JSON", "Complete Xray client JSON")
             elif protocol == "vless-reality":
                 native = needed(profile.get("xray"), "xray")
                 target = native["settings"]["vnext"][0]

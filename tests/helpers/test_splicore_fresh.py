@@ -114,6 +114,18 @@ class FreshTests(base.RuntimeTests):
         with self.assertRaises(sc.Failure) as caught: sc.inspect_backup_archive(archive)
         self.assertEqual(caught.exception.category, 'UNSUPPORTED_LEGACY_INSTALLATION')
         self.assertEqual(self.snapshot(), before)
+        # A v4 native registry used to coexist with the retired Xray exception.
+        # Reject it before extraction or any backup-restore transaction effects.
+        for retired in ('state/vless-sudoku/state.json', 'config/vless-sudoku/config.json'):
+            with tarfile.open(archive, 'w:gz') as stream:
+                for directory in ('state', 'config'):
+                    item=tarfile.TarInfo(directory);item.type=tarfile.DIRTYPE;stream.addfile(item)
+                for name,body in [('manifest.txt',b'synthetic'),('state/state.json',b'{"architecture":"splicore-native","schema_version":3}'),(retired,b'{"synthetic":"preserve"}')]:
+                    item=tarfile.TarInfo(name);item.size=len(body);stream.addfile(item,io.BytesIO(body))
+            before=self.snapshot()
+            with self.assertRaises(sc.Failure) as caught:sc.inspect_backup_archive(archive)
+            self.assertEqual(caught.exception.category,'UNSUPPORTED_LEGACY_INSTALLATION')
+            self.assertEqual(self.snapshot(),before)
 
     def test_native_ingress_change_keeps_credentials_and_transport(self):
         with patch.dict(os.environ, {'PORT': '31232', 'ADVERTISE_HOST': 'entry.example',

@@ -13,12 +13,12 @@
 
 | Module | Current responsibility |
 |---|---|
-| `00` / `05` / `10` | 启动、常量、统一 parser；固定 rc.4 协议入口 |
+| `00` / `05` / `10` | 启动、常量、统一 parser；固定 v0.5.0 协议入口 |
 | `15`–`18` | schema-v3 registry、端口、Ingress、Endpoint、通用 lifecycle 和 native backup/restore |
 | `19-splicore` + `runtime/` | 只读 legacy 拒绝、统一 artifact、原生 desired、单 daemon、generation 事务、客户端投影 |
-| `20`–`25` | 公共依赖/平台工具；Xray 下载只供既有 FinalMask/Sudoku 例外 |
+| `20`–`25` | 公共依赖/平台工具；无 Xray 服务端下载；旧路径仅作只读识别 |
 | `30`–`55` | 普通协议适配、通用诊断、参数选择；旧实例/配额实现已移除 |
-| `56`–`59` | 普通协议薄入口和既有 FinalMask/Sudoku 实现 |
+| `56`–`59` | 原生协议薄入口，包含共享 Splicore 的 FinalMask/Sudoku |
 | `60` / `61` / `62` | 公共 firewall、系统 OpenSSH 账号策略、nftables/Realm Forward |
 | `65`–`99` | BBR、管理器安装、lifecycle、状态、UI、main |
 
@@ -27,7 +27,7 @@
 ## State boundary
 
 产品 registry `state.json` 使用 `schema_version=3`，并明确标记
-`architecture=splicore-native`、`splicore_version=v0.3.0-rc.4`、`config_schema=1`。
+`architecture=splicore-native`、`splicore_version=v0.5.0`、`config_schema=1`。
 原生协议 authority 是 `splicore/current/desired.json`；`current` 指向已验证 generation。
 每个 generation 使用独立 DB、私有控制 socket/key，普通协议共用一个活动 daemon。
 
@@ -39,7 +39,7 @@ Ingress Profile authority 在 `ingress.json`。原生节点持有 Profile ID；s
 loopback 端口，Display Host 不决定 listener，也不创建 policy routing。
 
 SSH Tunnel 保留系统 sshd 的账号/策略层和管理员确认流程。Forward 保留独立 ownership
-的 nftables/Realm 资源。FinalMask/Sudoku 保留其固定 Xray 例外；这些资源不属于普通协议
+的 nftables/Realm 资源。FinalMask/Sudoku 也由共享 Splicore 托管；SSH/Forward 等独立组件不属于代理协议
 下载路径。
 
 ## Backup, upgrade and rollback
@@ -51,5 +51,4 @@ SSH Tunnel 保留系统 sshd 的账号/策略层和管理员确认流程。Forwa
 未来 Splicore 升级仍使用 exact artifact、预验证、原子 generation 发布和 binary/config
 rollback。同版本执行 verify/no-op。当前 manifest 不承诺尚未公开版本的兼容性。
 
-当前产品合同见 [README](../README.md)、[rc.4 contract](SPLICORE-RC4-CONTRACT.md)
-和 [安装/升级说明](SPLICORE-MIGRATION.md)。
+当前产品合同见 [README](../README.md) 和 [安装/升级说明](SPLICORE-MIGRATION.md)。

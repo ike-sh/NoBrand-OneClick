@@ -150,7 +150,11 @@ class PresentationTests(unittest.TestCase):
         self.assertNotIn('TLS_PRIVATE_KEY_SHOULD_NEVER_RENDER', text)
         profile = mieru()
         profile['server_secret'] = {'private_key': 'REALITY_PRIVATE_KEY_SHOULD_NEVER_RENDER'}
-        self.assertNotIn('REALITY_PRIVATE_KEY_SHOULD_NEVER_RENDER', render(profile))
+        with self.assertRaises(ui.ProfileError): render(profile)
+        del profile['server_secret']
+        profile['decryption'] = 'VLESS_SERVER_SECRET_SHOULD_NEVER_RENDER'
+        with self.assertRaises(ui.ProfileError): render(profile)
+        del profile['decryption']
         profile['mieru']['server_secret'] = {'private_key': 'REALITY_PRIVATE_KEY_SHOULD_NEVER_RENDER'}
         with self.assertRaises(ui.ProfileError): render(profile)
 
@@ -234,6 +238,9 @@ source "$INSTALLER" "$@"
 trap - ERR
 PORT=10201
 YES=1
+ADVERTISE_HOST=fixture-install.invalid
+ADVERTISE_PORT=10201
+ADVERTISE_CLI=1
 require_root() { :; }
 nb_prepare_ingress_request() { INGRESS_PROFILE_ID=synthetic; }
 nb_prepare_ingress_deployment() { INGRESS_LISTEN_HOST=0.0.0.0; }

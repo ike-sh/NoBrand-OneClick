@@ -27,7 +27,7 @@ trap on_error ERR
 
 usage() {
   cat <<EOF
-NoBrand-OneClick ${SCRIPT_VERSION} / Splicore v0.3.0-rc.4
+NoBrand-OneClick ${SCRIPT_VERSION} / Splicore v0.5.0
 用法 / Usage: nobrand <protocol> <action> [options]
 协议 / Protocols: mieru, snell, hy2, tuic, vless-reality, vless-sudoku, ssh, forward
 Actions: install, show, status, doctor, start, stop, restart, uninstall
@@ -43,7 +43,6 @@ EOF
 }
 
 msg() { printf '%s\n' "$*"; }
-info() { msg "==> $*"; }
 warn() { msg "[警告] $*"; }
 die() {
   msg "[错误] $*" >&2
@@ -302,18 +301,29 @@ parse_nobrand_hy2_args() {
 
 parse_nobrand_vless_sudoku_args() {
   VLESS_SUDOKU_ACTION="${1:-menu}"
+  NOBRAND_SPLICORE_EXPORT_FORMAT=""
+  NOBRAND_SPLICORE_CLIENT_VERSION=""
   [ "$#" -eq 0 ] || shift
   case "$VLESS_SUDOKU_ACTION" in
     add|create|reconfigure) VLESS_SUDOKU_ACTION=install ;;
     nodes) VLESS_SUDOKU_ACTION=show ;;
     delete|uninstall) VLESS_SUDOKU_ACTION=remove ;;
     endpoint) VLESS_SUDOKU_ACTION="set-endpoint" ;;
-    menu|install|show|set-endpoint|remove|start|stop|restart|status|doctor|smoke|upgrade) ;;
+    menu|install|show|export|client-config|subscription|set-endpoint|remove|start|stop|restart|status|doctor|smoke|upgrade) ;;
     help|-h|--help) VLESS_SUDOKU_ACTION=help ;;
     *) die "未知 VLESS Sudoku 操作: $VLESS_SUDOKU_ACTION" ;;
   esac
   while [ "$#" -gt 0 ]; do
     local consumed=0 rc=0
+    case "$1" in
+      --format|--client-version)
+        case "$VLESS_SUDOKU_ACTION" in export|subscription) ;; *) die "$1 仅用于 export / subscription" ;; esac
+        [ -n "${2:-}" ] || die "$1 缺少参数"
+        if [ "$1" = --format ]; then NOBRAND_SPLICORE_EXPORT_FORMAT="$2"; else NOBRAND_SPLICORE_CLIENT_VERSION="$2"; fi
+        shift 2
+        continue
+        ;;
+    esac
     parse_nobrand_common_option "$1" "${2:-}" || rc=$?
     case "$rc" in
       0) consumed=1 ;;

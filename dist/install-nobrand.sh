@@ -10,11 +10,29 @@ import json
 RELEASE = json.loads(r'''
 {
   "repository": "ike-sh/Splicore",
-  "version": "v0.3.0-rc.4",
-  "commit": "2634ea50d19623591c5db63329a288862726db74",
+  "version": "v0.5.0",
+  "commit": "70b09da7d2758e19ba03df9ff9b9e541a669fa29",
   "checksum_asset": "SHA256SUMS",
-  "qualification": "Release Candidate / Experimental",
-  "rollback_releases": {},
+  "qualification": "Official Splicore v0.5.0",
+  "rollback_releases": {
+    "v0.4.0": {
+      "version": "v0.4.0",
+      "commit": "cbac3fd1fcfdc76166513cdaa2d4f113497682cb",
+      "assets": {
+        "amd64": {
+          "name": "splicore-v0.4.0-linux-amd64.tar.gz",
+          "sha256": "71f7067d478de7ef85b9b34d49eae90c5b20c419a7503afcfdce9c3d144de8eb",
+          "binary_sha256": "fd37493b7565c88fa6ec8291ea02300e3b7c246dcd07af02f856127ff75f766e"
+        },
+        "arm64": {
+          "name": "splicore-v0.4.0-linux-arm64.tar.gz",
+          "sha256": "efd8a38eb8a874f85c9851e560e9a4327346ef55df22885354ad9e52ebb261df",
+          "binary_sha256": "dad5eaa6e6917e7aa58eadcb00407dffbb6397dab74fa491a6e5e99bf2a82f4a"
+        }
+      },
+      "purpose": "Verify existing pre-upgrade snapshots only; never used for new downloads"
+    }
+  },
   "capabilities": {
     "snell": {
       "managed": true,
@@ -54,25 +72,29 @@ RELEASE = json.loads(r'''
       "fresh_install": "raw TCP + Vision + native protected destination"
     },
     "vless-sudoku": {
-      "managed": false,
-      "requires_external_xray": true,
-      "scope": "existing specialized pinned Xray exception"
+      "managed": true,
+      "requires_external_xray": false,
+      "fresh_install": "Native VLESS Encryption (mlkem768 + random + 1rtt) over TCP with FinalMask Sudoku",
+      "client_export": "Xray 26.10.21 JSON; NoBrand adapter preserves Encryption and FinalMask Sudoku",
+      "vless_encryption": true
     }
   },
   "assets": {
     "amd64": {
-      "name": "splicore-v0.3.0-rc.4-linux-amd64.tar.gz",
-      "sha256": "9dd1941c817143d18ea1c892a5fc13266c1b209600576946504a9d3c98c62161",
-      "binary_sha256": "0a347f06f0d1a17ef37edd779826ad79739217b65f80bf39dc6077f115ac175f",
-      "qualification": "Experimental; external runtime qualification pending"
+      "name": "splicore-v0.5.0-linux-amd64.tar.gz",
+      "sha256": "a99a419a4fe6aaaacaee25de6d7886ca5dc6e2cf31f1b67ae57f13f2a5fda5d7",
+      "binary_sha256": "f27b8b9bb0bab32e7323370aa8870c1b8d5a78e95a163fa28cb31dbb60825de3",
+      "qualification": "Official release"
     },
     "arm64": {
-      "name": "splicore-v0.3.0-rc.4-linux-arm64.tar.gz",
-      "sha256": "5b5e39bd8e6ef373ebc00e7e3a8a688ce09d0369dc2c4ecfab06ed535d948b64",
-      "binary_sha256": "85ec863d21707ac309a4c7a64b3b7228eb34bb0405379db6b569d8d550032a4c",
-      "qualification": "BUILD ONLY; runtime qualification pending"
+      "name": "splicore-v0.5.0-linux-arm64.tar.gz",
+      "sha256": "c71c27dfa87c6bb55242b4be955a32fc4a9795c600f7bee73fcba3e43a4082f8",
+      "binary_sha256": "21a38d8cb80270f67f34be32ff07816fcdecd2e4756817e4c98e4f99b8cfcedc",
+      "qualification": "Official release; BUILD ONLY"
     }
-  }
+  },
+  "manifest_asset": "RELEASE_MANIFEST.json",
+  "manifest_sha256": "bb236878409e58779444d584cabeb71c657f5dc2baba62ae49346de29cab7f46"
 }
 ''')
 LAUNCHER = r'''
@@ -271,26 +293,58 @@ def inspect_archive(path, entry, sums):
             "CHECKSUM_MISMATCH", "archive does not match official checksum and immutable pin")
     with tarfile.open(path, "r:gz") as archive:
         members, names, size = archive.getmembers(), set(), 0
+        prefix = entry["name"][:-7] + "/"
+        files = {}
         require(len(members) <= 512, "ARCHIVE_INVALID", "too many archive entries")
         for member in members:
-            name = member.name
+            name = member.name.rstrip("/")
             require(name and not PurePosixPath(name).is_absolute() and "\\" not in name and ":" not in name
                     and all(p not in ("", ".", "..") for p in name.rstrip("/").split("/"))
                     and name not in names and (member.isfile() or member.isdir()),
                     "ARCHIVE_INVALID", "unsafe archive entry")
             names.add(name)
-            root_file = name in {"splicore", "LICENSE", "NOTICE.md", "THIRD_PARTY_NOTICES.md"}
-            require((root_file and member.isfile()) or name.startswith("licenses/third-party/")
-                    or (member.isdir() and name.rstrip("/") in {"licenses", "licenses/third-party"}),
+            require(name == prefix[:-1] and member.isdir() or name.startswith(prefix),
+                    "ARCHIVE_INVALID", "wrong versioned archive root")
+            relative = name[len(prefix):]
+            root_file = relative in {"splicore", "BUILD_INFO.json", "SHA256SUMS", "RUNNING.md",
+                                     "LICENSE", "NOTICE.md", "THIRD_PARTY_NOTICES.md"}
+            require((root_file and member.isfile()) or relative.startswith(("licenses/", "examples/"))
+                    or (member.isdir() and relative in {"", "licenses", "examples"}),
                     "ARCHIVE_INVALID", "unexpected archive entry")
             size += member.size
             require(0 <= member.size and size <= 128 * 1024 * 1024, "ARCHIVE_INVALID", "archive size limit")
-        require("splicore" in names, "ARCHIVE_INVALID", "missing binary")
-        with archive.extractfile("splicore") as src:
+            if member.isfile():
+                files[relative] = member
+        require({"splicore", "BUILD_INFO.json", "SHA256SUMS", "RUNNING.md"} <= files.keys(),
+                "ARCHIVE_INVALID", "incomplete release package")
+        internal = {}
+        for line in archive.extractfile(files["SHA256SUMS"]).read().decode("ascii").splitlines():
+            match = re.fullmatch(r"([0-9a-f]{64})  (.+)", line)
+            require(match and match[2] in files and match[2] not in internal,
+                    "ARCHIVE_INVALID", "invalid internal checksum entry")
+            internal[match[2]] = match[1]
+        require(internal.keys() == files.keys() - {"SHA256SUMS"},
+                "ARCHIVE_INVALID", "internal hashes do not cover the package")
+        for name, digest in internal.items():
+            with archive.extractfile(files[name]) as src:
+                h = hashlib.sha256()
+                for chunk in iter(lambda: src.read(1024 * 1024), b""):
+                    h.update(chunk)
+                require(h.hexdigest() == digest,
+                        "CHECKSUM_MISMATCH", "internal package checksum differs")
+        build = json.load(archive.extractfile(files["BUILD_INFO.json"]))
+        target_arch = "amd64" if "amd64" in entry["name"] else "arm64"
+        require(build.get("version") == RELEASE["version"] and build.get("commit") == RELEASE["commit"]
+                and build.get("target") == "linux-" + target_arch
+                and build.get("binary_sha256") == entry["binary_sha256"]
+                and internal["splicore"] == entry["binary_sha256"],
+                "BINARY_IDENTITY", "build metadata does not match immutable release pin")
+        with archive.extractfile(files["splicore"]) as src:
             header = src.read(20)
         require(len(header) == 20 and header[:6] == b"\x7fELF\x02\x01"
                 and struct.unpack_from("<H", header, 18)[0] == (62 if "amd64" in entry["name"] else 183),
                 "BINARY_IDENTITY", "wrong executable architecture")
+        return prefix + "splicore"
 
 
 def download(url, path, proxy=""):
@@ -330,20 +384,31 @@ def artifact(destination, directory=None, proxy="", target_arch=None):
     with tempfile.TemporaryDirectory(prefix="nb-splicore-download-") as tmp:
         staging = Path(tmp)
         archive, sums = staging / entry["name"], staging / RELEASE["checksum_asset"]
+        manifest = staging / RELEASE["manifest_asset"]
         if directory:
             source = Path(directory)
             require((source / entry["name"]).is_file(), "ASSET_NOT_FOUND", "pinned archive missing")
             require((source / RELEASE["checksum_asset"]).is_file(), "CHECKSUM_MISMATCH", "official SHA256SUMS missing")
             shutil.copyfile(source / entry["name"], archive)
             shutil.copyfile(source / RELEASE["checksum_asset"], sums)
+            require((source / manifest.name).is_file(), "CHECKSUM_MISMATCH", "release manifest missing")
+            shutil.copyfile(source / manifest.name, manifest)
         else:
             base = "https://github.com/" + RELEASE["repository"] + "/releases/download/" + RELEASE["version"] + "/"
             download(base + entry["name"], archive, proxy)
             download(base + RELEASE["checksum_asset"], sums, proxy)
-        inspect_archive(archive, entry, sums.read_text(encoding="ascii"))
+            download(base + manifest.name, manifest, proxy)
+        require(sha(manifest) == RELEASE["manifest_sha256"], "CHECKSUM_MISMATCH", "release manifest differs from pin")
+        published = load(manifest)
+        require(published.get("release", {}).get("version") == RELEASE["version"]
+                and published["release"].get("commit") == RELEASE["commit"],
+                "BINARY_IDENTITY", "release manifest source identity differs")
+        require(published.get("assets", {}).get(entry["name"]) == entry["sha256"],
+                "CHECKSUM_MISMATCH", "release manifest archive digest differs")
+        binary_member = inspect_archive(archive, entry, sums.read_text(encoding="ascii"))
         candidate = staging / "splicore"
         with tarfile.open(archive, "r:gz") as package:
-            with package.extractfile("splicore") as src:
+            with package.extractfile(binary_member) as src:
                 atomic(candidate, src.read(), 0o700)
         require(sha(candidate) == entry["binary_sha256"], "BINARY_IDENTITY", "extracted binary differs from release pin")
         identity = binary_identity(candidate, target_arch)
@@ -382,7 +447,8 @@ def inspect_backup_archive(path):
     require(isinstance(registry, dict) and registry.get("architecture") == "splicore-native",
             "UNSUPPORTED_LEGACY_INSTALLATION", LEGACY_NOTICE)
     require(not any(name.startswith(("state/mieru/", "state/snell/", "state/tuic/", "state/hysteria2/",
-                                    "state/vless-reality/", "config/hysteria2/", "config/vless-reality/")) for name in names),
+                                    "state/vless-reality/", "state/vless-sudoku/", "config/vless-sudoku/",
+                                    "config/hysteria2/", "config/vless-reality/")) for name in names),
             "UNSUPPORTED_LEGACY_INSTALLATION", LEGACY_NOTICE)
 
 
@@ -426,7 +492,7 @@ def tls_check(tls):
         command(["openssl", "verify", "-CAfile", ca, "-purpose", "sslserver", verify_name,
                  tls["server_name"], certificate], "CONFIG_INVALID")
         text = command(["openssl", "x509", "-in", certificate, "-noout", "-text"]).stdout
-        require(b"CA:TRUE" not in text, "CAPABILITY_UNSUPPORTED", "rc.4 requires a non-CA TLS leaf")
+        require(b"CA:TRUE" not in text, "CAPABILITY_UNSUPPORTED", "Splicore requires a non-CA TLS leaf")
         if b"X509v3 Key Usage:" in text:
             require(b"Digital Signature" in text.split(b"X509v3 Key Usage:", 1)[1].splitlines()[1],
                     "CONFIG_INVALID", "TLS leaf KeyUsage must allow digitalSignature")
@@ -436,7 +502,7 @@ def tls_check(tls):
 
 
 def hysteria_obfs(settings):
-    """NoBrand exposes plain/Salamander; other rc.4 capabilities stay explicit."""
+    """NoBrand exposes plain/Salamander; other core capabilities stay explicit."""
     stream = settings.get("stream_transport")
     if stream is None:
         return {"type": "none"}
@@ -449,7 +515,7 @@ def hysteria_obfs(settings):
     obfs = transport.get("obfs", {"type": "none"})
     keys(obfs, {"type", "password"}, "HY2 obfs")
     require(obfs.get("type") in ("none", "salamander"), "CAPABILITY_UNSUPPORTED",
-            "NoBrand exposes none/salamander; rc.4 Gecko is supported experimental but not exposed")
+            "NoBrand exposes none/salamander; core Gecko is supported experimental but not exposed")
     if obfs["type"] == "none":
         require(not obfs.get("password"), "CONFIG_INVALID", "plain HY2 cannot carry an obfs password")
     else:
@@ -525,6 +591,86 @@ def reality_check(node, document):
             "CONFIG_INVALID", "REALITY requires a private server key")
 
 
+def sudoku_mask(password):
+    return {"tcp": [{"type": "sudoku", "settings": {"password": password,
+            "ascii": "prefer_entropy", "paddingMin": 10, "paddingMax": 40}}]}
+
+
+def sudoku_check(settings):
+    keys(settings, {"security", "flow", "transport", "packet_encoding", "stream_transport", "encryption"}, "Sudoku settings")
+    stream = settings.get("stream_transport", {})
+    keys(stream, {"kind", "final_mask"}, "Sudoku raw transport")
+    mask = stream.get("final_mask", {})
+    keys(mask, {"tcp"}, "FinalMask")
+    chain = mask.get("tcp", [])
+    require(len(chain) == 1 and isinstance(chain[0], dict), "CONFIG_INVALID", "one Sudoku mask required")
+    keys(chain[0], {"type", "settings"}, "Sudoku mask")
+    params = chain[0].get("settings", {})
+    keys(params, {"password", "ascii", "paddingMin", "paddingMax"}, "Sudoku parameters")
+    require(settings.get("security") == "none" and settings.get("flow") == "none"
+            and settings.get("transport") == "tcp" and settings.get("packet_encoding") == "xudp"
+            and stream.get("kind") == "tcp" and chain[0].get("type") == "sudoku"
+            and isinstance(params.get("password"), str) and 0 < len(params["password"].encode()) <= 1024
+            and params.get("ascii") in ("prefer_entropy", "prefer_ascii", "entropy", "ascii")
+            and type(params.get("paddingMin")) is int and type(params.get("paddingMax")) is int
+            and 0 <= params["paddingMin"] <= params["paddingMax"] <= 100,
+            "CAPABILITY_UNSUPPORTED", "invalid native VLESS raw TCP Sudoku parameters")
+
+
+def public_encryption(value):
+    # This only checks the public field boundary. Splicore validates keys,
+    # padding and the private/public correspondence through inbound validate.
+    require(isinstance(value, str) and (value == "none" or (len(value) <= 16384 and re.fullmatch(
+        r"mlkem768x25519plus\.(native|xorpub|random)\.(1rtt|0rtt)\.[A-Za-z0-9_.-]+", value))),
+        "CONFIG_INVALID", "invalid public VLESS encryption parameter")
+    return value
+
+
+def server_encryption(value):
+    # v0.5.0 stores the public inbound projection with ClientString(true).
+    # Keep the generator's independent client 1rtt/0rtt choice in node.client.
+    parts = public_encryption(value).split(".")
+    if value != "none":
+        parts[2] = "0rtt"
+    return ".".join(parts)
+
+
+def sudoku_encryption(node):
+    document = node["document"]
+    settings = document["settings"]
+    public = public_encryption(settings.get("encryption", "none"))
+    client = public_encryption(node.get("client", {}).get("encryption", public))
+    require(server_encryption(client) == server_encryption(public),
+            "CONFIG_INVALID", "stored VLESS client/server public parameters differ")
+    secret = document.get("server_secret", {})
+    keys(secret, {"decryption"}, "VLESS encryption server secret")
+    if client == "none":
+        require(not secret, "CONFIG_INVALID", "private VLESS decryption requires public encryption")
+    else:
+        private = secret.get("decryption")
+        require(isinstance(private, str) and 0 < len(private) <= 16384
+                and re.fullmatch(r"mlkem768x25519plus\.(native|xorpub|random)\.[0-9]+(?:-[0-9]+)?s?\.[A-Za-z0-9_.-]+", private),
+                "CONFIG_INVALID", "enabled VLESS encryption requires a private server credential")
+    return client
+
+
+def generate_vless_encryption(binary):
+    result = command([binary, "vlessenc", "--auth", "mlkem768", "--mode", "random", "--handshake", "1rtt"],
+                     "VLESS_ENCRYPTION", ok=False)
+    # The generator explicitly outputs secrets. Never forward stdout/stderr.
+    require(result.returncode == 0, "VLESS_ENCRYPTION", "official VLESS encryption generator failed")
+    try:
+        pair = json.loads(result.stdout)
+        require(isinstance(pair, dict) and set(pair) == {"decryption", "encryption"}
+                and isinstance(pair["decryption"], str) and isinstance(pair["encryption"], str)
+                and pair["encryption"].startswith("mlkem768x25519plus.random.1rtt."),
+                "VLESS_ENCRYPTION", "official generator returned invalid encryption parameters")
+        public_encryption(pair["encryption"])
+    except (ValueError, TypeError, KeyError) as exc:
+        raise Failure("VLESS_ENCRYPTION", "invalid official generator output") from exc
+    return pair
+
+
 def guard_mutations(desired):
     mutations, rules, listeners, ids = [], [], set(), set()
     for node in desired["nodes"]:
@@ -573,7 +719,7 @@ def render(desired, validate_tls=True):
         protocol = node.get("protocol")
         capability = RELEASE["capabilities"].get(protocol, {})
         require(capability.get("managed", False), "CAPABILITY_UNSUPPORTED",
-                capability.get("integration_blocker", "protocol/security policy is not qualified by rc.4"))
+                capability.get("integration_blocker", "protocol/security policy is not qualified by v0.5.0"))
         options = node.get("options", {})
         keys(options, {"traffic_pattern", "low_entropy", "quota_mb", "expire_at", "bandwidth_mbps",
                        "quic_proxy_enabled", "obfs", "ingress_enforcement"}, "capability options")
@@ -583,7 +729,7 @@ def render(desired, validate_tls=True):
                 and options.get("bandwidth_mbps", 0) == 0
                 and not options.get("quic_proxy_enabled") and (protocol == "hysteria2" or not options.get("obfs"))
                 and options.get("ingress_enforcement", "native") == "native",
-                "CAPABILITY_UNSUPPORTED", "stored protocol/accounting/security option has no rc.4 equivalent")
+                "CAPABILITY_UNSUPPORTED", "stored protocol/accounting/security option has no v0.5.0 equivalent")
         document = copy.deepcopy(node.get("document"))
         require(isinstance(document, dict), "CONFIG_INVALID", "managed document required")
         keys(document, {"schema", "name", "account_name", "listener", "display_endpoint", "settings", "users", "psk", "server_secret"}, "managed document")
@@ -605,7 +751,7 @@ def render(desired, validate_tls=True):
         except ValueError as exc:
             raise Failure("CONFIG_INVALID", "listener requires an IP address") from exc
         settings = document.get("settings", {})
-        transport = "tcp" if protocol in ("snell", "vless-reality") else "udp"
+        transport = "tcp" if protocol in ("snell", "vless-reality", "vless-sudoku") else "udp"
         if protocol == "mieru":
             keys(settings, {"transport", "mtu", "multiplex"}, "Mieru settings")
             transport = settings.get("transport")
@@ -614,10 +760,13 @@ def render(desired, validate_tls=True):
             keys(settings, {"version"}, "Snell settings")
             require(settings.get("version") in (4, 5) and isinstance(document.get("psk"), str)
                     and re.fullmatch(r"[A-Za-z0-9_+/=-]{12,128}", document["psk"]),
-                    "CAPABILITY_UNSUPPORTED", "stored Snell PSK/version outside rc.4 domain; rotation required explicitly")
+                    "CAPABILITY_UNSUPPORTED", "stored Snell PSK/version outside v0.5.0 domain; rotation required explicitly")
             document["account_name"] = "nb-" + name
         elif protocol == "vless-reality":
             reality_check(node, document)
+        elif protocol == "vless-sudoku":
+            sudoku_check(settings)
+            sudoku_encryption(node)
         else:
             allowed = {"tls", "stream_transport"} if protocol == "hysteria2" else {"version", "tls", "congestion_control", "udp_relay_mode", "zero_rtt_handshake"}
             keys(settings, allowed, protocol + " settings")
@@ -629,12 +778,12 @@ def render(desired, validate_tls=True):
                 tls_check(settings.get("tls", {}))
         if protocol != "snell":
             users = document.get("users")
-            require(isinstance(users, list) and 1 <= len(users) <= 16, "CONFIG_INVALID", "rc.4 supports 1..16 users per inbound")
+            require(isinstance(users, list) and 1 <= len(users) <= 16, "CONFIG_INVALID", "v0.5.0 supports 1..16 users per inbound")
             for index, user in enumerate(users):
                 keys(user, {"account_name", "username", "uuid", "password"}, "managed user")
                 # Internal account identity is independent of wire credentials.
                 user["account_name"] = "nb-" + name + "-" + str(index)
-                if protocol == "vless-reality":
+                if protocol in ("vless-reality", "vless-sudoku"):
                     require(str(uuid.UUID(user.get("uuid", ""))) == user.get("uuid"), "CONFIG_INVALID", "invalid VLESS UUID")
                 else:
                     require(isinstance(user.get("password"), str) and user["password"], "CONFIG_INVALID", "credentials must be explicit")
@@ -646,8 +795,8 @@ def render(desired, validate_tls=True):
         occupied.append((transport, address, listener["port"]))
         if not node.get("enabled", True):
             continue
-        documents.append((name, "vless" if protocol == "vless-reality" else protocol, document))
-    require(len(documents) <= 64, "CONFIG_INVALID", "rc.4 inbound limit exceeded")
+        documents.append((name, "vless" if protocol in ("vless-reality", "vless-sudoku") else protocol, document))
+    require(len(documents) <= 64, "CONFIG_INVALID", "v0.5.0 inbound limit exceeded")
     guard_mutations(desired)
     for node in desired["nodes"]:
         if node.get("guard"):
@@ -695,8 +844,24 @@ def client_profiles(node):
     host, port = endpoint["host"], endpoint["port"]
     name = node.get("client", {}).get("name") or node["id"]
     out = {"id": node["id"], "protocol": protocol}
-    if protocol == "snell":
-        # Public rc.4 ClientVersion(5)=4: native v5 admits v4 TCP/UDP
+    if protocol == "vless-sudoku":
+        sudoku_check(settings)
+        encryption = sudoku_encryption(node)
+        mask = copy.deepcopy(settings["stream_transport"]["final_mask"])
+        user = document["users"][0]
+        # The Core exporter rejects FinalMask. NoBrand maps its canonical TCP
+        # mask explicitly to Xray 26.10.21 JSON without losing either layer.
+        out["uri"] = None
+        out["share_notice"] = "FinalMask/Sudoku 与 VLESS Encryption 请使用完整 Xray 26.10.21 JSON；不生成可能丢失参数的 URI。"
+        out["xray"] = {"protocol": "vless", "settings": {"vnext": [{"address": host, "port": port,
+            "users": [{"id": user["uuid"], "encryption": encryption}]}]}, "streamSettings": {
+            "network": "raw", "security": "none", "finalmask": mask}}
+        out["xray_config"] = xray_client_config([dict(out["xray"], tag=node["id"])])
+        out["client_version"] = "26.10.21"
+        out["compatibility"] = {"vless_encryption": "enabled" if encryption != "none" else "none (preserved legacy mode)",
+                                "projection": "NoBrand FinalMask adapter; Xray 26.10.21 JSON"}
+    elif protocol == "snell":
+        # Public Splicore ClientVersion(5)=4: native v5 admits v4 TCP/UDP
         # clients while QUIC Proxy Mode stays unavailable.
         wire = 4
         out["server_version"], out["client_wire_version"] = settings["version"], wire
@@ -799,6 +964,28 @@ def client_profiles(node):
     return out
 
 
+def xray_client_config(outbounds):
+    return {"log": {"loglevel": "warning"}, "inbounds": [{"tag": "socks-in", "listen": "127.0.0.1", "port": 1080,
+            "protocol": "socks", "settings": {"auth": "noauth", "udp": True}}], "outbounds": outbounds}
+
+
+def sudoku_export(nodes):
+    requested = os.environ.get("NOBRAND_SPLICORE_EXPORT_FORMAT") or "json"
+    version = os.environ.get("NOBRAND_SPLICORE_CLIENT_VERSION") or "26.10.21"
+    require(requested in ("json", "xray"), "EXPORT_UNSUPPORTED",
+            "VLESS Encryption with FinalMask Sudoku requires complete Xray JSON; URI and other subscription formats are unsupported")
+    require(version == "26.10.21", "EXPORT_UNSUPPORTED", "VLESS Sudoku JSON export targets Xray 26.10.21")
+    outbounds = []
+    for node in nodes:
+        # One outbound per UUID keeps multi-user subscriptions complete.
+        for index, user in enumerate(node["document"]["users"]):
+            member = copy.deepcopy(node)
+            member["document"]["users"] = [user]
+            outbound = client_profiles(member)["xray"]
+            outbounds.append(dict(outbound, tag=node["id"] + ("-" + str(index) if index else "")))
+    return xray_client_config(outbounds)
+
+
 class Service:
     """One canonical supervisor. Fixture adapter is explicit and never auto-selected."""
     def __init__(self, adapter, generation, fixture=None):
@@ -894,7 +1081,7 @@ class Runtime:
             require(all(p.name in allowed for p in self.state.iterdir()), "CONFIG_INVALID", "unmarked state contains foreign data")
 
     @contextlib.contextmanager
-    def locked(self):
+    def locked(self, recovery=False):
         self.refuse_legacy()
         self.safe()
         self.lifecycle.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -915,7 +1102,74 @@ class Runtime:
                 fcntl.flock(out, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as exc:
                 raise Failure("LOCKED", "another runtime transaction is active") from exc
+            if not recovery:
+                legacy = self.lifecycle_record()
+                require(not legacy or legacy.get("STATUS") == "complete", "LIFECYCLE_PENDING",
+                        "unfinished lifecycle transaction; run nobrand runtime transactions then nobrand runtime recover")
             yield
+
+    def lifecycle_record(self):
+        path = Path(os.environ.get("NOBRAND_LIFECYCLE_TX_FILE", str(self.lifecycle / "transaction.env")))
+        if not path.exists() and not path.is_symlink():
+            return None
+        require(not path.is_symlink() and path.is_file(), "TRANSACTION_INVALID", "unsafe lifecycle record")
+        record = {}
+        for line in path.read_text().splitlines():
+            key, sep, value = line.partition("=")
+            require(sep and key not in record and re.fullmatch(r"[A-Z_]+", key),
+                    "TRANSACTION_INVALID", "invalid lifecycle record")
+            record[key] = value
+        require(record.get("FORMAT") == "nobrand-lifecycle-v2" and record.get("STATUS") in ("in-progress", "complete")
+                and record.get("MUTATION_STARTED") in ("0", "1"),
+                "TRANSACTION_INVALID", "unsupported lifecycle record")
+        return record
+
+    def transactions(self):
+        """Read only; no locks, packages, daemon calls or recovery side effects."""
+        legacy = self.lifecycle_record()
+        result = {"lifecycle": None, "generation": None}
+        if legacy:
+            result["lifecycle"] = {key: legacy.get(key) for key in (
+                "OPERATION", "SCOPE", "STATUS", "LAST_COMPLETED_PHASE", "MUTATION_STARTED", "TRANSACTION_ID")}
+            result["lifecycle"]["recovery"] = ("NO_MUTATION_CANCEL" if legacy["MUTATION_STARTED"] == "0"
+                                                else "BLOCKED: original request/snapshot required")
+            result["lifecycle"]["error_code"] = "NB-TX-" + str(legacy.get("SCOPE", "UNKNOWN")).upper() + "-" + str(legacy.get("LAST_COMPLETED_PHASE", "UNKNOWN")).upper()
+            if legacy.get("SCOPE") == "manager":
+                result["lifecycle"]["recovery"] = "manager bootstrap may replay its deterministic manager-only steps"
+        if self.transaction.exists():
+            require(not self.transaction.is_symlink(), "TRANSACTION_INVALID", "unsafe generation record")
+            tx = load(self.transaction)
+            self.validate_transaction(tx)
+            result["generation"] = {key: tx.get(key) for key in ("phase", "candidate", "old", "error_code", "failed_phase")}
+        return result
+
+    def recover_lifecycle(self):
+        record = self.lifecycle_record()
+        if not record or record["STATUS"] == "complete":
+            return {"lifecycle": "not-needed"}
+        require(record["MUTATION_STARTED"] == "0", "RECOVERY_EVIDENCE_MISSING",
+                "lifecycle mutation started but original request and verified snapshot are unavailable; retain transaction and use matching historical installer")
+        required = {"FORMAT", "STATUS", "OPERATION", "SCOPE", "MUTATION_STARTED", "MANAGER_VERSION",
+                    "SCHEMA_GENERATION", "TRANSACTION_ID", "STARTED_AT", "LAST_COMPLETED_PHASE", "MIERU_OWNED",
+                    "MIERU_PRESERVE_PACKAGE", "MIERU_PRESERVE_USER", "MIERU_PRESERVE_GROUP", "MIERU_PRESERVE_SHARED"}
+        require(record.keys() == required and record["SCHEMA_GENERATION"] == "3"
+                and re.fullmatch(r"4\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", record["MANAGER_VERSION"])
+                and re.fullmatch(r"[A-Za-z0-9._-]{8,128}", record["TRANSACTION_ID"])
+                and re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", record["STARTED_AT"])
+                and record["LAST_COMPLETED_PHASE"] in ("prepare", "state-layout", "manager-ready", "runtime-ready")
+                and all(record[k] == "0" for k in required if k.startswith("MIERU_")),
+                "RECOVERY_EVIDENCE_MISSING", "incomplete or unsupported lifecycle evidence; original record retained")
+        require(record.get("OPERATION") == "install" and record.get("SCOPE") in (
+            "manager", "mieru", "snell", "hy2", "tuic", "vless-reality", "vless-sudoku"),
+            "RECOVERY_EVIDENCE_MISSING", "this lifecycle scope requires its component recovery command")
+        path = Path(os.environ.get("NOBRAND_LIFECYCLE_TX_FILE", str(self.lifecycle / "transaction.env")))
+        original = path.read_bytes()
+        digest = hashlib.sha256(original).hexdigest()
+        atomic(self.lifecycle / ("cancelled-" + digest + ".env"), original)
+        # Keep transaction.env as a terminal record; never bypass recovery by deleting it.
+        record.update(STATUS="complete", LAST_COMPLETED_PHASE="complete")
+        atomic(path, "".join(k + "=" + v + "\n" for k, v in record.items()))
+        return {"lifecycle": "cancelled-before-mutation", "original_sha256": digest}
 
     def target(self, link):
         if not link.is_symlink():
@@ -949,15 +1203,15 @@ class Runtime:
             "tuic/runtime.json", "snell/instances", "tuic/instances", "vless-reality/instances")]
         paths += [self.config / "hysteria2/config.json", self.config / "vless-reality/instances"]
         paths += [self.lib / name for name in ("bin/mita", "bin/sing-box", "bin/hysteria", "mieru-instance-run")]
-        if not (self.state / "vless-sudoku/state.json").is_file():
-            paths.append(self.lib / "bin/xray")
+        paths += [self.lib / "bin/xray", self.lib / "xray-assets", self.state / "vless-sudoku/state.json",
+                  self.config / "vless-sudoku/config.json"]
         system = Path(os.environ.get("NOBRAND_SYSTEM_ROOT", "/"))
         paths.append(Path(os.environ.get("NOBRAND_LEGACY_MIERU_STATE_DIR", str(system / "var/lib/mita-oneclick"))))
         for folder, patterns in ((system / "etc/systemd/system", ("nobrand-mieru*.service", "nobrand-mieru*.timer",
                                   "nobrand-snell*.service", "nobrand-tuic*.service", "nobrand-vless-reality*.service",
-                                  "nobrand-hysteria2.service")),
+                                  "nobrand-hysteria2.service", "nobrand-vless-sudoku.service")),
                                  (system / "etc/init.d", ("nobrand-mieru*", "nobrand-snell*", "nobrand-tuic*",
-                                                      "nobrand-vless-reality*", "nobrand-hysteria2"))):
+                                                      "nobrand-vless-reality*", "nobrand-hysteria2", "nobrand-vless-sudoku"))):
             for pattern in patterns:
                 paths.extend(folder.glob(pattern))
         if any(path.exists() or path.is_symlink() for path in paths):
@@ -978,7 +1232,7 @@ class Runtime:
         result = set()
         for node in desired["nodes"]:
             protocol, doc = node["protocol"], node["document"]
-            transport = doc["settings"]["transport"] if protocol == "mieru" else "tcp" if protocol in ("snell", "vless-reality") else "udp"
+            transport = doc["settings"]["transport"] if protocol == "mieru" else "tcp" if protocol in ("snell", "vless-reality", "vless-sudoku") else "udp"
             result.add(transport.upper() + "|" + str(doc["listener"]["port"]))
         return result
 
@@ -1022,6 +1276,12 @@ class Runtime:
         metadata = load(generation / "artifact.json")
         release = RELEASE if metadata["version"] == RELEASE["version"] else RELEASE.get("rollback_releases", {}).get(metadata["version"])
         require(release and release.get("version") == metadata["version"], "BINARY_IDENTITY", "generation release is not an approved rollback pin")
+        require(metadata.get("architecture") in release["assets"], "BINARY_IDENTITY", "unapproved generation architecture")
+        graph = load(generation / "desired.json")
+        require(graph.get("splicore_version") == metadata["version"], "BINARY_IDENTITY", "generation state and binary versions differ")
+        if metadata["version"] != RELEASE["version"]:
+            require(all(sudoku_encryption(node) == "none" for node in graph["nodes"] if node["protocol"] == "vless-sudoku"),
+                    "STATE_VERSION_UNSUPPORTED", "encrypted VLESS state cannot run on the pre-encryption rollback release")
         digest = sha(generation / "splicore")
         require(metadata["binary_sha256"] == digest,
                 "BINARY_IDENTITY", "installed binary or version changed")
@@ -1066,9 +1326,12 @@ class Runtime:
             require(current, "ROLLBACK", "no installed generation to roll back")
             require(old, "ROLLBACK", "no previous known-good Splicore generation")
             service = Service(self.adapter, current, self.fixture)
+            registry = load(self.state / "state.json")
+            registry["splicore_version"] = load(old / "artifact.json")["version"]
             tx = {"owner": "nobrand-splicore-v1", "adapter": self.adapter, "candidate": current.name,
                   "old": old.name, "active": service.call("active", ok=False),
                   "enabled": service.call("enabled", ok=False),
+                  "previous": current.name, "registry_backup": json.dumps(registry),
                   "unit_backup": self.unit_path().read_text() if self.unit_path().exists() else None}
             self.checkpoint(tx, "ROLLING_BACK")
             self.restore_transaction(tx)
@@ -1141,7 +1404,7 @@ class Runtime:
                 try:
                     with tarfile.open(temporary, "w:gz") as archive:
                         if unified:
-                            text = ("project=NoBrand-OneClick\nversion=" + os.environ.get("SCRIPT_VERSION", "4.0.1")
+                            text = ("project=NoBrand-OneClick\nversion=" + os.environ.get("SCRIPT_VERSION", "4.1.0")
                                     + "\nschema_version=3\nownership=nobrand-v3\ncontents=state,config\n")
                             info = tarfile.TarInfo("manifest.txt")
                             info.size, info.mode = len(text.encode()), 0o600
@@ -1201,7 +1464,7 @@ class Runtime:
                 "private_key_file": str(target / "private.key"), "ca_certificate": (target / "ca.pem").read_text()}
 
     def certificate_provenance(self, name, tls):
-        """Pre-marker rc.4 material needs an exact native canonical reference."""
+        """Pre-marker native material needs an exact native canonical reference."""
         if not self.generations.is_dir():
             return None
         for generation in self.generations.iterdir():
@@ -1213,7 +1476,8 @@ class Runtime:
                 continue
             graph, artifact_metadata = (load(p) for p in paths)
             if (graph.get("owner") != "nobrand-splicore-v1" or graph.get("architecture") != "splicore-native"
-                    or graph.get("config_schema") != 1 or artifact_metadata.get("version") != RELEASE["version"]):
+                    or graph.get("config_schema") != 1 or artifact_metadata.get("version") not in
+                    {RELEASE["version"], *RELEASE.get("rollback_releases", {})}):
                 continue
             for node in graph.get("nodes", []):
                 protocol, label = node.get("protocol"), node.get("client", {}).get("name")
@@ -1327,12 +1591,19 @@ class Runtime:
                     and (not selector or node["id"] == selector or node.get("client", {}).get("name") == selector
                          or node.get("client", {}).get("pair") == selector
                          or (protocol == "mieru" and node["document"].get("users", [{}])[0].get("username") == selector))]
+        if protocol == "vless-sudoku" and operation == "install" and matching:
+            operation = "reconfigure"
         if operation in ("show", "export", "user-show", "user-list"):
             require(matching, "CONFIG_INVALID", "node not found")
             if operation == "user-list":
                 return {"nodes": [{"id": n["id"], "enabled": n.get("enabled", True),
                                    "users": n.get("client", {}).get("user_names") or [u.get("username", "") for u in n["document"].get("users", [])]} for n in matching]}
+            if protocol == "vless-sudoku" and operation == "export":
+                return sudoku_export(matching)
             return {"client_profiles": [client_profiles(n) for n in matching]}
+        if protocol == "vless-sudoku" and operation == "subscription":
+            require(matching, "CONFIG_INVALID", "node not found")
+            return sudoku_export(matching)
         if operation in ("upgrade", "upgrade-runtime"):
             return redacted_plan(desired) if preview else self.deploy(desired, artifacts, proxy)
         if operation == "install":
@@ -1370,7 +1641,7 @@ class Runtime:
                                    "low_entropy": env.get("LOW_ENTROPY_MODE", "LOW_ENTROPY_MODE_OFF"),
                                    "quota_mb": int(env.get("USER_QUOTA_MB") or 0), "expire_at": env.get("USER_EXPIRE", ""),
                                    "bandwidth_mbps": int(env.get("USER_BANDWIDTH_MBPS") or 0)}
-                require(env.get("USER_PACKAGE", "") in ("", "unlimited", "custom"), "CAPABILITY_UNSUPPORTED", "quota packages are unsupported by rc.4")
+                require(env.get("USER_PACKAGE", "") in ("", "unlimited", "custom"), "CAPABILITY_UNSUPPORTED", "quota packages are unsupported by v0.5.0")
                 node["client"].update({"handshake_mode": handshake(env.get("HANDSHAKE_MODE", "HANDSHAKE_NO_WAIT")),
                                          "transport": env.get("PROTOCOL", "TCP").upper(), "pair": name})
                 if env.get("PROTOCOL", "TCP").upper() == "BOTH":
@@ -1380,6 +1651,10 @@ class Runtime:
                     pair["document"]["listener"]["port"] += 1
                     pair["document"]["display_endpoint"]["port"] += 1
                     desired["nodes"].append(pair)
+            elif protocol == "vless-sudoku":
+                document.update(settings={"security": "none", "flow": "none", "transport": "tcp", "packet_encoding": "xudp",
+                                "stream_transport": {"kind": "tcp", "final_mask": sudoku_mask(env.get("PASSWORD") or secrets.token_urlsafe(24))}},
+                                users=[{"uuid": str(uuid.uuid4())}])
             elif protocol == "vless-reality":
                 cover = env.get("VLESS_REALITY_TARGET") or "www.microsoft.com"
                 cover_port = int(env.get("VLESS_REALITY_TARGET_PORT") or 443)
@@ -1415,6 +1690,17 @@ class Runtime:
             elif operation in ("start", "stop", "restart", "user-enable", "user-disable"):
                 for member in matching:
                     member["enabled"] = operation not in ("stop", "user-disable")
+            elif protocol == "vless-sudoku" and operation == "reconfigure":
+                require(len(matching) == 1, "CONFIG_INVALID", "select one Sudoku node")
+                document, env = node["document"], os.environ
+                if env.get("PORT_CLI") == "1":
+                    document["listener"]["port"] = int(env.get("PORT") or 0)
+                if env.get("PASSWORD_CLI") == "1":
+                    document["settings"]["stream_transport"]["final_mask"]["tcp"][0]["settings"]["password"] = env.get("PASSWORD", "")
+                if env.get("ADVERTISE_CLI") == "1":
+                    endpoint = document["display_endpoint"]
+                    endpoint.update(host=env.get("ADVERTISE_HOST") or endpoint["host"],
+                                    port=int(env.get("ADVERTISE_PORT") or endpoint["port"]))
             elif protocol == "tuic" and operation in ("user-add", "user-delete", "user-rotate"):
                 client = node.setdefault("client", {})
                 original_names = [u["name"] for u in client.get("users", [])]
@@ -1466,16 +1752,20 @@ class Runtime:
                     if profile or env.get("LOW_ENTROPY_CLI") == "1":
                         options["low_entropy"] = env.get("LOW_ENTROPY_MODE", "LOW_ENTROPY_MODE_OFF")
             elif protocol == "snell" and operation == "set-quic":
-                require(os.environ.get("SNELL_QUIC_PROXY", "off") == "off", "CAPABILITY_UNSUPPORTED", "Snell QUIC is not exposed by rc.4")
+                require(os.environ.get("SNELL_QUIC_PROXY", "off") == "off", "CAPABILITY_UNSUPPORTED", "Snell QUIC is not exposed by v0.5.0")
                 for member in matching:
                     member.setdefault("options", {})["quic_proxy_enabled"] = False
             else:
                 raise Failure("CAPABILITY_UNSUPPORTED", "operation needs an explicit supported desired-state change; no legacy fallback")
         if preview:
-            return redacted_plan(desired)
+            plan = redacted_plan(desired)
+            if protocol == "vless-sudoku" and operation == "install":
+                plan["vless_encryption"] = "mlkem768 + random + 1rtt; generated by the pinned Splicore during installation"
+            return plan
         try:
             outcome = self.deploy(desired, artifacts, proxy, force=operation == "restart",
-                                  expected_generation=installed.name if installed else "")
+                                  expected_generation=installed.name if installed else "",
+                                  new_encryption_nodes=[name] if protocol == "vless-sudoku" and operation == "install" else ())
         except BaseException:
             # Only remove material minted by this request after a completed
             # rollback. Unfinished recovery may still need the candidate TLS.
@@ -1486,7 +1776,9 @@ class Runtime:
                 shutil.rmtree(created_tls)
             raise
         if operation == "install":
-            outcome["client_profiles"] = [client_profiles(n) for n in desired["nodes"] if n["id"] in (name, name + "-udp")]
+            outcome["client_profiles"] = [client_profiles(n) for n in self.desired()["nodes"] if n["id"] in (name, name + "-udp")]
+        elif protocol == "vless-sudoku" and operation == "reconfigure":
+            outcome["client_profiles"] = [client_profiles(node)]
         return outcome
 
     def uninstall(self, purge=False):
@@ -1627,7 +1919,7 @@ class Runtime:
                     continue
                 protocol, doc = node["protocol"], node["document"]
                 transport = doc["settings"]["transport"] if protocol == "mieru" else (
-                    "tcp" if protocol in ("snell", "vless-reality") else "udp")
+                    "tcp" if protocol in ("snell", "vless-reality", "vless-sudoku") else "udp")
                 result.add((transport, doc["listener"]["host"], doc["listener"]["port"]))
                 if node.get("guard"):
                     result.add(("tcp", node["guard"]["listen"]["host"], node["guard"]["listen"]["port"]))
@@ -1663,6 +1955,11 @@ class Runtime:
             finally:
                 remove_file(plan)
         self.health(generation, documents, record=True)
+        exports = {node["id"]: {"status": "adapter", "format": "xray-json", "client_version": "26.10.21",
+                               "client_projection": "NoBrand adapter preserves VLESS Encryption and FinalMask Sudoku"}
+                   for node in desired["nodes"] if node["protocol"] == "vless-sudoku" and node.get("enabled", True)}
+        if exports:
+            save(generation / "export-status.json", exports)
 
     def health(self, generation, documents=None, record=False):
         documents = documents if documents is not None else render(load(generation / "desired.json"))
@@ -1699,11 +1996,34 @@ class Runtime:
         tx["phase"] = phase
         save(self.transaction, tx)
 
+    def validate_transaction(self, tx):
+        require(isinstance(tx, dict) and tx.get("owner") == "nobrand-splicore-v1"
+                and tx.get("adapter") in ("systemd", "openrc", "fixture", "process")
+                and tx.get("phase") in ("PREPARING", "VALIDATED", "STOPPING", "STOPPED", "STARTING",
+                                        "VERIFIED", "ROLLING_BACK", "COMMITTED", "ROLLED_BACK"),
+                "TRANSACTION_INVALID", "transaction owner, phase or init invalid")
+        require(tx.get("candidate"), "TRANSACTION_INVALID", "candidate missing")
+        for field in ("candidate", "old", "previous"):
+            if tx.get(field):
+                require(re.fullmatch(r"g[0-9a-f]{32}", tx[field]), "TRANSACTION_INVALID", "invalid generation reference")
+                path = self.generations / tx[field]
+                require(not path.is_symlink() and within(path, self.generations),
+                        "TRANSACTION_INVALID", "unsafe generation reference")
+        require(tx.get("old") != tx["candidate"] and type(tx.get("active")) is bool
+                and type(tx.get("enabled")) is bool and "unit_backup" in tx,
+                "TRANSACTION_INVALID", "recovery snapshot incomplete")
+
     def restore_transaction(self, tx):
+        self.validate_transaction(tx)
+        if tx["phase"] == "PREPARING":
+            # No service, pointer, registry or firewall mutation can precede VALIDATED.
+            self.checkpoint(tx, "ROLLED_BACK")
+            return
         candidate = self.generations / tx["candidate"]
         old = self.generations / tx["old"] if tx.get("old") else None
         if old:
             self.verify_installed_binary(old)
+        self.checkpoint(tx, "ROLLING_BACK")
         service = Service(tx["adapter"], candidate, self.fixture)
         require(service.call("stop", ok=False), "ROLLBACK", "candidate stop failed; recovery record retained")
         if old:
@@ -1751,19 +2071,21 @@ class Runtime:
         if not self.transaction.exists():
             return {"recovery": "not-needed"}
         tx = load(self.transaction)
-        require(tx.get("owner") == "nobrand-splicore-v1" and tx.get("adapter") == self.adapter,
+        self.validate_transaction(tx)
+        require(tx.get("adapter") == self.adapter,
                 "ROLLBACK", "transaction owner/init mismatch")
-        for field in ("candidate", "old"):
-            if tx.get(field):
-                identifier(tx[field])
         if tx["phase"] not in ("COMMITTED", "ROLLED_BACK"):
             self.restore_transaction(tx)
         return {"recovery": load(self.transaction)["phase"]}
 
-    def deploy(self, desired, artifacts=None, proxy="", force=False, probe=False, key_material=None, expected_generation=None):
+    def deploy(self, desired, artifacts=None, proxy="", force=False, probe=False, key_material=None, expected_generation=None,
+               new_encryption_nodes=()):
         self.refuse_legacy()
         self.safe()
         desired = copy.deepcopy(desired)
+        require(desired.get("splicore_version") == RELEASE["version"]
+                or desired.get("splicore_version") in RELEASE.get("rollback_releases", {}),
+                "STATE_VERSION_UNSUPPORTED", "canonical state version has no reviewed migration contract")
         desired["splicore_version"] = RELEASE["version"]
         documents = render(desired)
         self.check_external_ports(desired)
@@ -1777,6 +2099,11 @@ class Runtime:
             old = self.target(self.current)
             require(expected_generation is None or expected_generation == (old.name if old else ""),
                     "STATE_CHANGED", "runtime changed since request was collected; retry with current state")
+            old_ids = {node["id"] for node in load(old / "desired.json")["nodes"]} if old else set()
+            encrypt_ids = set(new_encryption_nodes)
+            require(not encrypt_ids.intersection(old_ids)
+                    and encrypt_ids <= {node["id"] for node in desired["nodes"] if node["protocol"] == "vless-sudoku"},
+                    "CONFIG_INVALID", "default encryption generation is only allowed for new Sudoku nodes")
             require(not probe or old is None, "CONFIG_INVALID", "probe requires an empty private runtime root")
             if old and load(old / "artifact.json")["version"] == RELEASE["version"] and desired == load(old / "desired.json") and not force and key_material is None:
                 self.verify_installed_binary(old)
@@ -1791,6 +2118,20 @@ class Runtime:
             candidate_service = Service(self.adapter, generation, self.fixture)
             tx = None
             try:
+                unit = self.unit_path()
+                require(self.adapter == "process" or not unit.exists() or (
+                    not unit.is_symlink() and "# NoBrand-owned Splicore v1" in unit.read_text()),
+                    "CONFIG_INVALID", "refuse foreign service unit before preparation")
+                tx = {"owner": "nobrand-splicore-v1", "adapter": self.adapter,
+                      "candidate": generation.name, "old": old.name if old else None,
+                      "previous": self.target(self.previous).name if self.target(self.previous) else None,
+                      "active": candidate_service.call("active", ok=False),
+                      "enabled": candidate_service.call("enabled", ok=False),
+                      "unit_backup": unit.read_text() if self.adapter != "process" and unit.exists() else None,
+                      "registry_backup": (self.state / "state.json").read_text() if (self.state / "state.json").exists() else None,
+                      "registry_created": not (self.state / "state.json").exists(), "opened_ports": []}
+                self.checkpoint(tx, "PREPARING")
+                save(generation / "desired.json", desired)
                 if old and not artifacts and load(old / "artifact.json")["version"] == RELEASE["version"]:
                     metadata = self.verify_installed_binary(old)
                     atomic(generation / "splicore", (old / "splicore").read_bytes(), 0o700)
@@ -1798,6 +2139,14 @@ class Runtime:
                 else:
                     metadata = artifact(generation / "splicore", artifacts, proxy)
                 save(generation / "artifact.json", metadata)
+                for node in desired["nodes"]:
+                    if node["id"] in encrypt_ids:
+                        require(sudoku_encryption(node) == "none", "CONFIG_INVALID", "refuse to overwrite existing VLESS encryption")
+                        pair = generate_vless_encryption(generation / "splicore")
+                        node["document"]["server_secret"] = {"decryption": pair["decryption"]}
+                        node["document"]["settings"]["encryption"] = server_encryption(pair["encryption"])
+                        node.setdefault("client", {})["encryption"] = pair["encryption"]
+                documents = render(desired)
                 save(generation / "desired.json", desired)
                 (generation / "runtime").mkdir(mode=0o700)
                 atomic(generation / "bootstrap.yaml", self.bootstrap_text(generation))
@@ -1819,15 +2168,7 @@ class Runtime:
                     "CONFIG_INVALID", "refuse foreign service unit before cutover")
                 prior_ports = self.port_pairs(load(old / "desired.json")) if old else set()
                 added_ports = self.port_pairs(desired) - prior_ports
-                tx = {"owner": "nobrand-splicore-v1", "adapter": self.adapter,
-                      "candidate": generation.name, "old": old.name if old else None,
-                      "previous": self.target(self.previous).name if self.target(self.previous) else None,
-                      "active": candidate_service.call("active", ok=False),
-                      "enabled": candidate_service.call("enabled", ok=False),
-                      "unit_backup": unit.read_text() if self.adapter != "process" and unit.exists() else None,
-                      "registry_backup": (self.state / "state.json").read_text() if (self.state / "state.json").exists() else None,
-                      "registry_created": not (self.state / "state.json").exists(),
-                      "opened_ports": sorted(added_ports - self.owned_firewall_pairs())}
+                tx["opened_ports"] = sorted(added_ports - self.owned_firewall_pairs())
                 self.checkpoint(tx, "VALIDATED")
                 self.checkpoint(tx, "STOPPING")
                 if tx["active"]:
@@ -1877,8 +2218,11 @@ class Runtime:
                 except (Failure, OSError):
                     cleanup_debt.append("old generations")
                 return {"result": "committed", "inbounds": len(documents), "traffic_qualification": "PENDING", "cleanup_debt": cleanup_debt}
-            except BaseException:
+            except BaseException as error:
                 if tx and tx.get("phase") != "COMMITTED":
+                    tx["failed_phase"] = tx["phase"]
+                    tx["error_code"] = "NB-GEN-" + tx["phase"] + "-" + (error.category if isinstance(error, Failure) else "INTERRUPTED")
+                    save(self.transaction, tx)
                     try:
                         self.restore_transaction(tx)
                     except (Failure, OSError) as exc:
@@ -1892,8 +2236,8 @@ class Runtime:
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="NoBrand Splicore runtime manager (pinned RC)")
-    parser.add_argument("action", choices=["inspect-backup", "capabilities", "status", "doctor", "render", "apply", "probe", "recover", "unit", "plan",
+    parser = argparse.ArgumentParser(description="NoBrand Splicore runtime manager (pinned official release)")
+    parser.add_argument("action", choices=["transactions", "inspect-backup", "capabilities", "status", "doctor", "render", "apply", "probe", "recover", "unit", "plan",
                                            "rollback", "backup", "restore", "adopt-snapshot", "stop", "start", "restart", "uninstall", "purge", "protocol"])
     parser.add_argument("--file", type=Path)
     parser.add_argument("--artifacts", type=Path)
@@ -1910,6 +2254,9 @@ def main(argv=None):
     args = parser.parse_args(argv)
     require(args.version == RELEASE["version"], "BINARY_IDENTITY", "version change requires a reviewed release manifest; no implicit downgrade/latest")
     runtime = Runtime(adapter=args.adapter, fixture=args.fixture_driver)
+    if args.action == "transactions":
+        print(json.dumps(runtime.transactions(), indent=2))
+        return 0
     runtime.refuse_legacy()
     runtime.safe()
     if args.action == "inspect-backup":
@@ -1922,8 +2269,11 @@ def main(argv=None):
         require(args.file or args.action == "plan", "CONFIG_INVALID", "--file canonical desired state is required")
         desired = load(args.file) if args.file else runtime.desired()
         if args.action in ("render", "plan"):
-            # Render writes only to stdout by explicit operator request. Plan is redacted.
-            result = {"documents": [{"id": name, "protocol": protocol, "document": doc} for name, protocol, doc in render(desired)]} if args.action == "render" else redacted_plan(desired)
+            # Private creation documents remain 0600 on disk; display only the
+            # public projection even when explicitly rendering configuration.
+            result = {"documents": [{"id": name, "protocol": protocol,
+                                      "document": {k: v for k, v in doc.items() if k != "server_secret"}}
+                                     for name, protocol, doc in render(desired)]} if args.action == "render" else redacted_plan(desired)
             if args.action == "plan" and result["blockers"]:
                 print(json.dumps(result, indent=2))
                 return 1
@@ -1954,8 +2304,9 @@ def main(argv=None):
             service.call("start")
             result = runtime.wait_health(current)
     elif args.action == "recover":
-        with runtime.locked():
+        with runtime.locked(recovery=True):
             result = runtime.recover()
+            result.update(runtime.recover_lifecycle())
     elif args.action == "unit":
         require(runtime.adapter in ("systemd", "openrc"), "SERVICE_START", "specify supported init system")
         print(runtime.service_text(), end="")
@@ -2036,7 +2387,7 @@ def host_port(host, port):
 
 def client_only(value):
     """Fail closed if server private material enters a native client document."""
-    forbidden = {"privatekey", "serversecret", "signingkey", "masterkey", "keyfile"}
+    forbidden = {"privatekey", "serversecret", "decryption", "signingkey", "masterkey", "keyfile"}
     if isinstance(value, dict):
         for key, child in value.items():
             normalized = key.replace("_", "").replace("-", "").lower()
@@ -2056,7 +2407,7 @@ def render_client_profiles(result, listeners=None, chinese=True):
         raise ProfileError("client_profiles")
     lines = []
     titles = {"mieru": "Mieru", "snell": "Snell", "hysteria2": "Hysteria2",
-              "tuic": "TUIC v5", "vless-reality": "VLESS REALITY"}
+              "tuic": "TUIC v5", "vless-reality": "VLESS REALITY", "vless-sudoku": "VLESS FinalMask Sudoku"}
     def label(zh, en):
         return zh if chinese else en
     def field(zh, en, value, required=False):
@@ -2075,6 +2426,7 @@ def render_client_profiles(result, listeners=None, chinese=True):
     def connection(host, port):
         field("客户端入口", "Client endpoint", endpoint(host, port))
     for index, profile in enumerate(profiles, 1):
+        client_only(profile)
         protocol = profile.get("protocol")
         if protocol not in titles:
             raise ProfileError("unsupported protocol")
@@ -2103,6 +2455,19 @@ def render_client_profiles(result, listeners=None, chinese=True):
                             field("传输协议", "Transport", binding.get("protocol"), True)
                             connection(host, binding.get("port"))
                 native_label = ("Mieru 原生客户端配置", "Mieru native client configuration")
+            elif protocol == "vless-sudoku":
+                native = needed(profile.get("xray"), "xray")
+                target = native["settings"]["vnext"][0]
+                connection(target.get("address"), target.get("port"))
+                field("UUID", "UUID", target["users"][0].get("id"), True)
+                field("FinalMask", "FinalMask", native["streamSettings"]["finalmask"], True)
+                encryption = needed(target["users"][0].get("encryption"), "VLESS Encryption")
+                field("VLESS Encryption", "VLESS Encryption", encryption if encryption != "none"
+                      else label("none（保留旧节点模式）", "none (preserved legacy mode)"))
+                field("客户端格式", "Client format", "Xray " + profile.get("client_version", "26.10.21") + " JSON")
+                field("分享方式", "Sharing", profile.get("share_notice"))
+                native = needed(profile.get("xray_config"), "complete Xray JSON")
+                native_label = ("Xray 完整客户端 JSON", "Complete Xray client JSON")
             elif protocol == "vless-reality":
                 native = needed(profile.get("xray"), "xray")
                 target = native["settings"]["vnext"][0]
@@ -2173,15 +2538,15 @@ NOBRAND_CLIENT_OUTPUT_PY
 # The menu intentionally mutates globals inside isolated action subshells; the
 # parent only consumes exit codes, so SC2030/SC2031 are false positives here.
 # shellcheck disable=SC2030,SC2031
-# NoBrand-OneClick — Mieru / Snell / Hysteria2 / TUIC v5 / Plain VLESS Sudoku / SSH Tunnel
+# NoBrand-OneClick — Mieru / Snell / Hysteria2 / TUIC v5 / VLESS Encryption + Sudoku / SSH Tunnel
 # 作者: ike / https://github.com/ike-sh/NoBrand-OneClick
 # Mieru 母体代码源自 ike-sh/mieru-OneClick (MIT)；Hysteria2 与 VLESS
 # FinalMask/Sudoku 逻辑参考 ike-sh/Xray-OneClick (GPL-3.0)。本融合项目按
-# GPL-3.0 发布；VLESS 为 plain VLESS/TCP，不使用 VLESS Encryption。
+# GPL-3.0 发布；VLESS Encryption 与原生 FinalMask/Sudoku 共用 Splicore。
 set -euo pipefail
 umask 077
 
-SCRIPT_VERSION="4.0.1"
+SCRIPT_VERSION="4.1.0"
 SCRIPT_AUTHOR="ike"
 SCRIPT_NAME="NoBrand-OneClick"
 SCRIPT_REPO="ike-sh/NoBrand-OneClick"
@@ -2235,20 +2600,14 @@ NOBRAND_XRAY_BIN="${NOBRAND_XRAY_BIN:-${NOBRAND_BIN_DIR}/xray}"
 NOBRAND_XRAY_ASSET_DIR="${NOBRAND_XRAY_ASSET_DIR:-${NOBRAND_LIB_DIR}/xray-assets}"
 NOBRAND_HY2_SYSTEMD_SERVICE="${NOBRAND_HY2_SYSTEMD_SERVICE:-/etc/systemd/system/nobrand-hysteria2.service}"
 NOBRAND_HY2_OPENRC_SERVICE="${NOBRAND_HY2_OPENRC_SERVICE:-/etc/init.d/nobrand-hysteria2}"
-TESTED_XRAY_VERSION="26.3.27"
-TESTED_XRAY_AMD64_SHA256="23cd9af937744d97776ee35ecad4972cf4b2109d1e0fe6be9930467608f7c8ae"
-TESTED_XRAY_ARM64_SHA256="4d30283ae614e3057f730f67cd088a42be6fdf91f8639d82cb69e48cde80413c"
-NOBRAND_XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/tags/v${TESTED_XRAY_VERSION}"
 
 NOBRAND_VLESS_STATE_DIR="${NOBRAND_VLESS_STATE_DIR:-${NOBRAND_STATE_DIR}/vless-sudoku}"
 NOBRAND_VLESS_STATE_FILE="${NOBRAND_VLESS_STATE_FILE:-${NOBRAND_VLESS_STATE_DIR}/state.json}"
 NOBRAND_VLESS_CLIENT_FILE="${NOBRAND_VLESS_CLIENT_FILE:-${NOBRAND_VLESS_STATE_DIR}/client.json}"
 NOBRAND_VLESS_CONFIG_DIR="${NOBRAND_VLESS_CONFIG_DIR:-${NOBRAND_CONFIG_DIR}/vless-sudoku}"
 NOBRAND_VLESS_CONFIG_FILE="${NOBRAND_VLESS_CONFIG_FILE:-${NOBRAND_VLESS_CONFIG_DIR}/config.json}"
-NOBRAND_VLESS_SERVICE_NAME="nobrand-vless-sudoku"
 NOBRAND_VLESS_SYSTEMD_SERVICE="${NOBRAND_VLESS_SYSTEMD_SERVICE:-/etc/systemd/system/nobrand-vless-sudoku.service}"
 NOBRAND_VLESS_OPENRC_SERVICE="${NOBRAND_VLESS_OPENRC_SERVICE:-/etc/init.d/nobrand-vless-sudoku}"
-NOBRAND_VLESS_TAG="nobrand-vless-sudoku-in"
 
 NOBRAND_REALITY_SYSTEMD_TEMPLATE="${NOBRAND_REALITY_SYSTEMD_TEMPLATE:-/etc/systemd/system/nobrand-vless-reality@.service}"
 NOBRAND_REALITY_DEFAULT_CAMOUFLAGE_PORT="443"
@@ -2375,9 +2734,6 @@ SNELL_QUIC_PROXY=""
 HY2_ACTION=""
 HY2_SNI=""
 VLESS_SUDOKU_ACTION=""
-VLESS_SUDOKU_UUID=""
-VLESS_SUDOKU_PASSWORD=""
-VLESS_SUDOKU_LISTEN="0.0.0.0"
 VLESS_SUDOKU_CLIENT_SOCKS_PORT="${VLESS_SUDOKU_CLIENT_SOCKS_PORT:-18080}"
 VLESS_REALITY_ACTION=""
 VLESS_REALITY_NAME=""
@@ -2491,7 +2847,7 @@ trap on_error ERR
 
 usage() {
   cat <<EOF
-NoBrand-OneClick ${SCRIPT_VERSION} / Splicore v0.3.0-rc.4
+NoBrand-OneClick ${SCRIPT_VERSION} / Splicore v0.5.0
 用法 / Usage: nobrand <protocol> <action> [options]
 协议 / Protocols: mieru, snell, hy2, tuic, vless-reality, vless-sudoku, ssh, forward
 Actions: install, show, status, doctor, start, stop, restart, uninstall
@@ -2507,7 +2863,6 @@ EOF
 }
 
 msg() { printf '%s\n' "$*"; }
-info() { msg "==> $*"; }
 warn() { msg "[警告] $*"; }
 die() {
   msg "[错误] $*" >&2
@@ -2766,18 +3121,29 @@ parse_nobrand_hy2_args() {
 
 parse_nobrand_vless_sudoku_args() {
   VLESS_SUDOKU_ACTION="${1:-menu}"
+  NOBRAND_SPLICORE_EXPORT_FORMAT=""
+  NOBRAND_SPLICORE_CLIENT_VERSION=""
   [ "$#" -eq 0 ] || shift
   case "$VLESS_SUDOKU_ACTION" in
     add|create|reconfigure) VLESS_SUDOKU_ACTION=install ;;
     nodes) VLESS_SUDOKU_ACTION=show ;;
     delete|uninstall) VLESS_SUDOKU_ACTION=remove ;;
     endpoint) VLESS_SUDOKU_ACTION="set-endpoint" ;;
-    menu|install|show|set-endpoint|remove|start|stop|restart|status|doctor|smoke|upgrade) ;;
+    menu|install|show|export|client-config|subscription|set-endpoint|remove|start|stop|restart|status|doctor|smoke|upgrade) ;;
     help|-h|--help) VLESS_SUDOKU_ACTION=help ;;
     *) die "未知 VLESS Sudoku 操作: $VLESS_SUDOKU_ACTION" ;;
   esac
   while [ "$#" -gt 0 ]; do
     local consumed=0 rc=0
+    case "$1" in
+      --format|--client-version)
+        case "$VLESS_SUDOKU_ACTION" in export|subscription) ;; *) die "$1 仅用于 export / subscription" ;; esac
+        [ -n "${2:-}" ] || die "$1 缺少参数"
+        if [ "$1" = --format ]; then NOBRAND_SPLICORE_EXPORT_FORMAT="$2"; else NOBRAND_SPLICORE_CLIENT_VERSION="$2"; fi
+        shift 2
+        continue
+        ;;
+    esac
     parse_nobrand_common_option "$1" "${2:-}" || rc=$?
     case "$rc" in
       0) consumed=1 ;;
@@ -4579,7 +4945,7 @@ nb_write_schema_v3_file() {
   local tmp
   tmp="$(mktemp "${NOBRAND_REGISTRY_FILE}.tmp.XXXXXX")" || return 1
   if ! printf '%s\n' \
-      "{\"schema_version\":${NOBRAND_SCHEMA_VERSION},\"project\":\"NoBrand-OneClick\",\"ownership\":\"nobrand-v3\",\"author\":\"ike\",\"architecture\":\"splicore-native\",\"splicore_version\":\"v0.3.0-rc.4\",\"config_schema\":1}" \
+      "{\"schema_version\":${NOBRAND_SCHEMA_VERSION},\"project\":\"NoBrand-OneClick\",\"ownership\":\"nobrand-v3\",\"author\":\"ike\",\"architecture\":\"splicore-native\",\"splicore_version\":\"v0.5.0\",\"config_schema\":1}" \
       >"$tmp" \
     || ! chmod 0600 "$tmp" \
     || ! mv -f "$tmp" "$NOBRAND_REGISTRY_FILE"; then
@@ -5054,7 +5420,7 @@ if primary:
     for node in state["nodes"]:
         doc = node["document"]
         protocol = node["protocol"]
-        transport = doc["settings"]["transport"] if protocol == "mieru" else "TCP" if protocol in ("snell", "vless-reality") else "UDP"
+        transport = doc["settings"]["transport"] if protocol == "mieru" else "TCP" if protocol in ("snell", "vless-reality", "vless-sudoku") else "UDP"
         emit(protocol + ":" + node["id"], transport, doc["listener"]["port"],
              doc["display_endpoint"]["host"], doc["display_endpoint"]["port"])
         if node.get("guard"):
@@ -6316,7 +6682,6 @@ nb_ingress_apply_owner() {
       nb_prepare_ingress_deployment "$profile_id" native-bind || return 1
       NOBRAND_SPLICORE_LISTEN="$INGRESS_LISTEN_HOST" nb_splicore_call protocol --protocol "$(jq -r --arg id "${owner#splicore:}" '.nodes[]|select(.id==$id)|.protocol' "${NOBRAND_STATE_DIR}/splicore/current/desired.json")" --operation set-listen --selector "${owner#splicore:}"
       ;;
-    vless-sudoku:*) vless_sudoku_apply_ingress_enforcement ;;
     forward:*) forward_apply_ingress_enforcement "${owner#forward:}" ;;
     ssh-tunnel:*) return 0 ;;
     *) return 1 ;;
@@ -6618,11 +6983,14 @@ nb_endpoint_conflict_owner() {
   host="$2"
   port="$(normalize_uint "$3")" || return 1
   expected_host="$(nb_normalize_endpoint_host "$host")"
-  auto_host="$(public_ip 2>/dev/null || true)"
+  auto_host=""
   while IFS='|' read -r owner row_transport listen_port advertise_host advertise_port; do
     [ -n "$owner" ] || continue
     [ "$owner" = "$ignore_owner" ] && continue
     [ "$row_transport" = "$transport" ] || continue
+    if [ -z "$advertise_host" ] && [ -z "$auto_host" ]; then
+      auto_host="$(public_ip 2>/dev/null || true)"
+    fi
     effective_host="${advertise_host:-$auto_host}"
     effective_port="${advertise_port:-$listen_port}"
     [ -n "$effective_host" ] || continue
@@ -6729,10 +7097,6 @@ nb_effective_advertise_port() {
   fi
 }
 
-nb_endpoint_mode_from_values() {
-  [ -n "${1:-}" ] && printf 'custom' || printf 'auto'
-}
-
 nb_firewall_open_pairs() {
   local pairs="$1"
   local MITA_FIREWALL_OWNED_STATE="$NOBRAND_FIREWALL_OWNED_STATE"
@@ -6798,7 +7162,7 @@ nobrand_version() {
 
 nobrand_usage() {
   cat <<EOF
-NoBrand-OneClick 4.0.1 — Multi-Ingress / Mieru / Snell v4-v5 / Hysteria2 / TUIC v5 / VLESS REALITY / VLESS + FinalMask + Sudoku / SSH Tunnel / Port Forward
+NoBrand-OneClick 4.1.0 — Multi-Ingress / Mieru / Snell v4-v5 / Hysteria2 / TUIC v5 / VLESS REALITY / VLESS + FinalMask + Sudoku / SSH Tunnel / Port Forward
 
 用法:
   nobrand                         打开统一菜单
@@ -6808,7 +7172,7 @@ NoBrand-OneClick 4.0.1 — Multi-Ingress / Mieru / Snell v4-v5 / Hysteria2 / TUI
   nobrand status                  综合状态
   nobrand nodes [--protocol P]    查看全部或指定协议节点
   nobrand doctor                  综合诊断（默认不输出 secret）
-  nobrand runtime capabilities    查看固定 rc.4 的能力与限制
+  nobrand runtime capabilities    查看固定 Splicore v0.5.0 的能力与限制
   nobrand runtime status|doctor|plan|recover|rollback
   nobrand runtime apply|render --file DESIRED.json
   nobrand runtime backup|restore --file BACKUP.tar.gz
@@ -6847,6 +7211,8 @@ NoBrand-OneClick 4.0.1 — Multi-Ingress / Mieru / Snell v4-v5 / Hysteria2 / TUI
   nobrand vless-sudoku install [--port PORT]
       [--advertise-host HOST --advertise-port PORT | --advertise-auto] [-y]
   nobrand vless-sudoku show|status|doctor|smoke|start|stop|restart|remove
+  nobrand vless-sudoku export|subscription [--format json] [--client-version 26.10.21]
+      输出完整 Xray JSON，保留 VLESS Encryption 与 FinalMask/Sudoku。
   nobrand vless-sudoku set-endpoint
       [--advertise-host HOST --advertise-port PORT | --advertise-auto]
 
@@ -6879,7 +7245,7 @@ NoBrand-OneClick 4.0.1 — Multi-Ingress / Mieru / Snell v4-v5 / Hysteria2 / TUI
 
 说明:
   - Snell 只支持 v5（默认/推荐）与 v4（兼容）。
-  - 普通代理由一个固定 Splicore v0.3.0-rc.4 daemon 管理；Release Candidate / Experimental。
+  - 普通代理由一个固定 Splicore v0.5.0 daemon 管理。
   - 新架构要求 clean install；旧 multi-core 安装只检测并拒绝，不支持原地迁移或新版卸载。
   - REALITY 使用原生 Local Tunnel Guard；HY2 使用新证书和独立 Salamander secret。
   - Mieru 新装可用 --profile iplc 或 --traffic-pattern off；默认 traffic off；balanced/stealth 不支持。
@@ -6887,9 +7253,9 @@ NoBrand-OneClick 4.0.1 — Multi-Ingress / Mieru / Snell v4-v5 / Hysteria2 / TUI
   - --advertise-host 接受 IPv4、IPv6 或 ASCII DNS hostname；Host 与 Port 分别填写，配置时不要求域名解析成功。
   - Display Endpoint 不配置 VPS 系统出站 IP、默认路由或 policy routing。
   - 非交互 -y 必须明确给出完整 Display Endpoint 或 --advertise-auto。
-  - VLESS Sudoku = plain VLESS + FinalMask(sudoku) + TCP。
+  - VLESS Sudoku = 原生 VLESS Encryption + FinalMask(sudoku) + TCP；已有节点保留原加密模式。
   - VLESS REALITY = VLESS + TCP + REALITY + xtls-rprx-vision；public Profile 推荐，mapped 仅警告。
-  - VLESS Encryption: NOT USED；不调用密钥生成子命令，不保存加密密钥。
+  - 新建 Sudoku 默认通过 Splicore vlessenc 生成 mlkem768 + random + 1rtt；客户端仅包含公开 encryption。
   - TUIC 只支持 v5：Splicore、UDP/QUIC、每用户独立 UUID + password。
   - SSH Tunnel 复用现有 sshd；允许 -L/-D/-R TCP forwarding，不允许 shell/exec/TTY/SFTP/SCP。
   - SSH Tunnel 使用 AllowTcpForwarding=yes，因此可访问服务器自身可达的 TCP destinations；GatewayPorts=no。
@@ -7003,8 +7369,8 @@ nobrand_manager_upgrade() {
 
 nb_all_node_rows() {
   case "${1:-}" in
-    ""|all) vless_sudoku_node_rows; ssh_tunnel_node_rows; forward_node_rows ;;
-    vless-sudoku|sudoku|vless) vless_sudoku_node_rows ;;
+    ""|all) ssh_tunnel_node_rows; forward_node_rows ;;
+    vless-sudoku|sudoku|vless) return 0 ;;
     ssh|ssh-tunnel) ssh_tunnel_node_rows ;;
     forward|port-forward) forward_node_rows ;;
     mieru|snell|hy2|hysteria2|tuic|vless-reality|reality) return 0 ;;
@@ -7016,7 +7382,6 @@ nb_owner_ingress_profile_id() {
   local owner="$1" id
   case "$owner" in
     splicore:*) jq -r --arg id "${owner#splicore:}" '.nodes[]|select(.id==$id)|.ingress.profile_id // empty' "${NOBRAND_STATE_DIR}/splicore/current/desired.json" ;;
-    vless-sudoku:*) vless_sudoku_state_field ingress_profile_id 2>/dev/null || true ;;
     forward:*)
       jq -r --arg id "${owner#forward:}" '.rules[]|select(.rule_id==$id)|.ingress_profile_id // empty' \
         "$NOBRAND_FORWARD_STATE_FILE" 2>/dev/null || true
@@ -7026,7 +7391,6 @@ nb_owner_ingress_profile_id() {
 
 nb_owner_state_file() {
   case "$1" in
-    vless-sudoku:*) printf '%s' "$NOBRAND_VLESS_STATE_FILE" ;;
     *) return 1 ;;
   esac
 }
@@ -7133,7 +7497,7 @@ nobrand_nodes() {
   if nb_splicore_installed; then
     nb_splicore_call status --protocol "${NOBRAND_PROTOCOL_FILTER:-}" || return 1
     local retained
-    for retained in vless-sudoku ssh forward; do
+    for retained in ssh forward; do
       [ -z "${NOBRAND_PROTOCOL_FILTER:-}" ] || [ "$NOBRAND_PROTOCOL_FILTER" = "$retained" ] || continue
       nb_all_node_rows "$retained"
     done
@@ -7185,7 +7549,6 @@ nobrand_nodes() {
 nobrand_status() {
   nb_splicore_legacy_preflight || return 1
   nb_splicore_call status || return 1
-  if vless_sudoku_state_exists; then vless_sudoku_service_command status; fi
   ssh_tunnel_status
   [ ! -s "$NOBRAND_FORWARD_STATE_FILE" ] || forward_list_rules
   return 0
@@ -7201,7 +7564,6 @@ nobrand_doctor() {
   nb_splicore_legacy_preflight || return 1
   local failed=0
   nb_splicore_call doctor || failed=1
-  if vless_sudoku_state_exists; then vless_sudoku_doctor || failed=1; fi
   if ssh_tunnel_state_exists; then ssh_tunnel_doctor || failed=1; fi
   [ ! -s "$NOBRAND_FORWARD_STATE_FILE" ] || forward_doctor || failed=1
   return "$failed"
@@ -7798,10 +8160,6 @@ nobrand_restore_protocol_runtimes() {
   if [ -e "${NOBRAND_STATE_DIR}/splicore/current" ] || nb_splicore_installed; then
     nb_splicore_call adopt-snapshot || return 1
   fi
-  if vless_sudoku_state_exists; then
-    NOBRAND_XRAY_SPECIALIZED=1 nobrand_install_xray_runtime 0 || return 1
-    nobrand_write_vless_sudoku_service || return 1
-  fi
   forward_realm_restore_runtime
 }
 
@@ -7816,14 +8174,8 @@ nobrand_fresh_restore_runtime_preflight() {
 
 nobrand_remove_fresh_restore_protocol_resources() {
   nb_splicore_legacy_preflight || return 1
-  local failed=0 port
+  local failed=0
   if nb_splicore_installed; then nb_splicore_call purge || failed=1; fi
-  if vless_sudoku_state_exists; then
-    port="$(vless_sudoku_state_field listen_port 2>/dev/null || true)"
-    nobrand_remove_vless_sudoku_service || failed=1
-    [ -z "$port" ] || nb_firewall_close_pairs "TCP|${port}" || failed=1
-    nobrand_remove_xray_runtime_files || failed=1
-  fi
   return "$failed"
 }
 
@@ -8214,7 +8566,7 @@ nobrand_uninstall_postcondition() {
 
 nobrand_uninstall_impl() {
   nb_splicore_legacy_preflight || return 1
-  local port safe_state safe_config safe_lib pairs="" failed=0
+  local safe_state safe_config safe_lib pairs="" failed=0
   safe_state="$(nb_assert_safe_nobrand_root "$NOBRAND_STATE_DIR" NOBRAND_STATE_DIR)" || return 1
   safe_config="$(nb_assert_safe_nobrand_root "$NOBRAND_CONFIG_DIR" NOBRAND_CONFIG_DIR)" || return 1
   safe_lib="$(nb_assert_safe_nobrand_root "$NOBRAND_LIB_DIR" NOBRAND_LIB_DIR)" || return 1
@@ -8240,11 +8592,6 @@ nobrand_uninstall_impl() {
   elif command -v nft >/dev/null 2>&1 \
        && nft list table "$NOBRAND_FORWARD_NFT_FAMILY" "$NOBRAND_FORWARD_NFT_TABLE" >/dev/null 2>&1; then
     forward_remove_owned_nft_table || failed=1
-  fi
-  if vless_sudoku_state_exists; then
-    port="$(vless_sudoku_state_field listen_port 2>/dev/null || true)"
-    nobrand_remove_vless_sudoku_service || failed=1
-    [ -z "$port" ] || nb_firewall_close_pairs "TCP|${port}" || failed=1
   fi
   # 清理可能由失败事务留下、但仍明确记录为 NoBrand-owned 的 firewall rows。
   if [ -s "$NOBRAND_FIREWALL_OWNED_STATE" ]; then
@@ -8410,7 +8757,6 @@ nobrand_stop_all_services() {
   nb_splicore_legacy_preflight || return 1
   local failed=0
   if nb_splicore_installed; then nb_splicore_call stop || return 1; fi
-  if vless_sudoku_state_exists; then nobrand_vless_sudoku_service_action stop || failed=1; fi
   if [ -s "$NOBRAND_FORWARD_STATE_FILE" ]; then forward_realm_service_action stop || failed=1; fi
   return "$failed"
 }
@@ -8418,7 +8764,6 @@ nobrand_stop_all_services() {
 nobrand_start_enabled_services() {
   nb_splicore_legacy_preflight || return 1
   if nb_splicore_installed; then nb_splicore_call start || return 1; fi
-  if vless_sudoku_state_exists; then nobrand_vless_sudoku_service_action start || return 1; fi
   forward_realm_restore_runtime
 }
 
@@ -8481,12 +8826,15 @@ nb_splicore_legacy_preflight() {
       return 1
     fi
   done
-  # The shared Xray binary is also owned by the existing Sudoku exception.
-  if { [ -e "$NOBRAND_XRAY_BIN" ] || [ -L "$NOBRAND_XRAY_BIN" ]; } \
-     && [ ! -f "$NOBRAND_VLESS_STATE_FILE" ]; then
-    nb_splicore_legacy_notice
-    return 1
-  fi
+  # Historical Xray deployments are evidence for read-only refusal only.
+  for path in "$NOBRAND_XRAY_BIN" "$NOBRAND_XRAY_ASSET_DIR" "$NOBRAND_VLESS_STATE_FILE" "$NOBRAND_VLESS_CONFIG_FILE" \
+      "${NOBRAND_VLESS_SYSTEMD_SERVICE}" "${NOBRAND_VLESS_OPENRC_SERVICE}"; do
+    case "$path" in /etc/*) path="${system}${path}" ;; esac
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      nb_splicore_legacy_notice
+      return 1
+    fi
+  done
   if [ -e "$registry" ] || [ -L "$registry" ]; then
     if [ -L "$registry" ] || ! nb_splicore_json_marker "$registry" architecture splicore-native; then
       nb_splicore_legacy_notice
@@ -8505,7 +8853,7 @@ nb_splicore_legacy_preflight() {
 
 nb_splicore_call() (
   export NOBRAND_STATE_DIR NOBRAND_CONFIG_DIR NOBRAND_LIB_DIR NOBRAND_LIFECYCLE_DIR
-  export NOBRAND_LIFECYCLE_LOCK_FILE
+  export NOBRAND_LIFECYCLE_LOCK_FILE NOBRAND_LIFECYCLE_TX_FILE
   export PORT ADVERTISE_HOST ADVERTISE_PORT USERNAME PASSWORD PROTOCOL MTU
   export MULTIPLEXING HANDSHAKE_MODE TRAFFIC_PATTERN LOW_ENTROPY_MODE
   export USER_QUOTA_MB USER_EXPIRE USER_BANDWIDTH_MBPS USER_PACKAGE
@@ -8513,6 +8861,7 @@ nb_splicore_call() (
   export PROTOCOL_CLI PORT_CLI PASSWORD_CLI ADVERTISE_CLI
   export SNELL_VERSION SNELL_PSK SNELL_QUIC_PROXY TUIC_SNI TUIC_USER HY2_SNI SCRIPT_VERSION
   export VLESS_REALITY_TARGET VLESS_REALITY_TARGET_PORT NOBRAND_SPLICORE_LISTEN NOBRAND_SPLICORE_INGRESS_ID
+  export NOBRAND_SPLICORE_EXPORT_FORMAT NOBRAND_SPLICORE_CLIENT_VERSION
   NOBRAND_SPLICORE_MANAGER_SOURCE="$(nobrand_manager_source_path 2>/dev/null || true)"
   export NOBRAND_SPLICORE_MANAGER_SOURCE
   command -v python3 >/dev/null 2>&1 || {
@@ -8531,11 +8880,30 @@ nb_splicore_installed() {
 
 nb_splicore_protocol() {
   nb_splicore_legacy_preflight || return 1
-  local protocol="$1" operation="$2" selector="${3:-}" output human_output=0
+  local protocol="$1" operation="$2" selector="${3:-}" output conflict transport human_output=0
+  local sudoku_status sudoku_port_input="" sudoku_password_input=""
   local -a runtime_options=()
   if nobrand_ssh_confirmation_pending; then
     nobrand_pending_ssh_confirmation_notice
     return 1
+  fi
+  # Fresh hosts must reach dependency provisioning before any Python API call.
+  if [ "$protocol:$operation" = vless-sudoku:install ] && nb_splicore_installed; then
+    sudoku_status="$(nb_splicore_call protocol --protocol vless-sudoku --operation status)" || return 1
+    if printf '%s\n' "$sudoku_status" | jq -e --arg selector "${selector:-primary}" '.nodes[]? | select(.name==$selector or .id==$selector)' >/dev/null; then
+      operation=reconfigure
+      if [ "${YES:-0}" -ne 1 ] && [ "${DRY_RUN:-0}" -ne 1 ]; then
+        if [ "${PORT_CLI:-0}" -eq 0 ]; then
+          PORT="$(printf '%s\n' "$sudoku_status" | jq -r --arg selector "${selector:-primary}" '.nodes[] | select(.name==$selector or .id==$selector) | .listener.port')"
+          read_tty sudoku_port_input "$(t '监听端口（留空保留）: ' 'Listen port (blank preserves): ')${PORT}" || return 1
+          if [ -n "$sudoku_port_input" ]; then PORT="$sudoku_port_input"; PORT_CLI=1; fi
+        fi
+        if [ "${PASSWORD_CLI:-0}" -eq 0 ]; then
+          read_tty sudoku_password_input "$(t 'Sudoku 密码（留空保留）: ' 'Sudoku password (blank preserves): ')" || return 1
+          if [ -n "$sudoku_password_input" ]; then PASSWORD="$sudoku_password_input"; PASSWORD_CLI=1; fi
+        fi
+      fi
+    fi
   fi
   if [ "$protocol" = mieru ]; then
     apply_requested_profile_preserving_cli || return 1
@@ -8586,13 +8954,17 @@ nb_splicore_protocol() {
       fi
     fi
     if [ -z "${PORT:-}" ] && [ "${DRY_RUN:-0}" -ne 1 ]; then
-      case "$protocol" in snell|mieru|vless-reality) PORT="$(nb_select_available_port TCP "$INGRESS_PROFILE_ID")" ;; *) PORT="$(nb_select_available_port UDP "$INGRESS_PROFILE_ID")" ;; esac
+      case "$protocol" in snell|mieru|vless-reality|vless-sudoku) PORT="$(nb_select_available_port TCP "$INGRESS_PROFILE_ID")" ;; *) PORT="$(nb_select_available_port UDP "$INGRESS_PROFILE_ID")" ;; esac
       [ -n "$PORT" ] || return 1
     fi
     if [ -n "${PORT:-}" ]; then
       nb_valid_port "$PORT" || return 1
       if [ "${DRY_RUN:-0}" -ne 1 ]; then
-        nb_ingress_port_is_reserved "$INGRESS_PROFILE_ID" "$PORT" && return 1
+        if nb_ingress_port_is_reserved "$INGRESS_PROFILE_ID" "$PORT"; then
+          nb_describe_port_conflict TCP "$PORT" "$INGRESS_PROFILE_ID" >&2
+          return 1
+        fi
+        nb_warn_if_outside_recommended_range "$PORT" "$INGRESS_PROFILE_ID"
       fi
     fi
     if [ "${YES:-0}" -ne 1 ] && [ "${DRY_RUN:-0}" -ne 1 ] && [ "${ADVERTISE_CLI:-0}" -eq 0 ]; then
@@ -8607,13 +8979,33 @@ nb_splicore_protocol() {
       export NOBRAND_SPLICORE_AUTO_HOST
     fi
   fi
+  if [ "$operation" = install ] && [ "${DRY_RUN:-0}" -ne 1 ]; then
+    if [ -z "${ADVERTISE_HOST:-}" ]; then
+      ADVERTISE_HOST="$(nb_ingress_profile_display_host "$INGRESS_PROFILE_ID" 2>/dev/null || true)"
+      if [ -n "$ADVERTISE_HOST" ]; then
+        ADVERTISE_PORT="$(nb_ingress_profile_display_port "$INGRESS_PROFILE_ID" "$PORT")"
+      fi
+    fi
+    if [ -n "${ADVERTISE_HOST:-}" ] && [ -z "${ADVERTISE_PORT:-}" ]; then
+      ADVERTISE_PORT="$PORT"
+    fi
+    nb_require_explicit_endpoint_noninteractive || return 1
+    transport=TCP
+    case "$protocol" in tuic|hysteria2) transport=UDP ;; mieru) transport="${PROTOCOL:-TCP}" ;; esac
+    conflict="$(nb_endpoint_conflict_owner "$transport" "${ADVERTISE_HOST:-${NOBRAND_SPLICORE_AUTO_HOST:-}}" "${ADVERTISE_PORT:-$PORT}" 2>/dev/null || true)"
+    if [ -n "$conflict" ]; then
+      warn "DISPLAY_ENDPOINT_CONFLICT: $conflict"
+      return 1
+    fi
+  fi
   [ "${DRY_RUN:-0}" -ne 1 ] || runtime_options+=(--dry-run)
   [ -z "${NOBRAND_SPLICORE_ARTIFACTS:-}" ] || runtime_options+=(--artifacts "$NOBRAND_SPLICORE_ARTIFACTS")
   output="$(nb_splicore_call protocol --protocol "$protocol" --operation "$operation" \
     --selector "$selector" "${runtime_options[@]}")" || return $?
   case "$operation:$protocol" in
+    export:vless-sudoku|subscription:vless-sudoku) ;;
     show:*|client-config:*|export:*|user-show:*) human_output=1 ;;
-    install:*|user-add:mieru)
+    install:*|reconfigure:vless-sudoku|user-add:mieru)
       if [ "${DRY_RUN:-0}" -ne 1 ]; then human_output=1; fi
       ;;
   esac
@@ -8669,6 +9061,13 @@ nb_splicore_route_main() {
     nobrand-vless-reality)
       [[ "${VLESS_REALITY_ACTION:-menu}" != menu && "${VLESS_REALITY_ACTION:-menu}" != help ]] || { NOBRAND_SPLICORE_HANDLED=0; return 0; }
       nb_splicore_protocol vless-reality "$VLESS_REALITY_ACTION" "${VLESS_REALITY_NAME:-}"
+      ;;
+    nobrand-vless-sudoku)
+      [[ "${VLESS_SUDOKU_ACTION:-menu}" != menu && "${VLESS_SUDOKU_ACTION:-menu}" != help ]] || { NOBRAND_SPLICORE_HANDLED=0; return 0; }
+      local sudoku_operation="$VLESS_SUDOKU_ACTION" sudoku_selector=primary
+      [ "$sudoku_operation" != smoke ] || sudoku_operation=doctor
+      [ "$sudoku_operation" != subscription ] || sudoku_selector=""
+      nb_splicore_protocol vless-sudoku "$sudoku_operation" "$sudoku_selector"
       ;;
     install|reconfigure|upgrade|uninstall|start|stop|restart|user-add|user-del|user-show|user-list|user-enable|user-disable|user-set-endpoint|user-set-quota|user-set-expire|user-set-rate|user-scan|user-quota-reset|profile-config|traffic-config|low-entropy-config|client-modes-config|mtu-config|version-channel)
       nb_splicore_protocol mieru "$ACTION" "${USERNAME:-${USER_DEL_NAME:-${USER_SHOW_NAME:-}}}"
@@ -8743,7 +9142,7 @@ ensure_management_dependencies() {
   esac
 }
 
-# ---------- NoBrand isolated Xray-core runtime / Hysteria2 service ----------
+# ---------- NoBrand shared runtime dependencies ----------
 
 nobrand_prepare_common() {
   local pm
@@ -8774,61 +9173,6 @@ nobrand_prepare_common() {
   nb_init_state_layout
 }
 
-nobrand_xray_arch_asset() {
-  case "${NOBRAND_TEST_ARCH:-$(uname -m)}" in
-    x86_64|amd64) printf 'Xray-linux-64.zip' ;;
-    aarch64|arm64) printf 'Xray-linux-arm64-v8a.zip' ;;
-    *) return 1 ;;
-  esac
-}
-
-nobrand_xray_tested_digest() {
-  case "$1" in
-    Xray-linux-64.zip) printf '%s' "$TESTED_XRAY_AMD64_SHA256" ;;
-    Xray-linux-arm64-v8a.zip) printf '%s' "$TESTED_XRAY_ARM64_SHA256" ;;
-    *) return 1 ;;
-  esac
-}
-
-nobrand_xray_version() {
-  local output version
-  [ -x "$NOBRAND_XRAY_BIN" ] || return 1
-  output="$("$NOBRAND_XRAY_BIN" version 2>/dev/null)" || return 1
-  version="$(printf '%s\n' "$output" \
-    | sed -nE 's/^Xray[[:space:]]+([^[:space:]]+).*/\1/p' | head -n1)"
-  [ -n "$version" ] || return 1
-  printf '%s' "$version"
-}
-
-nobrand_xray_release_info() {
-  local asset metadata version url digest expected
-  asset="$(nobrand_xray_arch_asset)" || {
-    warn "$(t 'NoBrand Sudoku 的 Xray runtime 仅测试 amd64/arm64' \
-      'NoBrand Sudoku Xray runtime is tested only on amd64/arm64')"
-    return 1
-  }
-  metadata="$(mktemp_file .json)" || return 1
-  if ! curl -fsSL --connect-timeout 15 --max-time 90 \
-      --retry 3 --retry-delay 2 --retry-all-errors \
-      -H 'Accept: application/vnd.github+json' \
-      -H 'User-Agent: NoBrand-OneClick' "$NOBRAND_XRAY_RELEASE_API" -o "$metadata"; then
-    rm -f "$metadata"
-    return 1
-  fi
-  IFS=$'\t' read -r version url digest < <(jq -r --arg asset "$asset" '
-    .tag_name as $version |
-    first(.assets[]? | select(.name == $asset)) as $matched |
-    select($matched != null) |
-    [$version, $matched.browser_download_url, ($matched.digest // "")] | @tsv
-  ' "$metadata")
-  local rc=$?
-  rm -f "$metadata"
-  [ "$rc" -eq 0 ] && [ "$version" = "v${TESTED_XRAY_VERSION}" ] || return 1
-  expected="$(nobrand_xray_tested_digest "$asset")" || return 1
-  [ "$digest" = "sha256:${expected}" ] || return 1
-  printf '%s\t%s\t%s\n' "$version" "$url" "$digest"
-}
-
 nobrand_sha256_file() {
   local file="$1"
   if command -v sha256sum >/dev/null 2>&1; then
@@ -8838,362 +9182,11 @@ nobrand_sha256_file() {
   fi
 }
 
-nobrand_verify_release_digest() {
-  local file="$1" digest="${2:-}" expected actual
-  [ -n "$digest" ] || {
-    info "$(t '上游 release API 未提供资产 hash；已继续执行 archive/ELF/runtime 校验' \
-      'Upstream release API has no asset hash; archive/ELF/runtime validation will still run')"
-    return 0
-  }
-  case "$digest" in
-    sha256:*) expected="${digest#sha256:}" ;;
-    *) warn "不支持的上游 digest: $digest"; return 1 ;;
-  esac
-  [[ "$expected" =~ ^[0-9A-Fa-f]{64}$ ]] || return 1
-  actual="$(nobrand_sha256_file "$file")" || return 1
-  [ "$(printf '%s' "$actual" | tr '[:upper:]' '[:lower:]')" = \
-    "$(printf '%s' "$expected" | tr '[:upper:]' '[:lower:]')" ]
-}
-
-nobrand_download_xray_candidate() {
-  local output="$1" asset_output_dir="${2:-}" info_line version url digest archive_dir candidate asset
-  info_line="$(nobrand_xray_release_info)" || return 1
-  IFS=$'\t' read -r version url digest <<<"$info_line"
-  [[ "$url" = https://github.com/XTLS/Xray-core/releases/download/* ]] || {
-    warn "拒绝非 XTLS 官方 HTTPS 资产: $url"
-    return 1
-  }
-  archive_dir="$(mktemp_dir)" || return 1
-  if ! curl -fL --connect-timeout 15 --max-time 180 \
-      --retry 3 --retry-delay 2 --retry-all-errors \
-      -H 'User-Agent: NoBrand-OneClick' "$url" -o "$archive_dir/xray.zip" \
-     || ! nobrand_verify_release_digest "$archive_dir/xray.zip" "$digest" \
-     || ! unzip -t "$archive_dir/xray.zip" >/dev/null \
-     || ! unzip -qo "$archive_dir/xray.zip" -d "$archive_dir/unpacked"; then
-    rm -rf -- "$archive_dir"
-    return 1
-  fi
-  candidate="$archive_dir/unpacked/xray"
-  [ -f "$candidate" ] || candidate="$(find "$archive_dir/unpacked" -type f -name xray | head -n1)"
-  [ -n "$candidate" ] && [ -f "$candidate" ] || { rm -rf -- "$archive_dir"; return 1; }
-  chmod 0755 "$candidate" || { rm -rf -- "$archive_dir"; return 1; }
-  "$candidate" version >/dev/null 2>&1 || { rm -rf -- "$archive_dir"; return 1; }
-  install -m 0755 "$candidate" "$output" || { rm -rf -- "$archive_dir"; return 1; }
-  if [ -n "$asset_output_dir" ]; then
-    mkdir -p "$asset_output_dir" || { rm -rf -- "$archive_dir"; return 1; }
-    for asset in geoip.dat geosite.dat; do
-      [ -s "$archive_dir/unpacked/$asset" ] \
-        || { rm -rf -- "$archive_dir"; return 1; }
-      install -m 0644 "$archive_dir/unpacked/$asset" "$asset_output_dir/$asset" \
-        || { rm -rf -- "$archive_dir"; return 1; }
-    done
-  fi
-  info "$(t "NoBrand 独立 Xray-core 资产已解析: ${version}" \
-    "NoBrand isolated Xray-core asset resolved: ${version}")"
-  rm -rf -- "$archive_dir"
-}
-
-nobrand_xray_asset_dir_safe() {
-  [ -n "${NOBRAND_LIB_DIR:-}" ] && [ -n "${NOBRAND_XRAY_ASSET_DIR:-}" ] \
-    && [ "$NOBRAND_XRAY_ASSET_DIR" != / ] \
-    && [[ "$NOBRAND_XRAY_ASSET_DIR" == "$NOBRAND_LIB_DIR"/* ]]
-}
-
-nobrand_xray_assets_ready() {
-  nobrand_xray_asset_dir_safe \
-    && [ -s "$NOBRAND_XRAY_ASSET_DIR/geoip.dat" ] \
-    && [ -s "$NOBRAND_XRAY_ASSET_DIR/geosite.dat" ]
-}
-
-nobrand_remove_xray_runtime_files() {
-  nobrand_xray_asset_dir_safe || return 1
-  rm -f "$NOBRAND_XRAY_BIN" || return 1
-  rm -rf -- "$NOBRAND_XRAY_ASSET_DIR"
-}
-
-nobrand_install_xray_runtime() {
-  local force="${1:-0}" candidate candidate_assets snapshot new_assets
-  local had_runtime=0 had_assets=0 replace_runtime=1 rc=0
-  nobrand_xray_asset_dir_safe || return 1
-  if [ -x "$NOBRAND_XRAY_BIN" ] && nobrand_xray_assets_ready && [ "$force" -ne 1 ]; then
-    return 0
-  fi
-  if [ -x "$NOBRAND_XRAY_BIN" ] && [ "$force" -ne 1 ]; then
-    [ "$(nobrand_xray_version 2>/dev/null || true)" = "$TESTED_XRAY_VERSION" ] || return 1
-    replace_runtime=0
-  fi
-  candidate="$(mktemp_file .xray)" || return 1
-  candidate_assets="$(mktemp_dir)" || { rm -f "$candidate"; return 1; }
-  if ! nobrand_download_xray_candidate "$candidate" "$candidate_assets"; then
-    rm -f "$candidate"
-    rm -rf -- "$candidate_assets"
-    warn "$(t 'NoBrand 独立 Xray-core 下载或校验失败' \
-      'NoBrand isolated Xray-core download or validation failed')"
-    return 1
-  fi
-  snapshot="$(mktemp_dir)" || { rm -f "$candidate"; rm -rf -- "$candidate_assets"; return 1; }
-  if [ -e "$NOBRAND_XRAY_BIN" ]; then
-    cp -a "$NOBRAND_XRAY_BIN" "$snapshot/xray" || rc=1
-    had_runtime=1
-  fi
-  if [ -d "$NOBRAND_XRAY_ASSET_DIR" ] && [ ! -L "$NOBRAND_XRAY_ASSET_DIR" ]; then
-    cp -a "$NOBRAND_XRAY_ASSET_DIR" "$snapshot/assets" || rc=1
-    had_assets=1
-  fi
-  new_assets="${NOBRAND_XRAY_ASSET_DIR}.new.$$"
-  if [ "$rc" -eq 0 ]; then
-    nb_lifecycle_mark_protocol_mutation_started "${NOBRAND_LIFECYCLE_SCOPE:-}" || {
-      rm -f "$candidate"
-      rm -rf -- "$candidate_assets" "$snapshot"
-      return 1
-    }
-    mkdir -p "$(dirname "$NOBRAND_XRAY_BIN")" "$(dirname "$NOBRAND_XRAY_ASSET_DIR")" \
-      && rm -rf -- "$new_assets" \
-      && mkdir -p "$new_assets" \
-      && install -m 0644 "$candidate_assets/geoip.dat" "$new_assets/geoip.dat" \
-      && install -m 0644 "$candidate_assets/geosite.dat" "$new_assets/geosite.dat" || rc=1
-  fi
-  if [ "$rc" -eq 0 ] && [ "$replace_runtime" -eq 1 ]; then
-    install -m 0755 "$candidate" "${NOBRAND_XRAY_BIN}.new" \
-      && mv -f "${NOBRAND_XRAY_BIN}.new" "$NOBRAND_XRAY_BIN" \
-      && [ "$(nobrand_xray_version 2>/dev/null || true)" = "$TESTED_XRAY_VERSION" ] || rc=1
-  fi
-  if [ "$rc" -eq 0 ]; then
-    rm -rf -- "$NOBRAND_XRAY_ASSET_DIR" \
-      && mv "$new_assets" "$NOBRAND_XRAY_ASSET_DIR" \
-      && nobrand_xray_assets_ready \
-      && nobrand_xray_validate_managed_configs "$NOBRAND_XRAY_BIN" || rc=1
-  fi
-  rm -f "$candidate" "${NOBRAND_XRAY_BIN}.new"
-  rm -rf -- "$candidate_assets" "$new_assets"
-  if [ "$rc" -ne 0 ]; then
-    rm -f "$NOBRAND_XRAY_BIN"
-    [ "$had_runtime" -eq 0 ] || install -m 0755 "$snapshot/xray" "$NOBRAND_XRAY_BIN" 2>/dev/null || true
-    rm -rf -- "$NOBRAND_XRAY_ASSET_DIR"
-    [ "$had_assets" -eq 0 ] \
-      || cp -a "$snapshot/assets" "$NOBRAND_XRAY_ASSET_DIR" 2>/dev/null || true
-    rm -rf -- "$snapshot"
-    return 1
-  fi
-  rm -rf -- "$snapshot"
-}
-
-nobrand_xray_redact_validation_log() {
-  local config="$1" log="$2"
-  if ! command -v python3 >/dev/null 2>&1; then
-    printf '%s\n' "$(t '[校验详情已隐藏：脱敏器不可用]' \
-      '[validation details suppressed: redactor unavailable]')" >&2
-    return 0
-  fi
-  python3 - "$config" "$log" >&2 <<'PY' || {
-import json
-import re
-import sys
-
-config_path, log_path = sys.argv[1:3]
-sensitive_keys = {
-    "auth", "password", "privatekey", "publickey", "uuid", "shortid", "shortids"
-}
-
-try:
-    with open(config_path, encoding="utf-8") as handle:
-        config = json.load(handle)
-    with open(log_path, encoding="utf-8", errors="replace") as handle:
-        text = handle.read()
-except Exception:
-    raise SystemExit(1)
-
-secrets = set()
-
-def collect(value):
-    if isinstance(value, dict):
-        for key, child in value.items():
-            if str(key).casefold() in sensitive_keys:
-                values = child if isinstance(child, list) else [child]
-                for item in values:
-                    if isinstance(item, (str, int, float)) and str(item):
-                        secrets.add(str(item))
-            collect(child)
-    elif isinstance(value, list):
-        for child in value:
-            collect(child)
-
-collect(config)
-for secret in sorted(secrets, key=len, reverse=True):
-    text = text.replace(secret, "***REDACTED***")
-
-field = r'(?:auth|password|privateKey|publicKey|uuid|shortId|shortIds)'
-text = re.sub(
-    rf'(?i)((?:["\']?{field}["\']?)\s*[:=]\s*)(?:"[^"]*"|\'[^\']*\'|[^\s,}}\]]+)',
-    lambda match: match.group(1) + '***REDACTED***',
-    text,
-)
-sys.stdout.write(text)
-PY
-    printf '%s\n' "$(t '[校验详情已隐藏：脱敏失败]' \
-      '[validation details suppressed: redaction failed]')" >&2
-  }
-}
-
-nobrand_xray_test_config() {
-  local config="$1" binary="${2:-$NOBRAND_XRAY_BIN}" log
-  [ -x "$binary" ] && jq empty "$config" >/dev/null 2>&1 || return 1
-  log="$(mktemp_file .log)" || return 1
-  if ! XRAY_LOCATION_ASSET="$NOBRAND_XRAY_ASSET_DIR" \
-      "$binary" run -test -c "$config" >"$log" 2>&1; then
-    warn "$(t 'NoBrand Xray 配置校验失败（已脱敏）:' \
-      'NoBrand Xray config validation failed (redacted):')"
-    nobrand_xray_redact_validation_log "$config" "$log"
-    rm -f "$log"
-    return 1
-  fi
-  rm -f "$log"
-}
-
-nobrand_xray_validate_managed_configs() {
-  [ ! -f "$NOBRAND_VLESS_CONFIG_FILE" ] || nobrand_xray_test_config "$NOBRAND_VLESS_CONFIG_FILE" "${1:-$NOBRAND_XRAY_BIN}"
-}
-
-nobrand_restore_xray_upgrade_snapshot() {
-  local snapshot="$1" had_runtime="$2" had_assets="$3" was_active="$4"
-  if [ "$had_runtime" = 1 ]; then install -m 0755 "$snapshot/xray" "$NOBRAND_XRAY_BIN" || return 1
-  else rm -f "$NOBRAND_XRAY_BIN"; fi
-  nobrand_xray_asset_dir_safe || return 1
-  rm -rf -- "$NOBRAND_XRAY_ASSET_DIR"
-  [ "$had_assets" = 0 ] || cp -a "$snapshot/xray-assets" "$NOBRAND_XRAY_ASSET_DIR" || return 1
-  [ ! -f "$snapshot/state" ] || cp -a "$snapshot/state" "$NOBRAND_VLESS_STATE_FILE" || return 1
-  [ "$was_active" = 0 ] || nobrand_vless_sudoku_service_action restart
-}
-
-nobrand_upgrade_xray_runtime() {
-  local snapshot had_runtime=0 had_assets=0 was_active=0 failed=0
-  vless_sudoku_state_exists || return 1
-  nobrand_prepare_common || return 1
-  admin_lock_acquire || return 1
-  snapshot="$(mktemp_dir)" || { admin_lock_release; return 1; }
-  if [ -f "$NOBRAND_XRAY_BIN" ]; then cp -a "$NOBRAND_XRAY_BIN" "$snapshot/xray" || failed=1; had_runtime=1; fi
-  if [ -d "$NOBRAND_XRAY_ASSET_DIR" ]; then cp -a "$NOBRAND_XRAY_ASSET_DIR" "$snapshot/xray-assets" || failed=1; had_assets=1; fi
-  cp -a "$NOBRAND_VLESS_STATE_FILE" "$snapshot/state" || failed=1
-  nobrand_vless_sudoku_service_active && was_active=1
-  if [ "$failed" = 0 ]; then
-    nobrand_install_xray_runtime 1 && nobrand_xray_validate_managed_configs || failed=1
-    if [ "$failed" = 0 ] && [ "$was_active" = 1 ]; then
-      nobrand_vless_sudoku_service_action restart && vless_sudoku_running || failed=1
-    fi
-    [ "$failed" != 0 ] || vless_sudoku_refresh_runtime_metadata || failed=1
-  fi
-  if [ "$failed" != 0 ]; then
-    nobrand_restore_xray_upgrade_snapshot "$snapshot" "$had_runtime" "$had_assets" "$was_active" || warn 'Sudoku runtime rollback failed'
-  fi
-  rm -rf -- "$snapshot"
-  admin_lock_release
-  return "$failed"
-}
-
 # Ordinary protocol runtime and exports are managed by the native Splicore adapter.
 
-# ---------- NoBrand VLESS Sudoku isolated Xray service ----------
-
-nobrand_write_vless_sudoku_service() {
-  local manager tmp
-  manager="$(nb_service_manager)"
-  case "$manager" in
-    systemd)
-      tmp="$(mktemp_file .service)" || return 1
-      cat >"$tmp" <<EOF
-# Managed by NoBrand-OneClick
-[Unit]
-Description=NoBrand Plain VLESS FinalMask Sudoku (Xray-core)
-Documentation=https://github.com/ike-sh/NoBrand-OneClick
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=${NOBRAND_VLESS_CONFIG_DIR}
-ExecStart=${NOBRAND_XRAY_BIN} run -c ${NOBRAND_VLESS_CONFIG_FILE}
-Restart=on-failure
-RestartSec=5
-LimitNOFILE=1048576
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=full
-ProtectHome=true
-ReadWritePaths=${NOBRAND_VLESS_CONFIG_DIR} ${NOBRAND_VLESS_STATE_DIR}
-
-[Install]
-WantedBy=multi-user.target
-EOF
-      grep -qF "ExecStart=${NOBRAND_XRAY_BIN} run -c ${NOBRAND_VLESS_CONFIG_FILE}" "$tmp" \
-        || { rm -f "$tmp"; return 1; }
-      install -m 0644 "$tmp" "${NOBRAND_VLESS_SYSTEMD_SERVICE}.new" \
-        && mv -f "${NOBRAND_VLESS_SYSTEMD_SERVICE}.new" "$NOBRAND_VLESS_SYSTEMD_SERVICE" \
-        || { rm -f "$tmp" "${NOBRAND_VLESS_SYSTEMD_SERVICE}.new"; return 1; }
-      rm -f "$tmp"
-      systemctl daemon-reload || return 1
-      systemctl enable "$NOBRAND_VLESS_SERVICE_NAME" >/dev/null 2>&1
-      ;;
-    openrc)
-      tmp="$(mktemp_file .openrc)" || return 1
-      cat >"$tmp" <<EOF
-#!/sbin/openrc-run
-# Managed by NoBrand-OneClick
-name="NoBrand Plain VLESS FinalMask Sudoku"
-description="NoBrand Plain VLESS FinalMask Sudoku (Xray-core)"
-command="${NOBRAND_XRAY_BIN}"
-command_args="run -c ${NOBRAND_VLESS_CONFIG_FILE}"
-command_background=true
-pidfile="/run/nobrand-vless-sudoku.pid"
-output_log="/var/log/nobrand-vless-sudoku.log"
-error_log="/var/log/nobrand-vless-sudoku.err"
-depend() { use net; after firewall; }
-EOF
-      install -m 0755 "$tmp" "${NOBRAND_VLESS_OPENRC_SERVICE}.new" \
-        && mv -f "${NOBRAND_VLESS_OPENRC_SERVICE}.new" "$NOBRAND_VLESS_OPENRC_SERVICE" \
-        || { rm -f "$tmp" "${NOBRAND_VLESS_OPENRC_SERVICE}.new"; return 1; }
-      rm -f "$tmp"
-      rc-update add "$NOBRAND_VLESS_SERVICE_NAME" default >/dev/null 2>&1
-      ;;
-    *) return 1 ;;
-  esac
-}
-
-nobrand_vless_sudoku_service_action() {
-  local action="$1" manager
-  manager="$(nb_service_manager)"
-  case "$manager" in
-    systemd)
-      [ "$action" != restart ] || systemctl daemon-reload
-      systemctl "$action" "$NOBRAND_VLESS_SERVICE_NAME"
-      ;;
-    openrc) rc-service "$NOBRAND_VLESS_SERVICE_NAME" "$action" ;;
-    *) return 1 ;;
-  esac
-}
-
-nobrand_vless_sudoku_service_active() {
-  nb_service_is_active "$NOBRAND_VLESS_SERVICE_NAME" "$NOBRAND_VLESS_SERVICE_NAME"
-}
-
-nobrand_remove_vless_sudoku_service() {
-  local manager
-  manager="$(nb_service_manager)"
-  nobrand_vless_sudoku_service_action stop >/dev/null 2>&1 || true
-  case "$manager" in
-    systemd)
-      systemctl disable "$NOBRAND_VLESS_SERVICE_NAME" >/dev/null 2>&1 || true
-      rm -f "$NOBRAND_VLESS_SYSTEMD_SERVICE"
-      systemctl daemon-reload 2>/dev/null || true
-      ;;
-    openrc)
-      rc-update del "$NOBRAND_VLESS_SERVICE_NAME" default >/dev/null 2>&1 || true
-      rm -f "$NOBRAND_VLESS_OPENRC_SERVICE"
-      ;;
-  esac
-}
+# ---------- Historical Sudoku ownership markers ----------
+# These paths are inspected read-only by nb_splicore_legacy_preflight.
+# No independent Sudoku service is created: all new nodes share Splicore.
 
 # Ordinary protocol runtime and exports are managed by the native Splicore adapter.
 
@@ -9427,895 +9420,17 @@ nobrand_run_hy2_action() {
   esac
 }
 
-# ---------- Plain VLESS + FinalMask Sudoku over TCP ----------
-
-vless_sudoku_state_exists() {
-  [ -s "$NOBRAND_VLESS_STATE_FILE" ] && jq empty "$NOBRAND_VLESS_STATE_FILE" >/dev/null 2>&1
-}
-
-vless_sudoku_state_field() {
-  local field="$1"
-  vless_sudoku_state_exists || return 1
-  jq -r --arg field "$field" \
-    'if has($field) and .[$field] != null then .[$field] else empty end' "$NOBRAND_VLESS_STATE_FILE"
-}
-
-vless_sudoku_finalmask_json() {
-  local password="$1"
-  [[ "$password" =~ ^[0-9A-Fa-f]{32}$ ]] || return 1
-  jq -cn --arg password "$password" '{
-    tcp: [{
-      type: "sudoku",
-      settings: {
-        password: $password,
-        ascii: "prefer_ascii",
-        paddingMin: 0,
-        paddingMax: 3
-      }
-    }]
-  }'
-}
-
-vless_sudoku_valid_uuid() {
-  [[ "${1:-}" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]]
-}
-
-vless_sudoku_generate_uuid() {
-  local value=""
-  if [ -x "$NOBRAND_XRAY_BIN" ]; then
-    value="$("$NOBRAND_XRAY_BIN" uuid 2>/dev/null | tr -d '\r\n' || true)"
-  fi
-  if ! vless_sudoku_valid_uuid "$value" && command -v uuidgen >/dev/null 2>&1; then
-    value="$(uuidgen 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr -d '\r\n' || true)"
-  fi
-  if ! vless_sudoku_valid_uuid "$value" && [ -r /proc/sys/kernel/random/uuid ]; then
-    value="$(tr -d '\r\n' </proc/sys/kernel/random/uuid)"
-  fi
-  if ! vless_sudoku_valid_uuid "$value" && command -v openssl >/dev/null 2>&1; then
-    value="$(openssl rand -hex 16 2>/dev/null \
-      | sed -E 's/(.{8})(.{4})(.{4})(.{4})(.{12})/\1-\2-\3-\4-\5/')"
-  fi
-  vless_sudoku_valid_uuid "$value" || return 1
-  printf '%s' "$value"
-}
-
-vless_sudoku_generate_server_config() {
-  local output="$1" listen="$2" port="$3" uuid="$4" password="$5" finalmask
-  finalmask="$(vless_sudoku_finalmask_json "$password")" || return 1
-  jq -n --arg tag "$NOBRAND_VLESS_TAG" --arg listen "$listen" --arg port "$port" \
-    --arg uuid "$uuid" --argjson finalmask "$finalmask" '
-    {
-      "log": {"loglevel":"warning"},
-      "inbounds": [{
-        "tag": $tag,
-        "listen": $listen,
-        "port": ($port|tonumber),
-        "protocol": "vless",
-        "settings": {
-          "clients": [{"id":$uuid,"email":"vless-sudoku@nobrand"}],
-          "decryption": "none"
-        },
-        "streamSettings": {
-          "network": "tcp",
-          "security": "none",
-          "finalmask": $finalmask
-        },
-        "sniffing": {
-          "enabled": true,
-          "destOverride": ["http","tls"]
-        }
-      }],
-      "outbounds": [{"tag":"direct","protocol":"freedom"}],
-      "routing": {"rules":[]}
-    }
-  ' >"$output"
-}
-
-vless_sudoku_build_share_link() {
-  local uuid="$1" host="$2" port="$3" finalmask_json="$4"
-  local host_uri fm_uri name_uri
-  vless_sudoku_valid_uuid "$uuid" && [ -n "$host" ] && nb_valid_port "$port" || return 1
-  jq -e '.tcp[0].type == "sudoku"' <<<"$finalmask_json" >/dev/null 2>&1 || return 1
-  host_uri="$(url_host "$host")"
-  fm_uri="$(urlencode "$finalmask_json")" || return 1
-  name_uri="$(urlencode 'NoBrand-VLESS-Sudoku')" || return 1
-  printf 'vless://%s@%s:%s?type=tcp&security=none&encryption=none&fm=%s#%s' \
-    "$uuid" "$host_uri" "$port" "$fm_uri" "$name_uri"
-}
-
-vless_sudoku_generate_client_config() {
-  local output="$1" host="$2" port="$3" uuid="$4" password="$5"
-  local socks_port="${6:-$VLESS_SUDOKU_CLIENT_SOCKS_PORT}" finalmask
-  finalmask="$(vless_sudoku_finalmask_json "$password")" || return 1
-  { valid_advertise_host "$host" || [ "$host" = YOUR_SERVER_IP ]; } \
-    && nb_valid_port "$port" && nb_valid_port "$socks_port" \
-    && vless_sudoku_valid_uuid "$uuid" || return 1
-  jq -n --arg host "$host" --arg port "$port" --arg uuid "$uuid" \
-    --arg socks_port "$socks_port" --argjson finalmask "$finalmask" '
-    {
-      "log": {"loglevel":"warning"},
-      "inbounds": [{
-        "tag":"local-socks",
-        "listen":"127.0.0.1",
-        "port":($socks_port|tonumber),
-        "protocol":"socks",
-        "settings":{"udp":true}
-      }],
-      "outbounds": [{
-        "tag":"vless-sudoku-out",
-        "protocol":"vless",
-        "settings": {
-          "vnext": [{
-            "address":$host,
-            "port":($port|tonumber),
-            "users":[{"id":$uuid,"encryption":"none"}]
-          }]
-        },
-        "streamSettings": {
-          "network":"tcp",
-          "security":"none",
-          "finalmask":$finalmask
-        }
-      }]
-    }
-  ' >"$output"
-}
-
-vless_sudoku_forbidden_absent() {
-  local file
-  for file in "$@"; do
-    [ -f "$file" ] || return 1
-    if grep -Eqi 'vlessenc|mlkem|xorpub|server_ticket|enc_method|client_rtt|vless_encryption|vless_decryption' "$file"; then
-      return 1
-    fi
-    jq -e '
-      ([.. | objects | to_entries[] |
-        select((.key | ascii_downcase) |
-          test("^(vlessenc|mlkem|xorpub|server_ticket|enc_method|client_rtt|vless_encryption|vless_decryption|decryption_secret|encryption_secret)$"))]
-       | length) == 0 and
-      ([.. | objects | to_entries[] |
-        select(((.key | ascii_downcase) == "encryption" or
-                (.key | ascii_downcase) == "decryption") and
-               .value != "none")]
-       | length) == 0
-    ' "$file" >/dev/null 2>&1 || return 1
-  done
-}
-
-vless_sudoku_state_matches() {
-  local state="${1:-$NOBRAND_VLESS_STATE_FILE}"
-  jq -e --arg tag "$NOBRAND_VLESS_TAG" '
-    .protocol == "vless-sudoku" and
-    (.uuid | type == "string" and test("^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$")) and
-    (.listen_host | type == "string" and length > 0) and
-    (.listen_port | type == "number" and . >= 1 and . <= 65535 and floor == .) and
-    .transport == "tcp" and
-    ((.advertise_mode == "auto" and .advertise_host == "" and .advertise_port == "") or
-     (.advertise_mode == "custom" and (.advertise_host | type == "string" and length > 0) and
-      (.advertise_port | type == "number" and . >= 1 and . <= 65535 and floor == .))) and
-    .finalmask_mode == "sudoku" and
-    (.finalmask_json.tcp | length) == 1 and
-    .finalmask_json.tcp[0].type == "sudoku" and
-    (.finalmask_json.tcp[0].settings.password | type == "string" and test("^[0-9A-Fa-f]{32}$")) and
-    .finalmask_json.tcp[0].settings.ascii == "prefer_ascii" and
-    .finalmask_json.tcp[0].settings.paddingMin == 0 and
-    .finalmask_json.tcp[0].settings.paddingMax == 3 and
-    .tag == $tag and
-    (.runtime_version | type == "string" and length > 0) and
-    (.link | type == "string" and startswith("vless://") and contains("type=tcp") and
-      contains("security=none") and contains("encryption=none") and contains("fm=")) and
-    .client_config == "client.json" and
-    (.enabled | type) == "boolean" and
-    (.created_at | type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")) and
-    (.updated_at | type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))
-  ' "$state" >/dev/null 2>&1 && vless_sudoku_forbidden_absent "$state"
-}
-
-vless_sudoku_server_config_matches() {
-  local config="${1:-$NOBRAND_VLESS_CONFIG_FILE}" uuid="${2:-}" port="${3:-}" password="${4:-}"
-  local listen="${5:-}"
-  [ -n "$uuid" ] || uuid="$(vless_sudoku_state_field uuid)" || return 1
-  [ -n "$port" ] || port="$(vless_sudoku_state_field listen_port)" || return 1
-  [ -n "$password" ] || password="$(jq -r '.finalmask_json.tcp[0].settings.password // empty' "$NOBRAND_VLESS_STATE_FILE")"
-  [ -n "$listen" ] || listen="$(vless_sudoku_state_field listen_host)" || return 1
-  jq -e --arg tag "$NOBRAND_VLESS_TAG" --arg uuid "$uuid" --arg port "$port" \
-    --arg password "$password" --arg listen "$listen" '
-    (.inbounds | length) == 1 and
-    .inbounds[0].tag == $tag and
-    .inbounds[0].listen == $listen and
-    .inbounds[0].protocol == "vless" and
-    .inbounds[0].port == ($port|tonumber) and
-    .inbounds[0].settings.clients == [{"id":$uuid,"email":"vless-sudoku@nobrand"}] and
-    .inbounds[0].settings.decryption == "none" and
-    .inbounds[0].streamSettings.network == "tcp" and
-    .inbounds[0].streamSettings.security == "none" and
-    .inbounds[0].streamSettings.finalmask.tcp == [{
-      "type":"sudoku",
-      "settings":{
-        "password":$password,
-        "ascii":"prefer_ascii",
-        "paddingMin":0,
-        "paddingMax":3
-      }
-    }]
-  ' "$config" >/dev/null 2>&1 && vless_sudoku_forbidden_absent "$config"
-}
-
-vless_sudoku_client_config_matches() {
-  local config="${1:-$NOBRAND_VLESS_CLIENT_FILE}" host="${2:-}" port="${3:-}"
-  local uuid="${4:-}" password="${5:-}" ingress_profile_id
-  ingress_profile_id="$(vless_sudoku_state_field ingress_profile_id 2>/dev/null || true)"
-  [ -n "$ingress_profile_id" ] || ingress_profile_id="$NOBRAND_LEGACY_INGRESS_PROFILE_ID"
-  [ -n "$host" ] || {
-    local mode advertise_host
-    mode="$(vless_sudoku_state_field advertise_mode)" || return 1
-    advertise_host="$(vless_sudoku_state_field advertise_host)"
-    host="$(nb_effective_advertise_host "$mode" "$advertise_host" "$ingress_profile_id")"
-  }
-  [ -n "$port" ] || {
-    local mode advertise_port listen_port
-    mode="$(vless_sudoku_state_field advertise_mode)" || return 1
-    advertise_port="$(vless_sudoku_state_field advertise_port)"
-    listen_port="$(vless_sudoku_state_field listen_port)"
-    port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port" "$ingress_profile_id")"
-  }
-  [ -n "$uuid" ] || uuid="$(vless_sudoku_state_field uuid)" || return 1
-  [ -n "$password" ] \
-    || password="$(jq -r '.finalmask_json.tcp[0].settings.password // empty' "$NOBRAND_VLESS_STATE_FILE")"
-  jq -e --arg host "$host" --arg port "$port" --arg uuid "$uuid" --arg password "$password" '
-    .outbounds[0].protocol == "vless" and
-    .outbounds[0].settings.vnext[0].address == $host and
-    .outbounds[0].settings.vnext[0].port == ($port|tonumber) and
-    .outbounds[0].settings.vnext[0].users == [{"id":$uuid,"encryption":"none"}] and
-    .outbounds[0].streamSettings.network == "tcp" and
-    .outbounds[0].streamSettings.security == "none" and
-    .outbounds[0].streamSettings.finalmask.tcp == [{
-      "type":"sudoku",
-      "settings":{
-        "password":$password,
-        "ascii":"prefer_ascii",
-        "paddingMin":0,
-        "paddingMax":3
-      }
-    }]
-  ' "$config" >/dev/null 2>&1 && vless_sudoku_forbidden_absent "$config"
-}
-
-vless_sudoku_current_share_link() {
-  local uuid listen_port mode advertise_host advertise_port ingress_profile_id host port finalmask
-  vless_sudoku_state_exists || return 1
-  uuid="$(vless_sudoku_state_field uuid)"
-  listen_port="$(vless_sudoku_state_field listen_port)"
-  mode="$(vless_sudoku_state_field advertise_mode)"
-  advertise_host="$(vless_sudoku_state_field advertise_host)"
-  advertise_port="$(vless_sudoku_state_field advertise_port)"
-  ingress_profile_id="$(vless_sudoku_state_field ingress_profile_id 2>/dev/null || true)"
-  host="$(nb_effective_advertise_host "$mode" "$advertise_host" "$ingress_profile_id")"
-  port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port" "$ingress_profile_id")"
-  finalmask="$(jq -c '.finalmask_json' "$NOBRAND_VLESS_STATE_FILE")" || return 1
-  vless_sudoku_build_share_link "$uuid" "$host" "$port" "$finalmask"
-}
-
-vless_sudoku_generate_state() {
-  local output="$1" listen="$2" port="$3" uuid="$4" password="$5"
-  local advertise_mode="$6" advertise_host="$7" advertise_port="$8" created_at="${9:-}"
-  local ingress_profile_id="${10:-}"
-  local updated_at runtime_version finalmask effective_host effective_port link
-  [ -n "$created_at" ] || created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  updated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  runtime_version="$(nobrand_xray_version 2>/dev/null || printf unknown)"
-  finalmask="$(vless_sudoku_finalmask_json "$password")" || return 1
-  effective_host="$(nb_effective_advertise_host "$advertise_mode" "$advertise_host" "$ingress_profile_id")"
-  effective_port="$(nb_effective_advertise_port "$advertise_mode" "$advertise_port" "$port" "$ingress_profile_id")"
-  link="$(vless_sudoku_build_share_link "$uuid" "$effective_host" "$effective_port" "$finalmask")" || return 1
-  jq -n --arg uuid "$uuid" --arg listen "$listen" --arg port "$port" \
-    --arg mode "$advertise_mode" --arg advertise_host "$advertise_host" \
-    --arg advertise_port "$advertise_port" --arg tag "$NOBRAND_VLESS_TAG" \
-    --arg runtime "$runtime_version" --arg link "$link" --arg created "$created_at" \
-    --arg updated "$updated_at" --argjson finalmask "$finalmask" --arg ingress_profile_id "$ingress_profile_id" '
-    {
-      "protocol":"vless-sudoku",
-      "uuid":$uuid,
-      "listen_host":$listen,
-      "listen_port":($port|tonumber),
-      "transport":"tcp",
-      "advertise_mode":$mode,
-      "advertise_host":$advertise_host,
-      "advertise_port":(if $advertise_port=="" then "" else ($advertise_port|tonumber) end),
-      "finalmask_mode":"sudoku",
-      "finalmask_json":$finalmask,
-      "tag":$tag,
-      "runtime_version":$runtime,
-      "link":$link,
-      "client_config":"client.json",
-      "enabled":true,
-      "created_at":$created,
-      "updated_at":$updated
-    }
-    + if $ingress_profile_id=="" then {} else {ingress_profile_id:$ingress_profile_id} end
-  ' >"$output"
-}
-
-vless_sudoku_snapshot_file() {
-  local source="$1" destination="$2"
-  if [ -e "$source" ]; then cp -a "$source" "$destination"; else printf absent >"${destination}.absent"; fi
-}
-
-vless_sudoku_restore_snapshot_file() {
-  local snapshot="$1" destination="$2"
-  if [ -f "${snapshot}.absent" ]; then
-    rm -f "$destination"
-  elif [ -e "$snapshot" ]; then
-    mkdir -p "$(dirname "$destination")"
-    cp -a "$snapshot" "$destination"
-  fi
-}
-
-vless_sudoku_configure_requests() {
-  local interactive="${1:-0}" old_port="" old_password="" conflict_owner=""
-  if vless_sudoku_state_exists && [ "${INGRESS_PROFILE_CLI:-0}" -eq 0 ]; then
-    INGRESS_PROFILE_ID="$(vless_sudoku_state_field ingress_profile_id 2>/dev/null || true)"
-    [ -n "$INGRESS_PROFILE_ID" ] || INGRESS_PROFILE_ID="$NOBRAND_LEGACY_INGRESS_PROFILE_ID"
-  else
-    nb_prepare_ingress_request || return 1
-  fi
-  nb_prepare_ingress_deployment "$INGRESS_PROFILE_ID" native-bind \
-    || die 'VLESS Sudoku 无法绑定所选 Ingress 的 Strict 本地地址'
-  VLESS_SUDOKU_LISTEN="$INGRESS_LISTEN_HOST"
-  if vless_sudoku_state_exists; then
-    old_port="$(vless_sudoku_state_field listen_port 2>/dev/null || true)"
-    VLESS_SUDOKU_UUID="$(vless_sudoku_state_field uuid 2>/dev/null || true)"
-    old_password="$(jq -r '.finalmask_json.tcp[0].settings.password // empty' "$NOBRAND_VLESS_STATE_FILE" 2>/dev/null)"
-  fi
-  if [ -z "${PORT:-}" ]; then
-    PORT="$(nb_select_available_port TCP "$INGRESS_PROFILE_ID")" \
-      || die '所选入口配置没有可用 VLESS Sudoku TCP 自动端口；manual-only 必须显式使用 --port'
-  else
-    nb_valid_port "$PORT" || die 'VLESS Sudoku 端口必须是 1-65535'
-    PORT="$(normalize_uint "$PORT")"
-    nb_warn_if_outside_recommended_range "$PORT" "$INGRESS_PROFILE_ID"
-    if [ "$PORT" != "$old_port" ] \
-       && ! nb_port_available_for_profile "$PORT" TCP "$INGRESS_PROFILE_ID" 'vless-sudoku:default'; then
-      warn "VLESS Sudoku TCP/${PORT} 已占用"
-      nb_describe_port_conflict TCP "$PORT"
-      return 1
-    fi
-  fi
-  if [ "$interactive" -eq 1 ] && [ "${ADVERTISE_CLI:-0}" -eq 0 ]; then
-    nb_collect_advertise_endpoint_interactive 'VLESS Sudoku' "$PORT"
-  else
-    nb_require_explicit_endpoint_noninteractive
-  fi
-  nb_validate_advertise_endpoint "$ADVERTISE_HOST" "$ADVERTISE_PORT" TCP \
-    || die 'VLESS Sudoku Display Endpoint 无效'
-  if [ -n "$ADVERTISE_HOST" ]; then
-    conflict_owner="$(nb_endpoint_conflict_owner TCP "$ADVERTISE_HOST" "$ADVERTISE_PORT" \
-      'vless-sudoku:default' 2>/dev/null || true)"
-    [ -z "$conflict_owner" ] || die "VLESS Sudoku Display Endpoint 与 ${conflict_owner} 冲突"
-  fi
-  vless_sudoku_valid_uuid "$VLESS_SUDOKU_UUID" \
-    || VLESS_SUDOKU_UUID="$(vless_sudoku_generate_uuid)" \
-    || die '无法生成 VLESS UUID'
-  if [[ "$old_password" =~ ^[0-9A-Fa-f]{32}$ ]]; then
-    VLESS_SUDOKU_PASSWORD="$old_password"
-  else
-    VLESS_SUDOKU_PASSWORD="$(openssl rand -hex 16 2>/dev/null || true)"
-    [[ "$VLESS_SUDOKU_PASSWORD" =~ ^[0-9A-Fa-f]{32}$ ]] \
-      || die '无法生成 FinalMask Sudoku 密码'
-  fi
-}
-
-vless_sudoku_install_rollback() {
-  local snapshot="$1" was_active="$2" new_binding_owned="$3"
-  nobrand_vless_sudoku_service_action stop >/dev/null 2>&1 || true
-  [ "$new_binding_owned" -eq 0 ] \
-    || nb_firewall_close_pairs "TCP|${PORT}" >/dev/null 2>&1 || true
-  vless_sudoku_restore_snapshot_file "$snapshot/config" "$NOBRAND_VLESS_CONFIG_FILE"
-  vless_sudoku_restore_snapshot_file "$snapshot/state" "$NOBRAND_VLESS_STATE_FILE"
-  vless_sudoku_restore_snapshot_file "$snapshot/client" "$NOBRAND_VLESS_CLIENT_FILE"
-  vless_sudoku_restore_snapshot_file "$snapshot/service-systemd" "$NOBRAND_VLESS_SYSTEMD_SERVICE"
-  vless_sudoku_restore_snapshot_file "$snapshot/service-openrc" "$NOBRAND_VLESS_OPENRC_SERVICE"
-  vless_sudoku_restore_snapshot_file "$snapshot/xray" "$NOBRAND_XRAY_BIN"
-  [ "$(nb_service_manager)" != systemd ] || systemctl daemon-reload >/dev/null 2>&1 || true
-  [ "$was_active" -eq 0 ] \
-    || nobrand_vless_sudoku_service_action start >/dev/null 2>&1 || true
-}
-
-install_vless_sudoku() {
-  local interactive=0 snapshot config_tmp state_tmp client_tmp advertise_mode
-  local old_port="" old_created="" was_active=0 binding_was_owned=0 binding_now_owned=0
-  local rollback_needed=1
-  [ "${YES:-0}" -eq 1 ] || interactive=1
-  nobrand_prepare_common
-  vless_sudoku_configure_requests "$interactive" || return 1
-  admin_lock_acquire || return 1
-  snapshot="$(mktemp_dir)" || { admin_lock_release; return 1; }
-  vless_sudoku_snapshot_file "$NOBRAND_VLESS_CONFIG_FILE" "$snapshot/config"
-  vless_sudoku_snapshot_file "$NOBRAND_VLESS_STATE_FILE" "$snapshot/state"
-  vless_sudoku_snapshot_file "$NOBRAND_VLESS_CLIENT_FILE" "$snapshot/client"
-  vless_sudoku_snapshot_file "$NOBRAND_VLESS_SYSTEMD_SERVICE" "$snapshot/service-systemd"
-  vless_sudoku_snapshot_file "$NOBRAND_VLESS_OPENRC_SERVICE" "$snapshot/service-openrc"
-  vless_sudoku_snapshot_file "$NOBRAND_XRAY_BIN" "$snapshot/xray"
-  nobrand_vless_sudoku_service_active && was_active=1
-  if vless_sudoku_state_exists; then
-    old_port="$(vless_sudoku_state_field listen_port 2>/dev/null || true)"
-    old_created="$(vless_sudoku_state_field created_at 2>/dev/null || true)"
-  fi
-  if ! nobrand_install_xray_runtime 0; then
-    if [ "${NOBRAND_LIFECYCLE_ACTIVE:-0}" -ne 1 ] \
-       || [ "$(nb_lifecycle_mutation_started 2>/dev/null || printf 1)" = 1 ]; then
-      vless_sudoku_install_rollback "$snapshot" "$was_active" 0
-    fi
-    rm -rf -- "$snapshot"
-    admin_lock_release
-    return 1
-  fi
-  if [ "${NOBRAND_LIFECYCLE_ACTIVE:-0}" -eq 1 ]; then
-    rollback_needed="$(nb_lifecycle_mutation_started)" || {
-      rm -rf -- "$snapshot"; admin_lock_release; return 1
-    }
-  fi
-  nb_firewall_binding_owned TCP "$PORT" && binding_was_owned=1
-  if [ "$was_active" -eq 1 ]; then
-    nb_lifecycle_mark_protocol_mutation_started vless-sudoku || {
-      rm -rf -- "$snapshot"; admin_lock_release; return 1
-    }
-    rollback_needed=1
-    nobrand_vless_sudoku_service_action stop || {
-      vless_sudoku_install_rollback "$snapshot" "$was_active" 0
-      rm -rf -- "$snapshot"; admin_lock_release; return 1;
-    }
-  fi
-  if ! nb_port_available_for_profile "$PORT" TCP "$INGRESS_PROFILE_ID" 'vless-sudoku:default'; then
-    warn "提交前发现 TCP/${PORT} 已被其它进程占用"
-    nb_describe_port_conflict TCP "$PORT"
-    [ "$rollback_needed" -eq 0 ] \
-      || vless_sudoku_install_rollback "$snapshot" "$was_active" 0
-    rm -rf -- "$snapshot"; admin_lock_release; return 1
-  fi
-  config_tmp="$(mktemp_file .json)" || {
-    [ "$rollback_needed" -eq 0 ] \
-      || vless_sudoku_install_rollback "$snapshot" "$was_active" 0
-    rm -rf -- "$snapshot"; admin_lock_release; return 1;
-  }
-  state_tmp="$(mktemp_file .json)" || {
-    rm -f "$config_tmp"
-    [ "$rollback_needed" -eq 0 ] \
-      || vless_sudoku_install_rollback "$snapshot" "$was_active" 0
-    rm -rf -- "$snapshot"; admin_lock_release; return 1;
-  }
-  client_tmp="$(mktemp_file .json)" || {
-    rm -f "$config_tmp" "$state_tmp"
-    [ "$rollback_needed" -eq 0 ] \
-      || vless_sudoku_install_rollback "$snapshot" "$was_active" 0
-    rm -rf -- "$snapshot"; admin_lock_release; return 1;
-  }
-  advertise_mode="$(nb_endpoint_mode_from_values "$ADVERTISE_HOST")"
-  local effective_host effective_port
-  effective_host="$(nb_effective_advertise_host "$advertise_mode" "$ADVERTISE_HOST" "$INGRESS_PROFILE_ID")"
-  effective_port="$(nb_effective_advertise_port "$advertise_mode" "$ADVERTISE_PORT" "$PORT" "$INGRESS_PROFILE_ID")"
-  if ! vless_sudoku_generate_server_config "$config_tmp" "$VLESS_SUDOKU_LISTEN" "$PORT" \
-       "$VLESS_SUDOKU_UUID" "$VLESS_SUDOKU_PASSWORD" \
-     || ! nobrand_xray_test_config "$config_tmp" \
-     || ! vless_sudoku_server_config_matches "$config_tmp" "$VLESS_SUDOKU_UUID" "$PORT" \
-       "$VLESS_SUDOKU_PASSWORD" "$VLESS_SUDOKU_LISTEN" \
-     || ! vless_sudoku_generate_state "$state_tmp" "$VLESS_SUDOKU_LISTEN" "$PORT" \
-       "$VLESS_SUDOKU_UUID" "$VLESS_SUDOKU_PASSWORD" "$advertise_mode" \
-       "$ADVERTISE_HOST" "$ADVERTISE_PORT" "$old_created" "$INGRESS_PROFILE_ID" \
-     || ! nb_ingress_stamp_state_file "$state_tmp" "$INGRESS_PROFILE_ID" native-bind \
-     || ! vless_sudoku_generate_client_config "$client_tmp" "$effective_host" "$effective_port" \
-       "$VLESS_SUDOKU_UUID" "$VLESS_SUDOKU_PASSWORD" \
-     || ! vless_sudoku_client_config_matches "$client_tmp" "$effective_host" "$effective_port" \
-       "$VLESS_SUDOKU_UUID" "$VLESS_SUDOKU_PASSWORD" \
-     || ! vless_sudoku_state_matches "$state_tmp"; then
-    rm -f "$config_tmp" "$state_tmp" "$client_tmp"
-    [ "$rollback_needed" -eq 0 ] \
-      || vless_sudoku_install_rollback "$snapshot" "$was_active" 0
-    rm -rf -- "$snapshot"; admin_lock_release; return 1
-  fi
-  if [ "$was_active" -eq 0 ]; then
-    nb_lifecycle_mark_protocol_mutation_started vless-sudoku || {
-      rm -f "$config_tmp" "$state_tmp" "$client_tmp"
-      [ "$rollback_needed" -eq 0 ] \
-        || vless_sudoku_install_rollback "$snapshot" "$was_active" 0
-      rm -rf -- "$snapshot"; admin_lock_release; return 1
-    }
-    rollback_needed=1
-  fi
-  if ! nb_atomic_install_file "$config_tmp" "$NOBRAND_VLESS_CONFIG_FILE" 0600 \
-     || ! nobrand_write_vless_sudoku_service \
-     || ! nb_firewall_open_pairs "TCP|${PORT}"; then
-    rm -f "$config_tmp" "$state_tmp" "$client_tmp"
-    nb_firewall_binding_owned TCP "$PORT" \
-      && [ "$binding_was_owned" -eq 0 ] && binding_now_owned=1
-    vless_sudoku_install_rollback "$snapshot" "$was_active" "$binding_now_owned"
-    rm -rf -- "$snapshot"; admin_lock_release; return 1
-  fi
-  rm -f "$config_tmp"
-  nb_firewall_binding_owned TCP "$PORT" \
-    && [ "$binding_was_owned" -eq 0 ] && binding_now_owned=1
-  local service_action=start
-  [ "$was_active" -eq 0 ] || service_action=restart
-  if ! nobrand_vless_sudoku_service_action "$service_action" \
-     || ! nobrand_vless_sudoku_service_active \
-     || ! nb_wait_for_enforced_listener "$INGRESS_ENFORCEMENT_RESOLVED" "$INGRESS_ENFORCEMENT_METHOD" \
-          TCP "$PORT" "$INGRESS_LOCAL_ADDRESS" 'vless-sudoku:default' 25 \
-     || ! nb_atomic_install_file "$client_tmp" "$NOBRAND_VLESS_CLIENT_FILE" 0600 \
-     || ! nb_atomic_install_file "$state_tmp" "$NOBRAND_VLESS_STATE_FILE" 0600; then
-    rm -f "$state_tmp" "$client_tmp"
-    vless_sudoku_install_rollback "$snapshot" "$was_active" "$binding_now_owned"
-    rm -rf -- "$snapshot"; admin_lock_release
-    warn 'VLESS Sudoku 服务、listener 或 state 验收失败，已回滚'
-    return 1
-  fi
-  rm -f "$state_tmp" "$client_tmp"
-  if [ -n "$old_port" ] && [ "$old_port" != "$PORT" ]; then
-    nb_firewall_close_pairs "TCP|${old_port}" || true
-  fi
-  nobrand_install_manager_script || true
-  rm -rf -- "$snapshot"
-  admin_lock_release
-  print_vless_sudoku_result install
-}
-
-vless_sudoku_set_endpoint() {
-  local interactive=0 state_tmp client_tmp snapshot mode owner uuid password host port link finalmask ingress_profile_id
-  require_root
-  vless_sudoku_state_exists || die 'VLESS Sudoku 未安装'
-  [ "${YES:-0}" -eq 1 ] || interactive=1
-  PORT="$(vless_sudoku_state_field listen_port)"
-  if [ "$interactive" -eq 1 ] && [ "${ADVERTISE_CLI:-0}" -eq 0 ]; then
-    nb_collect_advertise_endpoint_interactive 'VLESS Sudoku' "$PORT"
-  else
-    nb_require_explicit_endpoint_noninteractive
-  fi
-  nb_validate_advertise_endpoint "$ADVERTISE_HOST" "$ADVERTISE_PORT" TCP \
-    || die 'Display Endpoint 无效'
-  if [ -n "$ADVERTISE_HOST" ]; then
-    owner="$(nb_endpoint_conflict_owner TCP "$ADVERTISE_HOST" "$ADVERTISE_PORT" \
-      'vless-sudoku:default' 2>/dev/null || true)"
-    [ -z "$owner" ] || die "Display Endpoint 与 ${owner} 冲突"
-  fi
-  admin_lock_acquire || return 1
-  snapshot="$(mktemp_dir)" || { admin_lock_release; return 1; }
-  vless_sudoku_snapshot_file "$NOBRAND_VLESS_STATE_FILE" "$snapshot/state"
-  vless_sudoku_snapshot_file "$NOBRAND_VLESS_CLIENT_FILE" "$snapshot/client"
-  state_tmp="$(mktemp_file .json)" || { rm -rf -- "$snapshot"; admin_lock_release; return 1; }
-  client_tmp="$(mktemp_file .json)" || {
-    rm -f "$state_tmp"; rm -rf -- "$snapshot"; admin_lock_release; return 1;
-  }
-  mode="$(nb_endpoint_mode_from_values "$ADVERTISE_HOST")"
-  uuid="$(vless_sudoku_state_field uuid)"
-  password="$(jq -r '.finalmask_json.tcp[0].settings.password' "$NOBRAND_VLESS_STATE_FILE")"
-  ingress_profile_id="$(vless_sudoku_state_field ingress_profile_id 2>/dev/null || true)"
-  [ -n "$ingress_profile_id" ] || ingress_profile_id="$NOBRAND_LEGACY_INGRESS_PROFILE_ID"
-  finalmask="$(vless_sudoku_finalmask_json "$password")" || {
-    rm -f "$state_tmp" "$client_tmp"; rm -rf -- "$snapshot"; admin_lock_release; return 1;
-  }
-  host="$(nb_effective_advertise_host "$mode" "$ADVERTISE_HOST" "$ingress_profile_id")"
-  port="$(nb_effective_advertise_port "$mode" "$ADVERTISE_PORT" "$PORT" "$ingress_profile_id")"
-  link="$(vless_sudoku_build_share_link "$uuid" "$host" "$port" "$finalmask")" || {
-    rm -f "$state_tmp" "$client_tmp"; rm -rf -- "$snapshot"; admin_lock_release; return 1;
-  }
-  if ! jq --arg mode "$mode" --arg host "$ADVERTISE_HOST" --arg port "$ADVERTISE_PORT" \
-      --arg link "$link" --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
-        .advertise_mode=$mode |
-        .advertise_host=$host |
-        .advertise_port=(if $port=="" then "" else ($port|tonumber) end) |
-        .link=$link |
-        .updated_at=$updated
-      ' "$NOBRAND_VLESS_STATE_FILE" >"$state_tmp" \
-     || ! vless_sudoku_generate_client_config "$client_tmp" "$host" "$port" "$uuid" "$password" \
-     || ! vless_sudoku_client_config_matches "$client_tmp" "$host" "$port" \
-     || ! nb_atomic_install_file "$client_tmp" "$NOBRAND_VLESS_CLIENT_FILE" 0600 \
-     || ! nb_atomic_install_file "$state_tmp" "$NOBRAND_VLESS_STATE_FILE" 0600; then
-    vless_sudoku_restore_snapshot_file "$snapshot/state" "$NOBRAND_VLESS_STATE_FILE"
-    vless_sudoku_restore_snapshot_file "$snapshot/client" "$NOBRAND_VLESS_CLIENT_FILE"
-    rm -f "$state_tmp" "$client_tmp"; rm -rf -- "$snapshot"; admin_lock_release
-    return 1
-  fi
-  rm -f "$state_tmp" "$client_tmp"; rm -rf -- "$snapshot"
-  # 本函数禁止调用 service、firewall 或 server config writer。
-  admin_lock_release
-  t 'VLESS Sudoku 客户端展示入口已更新；server config/listener/PID/service/firewall 均未改变' \
-    'VLESS Sudoku display endpoint updated; server config/listener/PID/service/firewall are unchanged'
-  print_vless_sudoku_result show
-}
-
-vless_sudoku_running() {
-  local port policy method address
-  vless_sudoku_state_exists || return 1
-  port="$(vless_sudoku_state_field listen_port)"
-  policy="$(vless_sudoku_state_field ingress_enforcement 2>/dev/null || printf permissive)"
-  method="$(vless_sudoku_state_field ingress_enforcement_method 2>/dev/null || printf wildcard)"
-  address="$(vless_sudoku_state_field ingress_local_address 2>/dev/null || true)"
-  nobrand_vless_sudoku_service_active \
-    && nb_wait_for_enforced_listener "$policy" "$method" TCP "$port" "$address" 'vless-sudoku:default' 1
-}
-
-vless_sudoku_apply_ingress_enforcement() {
-  local profile_id port uuid password candidate_state candidate_config snapshot was_active=0 rc=0
-  vless_sudoku_state_exists || return 1
-  profile_id="$(vless_sudoku_state_field ingress_profile_id 2>/dev/null || true)"
-  [ -n "$profile_id" ] || profile_id="$NOBRAND_LEGACY_INGRESS_PROFILE_ID"
-  nb_prepare_ingress_deployment "$profile_id" native-bind || return 1
-  port="$(vless_sudoku_state_field listen_port)"
-  uuid="$(vless_sudoku_state_field uuid)"
-  password="$(jq -r '.finalmask_json.tcp[0].settings.password // empty' "$NOBRAND_VLESS_STATE_FILE")"
-  candidate_state="$(mktemp_file .vless-ingress-state)" || return 1
-  candidate_config="$(mktemp_file .vless-ingress-config.json)" || { rm -f "$candidate_state"; return 1; }
-  snapshot="$(mktemp_dir)" || { rm -f "$candidate_state" "$candidate_config"; return 1; }
-  cp -a "$NOBRAND_VLESS_STATE_FILE" "$snapshot/state" \
-    && cp -a "$NOBRAND_VLESS_CONFIG_FILE" "$snapshot/config" || rc=1
-  if [ "$rc" -eq 0 ]; then
-    jq --arg listen "$INGRESS_LISTEN_HOST" '.listen_host=$listen' "$NOBRAND_VLESS_STATE_FILE" >"$candidate_state" \
-      && nb_ingress_stamp_state_file "$candidate_state" "$profile_id" native-bind \
-      && vless_sudoku_state_matches "$candidate_state" \
-      && vless_sudoku_generate_server_config "$candidate_config" "$INGRESS_LISTEN_HOST" "$port" "$uuid" "$password" \
-      && vless_sudoku_server_config_matches "$candidate_config" "$uuid" "$port" "$password" "$INGRESS_LISTEN_HOST" \
-      && nobrand_xray_test_config "$candidate_config" || rc=1
-  fi
-  nobrand_vless_sudoku_service_active && was_active=1
-  if [ "$rc" -eq 0 ]; then
-    nb_atomic_install_file "$candidate_config" "$NOBRAND_VLESS_CONFIG_FILE" 0600 \
-      && nb_atomic_install_file "$candidate_state" "$NOBRAND_VLESS_STATE_FILE" 0600 || rc=1
-  fi
-  if [ "$rc" -eq 0 ] && [ "$was_active" -eq 1 ]; then
-    [ "${NOBRAND_TEST_INGRESS_SERVICE_FAIL:-0}" -eq 0 ] \
-      && nobrand_vless_sudoku_service_action restart \
-      && [ "${NOBRAND_TEST_INGRESS_LISTENER_FAIL:-0}" -eq 0 ] \
-      && vless_sudoku_running || rc=1
-  fi
-  if [ "$rc" -ne 0 ]; then
-    nb_atomic_install_file "$snapshot/config" "$NOBRAND_VLESS_CONFIG_FILE" 0600 >/dev/null 2>&1 || true
-    nb_atomic_install_file "$snapshot/state" "$NOBRAND_VLESS_STATE_FILE" 0600 >/dev/null 2>&1 || true
-    if [ "$was_active" -eq 1 ]; then
-      nobrand_vless_sudoku_service_action restart >/dev/null 2>&1 \
-        && vless_sudoku_running >/dev/null 2>&1 || true
-    else
-      nobrand_vless_sudoku_service_action stop >/dev/null 2>&1 || true
-    fi
-  fi
-  rm -f "$candidate_state" "$candidate_config"
-  rm -rf -- "$snapshot"
-  return "$rc"
-}
-
-vless_sudoku_state_set_enabled() {
-  local enabled="$1" tmp
-  tmp="$(mktemp_file .json)" || return 1
-  if ! jq --argjson enabled "$enabled" --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-      '.enabled=$enabled | .updated_at=$updated' "$NOBRAND_VLESS_STATE_FILE" >"$tmp" \
-     || ! nb_atomic_install_file "$tmp" "$NOBRAND_VLESS_STATE_FILE" 0600; then
-    rm -f "$tmp"
-    return 1
-  fi
-  rm -f "$tmp"
-}
-
-vless_sudoku_node_rows() {
-  local mode advertise_host advertise_port listen_port host port status
-  vless_sudoku_state_exists || return 0
-  mode="$(vless_sudoku_state_field advertise_mode)"
-  advertise_host="$(vless_sudoku_state_field advertise_host)"
-  advertise_port="$(vless_sudoku_state_field advertise_port)"
-  listen_port="$(vless_sudoku_state_field listen_port)"
-  host="$(nb_effective_advertise_host "$mode" "$advertise_host" "$(vless_sudoku_state_field ingress_profile_id 2>/dev/null || true)")"
-  port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port" "$(vless_sudoku_state_field ingress_profile_id 2>/dev/null || true)")"
-  status=Stopped; vless_sudoku_running && status=Running
-  printf 'VLESS/Sudoku|sudoku|%s:%s/TCP|%s|TCP\n' "$host" "$port" "$status"
-}
-
-print_vless_sudoku_result() {
-  local context="${1:-show}" uuid listen_host listen_port mode advertise_host advertise_port
-  local host port status link finalmask password mode_label
-  vless_sudoku_state_exists || { t 'VLESS Sudoku 未安装' 'VLESS Sudoku is not installed'; return 0; }
-  uuid="$(vless_sudoku_state_field uuid)"
-  listen_host="$(vless_sudoku_state_field listen_host)"
-  listen_port="$(vless_sudoku_state_field listen_port)"
-  mode="$(vless_sudoku_state_field advertise_mode)"
-  advertise_host="$(vless_sudoku_state_field advertise_host)"
-  advertise_port="$(vless_sudoku_state_field advertise_port)"
-  host="$(nb_effective_advertise_host "$mode" "$advertise_host" "$(vless_sudoku_state_field ingress_profile_id 2>/dev/null || true)")"
-  port="$(nb_effective_advertise_port "$mode" "$advertise_port" "$listen_port" "$(vless_sudoku_state_field ingress_profile_id 2>/dev/null || true)")"
-  finalmask="$(jq -c '.finalmask_json' "$NOBRAND_VLESS_STATE_FILE")"
-  password="$(jq -r '.finalmask_json.tcp[0].settings.password' "$NOBRAND_VLESS_STATE_FILE")"
-  link="$(vless_sudoku_current_share_link)"
-  status=已停止; vless_sudoku_running && status=运行中
-  mode_label="$mode"; case "$mode" in auto) mode_label='自动' ;; custom) mode_label='自定义' ;; esac
-  nobrand_print_banner
-  msg ''
-  [ "$context" != install ] || t '部署完成' 'Deployment complete'
-  msg '协议        VLESS + FinalMask + Sudoku'
-  msg '传输        TCP'
-  msg 'VLESS Encryption：未使用（NOT USED）'
-  msg "状态        ${status}"
-  msg ''
-  msg '实际监听 / Actual Listener'
-  msg "  地址      ${listen_host}"
-  msg "  端口      ${listen_port}"
-  msg ''
-  msg '网络入口 / Ingress'
-  msg "  入口配置 / Ingress Profile  $(nb_ingress_profile_name "$(vless_sudoku_state_field ingress_profile_id 2>/dev/null || true)")"
-  msg ''
-  msg '展示端点 / Display Endpoint'
-  msg "  主机      ${host}"
-  msg "  端口      ${port}"
-  msg "  模式      ${mode_label}"
-  msg ''
-  msg '认证与 FinalMask'
-  msg "  UUID      ${uuid}"
-  msg "  模式      sudoku"
-  msg "  密码      ${password}"
-  msg "  JSON      ${finalmask}"
-  msg ''
-  msg "Xray 客户端 JSON: ${NOBRAND_VLESS_CLIENT_FILE}"
-  msg '========================================'
-  msg "$link"
-}
-
-vless_sudoku_service_command() {
-  local action="$1" port was_enabled
-  vless_sudoku_state_exists || die 'VLESS Sudoku 未安装'
-  port="$(vless_sudoku_state_field listen_port)"
-  was_enabled="$(vless_sudoku_state_field enabled)"
-  case "$action" in
-    start|restart)
-      nobrand_xray_test_config "$NOBRAND_VLESS_CONFIG_FILE" || return 1
-      nb_firewall_open_pairs "TCP|${port}" || return 1
-      if ! nobrand_vless_sudoku_service_action "$action" \
-         || ! vless_sudoku_running \
-         || ! vless_sudoku_state_set_enabled true; then
-        nobrand_vless_sudoku_service_action stop >/dev/null 2>&1 || true
-        [ "$was_enabled" = true ] || vless_sudoku_state_set_enabled false >/dev/null 2>&1 || true
-        return 1
-      fi
-      ;;
-    stop)
-      nobrand_vless_sudoku_service_action stop || return 1
-      if ! vless_sudoku_state_set_enabled false; then
-        [ "$was_enabled" != true ] \
-          || nobrand_vless_sudoku_service_action start >/dev/null 2>&1 || true
-        return 1
-      fi
-      ;;
-    status)
-      if vless_sudoku_running; then msg 'VLESS Sudoku：运行中'; else msg 'VLESS Sudoku：已停止'; return 1; fi
-      ;;
-  esac
-}
-
-remove_vless_sudoku_config() {
-  local port
-  require_root
-  vless_sudoku_state_exists \
-    || { t 'VLESS Sudoku 未安装' 'VLESS Sudoku is not installed'; return 0; }
-  port="$(vless_sudoku_state_field listen_port)"
-  admin_lock_acquire || return 1
-  nobrand_remove_vless_sudoku_service || { admin_lock_release; return 1; }
-  nb_firewall_close_pairs "TCP|${port}" || { admin_lock_release; return 1; }
-  # Xray is now exclusive to Sudoku. Leaving it without its ownership state
-  # would look like an unsupported legacy runtime on the next invocation.
-  nobrand_remove_xray_runtime_files || { admin_lock_release; return 1; }
-  rm -f "$NOBRAND_VLESS_CONFIG_FILE" "$NOBRAND_VLESS_STATE_FILE" "$NOBRAND_VLESS_CLIENT_FILE"
-  rmdir "$NOBRAND_VLESS_CONFIG_DIR" "$NOBRAND_VLESS_STATE_DIR" 2>/dev/null || true
-  admin_lock_release
-  t '已删除 NoBrand VLESS Sudoku 及其专用 Xray；Splicore 与外部资源保留' \
-    'Removed NoBrand VLESS Sudoku and its dedicated Xray; Splicore and external resources are preserved'
-}
-
-vless_sudoku_doctor() {
-  local failed=0 port mode host advertise_port uuid password cached_link current_link enabled
-  if ! vless_sudoku_state_exists; then
-    nb_doctor_line INFO 'VLESS Sudoku 未安装'
-    return 0
-  fi
-  port="$(vless_sudoku_state_field listen_port)"
-  enabled="$(vless_sudoku_state_field enabled 2>/dev/null || true)"
-  case "$enabled" in true|false) ;; *) return 1 ;; esac
-  uuid="$(vless_sudoku_state_field uuid)"
-  password="$(jq -r '.finalmask_json.tcp[0].settings.password // empty' "$NOBRAND_VLESS_STATE_FILE")"
-  [ -x "$NOBRAND_XRAY_BIN" ] \
-    && nb_doctor_line PASS "Xray $(nobrand_xray_version 2>/dev/null || printf '未知版本')" \
-    || { nb_doctor_line FAIL 'NoBrand Xray 可执行文件'; failed=1; }
-  vless_sudoku_state_matches \
-    && nb_doctor_line PASS '状态 schema 与 VLESS 元数据有效' \
-    || { nb_doctor_line FAIL '状态 schema / 元数据无效'; failed=1; }
-  vless_sudoku_server_config_matches "$NOBRAND_VLESS_CONFIG_FILE" "$uuid" "$port" "$password" \
-    && nb_doctor_line PASS 'VLESS + TCP + FinalMask Sudoku 配置有效' \
-    || { nb_doctor_line FAIL '服务端配置语义无效'; failed=1; }
-  nobrand_xray_test_config "$NOBRAND_VLESS_CONFIG_FILE" \
-    && nb_doctor_line PASS 'Xray 配置校验' \
-    || { nb_doctor_line FAIL 'Xray 配置校验'; failed=1; }
-  vless_sudoku_forbidden_absent "$NOBRAND_VLESS_CONFIG_FILE" \
-    "$NOBRAND_VLESS_STATE_FILE" "$NOBRAND_VLESS_CLIENT_FILE" \
-    && nb_doctor_line PASS 'VLESS Encryption 未使用' \
-    || { nb_doctor_line FAIL '检测到禁用的 Encryption 依赖或字段'; failed=1; }
-  vless_sudoku_client_config_matches \
-    && nb_doctor_line PASS 'Xray 客户端 JSON' \
-    || { nb_doctor_line FAIL 'Xray 客户端 JSON'; failed=1; }
-  if [ "$enabled" = true ]; then
-    vless_sudoku_running \
-      && nb_doctor_line PASS "服务与 TCP/${port} 监听正常" \
-      || { nb_doctor_line FAIL "服务 / 监听异常: TCP/${port}"; failed=1; }
-  elif nobrand_vless_sudoku_service_active || nb_port_is_listening TCP "$port"; then
-    nb_doctor_line FAIL "服务标记为已停止，但仍有服务或监听: TCP/${port}"
-    failed=1
-  else
-    nb_doctor_line PASS '服务按状态保持停止，且无残留监听'
-  fi
-  nb_firewall_binding_owned TCP "$port" \
-    && nb_doctor_line PASS "防火墙归属正常: TCP/${port}" \
-    || nb_doctor_line INFO "防火墙规则不归 NoBrand 管理（预先存在 / 无本地防火墙）: TCP/${port}"
-  mode="$(vless_sudoku_state_field advertise_mode)"
-  host="$(vless_sudoku_state_field advertise_host)"
-  advertise_port="$(vless_sudoku_state_field advertise_port)"
-  nb_validate_advertise_endpoint "$host" "$advertise_port" TCP \
-    && nb_doctor_line PASS "展示端点 / Display Endpoint 模式=${mode}" \
-    || { nb_doctor_line FAIL '展示端点 / Display Endpoint 状态无效'; failed=1; }
-  vless_sudoku_current_share_link >/dev/null \
-    && nb_doctor_line PASS 'VLESS URL 生成正常' \
-    || { nb_doctor_line FAIL 'VLESS URL 生成失败'; failed=1; }
-  cached_link="$(vless_sudoku_state_field link 2>/dev/null || true)"
-  current_link="$(vless_sudoku_current_share_link 2>/dev/null || true)"
-  [ -n "$current_link" ] && [ "$cached_link" = "$current_link" ] \
-    && nb_doctor_line PASS '缓存的 VLESS URL 与状态一致' \
-    || { nb_doctor_line FAIL '缓存的 VLESS URL 与状态不一致'; failed=1; }
-  return "$failed"
-}
-
-vless_sudoku_smoke() {
-  local failed=0
-  vless_sudoku_state_exists || { nb_doctor_line INFO 'VLESS Sudoku 未安装'; return 0; }
-  vless_sudoku_state_matches \
-    && nb_doctor_line PASS '状态 schema 有效' || { nb_doctor_line FAIL '状态 schema 无效'; failed=1; }
-  nobrand_xray_test_config "$NOBRAND_VLESS_CONFIG_FILE" \
-    && nb_doctor_line PASS 'xray run -test' || { nb_doctor_line FAIL 'xray run -test'; failed=1; }
-  vless_sudoku_forbidden_absent "$NOBRAND_VLESS_CONFIG_FILE" \
-    "$NOBRAND_VLESS_STATE_FILE" "$NOBRAND_VLESS_CLIENT_FILE" \
-    && nb_doctor_line PASS 'VLESS_ENCRYPTION_ENABLED=false' \
-    || { nb_doctor_line FAIL '检测到 VLESS Encryption 数据'; failed=1; }
-  vless_sudoku_running \
-    && nb_doctor_line PASS '服务 / 监听正常' || { nb_doctor_line FAIL '服务 / 监听异常'; failed=1; }
-  return "$failed"
-}
-
-vless_sudoku_refresh_runtime_metadata() {
-  local tmp runtime
-  vless_sudoku_state_exists || return 0
-  runtime="$(nobrand_xray_version)" || return 1
-  tmp="$(mktemp_file .json)" || return 1
-  jq --arg runtime "$runtime" --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    '.runtime_version=$runtime | .updated_at=$updated' "$NOBRAND_VLESS_STATE_FILE" >"$tmp" \
-    && nb_atomic_install_file "$tmp" "$NOBRAND_VLESS_STATE_FILE" 0600
-  local rc=$?
-  rm -f "$tmp"
-  return "$rc"
-}
-
-vless_sudoku_upgrade_runtime() {
-  nobrand_upgrade_xray_runtime
-}
+# ---------- Native Sudoku on the shared Splicore daemon ----------
 
 nobrand_run_vless_sudoku_action() {
-  case "${VLESS_SUDOKU_ACTION:-menu}" in
-    menu) vless_sudoku_menu_loop ;;
-    install)
-      if [ "${NOBRAND_MANAGER_SESSION_ACTIVE:-0}" -eq 1 ]; then
-        nb_lifecycle_run_protocol_install vless-sudoku install_vless_sudoku
-      else
-        install_vless_sudoku
-      fi
-      ;;
-    show) print_vless_sudoku_result show ;;
-    set-endpoint) vless_sudoku_set_endpoint ;;
-    remove) remove_vless_sudoku_config ;;
-    start|stop|restart|status) vless_sudoku_service_command "$VLESS_SUDOKU_ACTION" ;;
-    doctor) vless_sudoku_doctor ;;
-    smoke) vless_sudoku_smoke ;;
-    upgrade) vless_sudoku_upgrade_runtime ;;
-    help) nobrand_usage ;;
+  local operation="${VLESS_SUDOKU_ACTION:-menu}" selector=primary
+  case "$operation" in
+    menu) vless_sudoku_menu_loop; return $? ;;
+    help) nobrand_usage; return $? ;;
+    smoke) operation=doctor ;;
+    subscription) selector="" ;;
   esac
+  nb_splicore_protocol vless-sudoku "$operation" "$selector"
 }
 
 # Native architecture: ordinary protocols use src/19-splicore.sh.
@@ -15475,29 +14590,6 @@ offer_bbr_fq() {
   fi
 }
 
-urlencode() {
-  local value="$1"
-  if command -v python3 >/dev/null 2>&1; then
-    python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$value"
-    return 0
-  fi
-  if [[ "$value" =~ ^[a-zA-Z0-9._~-]+$ ]]; then
-    printf '%s' "$value"
-    return 0
-  fi
-  die "$(t '密码含特殊字符时需要 python3 以生成节点链接' \
-    'python3 required to encode special characters in share link')"
-}
-
-url_host() {
-  local host="$1"
-  if [[ "$host" == *:* ]] && [[ "$host" != \[*\] ]]; then
-    printf '[%s]' "$host"
-  else
-    printf '%s' "$host"
-  fi
-}
-
 nb_render_client_profiles() {
   nb_client_profiles_python "${NOBRAND_STATE_DIR}/splicore/current/desired.json" "${LANG_ZH:-1}"
 }
@@ -15824,8 +14916,8 @@ nb_lifecycle_protocol_scope_state_valid() (
   shopt -s nullglob dotglob
   case "$scope" in
     vless-sudoku)
-      [ -f "$NOBRAND_VLESS_STATE_FILE" ] && [ ! -L "$NOBRAND_VLESS_STATE_FILE" ] \
-        && vless_sudoku_state_exists && vless_sudoku_state_matches
+      warn 'NB-TX-LEGACY-SUDOKU: historical Xray state cannot be replayed by the native installer'
+      return 1
       ;;
     ssh-tunnel)
       [ -f "$NOBRAND_SSH_STATE_FILE" ] && [ ! -L "$NOBRAND_SSH_STATE_FILE" ] \
@@ -15913,7 +15005,7 @@ nb_lifecycle_protocol_retry_authorized() {
 # credentials.  Structural validation intentionally precedes the admin lock
 # and every mutating service/firewall action.
 nb_lifecycle_reconcile_protocol_scope() {
-  local scope="$1" enabled port failed=0
+  local scope="$1"
   nb_lifecycle_protocol_scope_state_valid "$scope" || return 1
 
   case "$scope" in
@@ -15938,43 +15030,9 @@ nb_lifecycle_reconcile_protocol_scope() {
     *) return 1 ;;
   esac
 
-  # Complete the read-only preflight for the whole scope before repairing even
-  # one unit.  Enumerators are intentionally forgiving for status displays, so
-  # recovery additionally requires every derived field/config it will consume.
-  case "$scope" in
-    vless-sudoku)
-      enabled="$(vless_sudoku_state_field enabled 2>/dev/null)" || return 1
-      case "$enabled" in true|false) ;; *) return 1 ;; esac
-      port="$(vless_sudoku_state_field listen_port 2>/dev/null)" || return 1
-      [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || return 1
-      vless_sudoku_server_config_matches \
-        && vless_sudoku_client_config_matches \
-        && nobrand_xray_test_config "$NOBRAND_VLESS_CONFIG_FILE" || return 1
-      ;;
-  esac
-
-  admin_lock_acquire || return 1
-  case "$scope" in
-    vless-sudoku)
-      enabled="$(vless_sudoku_state_field enabled 2>/dev/null)" || failed=1
-      case "$enabled" in true|false) ;; *) failed=1 ;; esac
-      if [ "$failed" -eq 0 ]; then
-        nobrand_write_vless_sudoku_service || failed=1
-      fi
-      if [ "$failed" -eq 0 ] && [ "$enabled" = true ]; then
-        port="$(vless_sudoku_state_field listen_port)" || failed=1
-        [ "$failed" -ne 0 ] \
-          || nb_firewall_open_pairs "TCP|${port}" >/dev/null 2>&1 || failed=1
-        [ "$failed" -ne 0 ] \
-          || nobrand_vless_sudoku_service_action start >/dev/null 2>&1 || failed=1
-        [ "$failed" -ne 0 ] || vless_sudoku_running || failed=1
-      elif [ "$failed" -eq 0 ]; then
-        nobrand_vless_sudoku_service_action stop >/dev/null 2>&1 || failed=1
-      fi
-      ;;
-  esac
-  admin_lock_release
-  return "$failed"
+  # Historical Sudoku callbacks cannot start an external runtime.
+  warn 'NB-TX-LEGACY-SUDOKU: no complete native recovery evidence; original transaction retained'
+  return 1
 }
 
 nb_lifecycle_validate_protocol_scope() {
@@ -15985,7 +15043,7 @@ nb_lifecycle_validate_protocol_scope() {
   nb_lifecycle_protocol_scope_state_valid "$scope" || return 1
   case "$scope" in
     vless-sudoku)
-      vless_sudoku_state_exists && vless_sudoku_doctor
+      nb_splicore_call protocol --protocol vless-sudoku --operation doctor
       ;;
     ssh-tunnel)
       ssh_tunnel_state_exists && ssh_tunnel_doctor
@@ -16420,10 +15478,12 @@ show_backup_menu() {
 }
 
 show_menu() {
-  local installed="no" users="-" selected_rc=0 profile_text="native" version_text="v0.3.0-rc.4"
+  local installed="no" users="-" selected_rc=0 profile_text="native" version_text="v0.5.0" runtime_status
   if nb_splicore_installed; then
     installed=yes
-    users="$(nb_splicore_call protocol --protocol mieru --operation status | jq '[.nodes[]?] | length')"
+    runtime_status="$(nb_splicore_call protocol --protocol mieru --operation status)" || return 1
+    users="$(printf '%s\n' "$runtime_status" | jq '[.nodes[]?] | length')"
+    version_text="$(printf '%s\n' "$runtime_status" | jq -r .version)"
   fi
   msg ''
   t '========== NoBrand-OneClick / Mieru ==========' \
@@ -16782,7 +15842,7 @@ vless_sudoku_menu_loop() {
   while true; do
     msg ''
     msg '========== VLESS + FinalMask + Sudoku（TCP） =========='
-    msg 'VLESS Encryption：未使用（NOT USED）'
+    msg '新建默认 VLESS Encryption：mlkem768 + random + 1rtt；已有节点保留原模式。'
     msg '  1) 安装 / 重新配置'
     msg '  2) 查看节点'
     msg '  3) 修改客户端展示入口'
@@ -16798,7 +15858,7 @@ vless_sudoku_menu_loop() {
     read_tty choice "$(t '请选择 [0-11]: ' 'Choose [0-11]: ')" || return 0
     case "$choice" in
       1)
-        PORT="" PORT_CLI=0 VLESS_SUDOKU_UUID="" VLESS_SUDOKU_PASSWORD=""
+        PORT="" PORT_CLI=0 PASSWORD="" PASSWORD_CLI=0
         ADVERTISE_HOST="" ADVERTISE_PORT="" ADVERTISE_CLI=0 ADVERTISE_AUTO_REQUESTED=0
         YES=0 VLESS_SUDOKU_ACTION=install
         nobrand_menu_run nobrand_run_vless_sudoku_action
@@ -17895,7 +16955,7 @@ nobrand_set_scoped_recovery_action() {
   case "$scope" in
     manager) ACTION=nobrand-manager-bootstrap ;;
     ingress) ACTION=nobrand-ingress-recover ;;
-    vless-sudoku) ACTION=nobrand-vless-sudoku; VLESS_SUDOKU_ACTION=install ;;
+    vless-sudoku) ACTION=nobrand-runtime; NOBRAND_RUNTIME_ARGS=(recover) ;;
     ssh-tunnel) ACTION=nobrand-ssh-tunnel; SSH_TUNNEL_ACTION=install ;;
     forward)
       # Forward add parameters are intentionally not copied into lifecycle
@@ -17944,6 +17004,7 @@ nb_select_partial_recovery_action() {
   local state="${1:-$NOBRAND_INSTALL_STATE}" choice=""
   case "$state" in
     CURRENT_PARTIAL_INSTALL|CURRENT_PARTIAL_REPAIR|CURRENT_PARTIAL_CONFIGURE)
+      nb_splicore_call transactions || return 1
       t '检测到未完成的安装或修复。请选择恢复操作：' \
         'An incomplete install or repair was detected. Choose a recovery action:'
       t '  1) 继续安全修复（默认）' '  1) Continue safe repair (default)'
@@ -18017,12 +17078,17 @@ main() {
     nobrand-version) nobrand_version; return 0 ;;
     nobrand-help) nobrand_usage; return 0 ;;
   esac
+  # Diagnosis remains available even when old state prevents all mutations.
+  if [ "${ACTION:-}" = nobrand-runtime ] && [ "${NOBRAND_RUNTIME_ARGS[0]:-}" = transactions ]; then
+    nb_splicore_call "${NOBRAND_RUNTIME_ARGS[@]}"
+    return $?
+  fi
   nb_splicore_legacy_preflight || return 1
   # The primary runtime has its own persistent generation transaction and uses
   # the same lifecycle lock. Route before any legacy repair/download branch.
   if nobrand_ssh_confirmation_pending; then
     case "${ACTION:-}" in
-      nobrand-runtime|nobrand-snell|nobrand-tuic|nobrand-hy2|nobrand-vless-reality|install|upgrade|reconfigure)
+      nobrand-runtime|nobrand-snell|nobrand-tuic|nobrand-hy2|nobrand-vless-reality|nobrand-vless-sudoku|install|upgrade|reconfigure)
         nobrand_pending_ssh_confirmation_notice
         return 1
         ;;
@@ -18169,6 +17235,7 @@ main() {
     user-manage) do_user_manage ;;
     perf) do_perf ;;
     bbr-config) do_bbr_config ;;
+    nobrand-runtime) nb_splicore_call "${NOBRAND_RUNTIME_ARGS[@]}" ;;
     nobrand-status) nobrand_status ;;
     nobrand-nodes) nobrand_nodes ;;
     nobrand-doctor) nobrand_doctor ;;

@@ -57,12 +57,15 @@ nb_splicore_legacy_preflight() {
       return 1
     fi
   done
-  # The shared Xray binary is also owned by the existing Sudoku exception.
-  if { [ -e "$NOBRAND_XRAY_BIN" ] || [ -L "$NOBRAND_XRAY_BIN" ]; } \
-     && [ ! -f "$NOBRAND_VLESS_STATE_FILE" ]; then
-    nb_splicore_legacy_notice
-    return 1
-  fi
+  # Historical Xray deployments are evidence for read-only refusal only.
+  for path in "$NOBRAND_XRAY_BIN" "$NOBRAND_XRAY_ASSET_DIR" "$NOBRAND_VLESS_STATE_FILE" "$NOBRAND_VLESS_CONFIG_FILE" \
+      "${NOBRAND_VLESS_SYSTEMD_SERVICE}" "${NOBRAND_VLESS_OPENRC_SERVICE}"; do
+    case "$path" in /etc/*) path="${system}${path}" ;; esac
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      nb_splicore_legacy_notice
+      return 1
+    fi
+  done
   if [ -e "$registry" ] || [ -L "$registry" ]; then
     if [ -L "$registry" ] || ! nb_splicore_json_marker "$registry" architecture splicore-native; then
       nb_splicore_legacy_notice
@@ -81,7 +84,7 @@ nb_splicore_legacy_preflight() {
 
 nb_splicore_call() (
   export NOBRAND_STATE_DIR NOBRAND_CONFIG_DIR NOBRAND_LIB_DIR NOBRAND_LIFECYCLE_DIR
-  export NOBRAND_LIFECYCLE_LOCK_FILE
+  export NOBRAND_LIFECYCLE_LOCK_FILE NOBRAND_LIFECYCLE_TX_FILE
   export PORT ADVERTISE_HOST ADVERTISE_PORT USERNAME PASSWORD PROTOCOL MTU
   export MULTIPLEXING HANDSHAKE_MODE TRAFFIC_PATTERN LOW_ENTROPY_MODE
   export USER_QUOTA_MB USER_EXPIRE USER_BANDWIDTH_MBPS USER_PACKAGE
@@ -89,6 +92,7 @@ nb_splicore_call() (
   export PROTOCOL_CLI PORT_CLI PASSWORD_CLI ADVERTISE_CLI
   export SNELL_VERSION SNELL_PSK SNELL_QUIC_PROXY TUIC_SNI TUIC_USER HY2_SNI SCRIPT_VERSION
   export VLESS_REALITY_TARGET VLESS_REALITY_TARGET_PORT NOBRAND_SPLICORE_LISTEN NOBRAND_SPLICORE_INGRESS_ID
+  export NOBRAND_SPLICORE_EXPORT_FORMAT NOBRAND_SPLICORE_CLIENT_VERSION
   NOBRAND_SPLICORE_MANAGER_SOURCE="$(nobrand_manager_source_path 2>/dev/null || true)"
   export NOBRAND_SPLICORE_MANAGER_SOURCE
   command -v python3 >/dev/null 2>&1 || {
@@ -107,11 +111,30 @@ nb_splicore_installed() {
 
 nb_splicore_protocol() {
   nb_splicore_legacy_preflight || return 1
-  local protocol="$1" operation="$2" selector="${3:-}" output human_output=0
+  local protocol="$1" operation="$2" selector="${3:-}" output conflict transport human_output=0
+  local sudoku_status sudoku_port_input="" sudoku_password_input=""
   local -a runtime_options=()
   if nobrand_ssh_confirmation_pending; then
     nobrand_pending_ssh_confirmation_notice
     return 1
+  fi
+  # Fresh hosts must reach dependency provisioning before any Python API call.
+  if [ "$protocol:$operation" = vless-sudoku:install ] && nb_splicore_installed; then
+    sudoku_status="$(nb_splicore_call protocol --protocol vless-sudoku --operation status)" || return 1
+    if printf '%s\n' "$sudoku_status" | jq -e --arg selector "${selector:-primary}" '.nodes[]? | select(.name==$selector or .id==$selector)' >/dev/null; then
+      operation=reconfigure
+      if [ "${YES:-0}" -ne 1 ] && [ "${DRY_RUN:-0}" -ne 1 ]; then
+        if [ "${PORT_CLI:-0}" -eq 0 ]; then
+          PORT="$(printf '%s\n' "$sudoku_status" | jq -r --arg selector "${selector:-primary}" '.nodes[] | select(.name==$selector or .id==$selector) | .listener.port')"
+          read_tty sudoku_port_input "$(t '监听端口（留空保留）: ' 'Listen port (blank preserves): ')${PORT}" || return 1
+          if [ -n "$sudoku_port_input" ]; then PORT="$sudoku_port_input"; PORT_CLI=1; fi
+        fi
+        if [ "${PASSWORD_CLI:-0}" -eq 0 ]; then
+          read_tty sudoku_password_input "$(t 'Sudoku 密码（留空保留）: ' 'Sudoku password (blank preserves): ')" || return 1
+          if [ -n "$sudoku_password_input" ]; then PASSWORD="$sudoku_password_input"; PASSWORD_CLI=1; fi
+        fi
+      fi
+    fi
   fi
   if [ "$protocol" = mieru ]; then
     apply_requested_profile_preserving_cli || return 1
@@ -162,13 +185,17 @@ nb_splicore_protocol() {
       fi
     fi
     if [ -z "${PORT:-}" ] && [ "${DRY_RUN:-0}" -ne 1 ]; then
-      case "$protocol" in snell|mieru|vless-reality) PORT="$(nb_select_available_port TCP "$INGRESS_PROFILE_ID")" ;; *) PORT="$(nb_select_available_port UDP "$INGRESS_PROFILE_ID")" ;; esac
+      case "$protocol" in snell|mieru|vless-reality|vless-sudoku) PORT="$(nb_select_available_port TCP "$INGRESS_PROFILE_ID")" ;; *) PORT="$(nb_select_available_port UDP "$INGRESS_PROFILE_ID")" ;; esac
       [ -n "$PORT" ] || return 1
     fi
     if [ -n "${PORT:-}" ]; then
       nb_valid_port "$PORT" || return 1
       if [ "${DRY_RUN:-0}" -ne 1 ]; then
-        nb_ingress_port_is_reserved "$INGRESS_PROFILE_ID" "$PORT" && return 1
+        if nb_ingress_port_is_reserved "$INGRESS_PROFILE_ID" "$PORT"; then
+          nb_describe_port_conflict TCP "$PORT" "$INGRESS_PROFILE_ID" >&2
+          return 1
+        fi
+        nb_warn_if_outside_recommended_range "$PORT" "$INGRESS_PROFILE_ID"
       fi
     fi
     if [ "${YES:-0}" -ne 1 ] && [ "${DRY_RUN:-0}" -ne 1 ] && [ "${ADVERTISE_CLI:-0}" -eq 0 ]; then
@@ -183,13 +210,33 @@ nb_splicore_protocol() {
       export NOBRAND_SPLICORE_AUTO_HOST
     fi
   fi
+  if [ "$operation" = install ] && [ "${DRY_RUN:-0}" -ne 1 ]; then
+    if [ -z "${ADVERTISE_HOST:-}" ]; then
+      ADVERTISE_HOST="$(nb_ingress_profile_display_host "$INGRESS_PROFILE_ID" 2>/dev/null || true)"
+      if [ -n "$ADVERTISE_HOST" ]; then
+        ADVERTISE_PORT="$(nb_ingress_profile_display_port "$INGRESS_PROFILE_ID" "$PORT")"
+      fi
+    fi
+    if [ -n "${ADVERTISE_HOST:-}" ] && [ -z "${ADVERTISE_PORT:-}" ]; then
+      ADVERTISE_PORT="$PORT"
+    fi
+    nb_require_explicit_endpoint_noninteractive || return 1
+    transport=TCP
+    case "$protocol" in tuic|hysteria2) transport=UDP ;; mieru) transport="${PROTOCOL:-TCP}" ;; esac
+    conflict="$(nb_endpoint_conflict_owner "$transport" "${ADVERTISE_HOST:-${NOBRAND_SPLICORE_AUTO_HOST:-}}" "${ADVERTISE_PORT:-$PORT}" 2>/dev/null || true)"
+    if [ -n "$conflict" ]; then
+      warn "DISPLAY_ENDPOINT_CONFLICT: $conflict"
+      return 1
+    fi
+  fi
   [ "${DRY_RUN:-0}" -ne 1 ] || runtime_options+=(--dry-run)
   [ -z "${NOBRAND_SPLICORE_ARTIFACTS:-}" ] || runtime_options+=(--artifacts "$NOBRAND_SPLICORE_ARTIFACTS")
   output="$(nb_splicore_call protocol --protocol "$protocol" --operation "$operation" \
     --selector "$selector" "${runtime_options[@]}")" || return $?
   case "$operation:$protocol" in
+    export:vless-sudoku|subscription:vless-sudoku) ;;
     show:*|client-config:*|export:*|user-show:*) human_output=1 ;;
-    install:*|user-add:mieru)
+    install:*|reconfigure:vless-sudoku|user-add:mieru)
       if [ "${DRY_RUN:-0}" -ne 1 ]; then human_output=1; fi
       ;;
   esac
@@ -245,6 +292,13 @@ nb_splicore_route_main() {
     nobrand-vless-reality)
       [[ "${VLESS_REALITY_ACTION:-menu}" != menu && "${VLESS_REALITY_ACTION:-menu}" != help ]] || { NOBRAND_SPLICORE_HANDLED=0; return 0; }
       nb_splicore_protocol vless-reality "$VLESS_REALITY_ACTION" "${VLESS_REALITY_NAME:-}"
+      ;;
+    nobrand-vless-sudoku)
+      [[ "${VLESS_SUDOKU_ACTION:-menu}" != menu && "${VLESS_SUDOKU_ACTION:-menu}" != help ]] || { NOBRAND_SPLICORE_HANDLED=0; return 0; }
+      local sudoku_operation="$VLESS_SUDOKU_ACTION" sudoku_selector=primary
+      [ "$sudoku_operation" != smoke ] || sudoku_operation=doctor
+      [ "$sudoku_operation" != subscription ] || sudoku_selector=""
+      nb_splicore_protocol vless-sudoku "$sudoku_operation" "$sudoku_selector"
       ;;
     install|reconfigure|upgrade|uninstall|start|stop|restart|user-add|user-del|user-show|user-list|user-enable|user-disable|user-set-endpoint|user-set-quota|user-set-expire|user-set-rate|user-scan|user-quota-reset|profile-config|traffic-config|low-entropy-config|client-modes-config|mtu-config|version-channel)
       nb_splicore_protocol mieru "$ACTION" "${USERNAME:-${USER_DEL_NAME:-${USER_SHOW_NAME:-}}}"

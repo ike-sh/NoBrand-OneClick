@@ -18,6 +18,7 @@ case "${1:-}" in
 esac
 
 bash scripts/build.sh
+python3 scripts/audit-runtime.py
 for source_file in src/*.sh scripts/*.sh tests/*.sh install-nobrand.sh dist/install-nobrand.sh; do
   bash -n "$source_file"
 done
@@ -43,7 +44,7 @@ unit_tests=(
   tests/test_splicore_cert_lifecycle.sh
   tests/test_splicore_shell_surface.sh
   tests/test_client_profile_output.sh
-  tests/test_splicore_rc4_contract.sh
+  tests/test_splicore_v050_contract.sh
   tests/test_splicore_qualification.sh
   tests/test_architecture_audit.sh
   tests/test_repository_sanitization.sh
@@ -60,7 +61,7 @@ unit_tests=(
   tests/test_ssh_tunnel.sh
   tests/test_ssh_tunnel_transaction.sh
   tests/test_vless_sudoku_golden.sh
-  tests/test_vless_sudoku_encryption_absence.sh
+  tests/test_vless_sudoku_encryption.sh
   tests/test_vless_sudoku_lifecycle.sh
   tests/test_cli.sh
   tests/test_menu.sh
@@ -82,11 +83,11 @@ for test_file in "${unit_tests[@]}"; do
 done
 
 if [ "$run_runtime" -eq 1 ]; then
-  : "${NOBRAND_SPLICORE_PUBLIC_ARTIFACTS:?set the directory containing public rc.4 archives and SHA256SUMS}"
+  : "${NOBRAND_SPLICORE_PUBLIC_ARTIFACTS:?set the directory containing official v0.5.0 archives, SHA256SUMS and RELEASE_MANIFEST.json}"
   : "${NOBRAND_REFERENCE_MIHOMO_GZIP:?set the pinned reference client gzip path}"
   runtime_evidence="${NOBRAND_RUNTIME_EVIDENCE_DIR:-$(mktemp -d)}"
   mkdir -p "$runtime_evidence"
-  PYTHONDONTWRITEBYTECODE=1 python3 tests/helpers/splicore_rc4_probe.py \
+  PYTHONDONTWRITEBYTECODE=1 python3 tests/helpers/splicore_native_probe.py \
     --artifacts "$NOBRAND_SPLICORE_PUBLIC_ARTIFACTS" --mihomo-gzip "$NOBRAND_REFERENCE_MIHOMO_GZIP" \
     --private-log "$runtime_evidence/private-runtime.log" --output "$runtime_evidence/runtime-probe.json"
 
