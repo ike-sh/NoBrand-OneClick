@@ -32,6 +32,14 @@ menu_loop() {
     if [ "$sm_rc" -ne 0 ]; then
       continue
     fi
+    if [ "$ACTION" = set-port ]; then
+      if nb_splicore_menu_select mieru && nb_splicore_prompt_port mieru "$NOBRAND_MENU_SELECTION_ID"; then
+        nobrand_menu_run nb_splicore_protocol mieru set-port "$NOBRAND_MENU_SELECTION_ID"
+      fi
+      nobrand_menu_selection_clear
+      menu_pause
+      continue
+    fi
     # 不能把业务函数放在 if/|| 条件上下文中：Bash 会在整个函数调用链内
     # 抑制 errexit。用独立子 shell 作为简单命令执行，父菜单再读取退出码。
     local rc=0 action_lock=0
@@ -109,7 +117,7 @@ show_backup_menu() {
 }
 
 show_menu() {
-  local installed="no" users="-" selected_rc=0 profile_text="native" version_text="v0.5.0" runtime_status
+  local installed="no" users="-" selected_rc=0 profile_text="native" version_text="$SPLICORE_VERSION" runtime_status
   if nb_splicore_installed; then
     installed=yes
     runtime_status="$(nb_splicore_call protocol --protocol mieru --operation status)" || return 1
@@ -145,16 +153,17 @@ show_menu() {
   msg '  8) 升级'
   msg '  9) Doctor / 诊断'
   msg ' 10) 卸载'
+  t ' 11) 修改真实监听端口' ' 11) Change real listen port'
   msg '  0) 退出'
   msg ""
   t '快捷命令: nobrand mieru（nb mieru 同义）' \
     'Quick command: nobrand mieru (or nb mieru)'
   msg ""
   local choice=""
-  read_tty choice "$(t '请选择 [0-10]: ' 'Choose [0-10]: ')" || return 2
+  read_tty choice "$(t '请选择 [0-11]: ' 'Choose [0-11]: ')" || return 2
   choice="$(printf '%s' "$choice" | tr -d '[:space:]')"
   if [ -z "$choice" ]; then
-    warn "$(t '请输入 0-10' 'Enter 0-10')"
+    warn "$(t '请输入 0-11' 'Enter 0-11')"
     return 1
   fi
   case "$choice" in
@@ -177,9 +186,10 @@ show_menu() {
     8) ACTION=upgrade ;;
     9) ACTION=doctor ;;
     10) ACTION=uninstall ;;
+    11) ACTION=set-port ;;
     0) return 2 ;;
     *)
-      warn "$(t '无效选择，请输入 0-10' 'Invalid choice, enter 0-10')"
+      warn "$(t '无效选择，请输入 0-11' 'Invalid choice, enter 0-11')"
       return 1
       ;;
   esac
@@ -1412,6 +1422,58 @@ ingress_menu_loop() {
   done
 }
 
+socks5_menu_loop() {
+  local choice operation selector confirm_choice
+  local PORT PORT_CLI USERNAME PASSWORD PASSWORD_CLI ADVERTISE_HOST ADVERTISE_PORT ADVERTISE_CLI ADVERTISE_AUTO_REQUESTED
+  while true; do
+    PORT=""; PORT_CLI=0; USERNAME=""; PASSWORD=""; PASSWORD_CLI=0
+    ADVERTISE_HOST=""; ADVERTISE_PORT=""; ADVERTISE_CLI=0; ADVERTISE_AUTO_REQUESTED=0
+    nobrand_menu_selection_clear
+    msg ''
+    t '【SOCKS5 代理 · 强制用户名和密码认证】' '[SOCKS5 proxy · Username and password required]'
+    t '  1) 创建节点' '  1) Create node'
+    t '  2) 查看节点' '  2) List nodes'
+    t '  3) 修改真实监听端口' '  3) Change real listen port'
+    t '  4) 查看客户端配置' '  4) Show client configuration'
+    t '  5) 修改用户名 / 轮换密码' '  5) Change username / rotate password'
+    t '  6) 启动 / 停止节点' '  6) Start / stop node'
+    t '  7) 删除节点' '  7) Remove node'
+    t '  8) 节点诊断' '  8) Diagnose nodes'
+    t '  0) 返回' '  0) Back'
+    read_tty choice "$(t '请选择 [0-8]: ' 'Choose [0-8]: ')" || return 0
+    case "$choice" in
+      0) return 0 ;;
+      1) nobrand_menu_run nb_splicore_protocol socks5 install ;;
+      2) nobrand_menu_run nb_splicore_protocol socks5 status ;;
+      8) nobrand_menu_run nb_splicore_protocol socks5 doctor ;;
+      3|4|5|6|7)
+        nb_splicore_menu_select socks5 || { menu_pause; continue; }
+        selector="$NOBRAND_MENU_SELECTION_ID"
+        case "$choice" in
+          3) nb_splicore_prompt_port socks5 "$selector" || continue; operation=set-port ;;
+          4) operation=show ;;
+          5)
+            read_tty choice "$(t '1) 修改用户名  2) 轮换密码: ' '1) Change username  2) Rotate password: ')" || continue
+            case "$choice" in 1) operation=set-username ;; 2) operation=rotate-password ;; *) continue ;; esac
+            ;;
+          6)
+            read_tty choice "$(t '1) 启动  2) 停止: ' '1) Start  2) Stop: ')" || continue
+            case "$choice" in 1) operation=start ;; 2) operation=stop ;; *) continue ;; esac
+            ;;
+          7)
+            read_tty confirm_choice "$(t '输入 yes 确认删除: ' 'Enter yes to remove: ')" || continue
+            [ "$confirm_choice" = yes ] || continue
+            operation=remove
+            ;;
+        esac
+        nobrand_menu_run nb_splicore_protocol socks5 "$operation" "$selector"
+        ;;
+      *) warn "$(t '无效选择' 'Invalid choice')" ;;
+    esac
+    menu_pause
+  done
+}
+
 nobrand_menu_loop() {
   local choice="" uninstall_rc=0
   MENU_MODE=1
@@ -1435,8 +1497,9 @@ nobrand_menu_loop() {
     msg ' 14) 性能 / BBR / FQ（Mieru 公共网络工具）'
     msg ' 15) 帮助 / CLI'
     msg ' 16) 卸载 NoBrand-OneClick（全部协议）'
+    t ' 17) SOCKS5 代理' ' 17) SOCKS5 proxy'
     msg '  0) 退出'
-    read_tty choice "$(t '请选择 [0-16]: ' 'Choose [0-16]: ')" || return 0
+    read_tty choice "$(t '请选择 [0-17]: ' 'Choose [0-17]: ')" || return 0
     case "$choice" in
       1) menu_loop ;;
       2) snell_menu_loop ;;
@@ -1453,6 +1516,7 @@ nobrand_menu_loop() {
       13) nobrand_backup_menu_loop ;;
       14) nobrand_menu_run do_perf; menu_pause ;;
       15) nobrand_usage; menu_pause ;;
+      17) socks5_menu_loop ;;
       16)
         YES=0
         set +e

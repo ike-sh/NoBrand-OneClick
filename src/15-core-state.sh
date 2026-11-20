@@ -1065,7 +1065,7 @@ nb_write_schema_v3_file() {
   local tmp
   tmp="$(mktemp "${NOBRAND_REGISTRY_FILE}.tmp.XXXXXX")" || return 1
   if ! printf '%s\n' \
-      "{\"schema_version\":${NOBRAND_SCHEMA_VERSION},\"project\":\"NoBrand-OneClick\",\"ownership\":\"nobrand-v3\",\"author\":\"ike\",\"architecture\":\"splicore-native\",\"splicore_version\":\"v0.5.0\",\"config_schema\":1}" \
+      "{\"schema_version\":${NOBRAND_SCHEMA_VERSION},\"project\":\"NoBrand-OneClick\",\"ownership\":\"nobrand-v3\",\"author\":\"ike\",\"architecture\":\"splicore-native\",\"splicore_version\":\"${SPLICORE_VERSION}\",\"config_schema\":1}" \
       >"$tmp" \
     || ! chmod 0600 "$tmp" \
     || ! mv -f "$tmp" "$NOBRAND_REGISTRY_FILE"; then
@@ -1165,6 +1165,18 @@ read_tty() {
   local _var="$1"
   local _prompt="${2:-}"
   local _line=""
+  if [ "${3:-}" = secret ]; then
+    if [ -t 0 ]; then
+      IFS= read -r -s -p "$_prompt" _line || return 1
+    elif [ -r /dev/tty ]; then
+      IFS= read -r -s -p "$_prompt" _line </dev/tty || return 1
+    else
+      return 1
+    fi
+    printf '\n' >&2
+    printf -v "$_var" '%s' "$_line"
+    return 0
+  fi
   if [ -n "$_prompt" ]; then
     if [ -t 0 ]; then
       read -r -p "$_prompt" _line || _line=""

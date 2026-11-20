@@ -8,7 +8,7 @@ from unittest.mock import patch
 ROOT=Path(__file__).resolve().parents[2]
 def module(name,path):
  s=importlib.util.spec_from_file_location(name,ROOT/path);m=importlib.util.module_from_spec(s);s.loader.exec_module(m);return m
-q=module('qualification050','scripts/qualify-splicore.py')
+q=module('native_qualification','scripts/qualify-splicore.py')
 audit=module('runtimeaudit','scripts/audit-runtime.py')
 
 class IntegrationQualificationTests(unittest.TestCase):
@@ -25,9 +25,9 @@ class IntegrationQualificationTests(unittest.TestCase):
     (root/'src/new.sh').write_text(payload)
     self.assertTrue(audit.violations(root),payload)
  def test_release_and_rollback_pins_are_separate(self):
-  self.assertEqual(q.sc.RELEASE['version'],'v0.5.0')
-  self.assertEqual(q.sc.RELEASE['commit'],'70b09da7d2758e19ba03df9ff9b9e541a669fa29')
-  self.assertEqual(set(q.sc.RELEASE['rollback_releases']),{'v0.4.0'})
+  self.assertEqual(q.sc.RELEASE['version'],'v0.6.4')
+  self.assertEqual(q.sc.RELEASE['commit'],'6ff2101e76f73941ecbd780ce2cb68869cb32cee')
+  self.assertEqual(set(q.sc.RELEASE['rollback_releases']),{'v0.4.0','v0.5.0'})
   self.assertFalse(q.sc.RELEASE['capabilities']['vless-sudoku']['requires_external_xray'])
  def test_exact_integration_inventory_and_workflow(self):
   self.assertEqual(q.review_integrity()['result'],'PASS')

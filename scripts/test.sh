@@ -44,7 +44,8 @@ unit_tests=(
   tests/test_splicore_cert_lifecycle.sh
   tests/test_splicore_shell_surface.sh
   tests/test_client_profile_output.sh
-  tests/test_splicore_v050_contract.sh
+  tests/test_splicore_release_contract.sh
+  tests/test_mieru_listener_port.sh
   tests/test_splicore_qualification.sh
   tests/test_architecture_audit.sh
   tests/test_repository_sanitization.sh
@@ -83,7 +84,7 @@ for test_file in "${unit_tests[@]}"; do
 done
 
 if [ "$run_runtime" -eq 1 ]; then
-  : "${NOBRAND_SPLICORE_PUBLIC_ARTIFACTS:?set the directory containing official v0.5.0 archives, SHA256SUMS and RELEASE_MANIFEST.json}"
+  : "${NOBRAND_SPLICORE_PUBLIC_ARTIFACTS:?set the directory containing pinned Splicore archives, SHA256SUMS and RELEASE_MANIFEST.json}"
   : "${NOBRAND_REFERENCE_MIHOMO_GZIP:?set the pinned reference client gzip path}"
   runtime_evidence="${NOBRAND_RUNTIME_EVIDENCE_DIR:-$(mktemp -d)}"
   mkdir -p "$runtime_evidence"

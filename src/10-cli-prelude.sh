@@ -27,12 +27,13 @@ trap on_error ERR
 
 usage() {
   cat <<EOF
-NoBrand-OneClick ${SCRIPT_VERSION} / Splicore v0.5.0
+NoBrand-OneClick ${SCRIPT_VERSION} / Splicore ${SPLICORE_VERSION}
 用法 / Usage: nobrand <protocol> <action> [options]
-协议 / Protocols: mieru, snell, hy2, tuic, vless-reality, vless-sudoku, ssh, forward
+协议 / Protocols: mieru, snell, hy2, tuic, vless-reality, vless-sudoku, socks5, ssh, forward
 Actions: install, show, status, doctor, start, stop, restart, uninstall
 Fresh install: --port PORT --advertise-host HOST -y
 Mieru: --protocol TCP|UDP|BOTH --user NAME --password VALUE --mtu 1400
+Mieru / SOCKS5: set-port --name NAME --port PORT
 Snell: --version 4|5; QUIC Proxy Mode is unsupported.
 REALITY: --target COVER_HOST --target-port 443; native Vision and Local Tunnel Guard.
 HY2: --sni HOST; fresh TLS trust and Salamander credentials.
@@ -197,6 +198,56 @@ parse_nobrand_ingress_args() {
       || return 1
   fi
   ACTION="nobrand-ingress"
+  NOBRAND_ARGS_HANDLED=1
+}
+
+parse_nobrand_native_args() {
+  local protocol="$1" operation="$2" rc
+  shift 2
+  NOBRAND_NATIVE_ACTION="$operation"
+  NOBRAND_NATIVE_SELECTOR=""
+  case "$protocol:$operation" in
+    socks5:help|socks5:-h|socks5:--help) ACTION=nobrand-help; NOBRAND_ARGS_HANDLED=1; return 0 ;;
+    socks5:menu|socks5:install|socks5:status|socks5:doctor|socks5:show|socks5:export|socks5:set-port|\
+    socks5:set-username|socks5:rotate-password|socks5:start|socks5:stop|socks5:remove|mieru:set-port) ;;
+    *) die "未知 $protocol 操作: $operation"; return 1 ;;
+  esac
+  while [ "$#" -gt 0 ]; do
+    case "$operation:$1" in
+      *:--name)
+        NOBRAND_NATIVE_SELECTOR="${2:-}"
+        [ -n "$NOBRAND_NATIVE_SELECTOR" ] && [[ "$NOBRAND_NATIVE_SELECTOR" != --* ]] || die "--name 需要节点名"
+        shift 2 ;;
+      install:--user|set-username:--user)
+        USERNAME="${2:-}"
+        [ -n "$USERNAME" ] && [[ "$USERNAME" != --* ]] || die "--user 需要用户名"
+        shift 2 ;;
+      install:--password|rotate-password:--password)
+        PASSWORD="${2:-}"
+        [ -n "$PASSWORD" ] && [[ "$PASSWORD" != --* ]] || die "--password 需要密码"
+        PASSWORD_CLI=1
+        shift 2 ;;
+      export:--format)
+        NOBRAND_SPLICORE_EXPORT_FORMAT="${2:-}"
+        case "$NOBRAND_SPLICORE_EXPORT_FORMAT" in json|mihomo|sing-box) ;; *) die "--format 需要 json、mihomo 或 sing-box" ;; esac
+        shift 2 ;;
+      install:--*|install:-y|set-port:--port|set-port:--dry-run|set-port:--yes|set-port:-y|\
+      set-username:--yes|set-username:-y|rotate-password:--yes|rotate-password:-y|remove:--yes|remove:-y)
+        rc=0
+        parse_nobrand_common_option "$1" "${2:-}" || rc=$?
+        case "$rc" in 0) shift ;; 2) shift 2 ;; *) die "未知 $protocol 参数: $1"; return 1 ;; esac
+        ;;
+      *) die "未知 $protocol 参数: $1"; return 1 ;;
+    esac
+  done
+  [ "$operation" != set-port ] || [ -n "$PORT" ] || die "--port 需要端口号"
+  case "$operation" in
+    show|export|set-port|set-username|rotate-password|start|stop|remove)
+      [ -n "$NOBRAND_NATIVE_SELECTOR" ] || die "--name 需要节点名"
+      ;;
+  esac
+  ACTION="nobrand-$protocol"
+  [ "$protocol" != mieru ] || ACTION="nobrand-mieru-set-port"
   NOBRAND_ARGS_HANDLED=1
 }
 
@@ -638,6 +689,8 @@ detect_nobrand_entry() {
       if [ "$#" -eq 0 ]; then
         ACTION="nobrand-mieru-menu"
         NOBRAND_ARGS_HANDLED=1
+      elif [ "$1" = set-port ]; then
+        parse_nobrand_native_args mieru "$@"
       else
         # The mature Mieru option parser is an internal NoBrand subsystem.
         NOBRAND_REPARSED_ARGS=("$@")
@@ -646,6 +699,14 @@ detect_nobrand_entry() {
     snell)
       shift
       parse_nobrand_snell_args "$@"
+      ;;
+    socks5)
+      shift
+      if [ "$#" -eq 0 ]; then
+        parse_nobrand_native_args socks5 menu
+      else
+        parse_nobrand_native_args socks5 "$@"
+      fi
       ;;
     hy2|hysteria2)
       shift
@@ -702,7 +763,7 @@ detect_nobrand_entry() {
           --protocol)
             NOBRAND_PROTOCOL_FILTER="${2:-}"
             [ -n "$NOBRAND_PROTOCOL_FILTER" ] \
-              || die "--protocol 需要 mieru、snell、hy2、tuic、vless-reality、vless-sudoku、ssh 或 forward"
+              || die "--protocol 需要 mieru、snell、hy2、tuic、vless-reality、vless-sudoku、socks5、ssh 或 forward"
             shift 2
             ;;
           *) die "未知 nodes 参数: $1" ;;

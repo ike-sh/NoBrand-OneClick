@@ -51,7 +51,7 @@ def render_client_profiles(result, listeners=None, chinese=True):
         raise ProfileError("client_profiles")
     lines = []
     titles = {"mieru": "Mieru", "snell": "Snell", "hysteria2": "Hysteria2",
-              "tuic": "TUIC v5", "vless-reality": "VLESS REALITY", "vless-sudoku": "VLESS FinalMask Sudoku"}
+              "tuic": "TUIC v5", "vless-reality": "VLESS REALITY", "vless-sudoku": "VLESS FinalMask Sudoku", "socks5": "SOCKS5"}
     def label(zh, en):
         return zh if chinese else en
     def field(zh, en, value, required=False):
@@ -99,6 +99,16 @@ def render_client_profiles(result, listeners=None, chinese=True):
                             field("传输协议", "Transport", binding.get("protocol"), True)
                             connection(host, binding.get("port"))
                 native_label = ("Mieru 原生客户端配置", "Mieru native client configuration")
+            elif protocol == "socks5":
+                config = needed(profile.get("connection"), "connection")
+                connection(config.get("host"), config.get("port"))
+                field("用户名", "Username", config.get("username"), True)
+                field("密码", "Password", config.get("password"), True)
+                if config.get("authentication_required") is not True:
+                    raise ProfileError("authentication_required")
+                field("认证", "Authentication", label("必须使用用户名和密码（RFC 1929）", "Username and password required (RFC 1929)"))
+                native = needed(profile.get("sing_box"), "sing_box")
+                native_label = ("sing-box 客户端出站配置", "sing-box client outbound configuration")
             elif protocol == "vless-sudoku":
                 native = needed(profile.get("xray"), "xray")
                 target = native["settings"]["vnext"][0]

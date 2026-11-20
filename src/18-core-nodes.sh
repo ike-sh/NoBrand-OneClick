@@ -15,7 +15,7 @@ nobrand_version() {
 
 nobrand_usage() {
   cat <<EOF
-NoBrand-OneClick 4.1.0 — Multi-Ingress / Mieru / Snell v4-v5 / Hysteria2 / TUIC v5 / VLESS REALITY / VLESS + FinalMask + Sudoku / SSH Tunnel / Port Forward
+NoBrand-OneClick ${SCRIPT_VERSION} — Multi-Ingress / Mieru / Snell v4-v5 / Hysteria2 / TUIC v5 / VLESS REALITY / VLESS + FinalMask + Sudoku / SOCKS5 / SSH Tunnel / Port Forward
 
 用法:
   nobrand                         打开统一菜单
@@ -25,7 +25,7 @@ NoBrand-OneClick 4.1.0 — Multi-Ingress / Mieru / Snell v4-v5 / Hysteria2 / TUI
   nobrand status                  综合状态
   nobrand nodes [--protocol P]    查看全部或指定协议节点
   nobrand doctor                  综合诊断（默认不输出 secret）
-  nobrand runtime capabilities    查看固定 Splicore v0.5.0 的能力与限制
+  nobrand runtime capabilities    查看固定 Splicore ${SPLICORE_VERSION} 的能力与限制
   nobrand runtime status|doctor|plan|recover|rollback
   nobrand runtime apply|render --file DESIRED.json
   nobrand runtime backup|restore --file BACKUP.tar.gz
@@ -43,6 +43,7 @@ NoBrand-OneClick 4.1.0 — Multi-Ingress / Mieru / Snell v4-v5 / Hysteria2 / TUI
   nobrand mieru                    打开完整 Mieru 菜单
   nobrand mieru install|reconfigure|upgrade|uninstall|start|stop|restart
   nobrand mieru status|doctor|perf|show|users
+  nobrand mieru set-port --name NAME --port PORT
   nobrand mieru user-add|user-del|user-show|user-set-endpoint
   Mieru 参数: --port --protocol --profile --advertise-host --advertise-port --advertise-auto
     user-add 可在交互中选择自动/自定义展示入口；--advertise-host 可省略展示端口并继承新用户的有效端口。
@@ -54,6 +55,15 @@ NoBrand-OneClick 4.1.0 — Multi-Ingress / Mieru / Snell v4-v5 / Hysteria2 / TUI
   nobrand snell show|status|doctor|start|stop|restart|remove [--name NAME]
   nobrand snell set-endpoint --name NAME
       [--advertise-host HOST --advertise-port PORT | --advertise-auto]
+
+  nobrand socks5 install --name NAME --user USER [--port PORT]
+      [--advertise-host HOST --advertise-port PORT | --advertise-auto] [-y]
+  nobrand socks5 status|doctor
+  nobrand socks5 show|start|stop|remove --name NAME
+  nobrand socks5 set-port --name NAME --port PORT
+  nobrand socks5 set-username --name NAME --user USER
+  nobrand socks5 rotate-password --name NAME [-y]
+  nobrand socks5 export --name NAME [--format json|mihomo|sing-box]
 
   nobrand hy2 install [--port PORT] [--sni SNI]
       [--advertise-host HOST --advertise-port PORT | --advertise-auto] [-y]
@@ -98,7 +108,8 @@ NoBrand-OneClick 4.1.0 — Multi-Ingress / Mieru / Snell v4-v5 / Hysteria2 / TUI
 
 说明:
   - Snell 只支持 v5（默认/推荐）与 v4（兼容）。
-  - 普通代理由一个固定 Splicore v0.5.0 daemon 管理。
+  - 普通代理由一个固定 Splicore ${SPLICORE_VERSION} daemon 管理。
+  - SOCKS5 需要含原生认证入站的 Splicore 版本；RFC 1929 用户名与密码明文传输。
   - 新架构要求 clean install；旧 multi-core 安装只检测并拒绝，不支持原地迁移或新版卸载。
   - REALITY 使用原生 Local Tunnel Guard；HY2 使用新证书和独立 Salamander secret。
   - Mieru 新装可用 --profile iplc 或 --traffic-pattern off；默认 traffic off；balanced/stealth 不支持。
@@ -226,7 +237,7 @@ nb_all_node_rows() {
     vless-sudoku|sudoku|vless) return 0 ;;
     ssh|ssh-tunnel) ssh_tunnel_node_rows ;;
     forward|port-forward) forward_node_rows ;;
-    mieru|snell|hy2|hysteria2|tuic|vless-reality|reality) return 0 ;;
+    mieru|snell|socks5|hy2|hysteria2|tuic|vless-reality|reality) return 0 ;;
     *) return 1 ;;
   esac
 }

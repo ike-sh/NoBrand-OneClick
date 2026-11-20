@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import socket
 import tempfile
 import hashlib
 import io
@@ -126,7 +127,7 @@ class RuntimeTests(unittest.TestCase):
         old, events = self.runtime.current.readlink(), self.events()
         graph = desired()
         graph["nodes"][0]["options"] = {"quic_proxy_enabled": True}
-        with self.assertRaisesRegex(sc.Failure, "no v0.5.0 equivalent"):
+        with self.assertRaisesRegex(sc.Failure, "no native equivalent"):
             self.deploy(graph)
         self.assertEqual(self.runtime.current.readlink(), old)
         self.assertEqual(self.events(), events)
@@ -402,6 +403,84 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(self.artifact_calls, 2)
             self.runtime.rollback()
             self.assertEqual(self.runtime.current.resolve(), old)
+
+    def test_mieru_listener_pair_moves_together_and_retains_display(self):
+        def vacant_pair():
+            for _ in range(32):
+                with socket.socket() as tcp, socket.socket(type=socket.SOCK_DGRAM) as udp:
+                    tcp.bind(("127.0.0.1", 0))
+                    port = tcp.getsockname()[1]
+                    try:
+                        udp.bind(("127.0.0.1", port + 1))
+                    except OSError:
+                        continue
+                    return port
+            self.fail("No loopback pair available")
+
+        original, requested = vacant_pair(), vacant_pair()
+        while requested == original:
+            requested = vacant_pair()
+        with patch.dict(os.environ, {
+            "PORT": str(original), "PROTOCOL": "BOTH", "TRAFFIC_PATTERN": "off", "USERNAME": "fixture-user",
+            "ADVERTISE_HOST": "mapped.example", "ADVERTISE_PORT": "443", "NOBRAND_SPLICORE_LISTEN": "127.0.0.1",
+            "PASSWORD": "synthetic-mieru-fixture",
+        }):
+            self.runtime.protocol("mieru", "install", "original")
+        graph, generation = self.runtime.desired(), self.runtime.current.resolve()
+        self.assertEqual(self.runtime.port_pairs(graph), {f"TCP|{original}", f"UDP|{original + 1}"})
+        with patch.dict(os.environ, {"PORT": "65535"}):
+            with self.assertRaisesRegex(sc.Failure, "UDP base port"):
+                self.runtime.protocol("mieru", "set-port", "original")
+        with patch.dict(os.environ, {"PORT": str(requested)}):
+            with socket.socket(type=socket.SOCK_DGRAM) as udp:
+                udp.bind(("127.0.0.1", requested + 1))
+                with self.assertRaisesRegex(sc.Failure, "address/port is unavailable"):
+                    self.runtime.protocol("mieru", "set-port", "original")
+            firewall = self.runtime.state / "firewall-owned.bindings"
+            firewall.write_text(f"iptables|udp|{requested + 1}\n")
+            with self.assertRaisesRegex(sc.Failure, "firewall owner"):
+                self.runtime.protocol("mieru", "set-port", "original")
+            firewall.unlink()
+            (self.root / "fail-health").touch()
+            with self.assertRaises(sc.Failure):
+                self.runtime.protocol("mieru", "set-port", "original")
+            self.assertEqual(self.runtime.current.resolve(), generation)
+            self.assertEqual(self.runtime.desired(), graph)
+            self.assertEqual(sc.load(self.runtime.transaction)["phase"], "ROLLED_BACK")
+            alias = next(n["id"] for n in graph["nodes"] if sc.listener_transport(n) == "udp")
+            result = self.runtime.protocol("mieru", "set-port", alias)
+        self.assertEqual([(n["transport"], n["listener"]["port"], n["display_endpoint"]["port"])
+                          for n in result["listeners"]], [("tcp", requested, 443), ("udp", requested + 1, 444)])
+        for current, previous in zip(self.runtime.desired()["nodes"], graph["nodes"]):
+            self.assertEqual(current["document"]["users"], previous["document"]["users"])
+
+    def test_mieru_follow_actual_and_legacy_independent_port(self):
+        for policy, expected in ((None, 32001), ("follow-actual", 32002)):
+            client = {"name": "fixture"}
+            if policy:
+                client["display_port_policy"] = policy
+            node = {"id": "fixture", "protocol": "mieru", "client": client,
+                    "document": {"settings": {"transport": "udp"}, "listener": {"port": 32001},
+                                 "display_endpoint": {"host": "mapped.example", "port": 32001}}}
+            sc.set_listener_port([node], "mieru", "fixture", "32002")
+            self.assertEqual(node["document"]["display_endpoint"]["port"], expected)
+
+    def test_socks5_does_not_remove_multiple_nodes_with_an_ambiguous_name(self):
+        release = copy.deepcopy(sc.RELEASE)
+        release["capabilities"]["socks5"]["managed"] = True
+        graph = dict(sc.empty(), nodes=[
+            {"id": f"fixture-{port}", "client": {"name": "shared"}, "protocol": "socks5",
+             "document": {"schema": 1, "listener": {"host": "127.0.0.1", "port": port},
+                          "display_endpoint": {"host": "edge.example", "port": port},
+                          "settings": dict(sc.SOCKS5_SETTINGS),
+                          "users": [{"username": "fixture-user", "password": "synthetic-socks5-test-password"}]}}
+            for port in (32301, 32302)
+        ])
+        with patch.object(sc, "RELEASE", release), patch.object(self.runtime, "port_preflight"):
+            self.runtime.deploy(graph)
+            with self.assertRaisesRegex(sc.Failure, "select exactly one SOCKS5 node"):
+                self.runtime.protocol("socks5", "remove", "shared")
+            self.assertEqual(self.runtime.desired(), graph)
 
     def test_product_archive_rejects_links_before_extraction(self):
         path = self.root / "unsafe-product.tar.gz"

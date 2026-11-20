@@ -8,8 +8,7 @@ nb_normalize_transport() {
   esac
 }
 
-# 手工端口允许 1-65535；自动分配始终从 1025 起。Mieru 自身仍通过
-# valid_port 保持原有 1025 下限。
+# 手工端口允许 1-65535；自动分配始终从 1025 起。
 nb_valid_port() {
   local port
   port="$(normalize_uint "${1:-}")" || return 1
@@ -226,7 +225,7 @@ if primary:
     for node in state["nodes"]:
         doc = node["document"]
         protocol = node["protocol"]
-        transport = doc["settings"]["transport"] if protocol == "mieru" else "TCP" if protocol in ("snell", "vless-reality", "vless-sudoku") else "UDP"
+        transport = doc["settings"]["transport"] if protocol == "mieru" else "TCP" if protocol in ("snell", "socks5", "vless-reality", "vless-sudoku") else "UDP"
         emit(protocol + ":" + node["id"], transport, doc["listener"]["port"],
              doc["display_endpoint"]["host"], doc["display_endpoint"]["port"])
         if node.get("guard"):
@@ -287,6 +286,13 @@ nb_port_available_for_transport() {
 nb_port_available_for_profile() {
   local port="$1" transport="$2" profile_id="${3:-$NOBRAND_LEGACY_INGRESS_PROFILE_ID}" ignore_owner="${4:-}"
   nb_valid_port "$port" || return 1
+  if [ "$transport" = BOTH ]; then
+    port="$(normalize_uint "$port")" || return 1
+    [ "$port" -lt 65535 ] \
+      && nb_port_available_for_profile "$port" TCP "$profile_id" "$ignore_owner" \
+      && nb_port_available_for_profile "$((port + 1))" UDP "$profile_id" "$ignore_owner"
+    return $?
+  fi
   transport="$(nb_normalize_transport "$transport")" || return 1
   nb_ingress_profile_json "$profile_id" >/dev/null 2>&1 || return 1
   nb_ingress_port_is_reserved "$profile_id" "$port" && return 1
@@ -297,7 +303,7 @@ nb_port_available_for_profile() {
 
 nb_select_available_port() {
   local transport profile_id="${2:-$NOBRAND_LEGACY_INGRESS_PROFILE_ID}" bounds lo hi selected attempt random_value rc=0
-  transport="$(nb_normalize_transport "$1")" || return 1
+  if [ "$1" = BOTH ]; then transport=BOTH; else transport="$(nb_normalize_transport "$1")" || return 1; fi
   bounds="$(nb_ingress_profile_auto_range "$profile_id" 2>/dev/null)" || rc=$?
   if [ "$rc" -eq 0 ] && [ -n "$bounds" ]; then
     lo="${bounds%%|*}"
