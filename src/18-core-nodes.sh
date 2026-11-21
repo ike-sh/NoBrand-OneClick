@@ -57,12 +57,17 @@ NoBrand-OneClick ${SCRIPT_VERSION} — Multi-Ingress / Mieru / Snell v4-v5 / Hys
       [--advertise-host HOST --advertise-port PORT | --advertise-auto]
 
   nobrand socks5 install --name NAME --user USER [--port PORT]
+      [--listen IP --allow-cleartext-remote] [--udp on|off]
       [--advertise-host HOST --advertise-port PORT | --advertise-auto] [-y]
   nobrand socks5 status|doctor
   nobrand socks5 show|start|stop|remove --name NAME
   nobrand socks5 set-port --name NAME --port PORT
   nobrand socks5 set-username --name NAME --user USER
   nobrand socks5 rotate-password --name NAME [-y]
+  nobrand socks5 set-udp --name NAME --udp on|off
+  nobrand socks5 set-udp-relay --name NAME --udp-listen IP --udp-advertise HOST --udp-port-range FIRST-LAST
+      install 和 set-udp on 同样接受 UDP Relay 参数。回环监听可使用 --udp-port-range auto。
+      非回环 UDP 需要 --udp-advertise 和 --udp-port-range，NAT 须逐个转发到同号端口。
   nobrand socks5 export --name NAME [--format json|mihomo|sing-box]
 
   nobrand hy2 install [--port PORT] [--sni SNI]
@@ -108,11 +113,13 @@ NoBrand-OneClick ${SCRIPT_VERSION} — Multi-Ingress / Mieru / Snell v4-v5 / Hys
 
 说明:
   - Snell 只支持 v5（默认/推荐）与 v4（兼容）。
-  - 普通代理由一个固定 Splicore ${SPLICORE_VERSION} daemon 管理。
-  - SOCKS5 需要含原生认证入站的 Splicore 版本；RFC 1929 用户名与密码明文传输。
+  - 普通代理由一个固定 Splicore ${SPLICORE_VERSION} daemon 管理，安装支持 Linux amd64。
+  - SOCKS5 强制 RFC 1929 用户名密码认证，支持 TCP CONNECT，UDP 默认关闭。
+  - 非回环 SOCKS5 使用明文凭据与流量，请确认可信线路或访问控制后使用 --allow-cleartext-remote。
   - 新架构要求 clean install；旧 multi-core 安装只检测并拒绝，不支持原地迁移或新版卸载。
   - REALITY 使用原生 Local Tunnel Guard；HY2 使用新证书和独立 Salamander secret。
   - Mieru 新装可用 --profile iplc 或 --traffic-pattern off；默认 traffic off；balanced/stealth 不支持。
+  - Mieru 菜单可选 TCP（默认）、UDP 或 BOTH，并可修改真实监听端口。
   - Display Endpoint 只影响客户端输出，不创建 DNAT/IPLC 转发，也不改 listener。
   - --advertise-host 接受 IPv4、IPv6 或 ASCII DNS hostname；Host 与 Port 分别填写，配置时不要求域名解析成功。
   - Display Endpoint 不配置 VPS 系统出站 IP、默认路由或 policy routing。

@@ -82,17 +82,21 @@ def render_client_profiles(result, listeners=None, chinese=True):
             if len(entries) > 1:
                 lines.append(label(" 用户 ", " User ") + str(user_index) + " / " + str(len(entries)))
             lines.extend(["=" * 60, "", "[" + label("基本信息", "Connection info") + "]"])
-            field("节点", "Node", profile.get("id"))
-            listener = listeners.get(profile.get("id"))
-            if listener:
-                field("服务监听", "Server listen", host_port(listener["host"], listener["port"]))
+            field("节点", "Node", profile.get("name") or profile.get("id"))
+            ids = profile.get("listener_ids", [profile.get("id")])
+            if profile.get("name"):
+                field("内部 ID", "Internal ID", ", ".join(ids))
+            for listener_id in ids:
+                listener = listeners.get(listener_id)
+                if listener:
+                    field("服务监听", "Server listen", host_port(listener["host"], listener["port"]))
             if protocol == "mieru":
                 native = needed(profile.get("mieru"), "mieru")
                 for config in needed(native.get("profiles"), "profiles"):
                     user = config["user"]
                     field("用户名", "Username", user.get("name"), True)
                     field("密码", "Password", user.get("password"), True)
-                    field("传输预设", "Profile", config.get("profileName"))
+                    field("原生配置名", "Native profile name", config.get("profileName"))
                     for server in needed(config.get("servers"), "servers"):
                         host = server.get("domainName") or server.get("ipAddress")
                         for binding in needed(server.get("portBindings"), "portBindings"):
@@ -107,6 +111,8 @@ def render_client_profiles(result, listeners=None, chinese=True):
                 if config.get("authentication_required") is not True:
                     raise ProfileError("authentication_required")
                 field("认证", "Authentication", label("必须使用用户名和密码（RFC 1929）", "Username and password required (RFC 1929)"))
+                field("UDP ASSOCIATE", "UDP ASSOCIATE",
+                      label("开启", "Enabled") if config.get("udp") is True else label("关闭", "Disabled"))
                 native = needed(profile.get("sing_box"), "sing_box")
                 native_label = ("sing-box 客户端出站配置", "sing-box client outbound configuration")
             elif protocol == "vless-sudoku":

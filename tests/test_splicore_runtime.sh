@@ -12,7 +12,7 @@ workspace="$(mktemp -d)"
 trap 'rm -rf -- "$workspace" "$runtime_system_root"' EXIT
 cp "$TEST_ROOT/dist/install-nobrand.sh" "$workspace/installer.sh"
 output="$(bash "$workspace/installer.sh" runtime capabilities)"
-assert_contains "$output" 'v0.6.4' 'standalone public pin'
+assert_contains "$output" 'v0.6.5' 'standalone public pin'
 assert_contains "$output" 'requires_external_xray' 'explicit native Sudoku capability'
 source_installer
 nb_splicore_protocol() { printf 'primary:%s:%s\n' "$1" "$2"; }

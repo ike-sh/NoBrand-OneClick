@@ -1,5 +1,13 @@
 # Changelog
 
+## 4.2.0（未发布）
+
+- 锁定 Linux amd64 的 Splicore v0.6.5 正式发行包，校验发行 Manifest、SHA256SUMS 和二进制身份。
+- 新增强制 RFC 1929 用户名密码认证的原生 SOCKS5。支持 TCP CONNECT、可选 UDP ASSOCIATE、Relay 配置及通用 JSON、Mihomo 和 sing-box 导出。
+- Mieru 菜单可选 TCP、UDP 或 BOTH，可创建和修改真实监听端口。BOTH 成对提交端口更新，保留独立的客户端展示端点（Issue #2）。
+- 将 Mieru 节点名传递给 Mihomo、分享链接和原生配置。自定义入口 Host 或 Port 输入有误时提示并重新输入。
+- 原生 v4.1.0 升级保留既有节点和凭据。拒绝降级到与当前 SOCKS5 节点不兼容的内核并保留快照。
+
 ## 4.1.0 - 2026-11-11
 
 - 升级并固定 Splicore 正式版 v0.5.0，校验官方 Manifest、发行包和二进制身份。

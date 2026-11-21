@@ -25,9 +25,9 @@ class IntegrationQualificationTests(unittest.TestCase):
     (root/'src/new.sh').write_text(payload)
     self.assertTrue(audit.violations(root),payload)
  def test_release_and_rollback_pins_are_separate(self):
-  self.assertEqual(q.sc.RELEASE['version'],'v0.6.4')
-  self.assertEqual(q.sc.RELEASE['commit'],'6ff2101e76f73941ecbd780ce2cb68869cb32cee')
-  self.assertEqual(set(q.sc.RELEASE['rollback_releases']),{'v0.4.0','v0.5.0'})
+  self.assertEqual(q.sc.RELEASE['version'],'v0.6.5')
+  self.assertEqual(q.sc.RELEASE['commit'],'3c062eb21da933217f6d0bd4f2c42dc1075bb942')
+  self.assertEqual(set(q.sc.RELEASE['rollback_releases']),{'v0.4.0','v0.5.0','v0.6.4'})
   self.assertFalse(q.sc.RELEASE['capabilities']['vless-sudoku']['requires_external_xray'])
  def test_exact_integration_inventory_and_workflow(self):
   self.assertEqual(q.review_integrity()['result'],'PASS')
@@ -36,8 +36,15 @@ class IntegrationQualificationTests(unittest.TestCase):
   original=q.sc.sha
   with patch.object(q.sc,'sha',side_effect=lambda p: '0'*64 if Path(p).name=='splicore.py' else original(p)):
    with self.assertRaises(q.QualificationFailure):q.review_integrity()
- def test_architecture_qualifications_are_not_combined(self):
-  self.assertIn('BUILD ONLY',q.sc.RELEASE['assets']['arm64']['qualification'])
-  self.assertNotIn('PASS',q.sc.RELEASE['assets']['arm64']['qualification'])
+ def test_arm64_rejected_before_download(self):
+  self.assertEqual(set(q.sc.RELEASE['assets']),{'amd64'})
+  with patch.object(q.sc.platform,'machine',return_value='aarch64'), patch.object(q.sc,'download') as download:
+   with tempfile.TemporaryDirectory() as directory:
+    destination=Path(directory)/'splicore'
+    with self.assertRaises(q.sc.Failure) as raised:
+     q.sc.artifact(destination,target_arch='amd64')
+    self.assertEqual(raised.exception.category,'ARCH_UNSUPPORTED')
+    self.assertFalse(destination.exists())
+    download.assert_not_called()
 
 if __name__=='__main__':unittest.main(verbosity=2)

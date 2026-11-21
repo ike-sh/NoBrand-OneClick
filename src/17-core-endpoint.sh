@@ -113,11 +113,15 @@ nb_require_explicit_endpoint_noninteractive() {
 
 nb_collect_advertise_endpoint_interactive() {
   local protocol_name="$1" listen_port="$2" detected="" choice="" host="" port="" profile_name=""
-  detected="$(nb_ingress_profile_display_host "${INGRESS_PROFILE_ID:-}" 2>/dev/null || true)"
-  if [ -n "$detected" ]; then
-    profile_name="$(nb_ingress_profile_name "$INGRESS_PROFILE_ID")"
-  else
-    detected="$(public_ip 2>/dev/null || true)"
+  local transport="${4:-TCP}"
+  detected="${3:-}"
+  if [ -z "$detected" ]; then
+    detected="$(nb_ingress_profile_display_host "${INGRESS_PROFILE_ID:-}" 2>/dev/null || true)"
+    if [ -n "$detected" ]; then
+      profile_name="$(nb_ingress_profile_name "$INGRESS_PROFILE_ID")"
+    else
+      detected="$(public_ip 2>/dev/null || true)"
+    fi
   fi
   msg ""
   t "${protocol_name} 真实监听端口: ${listen_port}" "${protocol_name} real listen port: ${listen_port}"
@@ -132,25 +136,37 @@ nb_collect_advertise_endpoint_interactive() {
     '  1) Use auto endpoint (host is detected when viewing; port equals listener)'
   t '  2) 自定义客户端入口（IPLC / NAT / DNAT）' \
     '  2) Custom client endpoint (IPLC / NAT / DNAT)'
-  read_tty choice "$(t '请选择 [1-2，默认 1]: ' 'Choose [1-2, default 1]: ')" || choice=""
+  read_tty choice "$(t '请选择 [1-2，默认 1]: ' 'Choose [1-2, default 1]: ')" || return 1
   case "${choice:-1}" in
     2)
       while true; do
         read_tty host "$(t "客户端入口 Host [${detected:-example.com}]: " \
-          "Client entry host [${detected:-example.com}]: ")" || host=""
+          "Client entry host [${detected:-example.com}]: ")" literal || return 1
         host="${host:-$detected}"
+        if valid_advertise_host "$host"; then
+          ADVERTISE_HOST="$(nb_normalize_endpoint_host "$host")" || return 1
+          break
+        fi
+        if [[ "$host" =~ ^[0-9]+$ ]]; then
+          warn "$(t "Host 应填写 IP 地址或域名，${host} 看起来是端口号。请重新输入 Host。" \
+            "Host must be an IP address or domain. ${host} looks like a port. Enter the host again.")" >&2
+        else
+          warn "$(t 'Host 必须是可用的 IPv4、IPv6 或域名；请单独填写端口。' \
+            'Enter a usable IPv4 address, IPv6 address or domain. Enter the port separately.')" >&2
+        fi
+      done
+      while true; do
         read_tty port "$(t "客户端入口 Port [${listen_port}]: " \
-          "Client entry port [${listen_port}]: ")" || port=""
+          "Client entry port [${listen_port}]: ")" literal || return 1
         port="${port:-$listen_port}"
-        if nb_validate_advertise_endpoint "$host" "$port"; then
-          ADVERTISE_HOST="$host"
+        if nb_validate_advertise_endpoint "$ADVERTISE_HOST" "$port" "$transport"; then
           ADVERTISE_PORT="$(normalize_uint "$port")"
           ADVERTISE_CLI=1
           ADVERTISE_AUTO_REQUESTED=0
           return 0
         fi
-        warn "$(t '入口必须是有效 IPv4/IPv6/域名与 1-65535 端口' \
-          'Endpoint must be a valid IPv4/IPv6/domain and port 1-65535')"
+        warn "$(t 'Port 必须是 1–65535 的整数，BOTH 的基础端口最多为 65534。' \
+          'Port must be an integer from 1–65535, or at most 65534 in BOTH mode.')" >&2
       done
       ;;
     *)
@@ -205,7 +221,11 @@ nb_firewall_binding_owned() {
   proto="$(printf '%s' "$transport" | tr '[:upper:]' '[:lower:]')"
   [ -f "$NOBRAND_FIREWALL_OWNED_STATE" ] || return 1
   while IFS='|' read -r _tool row_proto row_port; do
-    [ "$row_proto" = "$proto" ] && [ "$row_port" = "$port" ] && return 0
+    [ "$row_proto" = "$proto" ] || continue
+    if [[ "$row_port" =~ ^([0-9]{1,5})(-([0-9]{1,5}))?$ ]] &&
+       [ "$port" -ge "${BASH_REMATCH[1]}" ] && [ "$port" -le "${BASH_REMATCH[3]:-${BASH_REMATCH[1]}}" ]; then
+      return 0
+    fi
   done <"$NOBRAND_FIREWALL_OWNED_STATE"
   return 1
 }

@@ -209,7 +209,8 @@ parse_nobrand_native_args() {
   case "$protocol:$operation" in
     socks5:help|socks5:-h|socks5:--help) ACTION=nobrand-help; NOBRAND_ARGS_HANDLED=1; return 0 ;;
     socks5:menu|socks5:install|socks5:status|socks5:doctor|socks5:show|socks5:export|socks5:set-port|\
-    socks5:set-username|socks5:rotate-password|socks5:start|socks5:stop|socks5:remove|mieru:set-port) ;;
+    socks5:set-username|socks5:rotate-password|socks5:set-udp|socks5:set-udp-relay|\
+    socks5:start|socks5:stop|socks5:remove|mieru:set-port) ;;
     *) die "未知 $protocol 操作: $operation"; return 1 ;;
   esac
   while [ "$#" -gt 0 ]; do
@@ -227,11 +228,32 @@ parse_nobrand_native_args() {
         [ -n "$PASSWORD" ] && [[ "$PASSWORD" != --* ]] || die "--password 需要密码"
         PASSWORD_CLI=1
         shift 2 ;;
+      install:--listen)
+        SOCKS5_LISTEN="${2:-}"
+        [ -n "$SOCKS5_LISTEN" ] && [[ "$SOCKS5_LISTEN" != --* ]] || die "--listen 需要 IP 地址"
+        shift 2 ;;
+      install:--allow-cleartext-remote)
+        SOCKS5_ALLOW_CLEARTEXT_REMOTE=1
+        shift ;;
+      install:--udp|set-udp:--udp)
+        SOCKS5_UDP="${2:-}"
+        case "$SOCKS5_UDP" in on|off) ;; *) die "--udp 需要 on 或 off" ;; esac
+        shift 2 ;;
+      install:--udp-*|set-udp:--udp-*|set-udp-relay:--udp-*)
+        [ -n "${2:-}" ] && [[ "$2" != --* ]] || die "$1 需要值"
+        case "$1" in
+          --udp-listen) SOCKS5_UDP_LISTEN="$2" ;;
+          --udp-advertise) SOCKS5_UDP_ADVERTISE="$2" ;;
+          --udp-port-range) SOCKS5_UDP_PORT_RANGE="$2" ;;
+          *) die "未知 $protocol 参数: $1" ;;
+        esac
+        shift 2 ;;
       export:--format)
         NOBRAND_SPLICORE_EXPORT_FORMAT="${2:-}"
         case "$NOBRAND_SPLICORE_EXPORT_FORMAT" in json|mihomo|sing-box) ;; *) die "--format 需要 json、mihomo 或 sing-box" ;; esac
         shift 2 ;;
       install:--*|install:-y|set-port:--port|set-port:--dry-run|set-port:--yes|set-port:-y|\
+      set-udp:--yes|set-udp:-y|set-udp-relay:--yes|set-udp-relay:-y|\
       set-username:--yes|set-username:-y|rotate-password:--yes|rotate-password:-y|remove:--yes|remove:-y)
         rc=0
         parse_nobrand_common_option "$1" "${2:-}" || rc=$?
@@ -242,7 +264,7 @@ parse_nobrand_native_args() {
   done
   [ "$operation" != set-port ] || [ -n "$PORT" ] || die "--port 需要端口号"
   case "$operation" in
-    show|export|set-port|set-username|rotate-password|start|stop|remove)
+    show|export|set-port|set-username|rotate-password|set-udp|set-udp-relay|start|stop|remove)
       [ -n "$NOBRAND_NATIVE_SELECTOR" ] || die "--name 需要节点名"
       ;;
   esac

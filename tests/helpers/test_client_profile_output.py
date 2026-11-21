@@ -45,10 +45,10 @@ class PresentationTests(unittest.TestCase):
             actual = [base.sc.client_profiles(node) for node in FIXTURE['nodes']]
         self.assertEqual(json.dumps(actual, indent=2), json.dumps(FIXTURE['client_profiles'], indent=2))
 
-    def test_historical_mieru_semantics(self):
+    def test_mieru_profile_name_and_connection(self):
         text = render(mieru(), listeners={'mieru': {'host': '0.0.0.0', 'port': 10201}})
         for value in ('Mieru 节点配置', '用户名: user_test_001', '密码: pass_test_001',
-                      '传输协议: TCP', '传输预设: default', '服务监听: 0.0.0.0:10201',
+                      '传输协议: TCP', '原生配置名: xiaoe', '服务监听: 0.0.0.0:10201',
                       '客户端入口: 203.0.113.10:10201', '[分享链接]', 'mierus://', '[Mihomo / Clash Meta]'):
             self.assertIn(value, text)
         self.assertNotIn('IPLC', text)
@@ -90,7 +90,7 @@ class PresentationTests(unittest.TestCase):
         profile = mieru()
         native = json.loads(section(render(profile), 'Mieru 原生客户端配置'))
         self.assertEqual(native, profile['mieru'])
-        self.assertEqual(native['activeProfile'], 'default')
+        self.assertEqual(native['activeProfile'], 'xiaoe')
 
     def test_endpoints_ipv4_domain_ipv6(self):
         for host, expected in (('203.0.113.10', '203.0.113.10:443'),
@@ -106,6 +106,7 @@ class PresentationTests(unittest.TestCase):
     def test_multiple_profiles_and_tuic_users_in_order(self):
         a, b = mieru(), mieru('edge.example')
         a['id'], b['id'] = 'Profile A', 'Profile B'
+        a['listener_ids'], b['listener_ids'] = [a['id']], [b['id']]
         text = render(a, b)
         self.assertLess(text.index('Profile A'), text.index('Profile B'))
         self.assertIn('Profile 1 / 2', text)

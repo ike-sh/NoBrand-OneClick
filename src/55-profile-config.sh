@@ -61,7 +61,19 @@ apply_requested_profile_preserving_cli() {
   [ "${LOW_ENTROPY_CLI:-0}" -eq 0 ] || LOW_ENTROPY_MODE="$cli_low"
 }
 
-choose_profile_interactive() {
-  t '使用原生 TCP 默认参数；traffic-pattern 与低熵模式当前不支持。' 'Using native TCP defaults; traffic-pattern and low entropy are unsupported.'
-  apply_profile_values iplc
+nb_mieru_prompt_transport() {
+  local mode
+  t '请选择 Mieru 传输模式' 'Choose the Mieru transport'
+  t '  1) TCP（默认）' '  1) TCP (default)'
+  t '  2) UDP' '  2) UDP'
+  t '  3) BOTH（TCP + UDP）' '  3) BOTH (TCP + UDP)'
+  while true; do
+    read_tty mode "$(t '请选择 [1-3，默认 1]：' 'Choose [1-3, default 1]: ')" || return 1
+    case "${mode:-1}" in
+      1) PROTOCOL=TCP; return 0 ;;
+      2) PROTOCOL=UDP; return 0 ;;
+      3) PROTOCOL=BOTH; return 0 ;;
+      *) warn "$(t '请输入 1、2 或 3。' 'Enter 1, 2 or 3.')" ;;
+    esac
+  done
 }

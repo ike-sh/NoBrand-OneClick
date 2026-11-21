@@ -1,6 +1,6 @@
 # NoBrand-OneClick
 
-本开发分支将代理内核锁定至正式版 **Splicore v0.6.4**（`6ff2101e76f73941ecbd780ce2cb68869cb32cee`）。各原生代理协议共享一个运行时。
+本开发分支将代理内核锁定至正式版 **Splicore v0.6.5**。各原生代理协议共享一个运行时，安装支持 Linux amd64。详见 [Splicore v0.6.5](https://github.com/ike-sh/Splicore/releases/tag/v0.6.5)。
 
 当前稳定版本：[v4.1.0](https://github.com/ike-sh/NoBrand-OneClick/releases/tag/v4.1.0)。更新内容见 [CHANGELOG](CHANGELOG.md)。
 
@@ -28,7 +28,7 @@
 | TUIC v5 | Splicore；UUID + password；独立 TLS 信任 |
 | VLESS + TCP + REALITY + Vision | Splicore 原生 Local Tunnel Guard |
 | VLESS Encryption + FinalMask/Sudoku | Splicore 原生 TCP；新建默认 mlkem768 + random + 1rtt |
-| SOCKS5 | 原生 TCP CONNECT 与强制 RFC 1929 认证已接入开发代码，启用需发布含该入站的 Splicore 版本 |
+| SOCKS5 | 原生 TCP CONNECT，UDP ASSOCIATE 可选，强制 RFC 1929 用户名密码认证 |
 | SSH Tunnel | 系统 OpenSSH 策略与账号 |
 | Port Forward | Realm / nftables |
 
@@ -88,11 +88,13 @@ sudo nobrand uninstall
 
 ### Mieru 真实监听端口
 
-添加节点时可输入真实监听端口，回车自动分配。已有节点可在 Mieru 菜单选择「修改真实监听端口」，也可运行 `sudo nobrand mieru set-port --name NAME --port PORT`。BOTH 一次更新 TCP 基础端口和 UDP 基础端口加一。独立设置的展示端点保持原值，标记为跟随监听的展示端口同步更新。
+添加节点时可选择 TCP（默认）、UDP 或 BOTH。真实监听端口可以手动指定，回车自动分配。已有节点可在 Mieru 菜单选择「修改真实监听端口」，也可运行 `sudo nobrand mieru set-port --name NAME --port PORT`。BOTH 一次更新 TCP 基础端口和 UDP 基础端口加一。独立设置的展示端点保持原值，标记为跟随监听的展示端口同步更新。节点名会用于 Mihomo 和 Mieru 客户端展示。
 
 ### SOCKS5 认证和导出
 
-SOCKS5 只支持 TCP CONNECT，可访问 IPv4、IPv6 或域名目标。安装时必须提供用户名，密码可留空并由系统安全随机生成。自定义密码需使用 16–255 个可见 ASCII 字符，至少含 8 个不同字符。RFC 1929 凭据在网络上明文传输，请通过可信线路、入口地址绑定或上游防火墙白名单限制访问。
+SOCKS5 强制用户名密码认证。安装时提供用户名，密码留空时由系统安全随机生成。TCP CONNECT 始终可用，UDP ASSOCIATE 默认关闭。凭据与流量均以明文传输。非回环监听需要在菜单确认使用可信线路或访问控制，命令行可显式使用 `--allow-cleartext-remote`。
+
+在 SOCKS5 菜单开启 UDP 或配置 Relay。非回环 Relay 需要对外地址与端口范围。IPLC/NAT 需在上游将每个对外 UDP 端口转发到服务端的同号端口。
 
 `nobrand socks5 show --name NAME` 显示完整连接参数。`nobrand socks5 export --name NAME` 导出通用 JSON，可用 `--format mihomo` 或 `--format sing-box` 切换格式。
 
@@ -106,9 +108,9 @@ REALITY 目标是一个仅监听回环的原生 guard。guard 只将允许的 co
 
 旧 Xray/Mita 等多内核部署 → 新架构：**不支持自动原地迁移**。新版只读检测并拒绝，不转换或删除旧节点、凭据、服务或防火墙。使用匹配的旧安装器导出、备份并处理旧部署；第三方软件不被接管。
 
-已有 v4.1.0 原生安装可用本分支构建的安装器执行 `sudo bash install-nobrand.sh manager upgrade`，再执行 `sudo nobrand mieru upgrade` 将共享内核升级到 v0.6.4。升级使用原数据库的快照和主密钥，保留账号、节点、凭据和入口设置。下载按正式 Manifest、SHA256SUMS、包内校验和与二进制身份核对。
+已有 v4.1.0 原生安装可用本分支构建的安装器执行 `sudo bash install-nobrand.sh manager upgrade`，再执行 `sudo nobrand mieru upgrade` 将共享内核升级到 v0.6.5。升级使用原数据库的快照和主密钥，保留账号、节点、凭据和入口设置。下载按正式 Manifest、SHA256SUMS、包内校验和与二进制身份核对。
 
-升级保留上一代二进制、数据库、密钥和状态用于整代回滚。相同版本和配置校验后不重复部署；失败的新装恢复到未安装状态，失败的更新恢复上一代。未知版本或不支持的配置明确拒绝。
+升级保留上一代二进制、数据库、密钥和状态用于整代回滚。相同版本和配置通过校验后沿用当前部署。失败的新装恢复到未安装状态，失败的更新恢复上一代。降级到不支持当前 SOCKS5 节点的内核时，管理器会拒绝操作并保留快照。
 
 - [安装、升级、FAQ 与排查](docs/SPLICORE-MIGRATION.md)
 - [当前架构与模块边界](docs/MODULE-DEPENDENCIES.md)

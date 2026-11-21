@@ -59,3 +59,59 @@ assert_contains "$out" '[::1]:24110 /TCP' 'current TCP listener'
 assert_contains "$out" '[::1]:24111 /UDP' 'current UDP listener'
 assert_contains "$out" 'edge.example:443' 'independent display endpoint'
 pass 'Mieru interactive manual and automatic listener ports and BOTH endpoint display'
+
+PROTOCOL_CLI=0
+read_tty() {
+  case "$1" in
+    selector) printf -v "$1" xiaoe ;;
+    mode) printf -v "$1" '%s' "$requested_mode" ;;
+    PORT) printf -v "$1" '' ;;
+    *) fail "Unexpected prompt: $1" ;;
+  esac
+}
+for mode_case in ':TCP:24101' '2:UDP:24101' '3:BOTH:24102'; do
+  IFS=: read -r requested_mode expected_mode expected_port <<<"$mode_case"
+  out="$(nb_splicore_protocol mieru install)"
+  assert_contains "$out" "listener=$expected_port transport=$expected_mode" "interactive $expected_mode allocation"
+done
+pass 'Mieru defaults to TCP and allocates each selected transport'
+
+ADVERTISE_CLI=0
+PORT=7020
+public_ip() { printf '%s' 192.0.2.241; }
+requested_mode=3
+host_inputs=(7010 'edge.example:7099' '999.0.0.1' $'edge.example\t' $'edge\x1f.example' 'relay.invalid')
+port_inputs=(0 65535 7099)
+host_index=0
+port_index=0
+read_tty() {
+  case "$1" in
+    mode) printf -v "$1" '%s' "$requested_mode" ;;
+    choice) printf -v "$1" 2 ;;
+    host)
+      [ "$3" = literal ] || fail 'Host input must preserve whitespace'
+      [ "$host_index" -lt "${#host_inputs[@]}" ] || return 1
+      printf -v "$1" '%s' "${host_inputs[host_index]}"
+      host_index=$((host_index + 1))
+      ;;
+    port)
+      [ "$host_index" -eq "${#host_inputs[@]}" ] || fail 'Port prompted before the Host was valid'
+      [ "$port_index" -lt "${#port_inputs[@]}" ] || return 1
+      printf -v "$1" '%s' "${port_inputs[port_index]}"
+      port_index=$((port_index + 1))
+      ;;
+    *) fail "Unexpected prompt: $1" ;;
+  esac
+}
+out="$(nb_splicore_protocol mieru install xiaoe 2>&1)"
+assert_contains "$out" '7010 looks like a port' 'immediate numeric Host warning'
+assert_contains "$out" 'Enter the port separately' 'malformed Host diagnostic'
+assert_contains "$out" 'at most 65534 in BOTH mode' 'display Port retry'
+assert_contains "$out" 'listener=7020 transport=BOTH display=relay.invalid:7099' 'unresolved DNS accepted'
+
+host_inputs=(7010)
+if out="$(nb_splicore_protocol mieru install xiaoe 2>&1)"; then
+  fail 'Invalid Host reached the install transaction'
+fi
+[[ "$out" != *'listener='* ]] || fail 'Invalid Host reached the runtime'
+pass 'Client Host retries before Port or the runtime install transaction'

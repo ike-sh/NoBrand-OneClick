@@ -234,6 +234,11 @@ main() {
     nobrand-version) nobrand_version; return 0 ;;
     nobrand-help) nobrand_usage; return 0 ;;
   esac
+  case "${ACTION:-menu}:${NOBRAND_RUNTIME_ARGS[0]:-}" in
+    nobrand-runtime:transactions|nobrand-runtime:capabilities|nobrand-runtime:status|nobrand-runtime:doctor|\
+    nobrand-runtime:plan|nobrand-runtime:render|nobrand-runtime:unit|nobrand-runtime:inspect-backup) ;;
+    *) nb_splicore_require_platform || return 1 ;;
+  esac
   # Diagnosis remains available even when old state prevents all mutations.
   if [ "${ACTION:-}" = nobrand-runtime ] && [ "${NOBRAND_RUNTIME_ARGS[0]:-}" = transactions ]; then
     nb_splicore_call "${NOBRAND_RUNTIME_ARGS[@]}"

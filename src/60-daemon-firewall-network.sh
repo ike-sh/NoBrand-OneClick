@@ -34,16 +34,17 @@ firewall_owned_remove() {
 }
 
 iptables_remove_owned_rule() {
-  local ipt="$1" proto="$2" p="$3" key
+  local ipt="$1" proto="$2" p="$3" key match
   key="${ipt}|${proto}|${p}"
+  match="${p/-/:}"
   firewall_owned_has "$key" || return 0
   command -v "$ipt" >/dev/null 2>&1 || return 1
-  if "$ipt" -C INPUT -p "$proto" --dport "$p" -m comment \
+  if "$ipt" -C INPUT -p "$proto" --dport "$match" -m comment \
       --comment "$MITA_FIREWALL_COMMENT" -j ACCEPT 2>/dev/null; then
-    run "$ipt" -D INPUT -p "$proto" --dport "$p" -m comment \
+    run "$ipt" -D INPUT -p "$proto" --dport "$match" -m comment \
       --comment "$MITA_FIREWALL_COMMENT" -j ACCEPT 2>/dev/null || return 1
   fi
-  if "$ipt" -C INPUT -p "$proto" --dport "$p" -m comment \
+  if "$ipt" -C INPUT -p "$proto" --dport "$match" -m comment \
       --comment "$MITA_FIREWALL_COMMENT" -j ACCEPT 2>/dev/null; then
     return 1
   fi
@@ -57,12 +58,11 @@ ufw_binding_exists() {
 }
 
 firewall_apply_binding() {
-  local fw="$1" action="$2" proto="$3" p="$4" spec key
+  local fw="$1" action="$2" proto="$3" p="$4" spec key kind
   spec="$(ufw_rule_spec "$p" "$proto")"
   case "${fw}:${action}" in
     ufw:add)
       key="ufw|${proto}|${p}"
-      firewall_owned_has "$key" && return 0
       ufw_binding_exists "$spec" && return 0
       if run ufw allow "$spec"; then
         firewall_owned_add "$key"
@@ -77,25 +77,34 @@ firewall_apply_binding() {
       if run ufw --force delete allow "$spec" 2>/dev/null \
          || ! ufw_binding_exists "$spec"; then
         firewall_owned_remove "$key"
-      fi
-      ;;
-    firewalld:add)
-      key="firewalld|${proto}|${p}"
-      firewall_owned_has "$key" && return 0
-      firewall-cmd --permanent --query-port="${p}/${proto}" >/dev/null 2>&1 && return 0
-      if run firewall-cmd --permanent --add-port="${p}/${proto}"; then
-        firewall_owned_add "$key"
       else
         return 1
       fi
       ;;
-    firewalld:del)
+    firewalld:add|firewalld:del)
       key="firewalld|${proto}|${p}"
-      firewall_owned_has "$key" || return 0
-      command -v firewall-cmd >/dev/null 2>&1 || return 0
-      if run firewall-cmd --permanent --remove-port="${p}/${proto}" 2>/dev/null \
-         || ! firewall-cmd --permanent --query-port="${p}/${proto}" >/dev/null 2>&1; then
-        firewall_owned_remove "$key"
+      kind=port
+      spec="${p}/${proto}"
+      # Plain firewalld ports coalesce overlapping ranges. Rich rules keep
+      # the old and new ranges independent during cutover and rollback.
+      if [[ "$p" == *-* ]] && { [ "$action" = add ] || firewall_owned_has "firewalld-rich|${proto}|${p}"; }; then
+        key="firewalld-rich|${proto}|${p}"
+        kind=rich-rule
+        printf -v spec 'rule port port="%s" protocol="%s" accept' "$p" "$proto"
+      fi
+      if [ "$action" = add ]; then
+        firewall-cmd --permanent "--query-${kind}=${spec}" >/dev/null 2>&1 && return 0
+        run firewall-cmd --permanent "--add-${kind}=${spec}" || return 1
+        firewall_owned_add "$key"
+      else
+        firewall_owned_has "$key" || return 0
+        command -v firewall-cmd >/dev/null 2>&1 || return 1
+        if run firewall-cmd --permanent "--remove-${kind}=${spec}" 2>/dev/null \
+           || ! firewall-cmd --permanent "--query-${kind}=${spec}" >/dev/null 2>&1; then
+          firewall_owned_remove "$key"
+        else
+          return 1
+        fi
       fi
       ;;
     iptables:add|iptables:del)
@@ -106,7 +115,7 @@ firewall_apply_binding() {
 
 close_firewall_for_bindings() {
   local bindings="$1"
-  local pp proto p proto_lc
+  local pp proto p proto_lc failed=0
   [ -n "$bindings" ] || return 0
 
   while IFS= read -r pp; do
@@ -114,14 +123,15 @@ close_firewall_for_bindings() {
     proto="${pp%%|*}"
     p="${pp#*|}"
     proto_lc="$(proto_lower "$proto")"
-    firewall_apply_binding ufw del "$proto_lc" "$p"
-    firewall_apply_binding firewalld del "$proto_lc" "$p"
-    firewall_apply_binding iptables del "$proto_lc" "$p"
+    firewall_apply_binding ufw del "$proto_lc" "$p" || failed=1
+    firewall_apply_binding firewalld del "$proto_lc" "$p" || failed=1
+    firewall_apply_binding iptables del "$proto_lc" "$p" || failed=1
   done <<< "$bindings"
 
   command -v firewall-cmd >/dev/null 2>&1 \
     && run firewall-cmd --reload 2>/dev/null || true
-  persist_iptables_rules
+  persist_iptables_rules || failed=1
+  [ "$failed" -eq 0 ]
 }
 
 ufw_rule_spec() {
@@ -140,46 +150,19 @@ iptables_accept_port() {
   local p="$1"
   local proto="$2"
   local action="${3:-add}"
-  local ipt key
+  local ipt key match="${p/-/:}"
   for ipt in iptables ip6tables; do
     command -v "$ipt" >/dev/null 2>&1 || continue
-    if [[ "$p" == *-* ]]; then
-      local start end port
-      start="${p%-*}"
-      end="${p#*-}"
-      port="$start"
-      while [ "$port" -le "$end" ]; do
-        key="${ipt}|${proto}|${port}"
-        if [ "$action" = add ]; then
-          if "$ipt" -C INPUT -p "$proto" --dport "$port" -m comment \
-              --comment "$MITA_FIREWALL_COMMENT" -j ACCEPT 2>/dev/null; then
-            firewall_owned_add "$key"
-          elif "$ipt" -C INPUT -p "$proto" --dport "$port" -j ACCEPT 2>/dev/null; then
-            :
-          elif run "$ipt" -I INPUT -p "$proto" --dport "$port" -m comment \
-              --comment "$MITA_FIREWALL_COMMENT" -j ACCEPT; then
-            firewall_owned_add "$key"
-          fi
-        elif firewall_owned_has "$key"; then
-          iptables_remove_owned_rule "$ipt" "$proto" "$port" || return 1
-        fi
-        port=$((port + 1))
-      done
-    else
-      key="${ipt}|${proto}|${p}"
-      if [ "$action" = add ]; then
-        if "$ipt" -C INPUT -p "$proto" --dport "$p" -m comment \
-            --comment "$MITA_FIREWALL_COMMENT" -j ACCEPT 2>/dev/null; then
-          firewall_owned_add "$key"
-        elif "$ipt" -C INPUT -p "$proto" --dport "$p" -j ACCEPT 2>/dev/null; then
-          :
-        elif run "$ipt" -I INPUT -p "$proto" --dport "$p" -m comment \
-            --comment "$MITA_FIREWALL_COMMENT" -j ACCEPT; then
-          firewall_owned_add "$key"
-        fi
-      elif firewall_owned_has "$key"; then
-        iptables_remove_owned_rule "$ipt" "$proto" "$p" || return 1
-      fi
+    key="${ipt}|${proto}|${p}"
+    if [ "$action" = del ]; then
+      iptables_remove_owned_rule "$ipt" "$proto" "$p" || return 1
+    elif "$ipt" -C INPUT -p "$proto" --dport "$match" -m comment \
+        --comment "$MITA_FIREWALL_COMMENT" -j ACCEPT 2>/dev/null; then
+      firewall_owned_add "$key" || return 1
+    elif ! "$ipt" -C INPUT -p "$proto" --dport "$match" -j ACCEPT 2>/dev/null; then
+      run "$ipt" -I INPUT -p "$proto" --dport "$match" -m comment \
+        --comment "$MITA_FIREWALL_COMMENT" -j ACCEPT || return 1
+      firewall_owned_add "$key" || return 1
     fi
   done
 }
@@ -249,9 +232,8 @@ valid_domain_name() {
   [[ "$value" != *://* && "$value" != *:* && "$value" != /* ]] || return 1
   value="${value%.}"
   [ -n "$value" ] || return 1
-  # A dotted decimal quad is an IPv4 candidate, not a DNS name. Reject it
-  # here when valid_ip_literal has already rejected its octets.
-  [[ ! "$value" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+  # Numeric input is either an IP literal or a mistyped port.
+  [[ ! "$value" =~ ^[0-9.]+$ ]] || return 1
   rest="$value"
   while true; do
     label="${rest%%.*}"
@@ -263,7 +245,17 @@ valid_domain_name() {
 }
 
 valid_advertise_host() {
-  valid_ip_literal "${1:-}" || valid_domain_name "${1:-}"
+  local host="${1:-}"
+  [[ "$host" != *[[:space:][:cntrl:]%]* ]] || return 1
+  if valid_ip_literal "$host"; then
+    if command -v python3 >/dev/null 2>&1; then
+      python3 -c 'import ipaddress, sys; a = ipaddress.ip_address(sys.argv[1]); a = getattr(a, "ipv4_mapped", None) or a; sys.exit(a.is_unspecified or a.is_multicast)' "$host"
+      return $?
+    fi
+    [[ "$host" != 0.0.0.0 && "$host" != :: ]]
+    return $?
+  fi
+  valid_domain_name "$host"
 }
 
 valid_public_ip_literal() {

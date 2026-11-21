@@ -318,7 +318,7 @@ def presentation_candidate_integrity():
 
 
 def review_integrity():
-    if sc.RELEASE["version"] == "v0.6.4":
+    if sc.RELEASE["version"] == "v0.6.5":
         return review_native_integrity()
     historical = reviewed_integrity(tree=RELEASE_BASE)
     candidate = presentation_candidate_integrity()
@@ -331,8 +331,8 @@ def review_integrity():
 
 def review_native_integrity():
     """Check current release inputs against the approved integration inventory."""
-    manifest = json.loads((ROOT / "tests/fixtures/splicore-v064-integration.json").read_text())
-    require(manifest.get("baseline") == "1d9b3ddc0b899616e70b658b9cb4f4d621f8d3e6"
+    manifest = json.loads((ROOT / "tests/fixtures/splicore-v065-integration.json").read_text())
+    require(manifest.get("baseline") == "8f6520685d85e424f1bf0e7fa512f9e4daaee984"
             and manifest.get("splicore_commit") == sc.RELEASE["commit"], "integration baseline differs")
     expected = {str(p.relative_to(ROOT)) for folder, pattern in (
         ("src", "*.sh"), ("runtime", "*.py"), ("runtime", "*.json"), ("scripts", "*.sh"),
@@ -482,7 +482,7 @@ def prepare_assets(destination):
 def summarize(log, probe):
     require(log.endswith("[PASS] NoBrand test suite\n"), "regression completion marker missing")
     require(probe["result"] == "PASS" and probe["checks"] and all(v == "PASS" for v in probe["checks"].values()), "runtime result is incomplete")
-    if sc.RELEASE["version"] == "v0.6.4":
+    if sc.RELEASE["version"] == "v0.6.5":
         selected = set(re.findall(r"^  (tests/\S+\.sh)$", (ROOT / "scripts/test.sh").read_text(), re.M))
         executed = re.findall(r"^\[RUN\] (tests/\S+\.sh)$", log, re.M)
         require(set(executed) == selected and len(executed) == len(selected), "integration Bash tests missing or repeated")
@@ -548,7 +548,8 @@ def campaign(args, evidence):
     require(result["regression"]["secret_scan"] == "PASS", "secret scan completion marker missing")
     result["integrity_after"] = review_integrity()
     result["result"] = "PASS: LOCAL CI AND LOOPBACK REGRESSION"
-    result["native_systemd"] = result["native_openrc"] = result["arm64_runtime"] = "PENDING ENVIRONMENT"
+    result["native_systemd"] = result["native_openrc"] = "PENDING ENVIRONMENT"
+    result["arm64_runtime"] = "UNSUPPORTED: Splicore v0.6.5 Linux amd64 release only"
     result["nftables_port_range"] = "N/A: CORE CAPABILITY NOT EXPOSED BY NOBRAND"
     result["external_github_actions"] = "PENDING UNTIL PUSH"
     return result

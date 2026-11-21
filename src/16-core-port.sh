@@ -228,6 +228,12 @@ if primary:
         transport = doc["settings"]["transport"] if protocol == "mieru" else "TCP" if protocol in ("snell", "socks5", "vless-reality", "vless-sudoku") else "UDP"
         emit(protocol + ":" + node["id"], transport, doc["listener"]["port"],
              doc["display_endpoint"]["host"], doc["display_endpoint"]["port"])
+        if protocol == "socks5" and doc["settings"].get("udp") is True:
+            relay = doc["settings"].get("udp_relay", {})
+            first, last = relay.get("port_min", 0), relay.get("port_max", 0)
+            if type(first) is int and type(last) is int and 1 <= first <= last <= 65535 and last - first < 1024:
+                for port in range(first, last + 1):
+                    emit("socks5:" + node["id"], "UDP", port, relay.get("advertise") or relay.get("listen") or doc["listener"]["host"], port)
         if node.get("guard"):
             emit("splicore-guard:" + node["id"], "TCP", node["guard"]["listen"]["port"])
 

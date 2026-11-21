@@ -48,7 +48,7 @@
       "id": "mieru",
       "protocol": "mieru",
       "client": {
-        "name": "mieru"
+        "name": "xiaoe"
       },
       "document": {
         "schema": 1,
@@ -234,12 +234,16 @@
     },
     {
       "id": "mieru",
+      "name": "xiaoe",
       "protocol": "mieru",
-      "uri": "mierus://user_test_001:pass_test_001@203.0.113.10?handshake-mode=HANDSHAKE_NO_WAIT&mtu=1400&multiplexing=MULTIPLEXING_OFF&port=10201&profile=default&protocol=TCP",
+      "listener_ids": [
+        "mieru"
+      ],
+      "uri": "mierus://user_test_001:pass_test_001@203.0.113.10?handshake-mode=HANDSHAKE_NO_WAIT&mtu=1400&multiplexing=MULTIPLEXING_OFF&profile=xiaoe&port=10201&protocol=TCP",
       "mieru": {
         "profiles": [
           {
-            "profileName": "default",
+            "profileName": "xiaoe",
             "user": {
               "name": "user_test_001",
               "password": "pass_test_001"
@@ -263,7 +267,7 @@
             "handshakeMode": "HANDSHAKE_NO_WAIT"
           }
         ],
-        "activeProfile": "default",
+        "activeProfile": "xiaoe",
         "rpcPort": 8964,
         "socks5Port": 1080,
         "loggingLevel": "INFO",
@@ -271,7 +275,7 @@
         "httpProxyPort": 8080,
         "httpProxyListenLAN": false
       },
-      "mihomo": "proxies:\n  - name: mieru-mita-tcp\n    type: mieru\n    server: \"203.0.113.10\"\n    port: 10201\n    transport: TCP\n    udp: true\n    username: \"user_test_001\"\n    password: \"pass_test_001\"\n    multiplexing: MULTIPLEXING_OFF\n    handshake-mode: HANDSHAKE_NO_WAIT\n"
+      "mihomo": "proxies:\n  - name: \"xiaoe\"\n    type: mieru\n    server: \"203.0.113.10\"\n    port: 10201\n    transport: TCP\n    udp: true\n    username: \"user_test_001\"\n    password: \"pass_test_001\"\n    multiplexing: MULTIPLEXING_OFF\n    handshake-mode: HANDSHAKE_NO_WAIT\n"
     },
     {
       "id": "hy2",

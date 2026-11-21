@@ -44,3 +44,39 @@ fallback="$(nb_select_available_port UDP)"
 nb_valid_port "$fallback" || fail 'no-IPv4 fallback must return valid port'
 
 pass 'common tail-port allocator and transport-aware registry'
+
+(
+  # Keep the host firewall untouched and model exact firewalld rich-rule queries.
+  export MITA_FIREWALL_OWNED_STATE="$NOBRAND_FIREWALL_OWNED_STATE"
+  rule_file="$fixture/firewalld-rules"
+  foreign='rule port port="22200-22202" protocol="udp" accept'
+  old='rule port port="22201-22203" protocol="udp" accept'
+  new='rule port port="22202-22204" protocol="udp" accept'
+  printf '%s\n' "$foreign" >"$rule_file"
+  firewall-cmd() {
+    case "$2" in
+      --query-rich-rule=*) grep -qxF "${2#*=}" "$rule_file" ;;
+      --add-rich-rule=*) printf '%s\n' "${2#*=}" >>"$rule_file" ;;
+      --remove-rich-rule=*)
+        grep -vxF "${2#*=}" "$rule_file" >"$rule_file.tmp" || true
+        mv "$rule_file.tmp" "$rule_file"
+        ;;
+      *) return 2 ;;
+    esac
+  }
+  firewall_apply_binding firewalld add udp 22200-22202
+  firewall_apply_binding firewalld add udp 22201-22203
+  firewall_apply_binding firewalld add udp 22202-22204
+  assert_eq "$foreign"$'\n'"$old"$'\n'"$new" "$(cat "$rule_file")" 'overlapping firewall rules'
+  firewall_apply_binding firewalld del udp 22201-22203
+  firewall_apply_binding firewalld del udp 22200-22202
+  assert_eq "$foreign"$'\n'"$new" "$(cat "$rule_file")" 'replacement and foreign rules survive'
+  nb_firewall_binding_owned UDP 22202 || fail 'replacement UDP port ownership missing'
+  if nb_firewall_binding_owned UDP 22201; then fail 'retired UDP port is still owned'; fi
+  printf '%s\n' "$foreign" >"$rule_file"
+  firewall_apply_binding firewalld add udp 22202-22204
+  assert_eq "$foreign"$'\n'"$new" "$(cat "$rule_file")" 'restore recreates an archived rule missing from the backend'
+  firewall_apply_binding firewalld del udp 22202-22204
+  assert_eq "$foreign" "$(cat "$rule_file")" 'removal preserves the foreign rule'
+)
+pass 'SOCKS5 UDP range replacement and firewalld ownership'

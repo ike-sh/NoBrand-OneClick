@@ -1,6 +1,14 @@
 # shellcheck shell=bash
 # ---------- One NoBrand-owned Splicore artifact, daemon and transaction ----------
 # nb_splicore_python is embedded by scripts/build.sh from runtime/splicore.py.
+nb_splicore_require_platform() {
+  if [ "$(uname -s)" = Linux ]; then
+    case "$(uname -m)" in x86_64|amd64) return 0 ;; esac
+  fi
+  printf '[错误 / Error] ARCH_UNSUPPORTED: Splicore %s 仅支持 Linux amd64 / requires Linux amd64\n' "$SPLICORE_VERSION" >&2
+  return 1
+}
+
 nb_splicore_legacy_notice() {
   cat >&2 <<'NOBRAND_LEGACY_NOTICE'
 Legacy NoBrand multi-core installation detected.
@@ -94,6 +102,7 @@ nb_splicore_call() (
   export VLESS_REALITY_TARGET VLESS_REALITY_TARGET_PORT NOBRAND_SPLICORE_LISTEN NOBRAND_SPLICORE_INGRESS_ID
   export NOBRAND_SPLICORE_EXPORT_FORMAT NOBRAND_SPLICORE_CLIENT_VERSION
   export NOBRAND_SPLICORE_DISPLAY_PORT_POLICY
+  export SOCKS5_ALLOW_CLEARTEXT_REMOTE SOCKS5_UDP SOCKS5_UDP_LISTEN SOCKS5_UDP_ADVERTISE SOCKS5_UDP_PORT_RANGE
   NOBRAND_SPLICORE_MANAGER_SOURCE="$(nobrand_manager_source_path 2>/dev/null || true)"
   export NOBRAND_SPLICORE_MANAGER_SOURCE
   command -v python3 >/dev/null 2>&1 || {
@@ -110,9 +119,92 @@ nb_splicore_installed() {
       "${NOBRAND_STATE_DIR}/splicore/current/desired.json"
 }
 
+nb_socks5_is_loopback() {
+  python3 -c 'import ipaddress, sys; a = ipaddress.ip_address(sys.argv[1]); a = getattr(a, "ipv4_mapped", None) or a; sys.exit(not a.is_loopback)' "$1"
+}
+
+nb_socks5_prepare_listen() {
+  local listen="$INGRESS_LISTEN_HOST" requested
+  if [ "$INGRESS_PROFILE_ID" = "$NOBRAND_LEGACY_INGRESS_PROFILE_ID" ]; then listen=127.0.0.1; fi
+  requested="$SOCKS5_LISTEN"
+  if [ -z "$requested" ] && [ "${INGRESS_ENFORCEMENT_RESOLVED:-}" != strict ] && [ "$YES" -ne 1 ]; then
+    read_tty requested "$(t "SOCKS5 TCP 监听 IP [$listen]: " "SOCKS5 TCP listen IP [$listen]: ")" literal || return 1
+  fi
+  requested="${requested:-$listen}"
+  if [[ "$requested" == *%* ]] || ! valid_ip_literal "$requested"; then
+    die "$(t 'SOCKS5 TCP 监听地址必须是 IPv4 或 IPv6。' 'SOCKS5 TCP listen address must be an IPv4 or IPv6 literal.')"
+    return 1
+  fi
+  requested="$(nb_normalize_endpoint_host "$requested")" || return 1
+  if [ "${INGRESS_ENFORCEMENT_RESOLVED:-}" = strict ] && [ "$requested" != "$listen" ]; then
+    die "$(t 'TCP 监听 IP 必须与严格入口配置的地址一致。' 'The TCP listen IP must match the strict ingress profile.')"
+    return 1
+  fi
+  if ! nb_socks5_is_loopback "$requested" && [ "$SOCKS5_ALLOW_CLEARTEXT_REMOTE" -ne 1 ]; then
+    if [ "$YES" -eq 1 ]; then
+      die "$(t '非回环 SOCKS5 需要 --allow-cleartext-remote，确认使用可信线路或访问控制。' \
+        'Non-loopback SOCKS5 requires --allow-cleartext-remote to confirm a trusted or access-controlled network.')"
+      return 1
+    fi
+    confirm 'SOCKS5 凭据和流量为明文。已限制在可信线路或有访问控制的网络中，确认启用非回环监听？[y/N] ' \
+      'SOCKS5 credentials and traffic are cleartext. Confirm that access is restricted to a trusted or access-controlled network? [y/N] ' n || return 1
+    SOCKS5_ALLOW_CLEARTEXT_REMOTE=1
+  fi
+  NOBRAND_SPLICORE_LISTEN="$requested"
+}
+
+nb_socks5_prompt_udp_mode() {
+  local choice
+  read_tty choice "$(t 'UDP ASSOCIATE  1) 开启  2) 关闭（默认） [1-2]: ' \
+    'UDP ASSOCIATE  1) Enable  2) Disable (default) [1-2]: ')" || return 1
+  case "${choice:-2}" in 1) SOCKS5_UDP=on ;; 2) SOCKS5_UDP=off ;; *) return 1 ;; esac
+}
+
+nb_socks5_prompt_relay() {
+  local bind="$1" display="$2" existing="${3:-}"
+  if [ -n "$existing" ] && [ "$existing" != null ]; then
+    printf '%s\n' "$existing" | jq -c . || return 1
+    t '回车保留当前值。' 'Enter keeps the current value.'
+  elif nb_socks5_is_loopback "$bind"; then
+    t '回车使用回环地址和系统分配的端口。' 'Enter uses the loopback address and OS-assigned ports.'
+  else
+    t "非回环需要对外地址和端口范围。客户端入口为 $display。NAT 须将声明的 UDP 端口逐一映射到同号端口。" \
+      "Remote relay needs an advertised address and port range. The client endpoint is $display. NAT must map each UDP port to the same internal port."
+  fi
+  read_tty SOCKS5_UDP_LISTEN "$(t "UDP Relay 监听 IP [TCP 地址 $bind]: " "UDP relay listen IP [TCP address $bind]: ")" literal || return 1
+  read_tty SOCKS5_UDP_ADVERTISE "$(t 'UDP Relay 对外 IP 或域名: ' 'UDP relay advertised IP or domain: ')" literal || return 1
+  read_tty SOCKS5_UDP_PORT_RANGE "$(t 'UDP Relay 端口范围 FIRST-LAST（回环可用 auto）: ' \
+    'UDP relay port range FIRST-LAST (auto on loopback): ')" literal || return 1
+}
+
+nb_socks5_udp_interactive() {
+  local operation="$1" selector="$2" node
+  [ "$YES" -ne 1 ] || return 0
+  case "$operation" in install|set-udp|set-udp-relay) ;; *) return 0 ;; esac
+  if [ "$operation" != set-udp-relay ]; then
+    [ -n "$SOCKS5_UDP" ] || nb_socks5_prompt_udp_mode || return 1
+    [ "$SOCKS5_UDP" = on ] || return 0
+  fi
+  [ -z "$SOCKS5_UDP_LISTEN$SOCKS5_UDP_ADVERTISE$SOCKS5_UDP_PORT_RANGE" ] || return 0
+  if [ "$operation" = install ]; then
+    nb_socks5_prompt_relay "$NOBRAND_SPLICORE_LISTEN" "${ADVERTISE_HOST:-${NOBRAND_SPLICORE_AUTO_HOST:-}}"
+    return $?
+  fi
+  node="$(nb_splicore_call protocol --protocol socks5 --operation status --selector "$selector" \
+    | jq -ce '.nodes | select(length == 1) | .[0]')" || return 1
+  if jq -e .udp <<<"$node" >/dev/null; then
+    [ "$operation" != set-udp ] || return 0
+  elif [ "$operation" = set-udp-relay ]; then
+    die "$(t '请先开启 UDP ASSOCIATE。' 'Enable UDP ASSOCIATE first.')"
+    return 1
+  fi
+  nb_socks5_prompt_relay "$(jq -r .listener.host <<<"$node")" "$(jq -r .display_endpoint.host <<<"$node")" \
+    "$(jq -c .udp_relay <<<"$node")"
+}
+
 nb_splicore_protocol() {
   nb_splicore_legacy_preflight || return 1
-  local protocol="$1" operation="$2" selector="${3:-}" output conflict transport display_port human_output=0
+  local protocol="$1" operation="$2" selector="${3:-}" output conflict transport display_port display_host local_host="" human_output=0
   local NOBRAND_SPLICORE_DISPLAY_PORT_POLICY=""
   local sudoku_status sudoku_port_input="" sudoku_password_input=""
   local -a runtime_options=()
@@ -123,14 +215,6 @@ nb_splicore_protocol() {
   if [ "$operation" = set-port ]; then
     nb_valid_port "$PORT" || { die "$(t '真实监听端口必须为 1–65535。' 'The listen port must be in 1–65535.')"; return 1; }
     PORT="$(normalize_uint "$PORT")"
-  fi
-  if [ "$protocol:$operation" = socks5:install ] && command -v python3 >/dev/null && command -v jq >/dev/null; then
-    output="$(nb_splicore_call capabilities)" || return 1
-    if ! jq -e '.capabilities.socks5.managed' <<<"$output" >/dev/null; then
-      die "$(t 'SOCKS5 需要发布含原生认证入站的 Splicore 版本。' \
-        'SOCKS5 requires a Splicore release with the native authenticated inbound.')"
-      return 1
-    fi
   fi
   # Fresh hosts must reach dependency provisioning before any Python API call.
   if [ "$protocol:$operation" = vless-sudoku:install ] && nb_splicore_installed; then
@@ -169,7 +253,7 @@ nb_splicore_protocol() {
       require_root || return 1
       if ! command -v python3 >/dev/null 2>&1 || ! command -v openssl >/dev/null 2>&1 \
          || ! command -v jq >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then
-        nobrand_prepare_common || return 1
+        nobrand_prepare_common deps-only || return 1
       fi
     fi
     if [ "$protocol" = mieru ]; then
@@ -187,17 +271,21 @@ nb_splicore_protocol() {
       nb_prepare_ingress_deployment "$INGRESS_PROFILE_ID" native-bind || return 1
       NOBRAND_SPLICORE_INGRESS_ID="$INGRESS_PROFILE_ID"
       NOBRAND_SPLICORE_LISTEN="$INGRESS_LISTEN_HOST"
+      if [ "$protocol" = socks5 ]; then
+        nb_socks5_prepare_listen || return 1
+        if nb_socks5_is_loopback "$NOBRAND_SPLICORE_LISTEN"; then local_host="$NOBRAND_SPLICORE_LISTEN"; fi
+      fi
       export NOBRAND_SPLICORE_LISTEN
+    elif [ "$protocol" = socks5 ]; then
+      NOBRAND_SPLICORE_LISTEN="${SOCKS5_LISTEN:-127.0.0.1}"
     fi
     if [ "${YES:-0}" -ne 1 ] && [ "${DRY_RUN:-0}" -ne 1 ]; then
       if [ -z "$selector" ]; then
         read_tty selector "$(t '节点名 [primary]: ' 'Node name [primary]: ')" || return 1
         selector="${selector:-primary}"
       fi
-      if [ "$protocol" = mieru ] && [ "${PROFILE_CLI:-0}" -eq 0 ]; then
-        local requested_transport="$PROTOCOL"
-        choose_profile_interactive || return 1
-        [ "${PROTOCOL_CLI:-0}" -eq 0 ] || PROTOCOL="$requested_transport"
+      if [ "$protocol" = mieru ] && [ "${PROTOCOL_CLI:-0}" -eq 0 ]; then
+        nb_mieru_prompt_transport || return 1
       fi
       if [ "$protocol" = socks5 ]; then
         if [ -z "$USERNAME" ]; then
@@ -240,13 +328,13 @@ nb_splicore_protocol() {
       fi
     fi
     if [ "${YES:-0}" -ne 1 ] && [ "${DRY_RUN:-0}" -ne 1 ] && [ "${ADVERTISE_CLI:-0}" -eq 0 ]; then
-      nb_collect_advertise_endpoint_interactive "$protocol" "$PORT" || return 1
+      nb_collect_advertise_endpoint_interactive "$protocol" "$PORT" "$local_host" "$transport" || return 1
     fi
     if [ "${ADVERTISE_AUTO_REQUESTED:-0}" -eq 1 ] && [ -z "${ADVERTISE_HOST:-}" ]; then
       if [ "${DRY_RUN:-0}" -eq 1 ]; then
         NOBRAND_SPLICORE_AUTO_HOST=preview.invalid
       else
-        NOBRAND_SPLICORE_AUTO_HOST="$(public_ip)" || return 1
+        NOBRAND_SPLICORE_AUTO_HOST="${local_host:-$(public_ip)}" || return 1
       fi
       export NOBRAND_SPLICORE_AUTO_HOST
     fi
@@ -257,7 +345,7 @@ nb_splicore_protocol() {
     else
       NOBRAND_SPLICORE_DISPLAY_PORT_POLICY=follow-actual
     fi
-    if [ -z "${ADVERTISE_HOST:-}" ]; then
+    if [ -z "${ADVERTISE_HOST:-}" ] && [ -z "$local_host" ]; then
       ADVERTISE_HOST="$(nb_ingress_profile_display_host "$INGRESS_PROFILE_ID" 2>/dev/null || true)"
       if [ -n "$ADVERTISE_HOST" ]; then
         ADVERTISE_PORT="$(nb_ingress_profile_display_port "$INGRESS_PROFILE_ID" "$PORT")"
@@ -269,7 +357,12 @@ nb_splicore_protocol() {
     fi
     nb_require_explicit_endpoint_noninteractive || return 1
     display_port="${ADVERTISE_PORT:-$PORT}"
-    nb_valid_port "$display_port" || return 1
+    display_host="${ADVERTISE_HOST:-${NOBRAND_SPLICORE_AUTO_HOST:-}}"
+    if ! nb_validate_advertise_endpoint "$display_host" "$display_port" "$transport" || [ -z "$display_host" ]; then
+      die "$(t '客户端入口需要合法的 Host 与 Port。' 'The client endpoint requires a valid Host and Port.')"
+      return 1
+    fi
+    if [ -n "${ADVERTISE_HOST:-}" ]; then ADVERTISE_HOST="$(nb_normalize_endpoint_host "$ADVERTISE_HOST")"; fi
     display_port="$(normalize_uint "$display_port")"
     conflict="$(nb_endpoint_conflict_owner "${transport/BOTH/TCP}" "${ADVERTISE_HOST:-${NOBRAND_SPLICORE_AUTO_HOST:-}}" "$display_port" 2>/dev/null || true)"
     if [ "$transport" = BOTH ] && [ -z "$conflict" ] && [ "$display_port" -lt 65535 ]; then
@@ -279,6 +372,9 @@ nb_splicore_protocol() {
       warn "DISPLAY_ENDPOINT_CONFLICT: $conflict"
       return 1
     fi
+  fi
+  if [ "$protocol" = socks5 ] && [ "${DRY_RUN:-0}" -ne 1 ]; then
+    nb_socks5_udp_interactive "$operation" "$selector" || return 1
   fi
   if [ "${YES:-0}" -ne 1 ] && [ "${DRY_RUN:-0}" -ne 1 ]; then
     case "$protocol:$operation" in

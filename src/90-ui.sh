@@ -1425,42 +1425,60 @@ ingress_menu_loop() {
 socks5_menu_loop() {
   local choice operation selector confirm_choice
   local PORT PORT_CLI USERNAME PASSWORD PASSWORD_CLI ADVERTISE_HOST ADVERTISE_PORT ADVERTISE_CLI ADVERTISE_AUTO_REQUESTED
+  local SOCKS5_LISTEN SOCKS5_ALLOW_CLEARTEXT_REMOTE SOCKS5_UDP SOCKS5_UDP_LISTEN SOCKS5_UDP_ADVERTISE SOCKS5_UDP_PORT_RANGE
+  local NOBRAND_SPLICORE_EXPORT_FORMAT
   while true; do
     PORT=""; PORT_CLI=0; USERNAME=""; PASSWORD=""; PASSWORD_CLI=0
     ADVERTISE_HOST=""; ADVERTISE_PORT=""; ADVERTISE_CLI=0; ADVERTISE_AUTO_REQUESTED=0
+    SOCKS5_LISTEN=""; SOCKS5_ALLOW_CLEARTEXT_REMOTE=0; SOCKS5_UDP=""
+    SOCKS5_UDP_LISTEN=""; SOCKS5_UDP_ADVERTISE=""; SOCKS5_UDP_PORT_RANGE=""
+    NOBRAND_SPLICORE_EXPORT_FORMAT=""
     nobrand_menu_selection_clear
     msg ''
     t '【SOCKS5 代理 · 强制用户名和密码认证】' '[SOCKS5 proxy · Username and password required]'
     t '  1) 创建节点' '  1) Create node'
     t '  2) 查看节点' '  2) List nodes'
     t '  3) 修改真实监听端口' '  3) Change real listen port'
-    t '  4) 查看客户端配置' '  4) Show client configuration'
-    t '  5) 修改用户名 / 轮换密码' '  5) Change username / rotate password'
-    t '  6) 启动 / 停止节点' '  6) Start / stop node'
-    t '  7) 删除节点' '  7) Remove node'
-    t '  8) 节点诊断' '  8) Diagnose nodes'
+    t '  4) 修改用户名' '  4) Change username'
+    t '  5) 轮换密码' '  5) Rotate password'
+    t '  6) 开启 / 关闭 UDP' '  6) Enable / disable UDP'
+    t '  7) 配置 UDP Relay' '  7) Configure UDP relay'
+    t '  8) 导出客户端配置' '  8) Export client configuration'
+    t '  9) 启动 / 停止节点' '  9) Start / stop node'
+    t ' 10) 删除节点' ' 10) Remove node'
+    t ' 11) Doctor / 诊断' ' 11) Diagnose nodes'
     t '  0) 返回' '  0) Back'
-    read_tty choice "$(t '请选择 [0-8]: ' 'Choose [0-8]: ')" || return 0
+    read_tty choice "$(t '请选择 [0-11]: ' 'Choose [0-11]: ')" || return 0
     case "$choice" in
       0) return 0 ;;
       1) nobrand_menu_run nb_splicore_protocol socks5 install ;;
       2) nobrand_menu_run nb_splicore_protocol socks5 status ;;
-      8) nobrand_menu_run nb_splicore_protocol socks5 doctor ;;
-      3|4|5|6|7)
+      11) nobrand_menu_run nb_splicore_protocol socks5 doctor ;;
+      3|4|5|6|7|8|9|10)
         nb_splicore_menu_select socks5 || { menu_pause; continue; }
         selector="$NOBRAND_MENU_SELECTION_ID"
         case "$choice" in
           3) nb_splicore_prompt_port socks5 "$selector" || continue; operation=set-port ;;
-          4) operation=show ;;
-          5)
-            read_tty choice "$(t '1) 修改用户名  2) 轮换密码: ' '1) Change username  2) Rotate password: ')" || continue
-            case "$choice" in 1) operation=set-username ;; 2) operation=rotate-password ;; *) continue ;; esac
+          4) operation=set-username ;;
+          5) operation=rotate-password ;;
+          6) operation=set-udp ;;
+          7) operation=set-udp-relay ;;
+          8)
+            read_tty choice "$(t '1) 通用 JSON  2) Mihomo  3) sing-box [1-3，默认 1]: ' \
+              '1) Generic JSON  2) Mihomo  3) sing-box [1-3, default 1]: ')" || continue
+            case "${choice:-1}" in
+              1) NOBRAND_SPLICORE_EXPORT_FORMAT=json ;;
+              2) NOBRAND_SPLICORE_EXPORT_FORMAT=mihomo ;;
+              3) NOBRAND_SPLICORE_EXPORT_FORMAT=sing-box ;;
+              *) continue ;;
+            esac
+            operation='export'
             ;;
-          6)
+          9)
             read_tty choice "$(t '1) 启动  2) 停止: ' '1) Start  2) Stop: ')" || continue
             case "$choice" in 1) operation=start ;; 2) operation=stop ;; *) continue ;; esac
             ;;
-          7)
+          10)
             read_tty confirm_choice "$(t '输入 yes 确认删除: ' 'Enter yes to remove: ')" || continue
             [ "$confirm_choice" = yes ] || continue
             operation=remove

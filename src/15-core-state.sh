@@ -1165,15 +1165,17 @@ read_tty() {
   local _var="$1"
   local _prompt="${2:-}"
   local _line=""
-  if [ "${3:-}" = secret ]; then
+  if [[ "${3:-}" = secret || "${3:-}" = literal ]]; then
+    local -a _flags=(-r -p "$_prompt")
+    [ "$3" != secret ] || _flags+=(-s)
     if [ -t 0 ]; then
-      IFS= read -r -s -p "$_prompt" _line || return 1
+      IFS= read "${_flags[@]}" _line || return 1
     elif [ -r /dev/tty ]; then
-      IFS= read -r -s -p "$_prompt" _line </dev/tty || return 1
+      IFS= read "${_flags[@]}" _line </dev/tty || return 1
     else
       return 1
     fi
-    printf '\n' >&2
+    [ "$3" != secret ] || printf '\n' >&2
     printf -v "$_var" '%s' "$_line"
     return 0
   fi
