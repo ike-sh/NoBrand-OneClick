@@ -54,7 +54,7 @@ nb_port_base_for_ip() {
   [[ "$octet" =~ ^[0-9]+$ ]] || return 1
   [ "$octet" -ge 1 ] && [ "$octet" -le 254 ] || return 1
   base=$((10#$octet * 100))
-  [ "$base" -ge 1025 ] && [ "$((base + 99))" -le 65535 ] || return 1
+  valid_port "$base" && valid_port "$((base + 99))" || return 1
   printf '%s' "$base"
 }
 
