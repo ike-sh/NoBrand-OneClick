@@ -145,9 +145,9 @@ def command(args, category="CONFIG_INVALID", timeout=30, ok=True, env=None):
 
 
 def arch(value=None):
-    normalized = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}
-    require((value or platform.machine()) in normalized, "ARCH_UNSUPPORTED", "unsupported architecture")
-    return normalized[value or platform.machine()]
+    require((value or platform.machine()) in ("x86_64", "amd64"),
+            "ARCH_UNSUPPORTED", "unsupported architecture. Linux amd64 (x86_64) is required")
+    return "amd64"
 
 
 def install_arch(target=None):
@@ -206,16 +206,15 @@ def inspect_archive(path, entry, sums):
                 require(h.hexdigest() == digest,
                         "CHECKSUM_MISMATCH", "internal package checksum differs")
         build = json.load(archive.extractfile(files["BUILD_INFO.json"]))
-        target_arch = "amd64" if "amd64" in entry["name"] else "arm64"
         require(build.get("version") == RELEASE["version"] and build.get("commit") == RELEASE["commit"]
-                and build.get("target") == "linux-" + target_arch
+                and build.get("target") == "linux-amd64"
                 and build.get("binary_sha256") == entry["binary_sha256"]
                 and internal["splicore"] == entry["binary_sha256"],
                 "BINARY_IDENTITY", "build metadata does not match immutable release pin")
         with archive.extractfile(files["splicore"]) as src:
             header = src.read(20)
         require(len(header) == 20 and header[:6] == b"\x7fELF\x02\x01"
-                and struct.unpack_from("<H", header, 18)[0] == (62 if "amd64" in entry["name"] else 183),
+                and struct.unpack_from("<H", header, 18)[0] == 62,
                 "BINARY_IDENTITY", "wrong executable architecture")
         return prefix + "splicore"
 
@@ -1418,6 +1417,8 @@ class Runtime:
 
     def verify_installed_binary(self, generation):
         metadata = load(generation / "artifact.json")
+        require(metadata.get("architecture") == install_arch(), "ARCH_UNSUPPORTED",
+                "snapshot architecture is unsupported. Linux amd64 (x86_64) is required")
         release = RELEASE if metadata["version"] == RELEASE["version"] else RELEASE.get("rollback_releases", {}).get(metadata["version"])
         require(release and release.get("version") == metadata["version"], "BINARY_IDENTITY", "generation release is not an approved rollback pin")
         require(metadata.get("architecture") in release["assets"], "BINARY_IDENTITY", "unapproved generation architecture")
@@ -2364,7 +2365,10 @@ class Runtime:
                     and encrypt_ids <= {node["id"] for node in desired["nodes"] if node["protocol"] == "vless-sudoku"},
                     "CONFIG_INVALID", "default encryption generation is only allowed for new Sudoku nodes")
             require(not probe or old is None, "CONFIG_INVALID", "probe requires an empty private runtime root")
-            old_version = load(old / "artifact.json")["version"] if old else None
+            old_metadata = load(old / "artifact.json") if old else {}
+            require(not old or old_metadata.get("architecture") == "amd64",
+                    "ARCH_UNSUPPORTED", "snapshot architecture is unsupported. Linux amd64 (x86_64) is required")
+            old_version = old_metadata["version"] if old else None
             keep_database = (old and old_version != RELEASE["version"] and key_material is None and
                              desired["nodes"] == before["nodes"])
             if old and old_version == RELEASE["version"] and desired == before and not force and key_material is None:

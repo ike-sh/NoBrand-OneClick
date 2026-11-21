@@ -1,8 +1,10 @@
 # NoBrand-OneClick
 
-本开发分支将代理内核锁定至正式版 **Splicore v0.6.5**。各原生代理协议共享一个运行时，安装支持 Linux amd64。详见 [Splicore v0.6.5](https://github.com/ike-sh/Splicore/releases/tag/v0.6.5)。
+各原生代理协议共享正式版 **Splicore v0.6.5** 运行时。详见 [Splicore v0.6.5](https://github.com/ike-sh/Splicore/releases/tag/v0.6.5)。
 
-当前稳定版本：[v4.1.0](https://github.com/ike-sh/NoBrand-OneClick/releases/tag/v4.1.0)。更新内容见 [CHANGELOG](CHANGELOG.md)。
+支持平台：Linux AMD64 (x86_64)
+
+当前稳定版本：[v4.2.0](https://github.com/ike-sh/NoBrand-OneClick/releases/tag/v4.2.0)。更新内容见 [CHANGELOG](CHANGELOG.md)。
 
 新建 VLESS + Sudoku 默认启用原生 VLESS Encryption，支持完整客户端 JSON 和 JSON 订阅输出。
 
@@ -36,11 +38,11 @@ Mieru 流量伪装、低熵、配额、到期、tc 限速及独立 Mita 版本�
 
 ## 安装和管理
 
-下载并校验 v4.1.0 正式安装器：
+下载并校验 v4.2.0 正式安装器：
 
 ```bash
-curl -fLO https://github.com/ike-sh/NoBrand-OneClick/releases/download/v4.1.0/install-nobrand.sh
-curl -fLO https://github.com/ike-sh/NoBrand-OneClick/releases/download/v4.1.0/SHA256SUMS
+curl -fLO https://github.com/ike-sh/NoBrand-OneClick/releases/download/v4.2.0/install-nobrand.sh
+curl -fLO https://github.com/ike-sh/NoBrand-OneClick/releases/download/v4.2.0/SHA256SUMS
 sha256sum -c SHA256SUMS
 sudo bash install-nobrand.sh
 ```
@@ -108,7 +110,7 @@ REALITY 目标是一个仅监听回环的原生 guard。guard 只将允许的 co
 
 旧 Xray/Mita 等多内核部署 → 新架构：**不支持自动原地迁移**。新版只读检测并拒绝，不转换或删除旧节点、凭据、服务或防火墙。使用匹配的旧安装器导出、备份并处理旧部署；第三方软件不被接管。
 
-已有 v4.1.0 原生安装可用本分支构建的安装器执行 `sudo bash install-nobrand.sh manager upgrade`，再执行 `sudo nobrand mieru upgrade` 将共享内核升级到 v0.6.5。升级使用原数据库的快照和主密钥，保留账号、节点、凭据和入口设置。下载按正式 Manifest、SHA256SUMS、包内校验和与二进制身份核对。
+已有 v4.1.0 原生安装可用 v4.2.0 安装器执行 `sudo bash install-nobrand.sh manager upgrade`，再执行 `sudo nobrand mieru upgrade` 将共享内核升级到 v0.6.5。升级使用原数据库的快照和主密钥，保留账号、节点、凭据和入口设置。下载按正式 Manifest、SHA256SUMS、包内校验和与二进制身份核对。
 
 升级保留上一代二进制、数据库、密钥和状态用于整代回滚。相同版本和配置通过校验后沿用当前部署。失败的新装恢复到未安装状态，失败的更新恢复上一代。降级到不支持当前 SOCKS5 节点的内核时，管理器会拒绝操作并保留快照。
 

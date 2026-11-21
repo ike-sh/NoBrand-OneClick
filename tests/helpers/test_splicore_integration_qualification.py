@@ -47,4 +47,15 @@ class IntegrationQualificationTests(unittest.TestCase):
     self.assertFalse(destination.exists())
     download.assert_not_called()
 
+ def test_cross_architecture_snapshot_is_refused_before_binary_execution(self):
+  with tempfile.TemporaryDirectory() as directory, patch.object(q.sc,'binary_identity') as identity:
+   snapshot=Path(directory)
+   metadata=snapshot/'artifact.json'
+   q.sc.save(metadata,{'version':'v0.6.4','architecture':'arm64'})
+   with self.assertRaises(q.sc.Failure) as raised:
+    q.sc.Runtime(root=snapshot,adapter='process').verify_installed_binary(snapshot)
+   self.assertEqual(raised.exception.category,'ARCH_UNSUPPORTED')
+   self.assertTrue(metadata.is_file())
+   identity.assert_not_called()
+
 if __name__=='__main__':unittest.main(verbosity=2)

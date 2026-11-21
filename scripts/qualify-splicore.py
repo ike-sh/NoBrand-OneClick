@@ -549,7 +549,6 @@ def campaign(args, evidence):
     result["integrity_after"] = review_integrity()
     result["result"] = "PASS: LOCAL CI AND LOOPBACK REGRESSION"
     result["native_systemd"] = result["native_openrc"] = "PENDING ENVIRONMENT"
-    result["arm64_runtime"] = "UNSUPPORTED: Splicore v0.6.5 Linux amd64 release only"
     result["nftables_port_range"] = "N/A: CORE CAPABILITY NOT EXPOSED BY NOBRAND"
     result["external_github_actions"] = "PENDING UNTIL PUSH"
     return result

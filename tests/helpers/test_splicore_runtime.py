@@ -321,10 +321,12 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(self.artifact_calls, 0)
 
     def test_unsupported_architecture_and_pin_identity(self):
-        for value, wanted in (("x86_64", "amd64"), ("amd64", "amd64"), ("aarch64", "arm64"), ("arm64", "arm64")):
-            self.assertEqual(sc.arch(value), wanted)
-        with self.assertRaises(sc.Failure):
-            sc.arch("armv7l")
+        for value in ("x86_64", "amd64"):
+            self.assertEqual(sc.arch(value), "amd64")
+        for value in ("aarch64", "arm64", "armv7l"):
+            with self.subTest(architecture=value), self.assertRaises(sc.Failure) as error:
+                sc.arch(value)
+            self.assertEqual(error.exception.category, "ARCH_UNSUPPORTED")
         self.assertNotIn("latest", sc.RELEASE["version"])
 
     def test_production_archive_gate_and_corruption(self):

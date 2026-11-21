@@ -5,7 +5,7 @@ nb_splicore_require_platform() {
   if [ "$(uname -s)" = Linux ]; then
     case "$(uname -m)" in x86_64|amd64) return 0 ;; esac
   fi
-  printf '[错误 / Error] ARCH_UNSUPPORTED: Splicore %s 仅支持 Linux amd64 / requires Linux amd64\n' "$SPLICORE_VERSION" >&2
+  printf '[错误 / Error] ARCH_UNSUPPORTED: 不支持当前架构，仅支持 Linux amd64 (x86_64)\n' >&2
   return 1
 }
 
