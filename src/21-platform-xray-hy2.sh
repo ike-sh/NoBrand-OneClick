@@ -26,7 +26,7 @@ nobrand_prepare_common() {
       run apk add --no-cache bash curl ca-certificates jq unzip openssl python3 iproute2 util-linux tar libstdc++
       ;;
   esac
-  nb_init_state_layout
+  [ "${1:-}" = deps-only ] || nb_init_state_layout
 }
 
 nobrand_sha256_file() {

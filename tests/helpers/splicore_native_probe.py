@@ -235,7 +235,7 @@ def run(args):
                                 if node['protocol'] == 'tuic': profile = profile['profiles'][0]
                                 name = 'NoBrand-Hysteria2' if node['protocol'] == 'hysteria2' else (
                                        'nobrand-tuic-synthetic-user' if node['protocol'] == 'tuic' else (
-                                       'mieru-mita-tcp' if node['protocol'] == 'mieru' else ('snell' if node['protocol'] == 'snell' else 'vless-reality')))
+                                       node['client']['name']))
                                 traffic(work, client, log, echo, profile['mihomo'], name,
                                         udp=node['protocol'] in ('hysteria2', 'tuic', 'snell'))
                                 passed(phase + '_profile_' + node['protocol'])
@@ -251,8 +251,7 @@ def run(args):
                             with patch.dict(os.environ,dict(env,PORT=str(vacant(socket.SOCK_DGRAM if protocol=='mieru' else socket.SOCK_STREAM)))):
                                 runtime.protocol(protocol,'install',label)
                             n=runtime.desired()['nodes'][-1]
-                            name='mieru-mita-udp' if protocol=='mieru' else label
-                            traffic(work,client,log,echo,sc.client_profiles(n)['mihomo'],name,udp=True)
+                            traffic(work,client,log,echo,sc.client_profiles(n)['mihomo'],label,udp=True)
                             passed(label+'_tcp_udp')
                         with socket.socket(socket.AF_INET6,socket.SOCK_STREAM) as ipv6:
                             ipv6.bind(('::1',0));ipv6_port=ipv6.getsockname()[1]
@@ -273,7 +272,7 @@ def run(args):
                                     label='snell-v'+str(candidate['document']['settings']['version'])
                                 elif protocol=='mieru':
                                     bad['document']['users'][0]['password']='synthetic-wrong-mieru'
-                                    label='mieru-'+candidate['document']['settings']['transport']; name='mieru-mita-'+candidate['document']['settings']['transport']
+                                    label='mieru-'+candidate['document']['settings']['transport']; name=candidate['client']['name']
                                 else:
                                     bad['document']['users'][0][fault]='22222222-2222-4222-8222-222222222222' if fault=='uuid' else 'synthetic-wrong-tuic'
                                     label='tuic'; name='nobrand-tuic-synthetic-user'

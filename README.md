@@ -1,10 +1,12 @@
 # NoBrand-OneClick
 
-全部代理服务统一使用固定的 **Splicore v0.5.0**（`70b09da7d2758e19ba03df9ff9b9e541a669fa29`），支持原生 VLESS Encryption 与 FinalMask/Sudoku，共享一个运行时，无 Xray 服务端依赖。
+各原生代理协议共享正式版 **Splicore v0.6.5** 运行时。详见 [Splicore v0.6.5](https://github.com/ike-sh/Splicore/releases/tag/v0.6.5)。
 
-当前稳定版本：[v4.1.0](https://github.com/ike-sh/NoBrand-OneClick/releases/tag/v4.1.0)。更新内容见 [CHANGELOG](CHANGELOG.md)。
+支持平台：Linux AMD64 (x86_64)
 
-v4.1.0 集成 Splicore v0.5.0；新建 VLESS + Sudoku 默认启用原生 VLESS Encryption，支持完整客户端 JSON 和 JSON 订阅输出。
+当前稳定版本：[v4.2.0](https://github.com/ike-sh/NoBrand-OneClick/releases/tag/v4.2.0)。更新内容见 [CHANGELOG](CHANGELOG.md)。
+
+新建 VLESS + Sudoku 默认启用原生 VLESS Encryption，支持完整客户端 JSON 和 JSON 订阅输出。
 
 ## 重要升级说明：v3.x → v4.x
 
@@ -28,6 +30,7 @@ v4.1.0 集成 Splicore v0.5.0；新建 VLESS + Sudoku 默认启用原生 VLESS E
 | TUIC v5 | Splicore；UUID + password；独立 TLS 信任 |
 | VLESS + TCP + REALITY + Vision | Splicore 原生 Local Tunnel Guard |
 | VLESS Encryption + FinalMask/Sudoku | Splicore 原生 TCP；新建默认 mlkem768 + random + 1rtt |
+| SOCKS5 | 原生 TCP CONNECT，UDP ASSOCIATE 可选，强制 RFC 1929 用户名密码认证 |
 | SSH Tunnel | 系统 OpenSSH 策略与账号 |
 | Port Forward | Realm / nftables |
 
@@ -35,11 +38,11 @@ Mieru 流量伪装、低熵、配额、到期、tc 限速及独立 Mita 版本�
 
 ## 安装和管理
 
-下载并校验 v4.1.0 正式安装器：
+下载并校验 v4.2.0 正式安装器：
 
 ```bash
-curl -fLO https://github.com/ike-sh/NoBrand-OneClick/releases/download/v4.1.0/install-nobrand.sh
-curl -fLO https://github.com/ike-sh/NoBrand-OneClick/releases/download/v4.1.0/SHA256SUMS
+curl -fLO https://github.com/ike-sh/NoBrand-OneClick/releases/download/v4.2.0/install-nobrand.sh
+curl -fLO https://github.com/ike-sh/NoBrand-OneClick/releases/download/v4.2.0/SHA256SUMS
 sha256sum -c SHA256SUMS
 sudo bash install-nobrand.sh
 ```
@@ -85,6 +88,18 @@ sudo nobrand uninstall
 
 客户端导出包含 UUID、Sudoku 密码等连接凭据，请私下保存。Sudoku 的 JSON 导出与订阅采用 Xray 26.10.21 格式，完整保留公开 Encryption 和 FinalMask 参数；无法完整表达的 URI 或其他格式会明确报错。服务端 decryption 通过 Splicore 私有凭据保存，不进入客户端输出。备份含私钥、客户端凭据与数据库主密钥，文件权限为 0600。
 
+### Mieru 真实监听端口
+
+添加节点时可选择 TCP（默认）、UDP 或 BOTH。真实监听端口可以手动指定，回车自动分配。已有节点可在 Mieru 菜单选择「修改真实监听端口」，也可运行 `sudo nobrand mieru set-port --name NAME --port PORT`。BOTH 一次更新 TCP 基础端口和 UDP 基础端口加一。独立设置的展示端点保持原值，标记为跟随监听的展示端口同步更新。节点名会用于 Mihomo 和 Mieru 客户端展示。
+
+### SOCKS5 认证和导出
+
+SOCKS5 强制用户名密码认证。安装时提供用户名，密码留空时由系统安全随机生成。TCP CONNECT 始终可用，UDP ASSOCIATE 默认关闭。凭据与流量均以明文传输。非回环监听需要在菜单确认使用可信线路或访问控制，命令行可显式使用 `--allow-cleartext-remote`。
+
+在 SOCKS5 菜单开启 UDP 或配置 Relay。非回环 Relay 需要对外地址与端口范围。IPLC/NAT 需在上游将每个对外 UDP 端口转发到服务端的同号端口。
+
+`nobrand socks5 show --name NAME` 显示完整连接参数。`nobrand socks5 export --name NAME` 导出通用 JSON，可用 `--format mihomo` 或 `--format sing-box` 切换格式。
+
 ## TLS 与 REALITY 安全边界
 
 HY2/TUIC 默认生成新的私有 CA 和非 CA 服务器叶证书，校验 SAN、有效期、KeyUsage、serverAuth、链顺序和私钥匹配。CA 签名私钥生成后删除。sing-box 配置携带 CA 并验证主机名；Mihomo 配置带显式叶证书 SHA256 pin。HY2 URI 使用 `insecure=1&pinSHA256=...` 表达私有信任的强制 pin，不能删除 pin 或交给忽略 pin 的客户端。优先导入完整配置。自备证书使用显式 canonical desired state；项目不管理 ACME。
@@ -95,9 +110,9 @@ REALITY 目标是一个仅监听回环的原生 guard。guard 只将允许的 co
 
 旧 Xray/Mita 等多内核部署 → 新架构：**不支持自动原地迁移**。新版只读检测并拒绝，不转换或删除旧节点、凭据、服务或防火墙。使用匹配的旧安装器导出、备份并处理旧部署；第三方软件不被接管。
 
-已有原生 v0.4.0 安装先用已校验的 v4.1.0 安装器执行 `sudo bash install-nobrand.sh manager upgrade`，再执行 `sudo nobrand vless-sudoku upgrade` 升级到固定 v0.5.0，按原有状态重建独立 SQLite 数据库，保留 UUID、端口、Sudoku 密码和原加密模式。新建节点才默认启用 Encryption。下载按正式 Manifest、SHA256SUMS、包内校验和与二进制身份核对，不使用浮动版本。
+已有 v4.1.0 原生安装可用 v4.2.0 安装器执行 `sudo bash install-nobrand.sh manager upgrade`，再执行 `sudo nobrand mieru upgrade` 将共享内核升级到 v0.6.5。升级使用原数据库的快照和主密钥，保留账号、节点、凭据和入口设置。下载按正式 Manifest、SHA256SUMS、包内校验和与二进制身份核对。
 
-升级保留上一代二进制、数据库、密钥和状态用于整代回滚。相同版本和配置校验后不重复部署；失败的新装恢复到未安装状态，失败的更新恢复上一代。未知版本或不支持的配置明确拒绝。
+升级保留上一代二进制、数据库、密钥和状态用于整代回滚。相同版本和配置通过校验后沿用当前部署。失败的新装恢复到未安装状态，失败的更新恢复上一代。降级到不支持当前 SOCKS5 节点的内核时，管理器会拒绝操作并保留快照。
 
 - [安装、升级、FAQ 与排查](docs/SPLICORE-MIGRATION.md)
 - [当前架构与模块边界](docs/MODULE-DEPENDENCIES.md)

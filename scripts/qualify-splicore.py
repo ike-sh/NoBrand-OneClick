@@ -318,8 +318,8 @@ def presentation_candidate_integrity():
 
 
 def review_integrity():
-    if sc.RELEASE["version"] == "v0.5.0":
-        return review_v050_integrity()
+    if sc.RELEASE["version"] == "v0.6.5":
+        return review_native_integrity()
     historical = reviewed_integrity(tree=RELEASE_BASE)
     candidate = presentation_candidate_integrity()
     run = subprocess.run(["bash", "scripts/build.sh", "--check"], cwd=ROOT, capture_output=True, timeout=60)
@@ -329,10 +329,10 @@ def review_integrity():
                 unapproved_changes=0)
 
 
-def review_v050_integrity():
-    """A new integration scope; historical rc.4 freeze remains independently tested."""
-    manifest = json.loads((ROOT / "tests/fixtures/splicore-v050-integration.json").read_text())
-    require(manifest.get("baseline") == "d409f313519674da78bc80dd9dac573ad152c24b"
+def review_native_integrity():
+    """Check current release inputs against the approved integration inventory."""
+    manifest = json.loads((ROOT / "tests/fixtures/splicore-v065-integration.json").read_text())
+    require(manifest.get("baseline") == "8f6520685d85e424f1bf0e7fa512f9e4daaee984"
             and manifest.get("splicore_commit") == sc.RELEASE["commit"], "integration baseline differs")
     expected = {str(p.relative_to(ROOT)) for folder, pattern in (
         ("src", "*.sh"), ("runtime", "*.py"), ("runtime", "*.json"), ("scripts", "*.sh"),
@@ -346,7 +346,7 @@ def review_v050_integrity():
     require(gate.returncode == 0, "external Xray server architecture regression")
     run = subprocess.run(["bash", "scripts/build.sh", "--check"], cwd=ROOT, capture_output=True, timeout=60)
     require(run.returncode == 0, "generated installers differ from integration source")
-    return {"result": "PASS", "scope": "Splicore v0.5.0 integration", "unapproved_changes": 0,
+    return {"result": "PASS", "scope": "Splicore " + sc.RELEASE["version"] + " integration", "unapproved_changes": 0,
             "protected_files": len(expected), "historical_freeze": "retained; tests run against historical tree"}
 
 
@@ -364,18 +364,18 @@ def workflow_contract(text):
     checkout = next(s for s in steps if "uses" in s)
     require(checkout["with"] == {"fetch-depth": "0", "persist-credentials": "false"}, "checkout must fetch baseline and discard credentials")
     joined = "\n".join(s.get("run", "") for s in steps)
-    require('python3 scripts/ci-diagnostics.py run --evidence "$RUNNER_TEMP/nobrand-v050"' in joined, "CI entrypoint missing")
+    require('python3 scripts/ci-diagnostics.py run --evidence "$RUNNER_TEMP/nobrand-splicore"' in joined, "CI entrypoint missing")
     require(not any("continue-on-error" in s for s in steps), "CI must propagate failures")
     for name in ("Publish sanitized diagnostics", "Upload sanitized qualification evidence", "Propagate qualification exit status"):
         require(next((s.get("if") for s in steps if s.get("name") == name), None) == "always()", "diagnostics/final status must always run")
     require(next(s.get("run") for s in steps if s.get("name") == "Publish sanitized diagnostics") ==
-            'python3 scripts/ci-diagnostics.py publish --evidence "$RUNNER_TEMP/nobrand-v050"', "sanitized publisher missing")
-    require(steps[-1].get("run") == 'python3 scripts/ci-diagnostics.py finish --evidence "$RUNNER_TEMP/nobrand-v050"', "final exit propagation missing")
+            'python3 scripts/ci-diagnostics.py publish --evidence "$RUNNER_TEMP/nobrand-splicore"', "sanitized publisher missing")
+    require(steps[-1].get("run") == 'python3 scripts/ci-diagnostics.py finish --evidence "$RUNNER_TEMP/nobrand-splicore"', "final exit propagation missing")
     upload = next(s for s in steps if s.get("uses") == UPLOAD)
     spec = importlib.util.spec_from_file_location("ci_contract_diagnostics", ROOT / "scripts/ci-diagnostics.py")
     diagnostics = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(diagnostics)
-    require(upload["with"]["path"].splitlines() == ["${{ runner.temp }}/nobrand-v050/public/" + p for p in diagnostics.PUBLIC_FILES], "artifact must list only reviewed public files")
+    require(upload["with"]["path"].splitlines() == ["${{ runner.temp }}/nobrand-splicore/public/" + p for p in diagnostics.PUBLIC_FILES], "artifact must list only reviewed public files")
     require(upload["with"].get("if-no-files-found") == "error" and upload["with"].get("include-hidden-files", "false") == "false", "missing/hidden artifact policy differs")
     require("git diff --exit-code --quiet" in joined, "CI generated-file mutation guard must fail without exposing raw diffs")
     require("actionlint/cmd/actionlint@v1.7.7" in joined, "workflow validator is not pinned")
@@ -482,7 +482,7 @@ def prepare_assets(destination):
 def summarize(log, probe):
     require(log.endswith("[PASS] NoBrand test suite\n"), "regression completion marker missing")
     require(probe["result"] == "PASS" and probe["checks"] and all(v == "PASS" for v in probe["checks"].values()), "runtime result is incomplete")
-    if sc.RELEASE["version"] == "v0.5.0":
+    if sc.RELEASE["version"] == "v0.6.5":
         selected = set(re.findall(r"^  (tests/\S+\.sh)$", (ROOT / "scripts/test.sh").read_text(), re.M))
         executed = re.findall(r"^\[RUN\] (tests/\S+\.sh)$", log, re.M)
         require(set(executed) == selected and len(executed) == len(selected), "integration Bash tests missing or repeated")
@@ -548,7 +548,7 @@ def campaign(args, evidence):
     require(result["regression"]["secret_scan"] == "PASS", "secret scan completion marker missing")
     result["integrity_after"] = review_integrity()
     result["result"] = "PASS: LOCAL CI AND LOOPBACK REGRESSION"
-    result["native_systemd"] = result["native_openrc"] = result["arm64_runtime"] = "PENDING ENVIRONMENT"
+    result["native_systemd"] = result["native_openrc"] = "PENDING ENVIRONMENT"
     result["nftables_port_range"] = "N/A: CORE CAPABILITY NOT EXPOSED BY NOBRAND"
     result["external_github_actions"] = "PENDING UNTIL PUSH"
     return result

@@ -30,7 +30,7 @@ import tarfile
 import tempfile
 import time
 import uuid
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 try:
     RELEASE
@@ -57,6 +57,9 @@ Recommended:
 2. Remove the legacy installation using the matching legacy NoBrand version.
 3. Perform a clean installation.
 4. Import/use the newly generated client profiles."""
+
+TCP_PROTOCOLS = {"snell", "socks5", "vless-reality", "vless-sudoku"}
+SOCKS5_SETTINGS = {"auth": True, "udp": False}
 
 
 def require(condition, category, detail):
@@ -142,9 +145,16 @@ def command(args, category="CONFIG_INVALID", timeout=30, ok=True, env=None):
 
 
 def arch(value=None):
-    normalized = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}
-    require((value or platform.machine()) in normalized, "ARCH_UNSUPPORTED", "unsupported architecture")
-    return normalized[value or platform.machine()]
+    require((value or platform.machine()) in ("x86_64", "amd64"),
+            "ARCH_UNSUPPORTED", "unsupported architecture. Linux amd64 (x86_64) is required")
+    return "amd64"
+
+
+def install_arch(target=None):
+    native = arch()
+    require(platform.system() == "Linux" and native in RELEASE["assets"] and target in (None, native), "ARCH_UNSUPPORTED",
+            "Splicore " + RELEASE["version"] + " is available for Linux amd64 only")
+    return native
 
 
 def inspect_archive(path, entry, sums):
@@ -196,16 +206,15 @@ def inspect_archive(path, entry, sums):
                 require(h.hexdigest() == digest,
                         "CHECKSUM_MISMATCH", "internal package checksum differs")
         build = json.load(archive.extractfile(files["BUILD_INFO.json"]))
-        target_arch = "amd64" if "amd64" in entry["name"] else "arm64"
         require(build.get("version") == RELEASE["version"] and build.get("commit") == RELEASE["commit"]
-                and build.get("target") == "linux-" + target_arch
+                and build.get("target") == "linux-amd64"
                 and build.get("binary_sha256") == entry["binary_sha256"]
                 and internal["splicore"] == entry["binary_sha256"],
                 "BINARY_IDENTITY", "build metadata does not match immutable release pin")
         with archive.extractfile(files["splicore"]) as src:
             header = src.read(20)
         require(len(header) == 20 and header[:6] == b"\x7fELF\x02\x01"
-                and struct.unpack_from("<H", header, 18)[0] == (62 if "amd64" in entry["name"] else 183),
+                and struct.unpack_from("<H", header, 18)[0] == 62,
                 "BINARY_IDENTITY", "wrong executable architecture")
         return prefix + "splicore"
 
@@ -241,8 +250,7 @@ def binary_identity(binary, target_arch, release=None):
 
 
 def artifact(destination, directory=None, proxy="", target_arch=None):
-    target_arch = target_arch or arch()
-    require(target_arch in RELEASE["assets"], "ARCH_UNSUPPORTED", "unsupported architecture")
+    target_arch = install_arch(target_arch)
     entry = RELEASE["assets"][target_arch]
     with tempfile.TemporaryDirectory(prefix="nb-splicore-download-") as tmp:
         staging = Path(tmp)
@@ -262,6 +270,8 @@ def artifact(destination, directory=None, proxy="", target_arch=None):
             download(base + RELEASE["checksum_asset"], sums, proxy)
             download(base + manifest.name, manifest, proxy)
         require(sha(manifest) == RELEASE["manifest_sha256"], "CHECKSUM_MISMATCH", "release manifest differs from pin")
+        if RELEASE.get("checksum_sha256"):
+            require(sha(sums) == RELEASE["checksum_sha256"], "CHECKSUM_MISMATCH", "SHA256SUMS differs from pin")
         published = load(manifest)
         require(published.get("release", {}).get("version") == RELEASE["version"]
                 and published["release"].get("commit") == RELEASE["commit"],
@@ -564,12 +574,166 @@ def guard_mutations(desired):
     return mutations
 
 
+def listener_transport(node):
+    protocol = node["protocol"]
+    if protocol == "mieru":
+        return node["document"]["settings"].get("transport")
+    return "tcp" if protocol in TCP_PROTOCOLS else "udp"
+
+
+def listener_summary(node):
+    doc, client = node["document"], node.get("client", {})
+    result = {"id": node["id"], "name": client.get("name") or node["id"], "protocol": node["protocol"],
+              "enabled": node.get("enabled", True), "transport": listener_transport(node),
+              "pair": client.get("pair"), "listener": doc["listener"], "display_endpoint": doc["display_endpoint"],
+              "display_port_policy": client.get("display_port_policy", "custom")}
+    if node["protocol"] == "socks5":
+        relay = socks5_relay(doc)
+        result.update(udp=relay is not None, udp_relay=relay)
+    return result
+
+
+def set_listener_port(nodes, protocol, selector, port):
+    require(protocol in ("mieru", "socks5") and selector, "CONFIG_INVALID", "specify a listener node by name or ID")
+    require(re.fullmatch(r"[0-9]{1,5}", port) and 1 <= int(port) <= 65535,
+            "CONFIG_INVALID", "listener port must be in 1–65535")
+    candidates = [n for n in nodes if n["protocol"] == protocol]
+    selected = [n for n in candidates if n["id"] == selector] or [
+        n for n in candidates if n.get("client", {}).get("name") == selector]
+    require(selected, "CONFIG_INVALID", "listener node not found")
+    pair = selected[0].get("client", {}).get("pair")
+    members = [n for n in candidates if n.get("client", {}).get("pair") == pair] if protocol == "mieru" and pair else selected
+    require(all(n in members for n in selected), "CONFIG_INVALID", "ambiguous listener name; specify the node ID")
+    both = protocol == "mieru" and (len(members) > 1 or any(n.get("client", {}).get("transport") == "BOTH" for n in members))
+    if both:
+        members.sort(key=listener_transport)
+        require([listener_transport(n) for n in members] == ["tcp", "udp"]
+                and members[1]["document"]["listener"]["port"] == members[0]["document"]["listener"]["port"] + 1,
+                "CONFIG_INVALID", "Mieru BOTH requires an intact TCP and UDP listener pair")
+        require(int(port) < 65535, "CONFIG_INVALID", "Mieru BOTH uses TCP base port and UDP base port + 1")
+    else:
+        require(len(members) == 1, "CONFIG_INVALID", "ambiguous listener selection")
+    for offset, node in enumerate(members):
+        doc, new_port = node["document"], int(port) + offset
+        doc["listener"]["port"] = new_port
+        if node.get("client", {}).get("display_port_policy") == "follow-actual":
+            doc["display_endpoint"]["port"] = new_port
+            endpoint = doc["display_endpoint"]
+            require(not any(n is not node and listener_transport(n) == listener_transport(node)
+                            and n["document"]["display_endpoint"] == endpoint for n in nodes),
+                    "PORT_CONFLICT", "the following display port would share another node's client endpoint")
+    return members
+
+
+def socks5_credential(user):
+    username, password = user.get("username"), user.get("password")
+    require(isinstance(username, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", username),
+            "CONFIG_INVALID", "SOCKS5 requires a username of 1–64 letters, digits, dots, underscores or hyphens")
+    require(isinstance(password, str) and re.fullmatch(r"[!-~]{16,255}", password)
+            and len(set(password)) >= 8 and password.lower() != username.lower(),
+            "CONFIG_INVALID", "SOCKS5 password requires 16–255 printable ASCII characters, including at least 8 distinct characters")
+
+
+def endpoint_ip(value):
+    if not isinstance(value, str) or "%" in value:
+        return None
+    try:
+        return ipaddress.ip_address(value)
+    except ValueError:
+        return None
+
+
+def endpoint_host(value):
+    address = endpoint_ip(value)
+    if address is not None:
+        address = getattr(address, "ipv4_mapped", None) or address
+        return not address.is_unspecified and not address.is_multicast
+    return (isinstance(value, str) and 1 <= len(value) <= 253 and not re.fullmatch(r"[0-9.]+", value)
+            and all(re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", part)
+                    for part in value.split(".")))
+
+
+def socks5_relay(document):
+    settings = document.get("settings")
+    keys(settings, {"auth", "udp", "allow_cleartext_remote", "udp_relay"}, "SOCKS5 settings")
+    listener = endpoint_ip(document["listener"]["host"])
+    allow_remote = settings.get("allow_cleartext_remote", False)
+    require(settings.get("auth") is True and type(settings.get("udp", False)) is bool and type(allow_remote) is bool,
+            "CONFIG_INVALID", "SOCKS5 requires RFC 1929 authentication and boolean UDP and cleartext settings")
+    require(listener is not None, "CONFIG_INVALID", "SOCKS5 listener requires an IP literal")
+    listener = getattr(listener, "ipv4_mapped", None) or listener
+    require(listener.is_loopback or allow_remote, "CONFIG_INVALID",
+            "non-loopback SOCKS5 requires explicit --allow-cleartext-remote for a trusted or access-controlled network")
+    if not settings.get("udp", False):
+        require("udp_relay" not in settings, "CONFIG_INVALID", "UDP relay configuration requires UDP ASSOCIATE enabled")
+        return None
+    relay = settings.get("udp_relay", {})
+    keys(relay, {"listen", "advertise", "port_min", "port_max"}, "SOCKS5 UDP relay")
+    bind = endpoint_ip(relay.get("listen", str(listener)))
+    require(bind is not None and bind.version == listener.version and bind.is_loopback == listener.is_loopback
+            and not bind.is_multicast and not getattr(bind, "ipv4_mapped", None),
+            "CONFIG_INVALID", "SOCKS5 UDP listen IP must match the TCP listener's address family and loopback scope")
+    low, high = relay.get("port_min", 0), relay.get("port_max", 0)
+    require(type(low) is int and type(high) is int
+            and ((low == high == 0) or (1 <= low <= high <= 65535 and high - low < 1024)),
+            "CONFIG_INVALID", "SOCKS5 UDP port range must contain 1–1024 ports in 1–65535")
+    require(listener.is_loopback or (low and relay.get("advertise")), "CONFIG_INVALID",
+            "non-loopback SOCKS5 UDP requires --udp-advertise and --udp-port-range")
+    advertised = relay.get("advertise", str(bind))
+    advertised_ip = endpoint_ip(advertised)
+    advertised_ip = getattr(advertised_ip, "ipv4_mapped", None) or advertised_ip
+    require(endpoint_host(advertised) and (advertised_ip is None or
+            (advertised_ip.version == bind.version and advertised_ip.is_loopback == bind.is_loopback)),
+            "CONFIG_INVALID", "SOCKS5 UDP advertise must be a usable IP or DNS name matching the relay scope")
+    return {"listen": str(bind), "advertise": advertised, "port_min": low, "port_max": high}
+
+
+def socks5_udp_request(document, operation, env):
+    settings = document["settings"]
+    mode = env.get("SOCKS5_UDP", "")
+    require(mode in ("", "on", "off"), "CONFIG_INVALID", "SOCKS5 --udp requires on or off")
+    relay = dict(settings.get("udp_relay", {}))
+    supplied = {key: env[var] for key, var in (("listen", "SOCKS5_UDP_LISTEN"), ("advertise", "SOCKS5_UDP_ADVERTISE"))
+                if env.get(var)}
+    port_range = env.get("SOCKS5_UDP_PORT_RANGE", "")
+    if operation == "set-udp-relay":
+        require(settings.get("udp") is True and (supplied or port_range),
+                "CONFIG_INVALID", "enable UDP and supply at least one UDP relay setting")
+    else:
+        require(mode or operation == "install", "CONFIG_INVALID", "specify --udp on or off")
+        settings["udp"] = mode == "on"
+    if not settings["udp"]:
+        require(not (supplied or port_range), "CONFIG_INVALID", "UDP relay settings require --udp on")
+        settings.pop("udp_relay", None)
+        return
+    relay.update(supplied)
+    if port_range == "auto":
+        relay.pop("port_min", None)
+        relay.pop("port_max", None)
+    elif port_range:
+        match = re.fullmatch(r"([0-9]{1,5})(?:-([0-9]{1,5}))?", port_range)
+        require(match and int(match[1]) > 0, "CONFIG_INVALID", "use --udp-port-range FIRST-LAST or auto on loopback")
+        relay.update(port_min=int(match[1]), port_max=int(match[2] or match[1]))
+    settings["udp_relay"] = relay
+
+
+def node_bindings(node):
+    doc = node["document"]
+    listener = doc["listener"]
+    yield listener_transport(node), listener["host"], listener["port"], False
+    if node["protocol"] == "socks5":
+        relay = socks5_relay(doc)
+        if relay:
+            for port in range(relay["port_min"], relay["port_max"] + 1):
+                yield "udp", relay["listen"], port, True
+
+
 def render(desired, validate_tls=True):
     keys(desired, {"schema", "owner", "nodes", "source", "architecture", "splicore_version", "config_schema"}, "desired state")
     require(desired.get("schema") == 1 and desired.get("architecture") == "splicore-native"
             and desired.get("config_schema") == 1 and desired.get("owner") == "nobrand-splicore-v1"
             and isinstance(desired.get("nodes"), list), "CONFIG_INVALID", "invalid NoBrand runtime authority")
-    documents, names, occupied = [], set(), []
+    documents, names, occupied = [], set(), {}
     for node in desired["nodes"]:
         keys(node, {"id", "protocol", "enabled", "document", "client", "guard", "options", "ingress"}, "node")
         name = identifier(node.get("id"))
@@ -582,7 +746,7 @@ def render(desired, validate_tls=True):
         protocol = node.get("protocol")
         capability = RELEASE["capabilities"].get(protocol, {})
         require(capability.get("managed", False), "CAPABILITY_UNSUPPORTED",
-                capability.get("integration_blocker", "protocol/security policy is not qualified by v0.5.0"))
+                capability.get("integration_blocker", "protocol/security policy is outside the pinned release"))
         options = node.get("options", {})
         keys(options, {"traffic_pattern", "low_entropy", "quota_mb", "expire_at", "bandwidth_mbps",
                        "quic_proxy_enabled", "obfs", "ingress_enforcement"}, "capability options")
@@ -592,7 +756,7 @@ def render(desired, validate_tls=True):
                 and options.get("bandwidth_mbps", 0) == 0
                 and not options.get("quic_proxy_enabled") and (protocol == "hysteria2" or not options.get("obfs"))
                 and options.get("ingress_enforcement", "native") == "native",
-                "CAPABILITY_UNSUPPORTED", "stored protocol/accounting/security option has no v0.5.0 equivalent")
+                "CAPABILITY_UNSUPPORTED", "stored protocol/accounting/security option has no native equivalent")
         document = copy.deepcopy(node.get("document"))
         require(isinstance(document, dict), "CONFIG_INVALID", "managed document required")
         keys(document, {"schema", "name", "account_name", "listener", "display_endpoint", "settings", "users", "psk", "server_secret"}, "managed document")
@@ -600,37 +764,35 @@ def render(desired, validate_tls=True):
         document["name"] = "nb-" + name
         listener = document.get("listener", {})
         keys(listener, {"host", "port"}, "listener")
-        require(isinstance(listener.get("port"), int) and 1 <= listener["port"] <= 65535,
+        require(type(listener.get("port")) is int and 1 <= listener["port"] <= 65535,
                 "CONFIG_INVALID", "invalid listener port")
         endpoint = document.get("display_endpoint", {})
         keys(endpoint, {"host", "port"}, "display endpoint")
-        require(isinstance(endpoint.get("host"), str) and endpoint["host"]
-                and endpoint["host"] not in ("0.0.0.0", "::")
-                and not any(c.isspace() or ord(c) < 32 for c in endpoint["host"])
-                and type(endpoint.get("port")) is int and 1 <= endpoint["port"] <= 65535,
-                "CONFIG_INVALID", "invalid display endpoint")
-        try:
-            address = ipaddress.ip_address(listener.get("host", ""))
-        except ValueError as exc:
-            raise Failure("CONFIG_INVALID", "listener requires an IP address") from exc
+        require(endpoint_host(endpoint.get("host")), "CONFIG_INVALID", "display Host requires a usable IPv4, IPv6 or DNS name")
+        require(type(endpoint.get("port")) is int and 1 <= endpoint["port"] <= 65535,
+                "CONFIG_INVALID", "display Port must be in 1–65535")
+        require(endpoint_ip(listener.get("host")) is not None, "CONFIG_INVALID", "listener requires an IP address")
+        if protocol in ("mieru", "socks5"):
+            port_policy = node.get("client", {}).get("display_port_policy", "custom")
+            require(port_policy == "custom" or (port_policy == "follow-actual" and endpoint["port"] == listener["port"]),
+                    "CONFIG_INVALID", "invalid display port policy")
         settings = document.get("settings", {})
-        transport = "tcp" if protocol in ("snell", "vless-reality", "vless-sudoku") else "udp"
+        transport = listener_transport(node)
         if protocol == "mieru":
             keys(settings, {"transport", "mtu", "multiplex"}, "Mieru settings")
-            transport = settings.get("transport")
             require(transport in ("tcp", "udp"), "CONFIG_INVALID", "BOTH requires two mapped inbounds")
         elif protocol == "snell":
             keys(settings, {"version"}, "Snell settings")
             require(settings.get("version") in (4, 5) and isinstance(document.get("psk"), str)
                     and re.fullmatch(r"[A-Za-z0-9_+/=-]{12,128}", document["psk"]),
-                    "CAPABILITY_UNSUPPORTED", "stored Snell PSK/version outside v0.5.0 domain; rotation required explicitly")
+                    "CAPABILITY_UNSUPPORTED", "stored Snell PSK/version outside the native contract; rotation required explicitly")
             document["account_name"] = "nb-" + name
         elif protocol == "vless-reality":
             reality_check(node, document)
         elif protocol == "vless-sudoku":
             sudoku_check(settings)
             sudoku_encryption(node)
-        else:
+        elif protocol in ("hysteria2", "tuic"):
             allowed = {"tls", "stream_transport"} if protocol == "hysteria2" else {"version", "tls", "congestion_control", "udp_relay_mode", "zero_rtt_handshake"}
             keys(settings, allowed, protocol + " settings")
             if protocol == "hysteria2":
@@ -641,30 +803,37 @@ def render(desired, validate_tls=True):
                 tls_check(settings.get("tls", {}))
         if protocol != "snell":
             users = document.get("users")
-            require(isinstance(users, list) and 1 <= len(users) <= 16, "CONFIG_INVALID", "v0.5.0 supports 1..16 users per inbound")
+            require(isinstance(users, list) and 1 <= len(users) <= (1 if protocol == "socks5" else 16),
+                    "CONFIG_INVALID", "invalid managed user count")
             for index, user in enumerate(users):
                 keys(user, {"account_name", "username", "uuid", "password"}, "managed user")
                 # Internal account identity is independent of wire credentials.
                 user["account_name"] = "nb-" + name + "-" + str(index)
                 if protocol in ("vless-reality", "vless-sudoku"):
                     require(str(uuid.UUID(user.get("uuid", ""))) == user.get("uuid"), "CONFIG_INVALID", "invalid VLESS UUID")
+                elif protocol == "socks5":
+                    socks5_credential(user)
                 else:
                     require(isinstance(user.get("password"), str) and user["password"], "CONFIG_INVALID", "credentials must be explicit")
-        for previous_transport, previous_address, previous_port in occupied:
-            overlap = address == previous_address or address.is_unspecified or previous_address.is_unspecified
-            # Conservatively reserve wildcard IPv6 against IPv4 too.
-            require(not (transport == previous_transport and listener["port"] == previous_port and overlap),
-                    "PORT_CONFLICT", "overlapping desired listeners")
-        occupied.append((transport, address, listener["port"]))
+        for socket_transport, host, port, relay in node_bindings(node):
+            if port == 0:
+                continue
+            address = endpoint_ip(host)
+            address = getattr(address, "ipv4_mapped", None) or address
+            others = occupied.setdefault((socket_transport, port), [])
+            require(not any(relay or other_relay or address == other or address.is_unspecified or other.is_unspecified
+                            for other, other_relay in others), "PORT_CONFLICT",
+                    "overlapping desired listeners or SOCKS5 relay on " + socket_transport.upper() + " port " + str(port))
+            others.append((address, relay))
         if not node.get("enabled", True):
             continue
         documents.append((name, "vless" if protocol in ("vless-reality", "vless-sudoku") else protocol, document))
-    require(len(documents) <= 64, "CONFIG_INVALID", "v0.5.0 inbound limit exceeded")
+    require(len(documents) <= 64, "CONFIG_INVALID", "native inbound limit exceeded")
     guard_mutations(desired)
     for node in desired["nodes"]:
         if node.get("guard"):
             port = node["guard"]["listen"]["port"]
-            require(not any(t == "tcp" and p == port for t, _a, p in occupied),
+            require(("tcp", port) not in occupied,
                     "PORT_CONFLICT", "guard overlaps a protocol listener")
     return documents
 
@@ -699,6 +868,67 @@ def leaf_fingerprint(tls):
     leaf = re.search(r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", pem, flags=re.S)
     require(leaf, "CONFIG_INVALID", "TLS leaf unavailable for explicit client pin")
     return hashlib.sha256(ssl.PEM_cert_to_DER_cert(leaf.group())).hexdigest()
+
+
+def mieru_client_parameters(node):
+    doc = node["document"]
+    settings, user = doc["settings"], doc["users"][0]
+    client = node.get("client", {})
+    mode = client.get("handshake_mode") or client.get("profile", {}).get("HANDSHAKE_MODE", "HANDSHAKE_NO_WAIT")
+    return (client.get("name") or node["id"], user["username"], user["password"], settings["mtu"],
+            "MULTIPLEXING_" + settings.get("multiplex", "off").upper(), mode)
+
+
+def mieru_client_profile(nodes):
+    nodes = sorted(nodes, key=listener_transport)
+    name, username, password, mtu, multiplexing, handshake_mode = mieru_client_parameters(nodes[0])
+    bindings, mihomo = {}, []
+    for index, node in enumerate(nodes):
+        endpoint = node["document"]["display_endpoint"]
+        host, port, transport = endpoint["host"], endpoint["port"], listener_transport(node).upper()
+        bindings.setdefault(host, []).append({"port": port, "protocol": transport})
+        proxy_name = f"{name} ({transport})" if index else name
+        mihomo.append("  - name: " + json.dumps(proxy_name, ensure_ascii=False)
+                      + "\n    type: mieru\n    server: " + json.dumps(host) + "\n    port: " + str(port)
+                      + "\n    transport: " + transport + "\n    udp: true\n    username: " + json.dumps(username)
+                      + "\n    password: " + json.dumps(password) + "\n    multiplexing: " + multiplexing
+                      + "\n    handshake-mode: " + handshake_mode + "\n")
+    uris, servers = [], []
+    for host, ports in bindings.items():
+        is_ip = endpoint_ip(host) is not None
+        servers.append({"ipAddress": host if is_ip else "", "domainName": "" if is_ip else host, "portBindings": ports})
+        address = f"[{host}]" if ":" in host else host
+        # The native mierus parser pairs repeated port/protocol values and
+        # imports the profile query parameter as the profile name.
+        query = [("handshake-mode", handshake_mode), ("mtu", mtu), ("multiplexing", multiplexing), ("profile", name)]
+        for binding in ports:
+            query.extend((("port", binding["port"]), ("protocol", binding["protocol"])))
+        uris.append("mierus://" + quote(username, safe="") + ":" + quote(password, safe="") + "@" + address
+                    + "?" + urlencode(query, quote_via=quote))
+    native = {"profiles": [{"profileName": name, "user": {"name": username, "password": password}, "servers": servers,
+                            "mtu": mtu, "multiplexing": {"level": multiplexing}, "handshakeMode": handshake_mode}],
+              "activeProfile": name, "rpcPort": 8964, "socks5Port": 1080, "loggingLevel": "INFO",
+              "socks5ListenLAN": False, "httpProxyPort": 8080, "httpProxyListenLAN": False}
+    return {"id": nodes[0]["id"], "name": name, "protocol": "mieru",
+            "listener_ids": [node["id"] for node in nodes], "uri": "\n".join(uris),
+            "mieru": native, "mihomo": "proxies:\n" + "".join(mihomo)}
+
+
+def profiles_for_nodes(nodes):
+    profiles, exported = [], set()
+    for node in nodes:
+        if node["id"] in exported:
+            continue
+        pair = node.get("client", {}).get("pair")
+        if node["protocol"] == "mieru" and pair:
+            parameters = mieru_client_parameters(node)
+            members = [other for other in nodes if other["protocol"] == "mieru"
+                       and other.get("client", {}).get("pair") == pair and mieru_client_parameters(other) == parameters]
+            profiles.append(mieru_client_profile(members))
+            exported.update(other["id"] for other in members)
+        else:
+            profiles.append(client_profiles(node))
+    return profiles
 
 
 def client_profiles(node):
@@ -778,27 +1008,19 @@ def client_profiles(node):
             "network": "tcp", "security": "reality", "realitySettings": {"serverName": reality["server_name"],
             "fingerprint": "chrome", "publicKey": reality["public_key"], "shortId": reality["short_ids"][0]}}}
     elif protocol == "mieru":
+        return mieru_client_profile([node])
+    elif protocol == "socks5":
         user = document["users"][0]
-        profile = node.get("client", {}).get("profile", {})
-        handshake = node.get("client", {}).get("handshake_mode") or profile.get("HANDSHAKE_MODE", "HANDSHAKE_NO_WAIT")
-        mux, transport = "MULTIPLEXING_" + settings.get("multiplex", "off").upper(), settings["transport"].upper()
-        address = "[" + host + "]" if ":" in host else host
-        out["uri"] = ("mierus://" + quote(user["username"], safe="") + ":" + quote(user["password"], safe="") + "@" + address
-                      + "?handshake-mode=" + handshake + "&mtu=" + str(settings["mtu"]) + "&multiplexing=" + mux
-                      + "&port=" + str(port) + "&profile=default&protocol=" + transport)
-        try:
-            ipaddress.ip_address(host)
-            ip, domain = host, ""
-        except ValueError:
-            ip, domain = "", host
-        out["mieru"] = {"profiles": [{"profileName": "default", "user": {"name": user["username"], "password": user["password"]},
-                        "servers": [{"ipAddress": ip, "domainName": domain, "portBindings": [{"port": port, "protocol": transport}]}],
-                        "mtu": settings["mtu"], "multiplexing": {"level": mux}, "handshakeMode": handshake}],
-                        "activeProfile": "default", "rpcPort": 8964, "socks5Port": 1080, "loggingLevel": "INFO",
-                        "socks5ListenLAN": False, "httpProxyPort": 8080, "httpProxyListenLAN": False}
-        out["mihomo"] = ("proxies:\n  - name: mieru-mita-" + transport.lower() + "\n    type: mieru\n    server: " + json.dumps(host)
-                         + "\n    port: " + str(port) + "\n    transport: " + transport + "\n    udp: true\n    username: " + json.dumps(user["username"])
-                         + "\n    password: " + json.dumps(user["password"]) + "\n    multiplexing: " + mux + "\n    handshake-mode: " + handshake + "\n")
+        socks5_credential(user)
+        credentials = {key: user[key] for key in ("username", "password")}
+        udp = socks5_relay(document) is not None
+        out["connection"] = {"host": host, "port": port, **credentials, "authentication_required": True, "udp": udp}
+        out["mihomo"] = {"proxies": [{"name": name, "type": "socks5", "server": host, "port": port,
+                                      **credentials, "udp": udp}]}
+        out["sing_box"] = {"type": "socks", "tag": name, "server": host, "server_port": port,
+                           "version": "5", **credentials}
+        if not udp:
+            out["sing_box"]["network"] = "tcp"
     elif protocol == "tuic":
         profiles = []
         names = node.get("client", {}).get("user_names", [])
@@ -945,6 +1167,7 @@ class Runtime:
 
     @contextlib.contextmanager
     def locked(self, recovery=False):
+        install_arch()
         self.refuse_legacy()
         self.safe()
         self.lifecycle.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -1092,12 +1315,28 @@ class Runtime:
         require(not self.legacy_present(), "UNSUPPORTED_LEGACY_INSTALLATION", LEGACY_NOTICE)
 
     def port_pairs(self, desired):
-        result = set()
+        return {transport.upper() + "|" + str(port) for node in desired["nodes"]
+                for transport, _, port, _ in node_bindings(node) if port}
+
+    def firewall_pairs(self, desired, protocol=None):
+        # The firewall keeps each explicit range as one owned rule so partial
+        # range edits can open the replacement and retire the exact old rule.
+        pairs = set()
         for node in desired["nodes"]:
-            protocol, doc = node["protocol"], node["document"]
-            transport = doc["settings"]["transport"] if protocol == "mieru" else "tcp" if protocol in ("snell", "vless-reality", "vless-sudoku") else "udp"
-            result.add(transport.upper() + "|" + str(doc["listener"]["port"]))
-        return result
+            if protocol and node["protocol"] != protocol:
+                continue
+            doc = node["document"]
+            if node["protocol"] == "socks5":
+                address = endpoint_ip(doc["listener"]["host"])
+                address = getattr(address, "ipv4_mapped", None) or address
+                if not node.get("enabled", True) or address.is_loopback:
+                    continue
+                relay = socks5_relay(doc)
+                if relay and relay["port_min"]:
+                    first, last = relay["port_min"], relay["port_max"]
+                    pairs.add("UDP|" + (str(first) if first == last else f"{first}-{last}"))
+            pairs.add(listener_transport(node).upper() + "|" + str(doc["listener"]["port"]))
+        return pairs
 
     def firewall(self, action, pairs):
         if not pairs or self.adapter == "process":
@@ -1112,7 +1351,7 @@ class Runtime:
                   + 'nb_firewall_' + action + '_pairs "$bindings"')
         command(["bash", "-c", script, "nobrand-firewall", source, "\n".join(sorted(pairs))], "FIREWALL", timeout=60)
 
-    def check_external_ports(self, desired):
+    def check_external_ports(self, desired, before, recheck_listener_ids=()):
         reservations = []
         sudoku = self.state / "vless-sudoku/state.json"
         if sudoku.exists():
@@ -1123,7 +1362,46 @@ class Runtime:
             for rule in load(forwarding).get("rules", []):
                 for transport in (["TCP", "UDP"] if str(rule.get("protocol")).upper() == "BOTH" else [str(rule.get("protocol")).upper()]):
                     reservations.append(transport + "|" + str(rule.get("listen_port")))
-        require(not self.port_pairs(desired).intersection(reservations), "PORT_CONFLICT", "port belongs to retained Sudoku or forwarding state")
+        requested = self.port_pairs(desired)
+        require(not requested.intersection(reservations), "PORT_CONFLICT", "port belongs to retained Sudoku or forwarding state")
+        added = requested - self.port_pairs(before)
+        for binding in self.owned_firewall_pairs():
+            transport, _, span = binding.partition("|")
+            first, _, last = span.partition("-")
+            require(not any(f"{transport}|{port}" in added for port in range(int(first), int(last or first) + 1)),
+                    "PORT_CONFLICT", "requested port has an existing NoBrand firewall owner")
+
+        # Check ingress reservations and bind addresses under the same lock.
+        def bindings(graph):
+            result = {}
+            for node in graph["nodes"]:
+                if node["protocol"] in ("mieru", "socks5"):
+                    profile = node.get("ingress", {}).get("profile_id", "")
+                    result[node["id"]] = {(profile, *binding) for binding in node_bindings(node)}
+            return result
+
+        source = os.environ.get("NOBRAND_SPLICORE_MANAGER_SOURCE", "")
+        prior = bindings(before)
+        changed = set()
+        for name, ports in bindings(desired).items():
+            if name in recheck_listener_ids or ports != prior.get(name):
+                changed.update(ports)
+        if changed and source:
+            profiles = sorted({profile for profile, *_ in changed})
+            script = ('manager=$1; shift; profiles=("$@"); set --; MITA_SOURCE_ONLY=1; source "$manager"; '
+                      'for profile in "${profiles[@]}"; do '
+                      'nb_ingress_profile_json "${profile:-$NOBRAND_LEGACY_INGRESS_PROFILE_ID}" | '
+                      'jq -ce "{reserved_ports, ingress_enforcement, local_address}" || exit 1; done')
+            result = command(["bash", "-c", script, "nobrand-listener-ports", source, *profiles], "PORT_CONFLICT", ok=False)
+            lines = result.stdout.splitlines()
+            require(result.returncode == 0 and len(lines) == len(profiles), "PORT_CONFLICT", "listener ingress profile is unavailable")
+            ingress = {profile: json.loads(line) for profile, line in zip(profiles, lines)}
+            for profile, _, host, port, relay in sorted(changed):
+                policy = ingress[profile]
+                require(port not in policy["reserved_ports"], "PORT_CONFLICT", f"port {port} is reserved by its ingress profile")
+                if policy["ingress_enforcement"] == "strict":
+                    require(endpoint_ip(host) == endpoint_ip(policy["local_address"]), "CONFIG_INVALID",
+                            ("SOCKS5 UDP relay" if relay else "listener") + " must bind its strict ingress address")
 
     def owned_firewall_pairs(self):
         result = set()
@@ -1131,18 +1409,23 @@ class Runtime:
             if path.exists():
                 for line in path.read_text().splitlines():
                     fields = line.split("|")
-                    if len(fields) == 3 and fields[1] in ("tcp", "udp") and fields[2].isdigit():
-                        result.add(fields[1].upper() + "|" + fields[2])
+                    if len(fields) == 3 and fields[1] in ("tcp", "udp"):
+                        span = re.fullmatch(r"([0-9]{1,5})(?:-([0-9]{1,5}))?", fields[2])
+                        if span and 1 <= int(span[1]) <= int(span[2] or span[1]) <= 65535:
+                            result.add(fields[1].upper() + "|" + fields[2])
         return result
 
     def verify_installed_binary(self, generation):
         metadata = load(generation / "artifact.json")
+        require(metadata.get("architecture") == install_arch(), "ARCH_UNSUPPORTED",
+                "snapshot architecture is unsupported. Linux amd64 (x86_64) is required")
         release = RELEASE if metadata["version"] == RELEASE["version"] else RELEASE.get("rollback_releases", {}).get(metadata["version"])
         require(release and release.get("version") == metadata["version"], "BINARY_IDENTITY", "generation release is not an approved rollback pin")
         require(metadata.get("architecture") in release["assets"], "BINARY_IDENTITY", "unapproved generation architecture")
         graph = load(generation / "desired.json")
         require(graph.get("splicore_version") == metadata["version"], "BINARY_IDENTITY", "generation state and binary versions differ")
-        if metadata["version"] != RELEASE["version"]:
+        self.verify_socks5_compatibility(graph, release)
+        if metadata["version"] != RELEASE["version"] and not release.get("vless_encryption"):
             require(all(sudoku_encryption(node) == "none" for node in graph["nodes"] if node["protocol"] == "vless-sudoku"),
                     "STATE_VERSION_UNSUPPORTED", "encrypted VLESS state cannot run on the pre-encryption rollback release")
         digest = sha(generation / "splicore")
@@ -1153,6 +1436,12 @@ class Runtime:
                     "BINARY_IDENTITY", "binary does not match immutable release pin")
         binary_identity(generation / "splicore", metadata["architecture"], release)
         return metadata
+
+    def verify_socks5_compatibility(self, graph, release):
+        if any(node["protocol"] == "socks5" for node in graph["nodes"]):
+            rules = release.get("capabilities", {}).get("socks5", {})
+            require(rules.get("managed"), "STATE_VERSION_UNSUPPORTED",
+                    "Splicore " + release["version"] + " cannot run the configured SOCKS5 nodes; snapshots retained")
 
     def adopt_snapshot(self):
         """Recreate only owned pointers/units after the existing product restore.
@@ -1188,14 +1477,22 @@ class Runtime:
             old, current = self.target(self.previous), self.target(self.current)
             require(current, "ROLLBACK", "no installed generation to roll back")
             require(old, "ROLLBACK", "no previous known-good Splicore generation")
+            old_metadata = load(old / "artifact.json")
+            old_graph, current_graph = load(old / "desired.json"), load(current / "desired.json")
+            old_release = RELEASE if old_metadata["version"] == RELEASE["version"] else RELEASE.get("rollback_releases", {}).get(old_metadata["version"])
+            require(old_release, "BINARY_IDENTITY", "rollback release is not an approved pin")
+            self.verify_socks5_compatibility(current_graph, old_release)
+            self.verify_installed_binary(old)
             service = Service(self.adapter, current, self.fixture)
             registry = load(self.state / "state.json")
-            registry["splicore_version"] = load(old / "artifact.json")["version"]
+            registry["splicore_version"] = old_metadata["version"]
             tx = {"owner": "nobrand-splicore-v1", "adapter": self.adapter, "candidate": current.name,
                   "old": old.name, "active": service.call("active", ok=False),
                   "enabled": service.call("enabled", ok=False),
                   "previous": current.name, "registry_backup": json.dumps(registry),
                   "unit_backup": self.unit_path().read_text() if self.unit_path().exists() else None}
+            prior_ports, current_ports = self.firewall_pairs(old_graph), self.firewall_pairs(current_graph)
+            tx.update(restore_ports=sorted(prior_ports - current_ports), opened_ports=sorted(current_ports - prior_ports))
             self.checkpoint(tx, "ROLLING_BACK")
             self.restore_transaction(tx)
             self.point(self.previous, current)
@@ -1216,6 +1513,7 @@ class Runtime:
                 shutil.rmtree(path)
 
     def restore(self, archive_path, artifacts=None, proxy=""):
+        install_arch()
         self.refuse_legacy()
         with tempfile.TemporaryDirectory(prefix="nb-splicore-restore-") as directory:
             staging = Path(directory)
@@ -1240,12 +1538,37 @@ class Runtime:
             render(desired)
             return self.deploy(desired, artifacts, proxy, key_material=(staging / "runtime/master.key").read_bytes())
 
+    def start(self, restart=False):
+        with self.locked():
+            self.recover()
+            current = self.target(self.current)
+            require(current, "SERVICE_START", "runtime not installed")
+            service = Service(self.adapter, current, self.fixture)
+            if restart:
+                service.call("stop")
+            service.call("start")
+            result = self.wait_health(current)
+            self.firewall("open", self.firewall_pairs(load(current / "desired.json"), "socks5"))
+            return result
+
     def stop(self):
         with self.locked():
             self.recover()
             current = self.target(self.current)
             require(current, "SERVICE_START", "runtime not installed")
-            Service(self.adapter, current, self.fixture).call("stop")
+            service = Service(self.adapter, current, self.fixture)
+            pairs = self.firewall_pairs(load(current / "desired.json"), "socks5")
+            active = bool(pairs) and service.call("active", ok=False)
+            service.call("stop")
+            try:
+                self.firewall("close", pairs)
+            except (Failure, OSError):
+                if active:
+                    try:
+                        self.firewall("open", pairs)
+                    finally:
+                        service.call("start")
+                raise
             return {"result": "stopped"}
 
     def backup(self, destination, unified=False):
@@ -1267,7 +1590,7 @@ class Runtime:
                 try:
                     with tarfile.open(temporary, "w:gz") as archive:
                         if unified:
-                            text = ("project=NoBrand-OneClick\nversion=" + os.environ.get("SCRIPT_VERSION", "4.1.0")
+                            text = ("project=NoBrand-OneClick\nversion=" + os.environ.get("SCRIPT_VERSION", "4.2.0")
                                     + "\nschema_version=3\nownership=nobrand-v3\ncontents=state,config\n")
                             info = tarfile.TarInfo("manifest.txt")
                             info.size, info.mode = len(text.encode()), 0o600
@@ -1436,20 +1759,28 @@ class Runtime:
         operation = aliases.get(operation, operation)
         if protocol == "mieru" and operation == "user-add":
             operation = "install"
+        if not preview and operation not in ("status", "doctor", "menu", "show", "export", "user-show", "user-list", "subscription"):
+            install_arch()
         installed = self.target(self.current)
+        desired = load(installed / "desired.json") if installed else empty()
+        capability = RELEASE["capabilities"].get(protocol, {})
         if operation in ("status", "doctor", "menu"):
             result = {"core": "Splicore", "version": RELEASE["version"], "protocol": protocol,
                       "architecture": "splicore-native", "nodes": [],
                       "installed": bool(installed), "qualification": RELEASE["qualification"]}
+            if protocol == "socks5":
+                result["managed"] = capability.get("managed", False)
+                result["active"] = bool(installed and self.adapter and Service(self.adapter, installed, self.fixture).call("active", ok=False))
+                if not result["managed"]:
+                    result["detail"] = capability["integration_blocker"]
             if installed:
                 result["version"] = load(installed / "artifact.json")["version"]
-                result["nodes"] = [{"id": n["id"], "enabled": n.get("enabled", True),
-                                     "name": n.get("client", {}).get("name") or n["id"],
-                                     "listener": n["document"]["listener"]} for n in self.desired()["nodes"] if n["protocol"] == protocol]
+                result["nodes"] = [listener_summary(n) for n in desired["nodes"] if n["protocol"] == protocol
+                                   and (not selector or selector in (n["id"], n.get("client", {}).get("name")))]
                 if operation == "doctor":
+                    self.verify_installed_binary(installed)
                     result.update(self.health(installed))
             return result
-        desired = self.desired()
         matching = [node for node in desired["nodes"] if node["protocol"] == protocol
                     and (not selector or node["id"] == selector or node.get("client", {}).get("name") == selector
                          or node.get("client", {}).get("pair") == selector
@@ -1458,17 +1789,32 @@ class Runtime:
             operation = "reconfigure"
         if operation in ("show", "export", "user-show", "user-list"):
             require(matching, "CONFIG_INVALID", "node not found")
+            if protocol == "socks5":
+                require(selector and len(matching) == 1 and operation in ("show", "export"),
+                        "CONFIG_INVALID", "select one SOCKS5 node for credential export")
+                if operation == "export":
+                    fmt = os.environ.get("NOBRAND_SPLICORE_EXPORT_FORMAT") or "json"
+                    fields = {"json": "connection", "mihomo": "mihomo", "sing-box": "sing_box"}
+                    require(fmt in fields, "CONFIG_INVALID", "SOCKS5 export supports json, mihomo and sing-box")
+                    return client_profiles(matching[0])[fields[fmt]]
             if operation == "user-list":
                 return {"nodes": [{"id": n["id"], "enabled": n.get("enabled", True),
                                    "users": n.get("client", {}).get("user_names") or [u.get("username", "") for u in n["document"].get("users", [])]} for n in matching]}
             if protocol == "vless-sudoku" and operation == "export":
                 return sudoku_export(matching)
-            return {"client_profiles": [client_profiles(n) for n in matching]}
+            return {"client_profiles": profiles_for_nodes(matching)}
         if protocol == "vless-sudoku" and operation == "subscription":
             require(matching, "CONFIG_INVALID", "node not found")
             return sudoku_export(matching)
         if operation in ("upgrade", "upgrade-runtime"):
-            return redacted_plan(desired) if preview else self.deploy(desired, artifacts, proxy)
+            return redacted_plan(desired) if preview else self.deploy(
+                desired, artifacts, proxy, expected_generation=installed.name if installed else "")
+        if protocol == "socks5":
+            require(capability.get("managed"), "CAPABILITY_UNSUPPORTED", capability.get("integration_blocker", "SOCKS5 unavailable"))
+            require(selector, "CONFIG_INVALID", "specify a SOCKS5 node by name or ID")
+            if operation != "install":
+                require(len(matching) == 1, "CONFIG_INVALID", "select exactly one SOCKS5 node by name or ID")
+        updated_listeners = []
         if operation == "install":
             require(not matching, "CONFIG_INVALID", "node already exists; use explicit reconfigure")
             env = os.environ
@@ -1478,10 +1824,14 @@ class Runtime:
             port = int(env.get("PORT") or 0)
             require(port > 0, "CONFIG_INVALID", "--port is required")
             display_host = env.get("ADVERTISE_HOST") or env.get("NOBRAND_SPLICORE_AUTO_HOST", "")
-            require(display_host and display_host not in ("0.0.0.0", "::"), "CONFIG_INVALID", "an explicit or detected display host is required")
-            document = {"schema": 1, "listener": {"host": env.get("NOBRAND_SPLICORE_LISTEN", "0.0.0.0"), "port": port},
+            require(endpoint_host(display_host), "CONFIG_INVALID", "display Host requires a usable IPv4, IPv6 or DNS name")
+            bind = env.get("NOBRAND_SPLICORE_LISTEN") or ("127.0.0.1" if protocol == "socks5" else "0.0.0.0")
+            document = {"schema": 1, "listener": {"host": bind, "port": port},
                         "display_endpoint": {"host": display_host, "port": int(env.get("ADVERTISE_PORT") or port)}}
             node = {"id": name, "protocol": protocol, "enabled": True, "client": {"name": label}, "document": document}
+            if protocol in ("mieru", "socks5"):
+                node["client"]["display_port_policy"] = env.get("NOBRAND_SPLICORE_DISPLAY_PORT_POLICY") or (
+                    "custom" if env.get("ADVERTISE_PORT") else "follow-actual")
             if protocol in ("hysteria2", "tuic"):
                 require(not preview, "CONFIG_INVALID", "fresh TLS preview requires a supplied canonical file with TLS paths")
                 tls_path = self.config / "splicore/tls" / name
@@ -1495,6 +1845,13 @@ class Runtime:
                 document.update({"settings": {"version": int(env.get("SNELL_VERSION", "5"))},
                                  "psk": env.get("SNELL_PSK") or uuid.uuid4().hex})
                 node["options"] = {"quic_proxy_enabled": env.get("SNELL_QUIC_PROXY", "off") in ("on", "true", "1")}
+            elif protocol == "socks5":
+                user = {"username": env.get("USERNAME", ""), "password": env.get("PASSWORD") or secrets.token_urlsafe(32)}
+                socks5_credential(user)
+                document.update(settings=dict(SOCKS5_SETTINGS), users=[user])
+                if env.get("SOCKS5_ALLOW_CLEARTEXT_REMOTE") == "1":
+                    document["settings"]["allow_cleartext_remote"] = True
+                socks5_udp_request(document, "install", env)
             elif protocol == "mieru":
                 require(env.get("PROTOCOL", "TCP").upper() in ("TCP", "UDP", "BOTH"), "CONFIG_INVALID", "invalid Mieru transport")
                 document.update({"settings": {"transport": "tcp" if env.get("PROTOCOL", "TCP").upper() == "BOTH" else env.get("PROTOCOL", "TCP").lower(),
@@ -1504,7 +1861,7 @@ class Runtime:
                                    "low_entropy": env.get("LOW_ENTROPY_MODE", "LOW_ENTROPY_MODE_OFF"),
                                    "quota_mb": int(env.get("USER_QUOTA_MB") or 0), "expire_at": env.get("USER_EXPIRE", ""),
                                    "bandwidth_mbps": int(env.get("USER_BANDWIDTH_MBPS") or 0)}
-                require(env.get("USER_PACKAGE", "") in ("", "unlimited", "custom"), "CAPABILITY_UNSUPPORTED", "quota packages are unsupported by v0.5.0")
+                require(env.get("USER_PACKAGE", "") in ("", "unlimited", "custom"), "CAPABILITY_UNSUPPORTED", "quota packages are unsupported")
                 node["client"].update({"handshake_mode": handshake(env.get("HANDSHAKE_MODE", "HANDSHAKE_NO_WAIT")),
                                          "transport": env.get("PROTOCOL", "TCP").upper(), "pair": name})
                 if env.get("PROTOCOL", "TCP").upper() == "BOTH":
@@ -1547,7 +1904,19 @@ class Runtime:
             require(matching and (selector or len(matching) == 1 or operation in ("uninstall", "start", "stop", "restart")),
                     "CONFIG_INVALID", "select a node by name")
             node = matching[0]
-            if operation in ("remove", "uninstall"):
+            if operation == "set-port":
+                updated_listeners = set_listener_port(desired["nodes"], protocol, selector, os.environ.get("PORT", ""))
+            elif protocol == "socks5" and operation in ("set-udp", "set-udp-relay"):
+                socks5_udp_request(node["document"], operation, os.environ)
+                updated_listeners = [node]
+            elif protocol == "socks5" and operation in ("set-username", "rotate-password"):
+                user = node["document"]["users"][0]
+                if operation == "set-username":
+                    user["username"] = os.environ.get("USERNAME", "")
+                else:
+                    user["password"] = os.environ.get("PASSWORD") or secrets.token_urlsafe(32)
+                socks5_credential(user)
+            elif operation in ("remove", "uninstall"):
                 for member in matching:
                     desired["nodes"].remove(member)
             elif operation in ("start", "stop", "restart", "user-enable", "user-disable"):
@@ -1589,9 +1958,17 @@ class Runtime:
                 for member in matching:
                     member["document"]["display_endpoint"] = {"host": os.environ["ADVERTISE_HOST"],
                         "port": int(os.environ.get("ADVERTISE_PORT") or base_port) + member["document"]["listener"]["port"] - base_port}
+                    if protocol in ("mieru", "socks5"):
+                        member.setdefault("client", {})["display_port_policy"] = "custom"
             elif operation == "set-listen":
                 for member in matching:
-                    member["document"]["listener"]["host"] = os.environ.get("NOBRAND_SPLICORE_LISTEN", "")
+                    doc = member["document"]
+                    listener = doc["listener"]
+                    address = os.environ.get("NOBRAND_SPLICORE_LISTEN", "")
+                    relay = doc["settings"].get("udp_relay") if protocol == "socks5" else None
+                    if relay and relay.get("listen") == listener["host"]:
+                        relay["listen"] = address
+                    listener["host"] = address
             elif protocol == "mieru" and operation in ("reconfigure", "profile-config", "mtu-config", "client-modes-config", "traffic-config", "low-entropy-config"):
                 env = os.environ
                 profile = env.get("PROFILE_CLI") == "1" and env.get("PROFILE", "custom") != "custom"
@@ -1615,20 +1992,23 @@ class Runtime:
                     if profile or env.get("LOW_ENTROPY_CLI") == "1":
                         options["low_entropy"] = env.get("LOW_ENTROPY_MODE", "LOW_ENTROPY_MODE_OFF")
             elif protocol == "snell" and operation == "set-quic":
-                require(os.environ.get("SNELL_QUIC_PROXY", "off") == "off", "CAPABILITY_UNSUPPORTED", "Snell QUIC is not exposed by v0.5.0")
+                require(os.environ.get("SNELL_QUIC_PROXY", "off") == "off", "CAPABILITY_UNSUPPORTED", "Snell QUIC is not exposed")
                 for member in matching:
                     member.setdefault("options", {})["quic_proxy_enabled"] = False
             else:
                 raise Failure("CAPABILITY_UNSUPPORTED", "operation needs an explicit supported desired-state change; no legacy fallback")
         if preview:
             plan = redacted_plan(desired)
+            if updated_listeners:
+                plan["listeners"] = [listener_summary(n) for n in updated_listeners]
             if protocol == "vless-sudoku" and operation == "install":
                 plan["vless_encryption"] = "mlkem768 + random + 1rtt; generated by the pinned Splicore during installation"
             return plan
         try:
             outcome = self.deploy(desired, artifacts, proxy, force=operation == "restart",
                                   expected_generation=installed.name if installed else "",
-                                  new_encryption_nodes=[name] if protocol == "vless-sudoku" and operation == "install" else ())
+                                  new_encryption_nodes=[name] if protocol == "vless-sudoku" and operation == "install" else (),
+                                  recheck_listener_ids=[n["id"] for n in matching] if operation == "set-listen" else ())
         except BaseException:
             # Only remove material minted by this request after a completed
             # rollback. Unfinished recovery may still need the candidate TLS.
@@ -1638,8 +2018,12 @@ class Runtime:
             if created_tls and terminal and not referenced:
                 shutil.rmtree(created_tls)
             raise
-        if operation == "install":
-            outcome["client_profiles"] = [client_profiles(n) for n in self.desired()["nodes"] if n["id"] in (name, name + "-udp")]
+        if updated_listeners:
+            outcome["listeners"] = [listener_summary(n) for n in updated_listeners]
+        elif protocol == "socks5" and operation == "install":
+            outcome["listeners"] = [listener_summary(n) for n in desired["nodes"] if n["id"] == name]
+        elif operation == "install":
+            outcome["client_profiles"] = profiles_for_nodes([n for n in self.desired()["nodes"] if n["id"] in (name, name + "-udp")])
         elif protocol == "vless-sudoku" and operation == "reconfigure":
             outcome["client_profiles"] = [client_profiles(node)]
         return outcome
@@ -1669,7 +2053,7 @@ class Runtime:
                     service.call("reload-manager")
                 self.current.unlink()
                 try:
-                    self.firewall("close", self.port_pairs(load(current / "desired.json")))
+                    self.firewall("close", self.firewall_pairs(load(current / "desired.json")))
                 except (Failure, OSError):
                     cleanup_debt.append("owned firewall bindings")
             if purge and self.home.exists():
@@ -1780,21 +2164,24 @@ class Runtime:
             for node in graph["nodes"]:
                 if not node.get("enabled", True):
                     continue
-                protocol, doc = node["protocol"], node["document"]
-                transport = doc["settings"]["transport"] if protocol == "mieru" else (
-                    "tcp" if protocol in ("snell", "vless-reality", "vless-sudoku") else "udp")
-                result.add((transport, doc["listener"]["host"], doc["listener"]["port"]))
+                result.update(node_bindings(node))
                 if node.get("guard"):
-                    result.add(("tcp", node["guard"]["listen"]["host"], node["guard"]["listen"]["port"]))
+                    result.add(("tcp", node["guard"]["listen"]["host"], node["guard"]["listen"]["port"], False))
             return result
         existing = bindings(load(old / "desired.json")) if old else set()
-        for transport, host, port in bindings(desired) - existing:
+        for transport, host, port, relay in sorted(bindings(desired) - existing):
             with socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET,
                                socket.SOCK_STREAM if transport == "tcp" else socket.SOCK_DGRAM) as listener:
                 try:
+                    if transport == "tcp":
+                        # Match the native TCP listener when restarting a port
+                        # with closed connections still in TIME_WAIT.
+                        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    elif relay and ":" in host:
+                        listener.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
                     listener.bind((host, port))
                 except OSError as exc:
-                    raise Failure("PORT_CONFLICT", "requested listener address/port is unavailable") from exc
+                    raise Failure("PORT_CONFLICT", f"requested listener address/port is unavailable ({transport.upper()} {host} port {port})") from exc
 
     def apply_documents(self, generation, documents, service):
         deadline = time.monotonic() + 15
@@ -1836,6 +2223,12 @@ class Runtime:
             inbound = next(item["inbound"] for item in items if item["inbound"]["name"] == document["name"])
             require(len(inbound.get("listeners", [])) == 1 and inbound["listeners"][0]["endpoint"] == document["listener"],
                     "HEALTH", "listener identity differs")
+            if self.adapter != "fixture":
+                require([endpoint["endpoint"] for endpoint in inbound["display_endpoints"]] == [document["display_endpoint"]],
+                        "HEALTH", "client display endpoint differs")
+                if protocol in ("mieru", "socks5"):
+                    transport = document["settings"]["transport"] if protocol == "mieru" else "tcp"
+                    require(inbound["listeners"][0]["transport"] == transport, "HEALTH", "listener transport differs")
             mapping[name] = inbound["id"]
         if record:
             save(generation / "resource-map.json", mapping)
@@ -1918,14 +2311,15 @@ class Runtime:
             atomic(registry, tx["registry_backup"])
         elif tx.get("registry_created"):
             remove_file(registry)
+        self.firewall("open", set(tx.get("restore_ports", [])))
         self.firewall("close", set(tx.get("opened_ports", [])))
         self.checkpoint(tx, "ROLLED_BACK")
 
-    def wait_health(self, generation):
+    def wait_health(self, generation, documents=None, record=False):
         end = time.monotonic() + 15
         while True:
             try:
-                return self.health(generation)
+                return self.health(generation, documents, record)
             except Failure:
                 require(time.monotonic() < end, "HEALTH", "runtime did not recover")
                 time.sleep(0.1)
@@ -1942,7 +2336,8 @@ class Runtime:
         return {"recovery": load(self.transaction)["phase"]}
 
     def deploy(self, desired, artifacts=None, proxy="", force=False, probe=False, key_material=None, expected_generation=None,
-               new_encryption_nodes=()):
+               new_encryption_nodes=(), recheck_listener_ids=()):
+        install_arch()
         self.refuse_legacy()
         self.safe()
         desired = copy.deepcopy(desired)
@@ -1951,7 +2346,6 @@ class Runtime:
                 "STATE_VERSION_UNSUPPORTED", "canonical state version has no reviewed migration contract")
         desired["splicore_version"] = RELEASE["version"]
         documents = render(desired)
-        self.check_external_ports(desired)
         require(not probe or self.adapter == "process", "CONFIG_INVALID", "local probe requires process adapter")
         require(self.adapter != "process" or probe, "SERVICE_START", "process adapter is only a temporary validation probe")
         require(self.adapter in ("systemd", "openrc", "fixture", "process"), "SERVICE_START", "systemd/OpenRC unavailable")
@@ -1962,13 +2356,22 @@ class Runtime:
             old = self.target(self.current)
             require(expected_generation is None or expected_generation == (old.name if old else ""),
                     "STATE_CHANGED", "runtime changed since request was collected; retry with current state")
-            old_ids = {node["id"] for node in load(old / "desired.json")["nodes"]} if old else set()
+            before = load(old / "desired.json") if old else empty()
+            self.check_external_ports(desired, before, recheck_listener_ids)
+            self.port_preflight(desired, old)
+            old_ids = {node["id"] for node in before["nodes"]}
             encrypt_ids = set(new_encryption_nodes)
             require(not encrypt_ids.intersection(old_ids)
                     and encrypt_ids <= {node["id"] for node in desired["nodes"] if node["protocol"] == "vless-sudoku"},
                     "CONFIG_INVALID", "default encryption generation is only allowed for new Sudoku nodes")
             require(not probe or old is None, "CONFIG_INVALID", "probe requires an empty private runtime root")
-            if old and load(old / "artifact.json")["version"] == RELEASE["version"] and desired == load(old / "desired.json") and not force and key_material is None:
+            old_metadata = load(old / "artifact.json") if old else {}
+            require(not old or old_metadata.get("architecture") == "amd64",
+                    "ARCH_UNSUPPORTED", "snapshot architecture is unsupported. Linux amd64 (x86_64) is required")
+            old_version = old_metadata["version"] if old else None
+            keep_database = (old and old_version != RELEASE["version"] and key_material is None and
+                             desired["nodes"] == before["nodes"])
+            if old and old_version == RELEASE["version"] and desired == before and not force and key_material is None:
                 self.verify_installed_binary(old)
                 service = Service(self.adapter, old, self.fixture)
                 active = service.call("active", ok=False)
@@ -1995,7 +2398,7 @@ class Runtime:
                       "registry_created": not (self.state / "state.json").exists(), "opened_ports": []}
                 self.checkpoint(tx, "PREPARING")
                 save(generation / "desired.json", desired)
-                if old and not artifacts and load(old / "artifact.json")["version"] == RELEASE["version"]:
+                if old and not artifacts and old_version == RELEASE["version"]:
                     metadata = self.verify_installed_binary(old)
                     atomic(generation / "splicore", (old / "splicore").read_bytes(), 0o700)
                     binary_identity(generation / "splicore", metadata["architecture"])
@@ -2024,26 +2427,35 @@ class Runtime:
                 os.chmod(generation / "runtime/master.key", 0o600)
                 require(len(str(generation / "control.sock").encode()) < 104, "CONFIG_INVALID", "runtime root exceeds Unix socket path limit")
                 self.validate(generation, documents)
-                self.port_preflight(desired, old)
+                if keep_database and self.adapter != "fixture":
+                    self.verify_installed_binary(old)
                 unit = self.unit_path()
                 require(self.adapter == "process" or not unit.exists() or (
                     not unit.is_symlink() and "# NoBrand-owned Splicore v1" in unit.read_text()),
                     "CONFIG_INVALID", "refuse foreign service unit before cutover")
-                prior_ports = self.port_pairs(load(old / "desired.json")) if old else set()
-                added_ports = self.port_pairs(desired) - prior_ports
+                prior_ports = self.firewall_pairs(before)
+                active_ports = self.firewall_pairs(desired)
+                added_ports = active_ports - prior_ports
                 tx["opened_ports"] = sorted(added_ports - self.owned_firewall_pairs())
                 self.checkpoint(tx, "VALIDATED")
                 self.checkpoint(tx, "STOPPING")
                 if tx["active"]:
                     candidate_service.call("stop")
                 self.checkpoint(tx, "STOPPED")
+                if keep_database and self.adapter != "fixture":
+                    command([generation / "splicore", "state", "backup", "--source", old / "runtime/state.db",
+                             "--output", generation / "runtime/state.db"], "STATE_VERSION_UNSUPPORTED", timeout=180)
+                    sync_dir(generation / "runtime")
                 self.install_unit()
                 self.point(self.current, generation)
                 candidate_service.call("reload-manager")
                 self.checkpoint(tx, "STARTING")
                 candidate_service.call("start")
                 if self.adapter != "fixture":
-                    self.apply_documents(generation, documents, candidate_service)
+                    if keep_database:
+                        self.wait_health(generation, documents, record=True)
+                    else:
+                        self.apply_documents(generation, documents, candidate_service)
                 else:
                     # Fixture driver must explicitly validate its expected graph.
                     candidate_service.call("verify")
@@ -2073,7 +2485,7 @@ class Runtime:
                 self.checkpoint(tx, "COMMITTED")
                 cleanup_debt = []
                 try:
-                    self.firewall("close", prior_ports - self.port_pairs(desired))
+                    self.firewall("close", prior_ports - active_ports)
                 except (Failure, OSError):
                     cleanup_debt.append("retired firewall bindings")
                 try:
@@ -2135,7 +2547,8 @@ def main(argv=None):
             # Private creation documents remain 0600 on disk; display only the
             # public projection even when explicitly rendering configuration.
             result = {"documents": [{"id": name, "protocol": protocol,
-                                      "document": {k: v for k, v in doc.items() if k != "server_secret"}}
+                                      "document": {k: v for k, v in doc.items()
+                                                   if k != "server_secret" and (protocol != "socks5" or k != "users")}}
                                      for name, protocol, doc in render(desired)]} if args.action == "render" else redacted_plan(desired)
             if args.action == "plan" and result["blockers"]:
                 print(json.dumps(result, indent=2))
@@ -2157,15 +2570,7 @@ def main(argv=None):
     elif args.action in ("stop", "uninstall", "purge"):
         result = runtime.stop() if args.action == "stop" else runtime.uninstall(args.action == "purge")
     elif args.action in ("start", "restart"):
-        with runtime.locked():
-            runtime.recover()
-            current = runtime.target(runtime.current)
-            require(current, "SERVICE_START", "runtime not installed")
-            service = Service(runtime.adapter, current, runtime.fixture)
-            if args.action == "restart":
-                service.call("stop")
-            service.call("start")
-            result = runtime.wait_health(current)
+        result = runtime.start(restart=args.action == "restart")
     elif args.action == "recover":
         with runtime.locked(recovery=True):
             result = runtime.recover()
@@ -2180,12 +2585,12 @@ def main(argv=None):
                   "installed": bool(current), "external_runtime_qualification": "PENDING"}
         if current:
             metadata = load(current / "artifact.json")
+            release = RELEASE if metadata["version"] == RELEASE["version"] else RELEASE.get("rollback_releases", {}).get(metadata["version"], {})
+            qualification = release.get("assets", {}).get(metadata["architecture"], {}).get("qualification")
             result.update({"version": metadata["version"], "pinned_target": RELEASE["version"], "architecture": metadata["architecture"], "generation": current.name,
-                           "architecture_qualification": RELEASE["assets"][metadata["architecture"]]["qualification"],
+                           "architecture_qualification": qualification or "Historical snapshot",
                            "protocols": sorted({n["protocol"] for n in load(current / "desired.json")["nodes"]})})
-            result["nodes"] = [{"id": n["id"], "name": n.get("client", {}).get("name") or n["id"],
-                                "protocol": n["protocol"], "enabled": n.get("enabled", True),
-                                "listener": n["document"]["listener"], "display_endpoint": n["document"]["display_endpoint"]}
+            result["nodes"] = [listener_summary(n)
                                for n in load(current / "desired.json")["nodes"] if not args.protocol or n["protocol"] == args.protocol]
             result["active"] = Service(runtime.adapter, current, runtime.fixture).call("active", ok=False)
             if args.action == "doctor":
