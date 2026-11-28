@@ -4,7 +4,7 @@
 
 支持平台：Linux AMD64 (x86_64)
 
-开发版本：**v4.3.0**（尚未发布）；当前稳定版本：[v4.2.0](https://github.com/ike-sh/NoBrand-OneClick/releases/tag/v4.2.0)。更新内容见 [CHANGELOG](CHANGELOG.md)。
+当前稳定版本：[v4.3.0](https://github.com/ike-sh/NoBrand-OneClick/releases/tag/v4.3.0)。更新内容见 [CHANGELOG](CHANGELOG.md)。
 
 新建 VLESS + Sudoku 默认启用原生 VLESS Encryption，支持完整客户端 JSON 和 JSON 订阅输出。
 
@@ -39,12 +39,12 @@ Mieru 流量伪装、低熵、配额、到期、tc 限速及独立 Mita 版本�
 
 ## 安装和管理
 
-下载并校验 v4.2.0 正式安装器：
+下载并校验 v4.3.0 正式安装器：
 
 ```bash
-curl -fLO https://github.com/ike-sh/NoBrand-OneClick/releases/download/v4.2.0/install-nobrand.sh
-curl -fLO https://github.com/ike-sh/NoBrand-OneClick/releases/download/v4.2.0/SHA256SUMS
-sha256sum -c SHA256SUMS
+curl -fLO https://github.com/ike-sh/NoBrand-OneClick/releases/download/v4.3.0/install-nobrand.sh &&
+curl -fLO https://github.com/ike-sh/NoBrand-OneClick/releases/download/v4.3.0/SHA256SUMS &&
+sha256sum -c SHA256SUMS &&
 sudo bash install-nobrand.sh
 ```
 
@@ -52,7 +52,7 @@ sudo bash install-nobrand.sh
 
 Alpine Linux 请先安装 `bash` 与 `curl`，然后以 root 身份执行 `bash install-nobrand.sh`。
 
-以下示例面向本分支的 v4.3.0 安装器：
+以下为 v4.3.0 管理命令示例：
 
 ```bash
 # 也可先安装管理命令
@@ -118,7 +118,11 @@ REALITY 目标是一个仅监听回环的原生 guard。guard 只将允许的 co
 
 旧 Xray/Mita 等多内核部署 → 新架构：**不支持自动原地迁移**。新版只读检测并拒绝，不转换或删除旧节点、凭据、服务或防火墙。使用匹配的旧安装器导出、备份并处理旧部署；第三方软件不被接管。
 
-从 v4.2.0 原生部署升级：先在旧版执行 `sudo nobrand backup create /root/nobrand-pre43.tar.gz` 并妥善保存，再用本分支已校验的安装器执行 `sudo bash install-nobrand.sh manager upgrade`。确认旧数据库当前内容可信后，执行 `sudo nobrand runtime upgrade --acknowledge-current-state`。这只为停服后的数据库副本建立首次 Commit Witness，不证明旧提交历史；已有 witness 损坏或存在 pending 时不要删除文件或强行建立基线。升级保留原节点、版本、凭据、入口和 Vault 主密钥。
+从 v4.2.0 原生部署升级：
+
+1. 先用旧管理器执行 `sudo nobrand backup create /root/nobrand-pre43.tar.gz`，私下保存备份。
+2. 下载并校验 v4.3.0 安装器，执行 `sudo bash install-nobrand.sh manager upgrade`，先更新管理器。
+3. 若旧库尚无 Commit Witness，只在管理员核对并明确接受当前数据库内容后，执行 `sudo nobrand runtime upgrade --acknowledge-current-state`。它只在停服后的候选数据库副本上建立基线，保留原数据库、Vault 主密钥和回滚快照；首次基线不证明过去提交的完整性。遇到待提交、损坏或不匹配的 witness 时，保留现场，不要删除或覆盖它。
 
 升级保留上一代二进制、数据库、密钥和状态用于整代回滚。相同版本和配置通过校验后沿用当前部署。失败的新装恢复到未安装状态，失败的更新恢复上一代。降级到不支持现有节点的内核时，管理器会拒绝操作并保留快照。不要将旧二进制与新库或不同代的 witness 混用。
 
