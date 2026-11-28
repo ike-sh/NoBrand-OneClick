@@ -168,6 +168,14 @@ class PresentationTests(unittest.TestCase):
         self.assertNotIn(secret, redact(text))
         self.assertNotIn(secret, json.dumps(base.sc.redacted_plan(dict(base.sc.empty(), nodes=FIXTURE['nodes']))))
 
+    def test_ss2022_key_redacted_in_public_diagnostics(self):
+        import base64
+        key = base64.b64encode(os.urandom(32)).decode('ascii')
+        private = json.dumps({'users': [{'key': key}]})
+        redact = diagnostics.sanitizer([private])
+        for text in (private, 'SS2022_KEY=' + key, 'connection rejected for ' + key):
+            self.assertNotIn(key, redact(text))
+
     def test_status_and_doctor_exclude_credentials(self):
         harness = base.RuntimeTests()
         harness.setUp()
@@ -245,7 +253,10 @@ ADVERTISE_CLI=1
 require_root() { :; }
 nb_prepare_ingress_request() { INGRESS_PROFILE_ID=synthetic; }
 nb_prepare_ingress_deployment() { INGRESS_LISTEN_HOST=0.0.0.0; }
+# Presentation goldens intentionally reuse port 10201 across protocols and
+# supply synthetic ingress metadata. Host port availability is not under test.
 nb_ingress_port_is_reserved() { return 1; }
+nb_port_available_for_profile() { return 0; }
 nobrand_install_manager_script() { :; }
 # Only the runtime boundary is a fixture. Parsing, menus and human output are production.
 nb_splicore_python() { cat "$PROFILE_RESULT"; }
@@ -267,7 +278,8 @@ read_tty() { case "$1" in choice) printf -v "$1" 2;; *) printf -v "$1" ''; esac;
             for profile in FIXTURE['client_profiles']:
                 protocol = profile['protocol']
                 outputs = []
-                for operation in ('install', 'show', 'export'):
+                ops = ('install', 'show') if protocol == 'snell' else ('install', 'show', 'export')
+                for operation in ops:
                     with self.subTest(installer=installer, protocol=protocol, operation=operation):
                         proc = self.shell(installer, profile,
                                           'nb_splicore_protocol ' + protocol + ' ' + operation + ' synthetic')
@@ -276,7 +288,17 @@ read_tty() { case "$1" in choice) printf -v "$1" 2;; *) printf -v "$1" ''; esac;
                         self.assertIn('[基本信息]', proc.stdout)
                         outputs.append(proc.stdout)
                 self.assertEqual(outputs[0], outputs[1])
-                self.assertEqual(outputs[1], outputs[2])
+                if protocol != 'snell':
+                    self.assertEqual(outputs[1], outputs[2])
+                else:
+                    # Each explicit export has one selected node and returns just
+                    # that client format (not the collection used by show).
+                    proc = self.shell(installer, profile,
+                                      'nb_splicore_python() { jq -r .client_profiles[0].surge "$PROFILE_RESULT"; }; '
+                                      'nb_splicore_route_main',
+                                      ('snell', 'export', '--name', 'synthetic', '--format', 'surge'))
+                    self.assertEqual(proc.returncode, 0, proc.stderr)
+                    self.assertEqual(proc.stdout.rstrip(), profile['surge'])
 
     def test_mieru_menu_aliases_and_explicit_show_consistent(self):
         for alias in ('nobrand', 'nb'):

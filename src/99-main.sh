@@ -214,7 +214,7 @@ nobrand_action_opens_interactive_menu() {
   case "${ACTION:-}" in
     menu|nobrand-mieru-menu|user-manage) return 0 ;;
     nobrand-snell) [ "${SNELL_ACTION:-menu}" = menu ] ;;
-    nobrand-socks5) [ "${NOBRAND_NATIVE_ACTION:-menu}" = menu ] ;;
+    nobrand-socks5|nobrand-ss2022) [ "${NOBRAND_NATIVE_ACTION:-menu}" = menu ] ;;
     nobrand-hy2) [ "${HY2_ACTION:-menu}" = menu ] ;;
     nobrand-vless-sudoku) [ "${VLESS_SUDOKU_ACTION:-menu}" = menu ] ;;
     nobrand-forward) [ "${FORWARD_ACTION:-}" = menu ] ;;
@@ -249,7 +249,7 @@ main() {
   # the same lifecycle lock. Route before any legacy repair/download branch.
   if nobrand_ssh_confirmation_pending; then
     case "${ACTION:-}" in
-      nobrand-runtime|nobrand-snell|nobrand-socks5|nobrand-mieru-set-port|nobrand-tuic|nobrand-hy2|nobrand-vless-reality|nobrand-vless-sudoku|install|upgrade|reconfigure)
+      nobrand-runtime|nobrand-snell|nobrand-ss2022|nobrand-socks5|nobrand-mieru-set-port|nobrand-tuic|nobrand-hy2|nobrand-vless-reality|nobrand-vless-sudoku|install|upgrade|reconfigure)
         nobrand_pending_ssh_confirmation_notice
         return 1
         ;;
@@ -406,6 +406,7 @@ main() {
     nobrand-network) do_perf ;;
     nobrand-snell) nobrand_run_snell_action ;;
     nobrand-socks5) socks5_menu_loop ;;
+    nobrand-ss2022) ss2022_menu_loop ;;
     nobrand-hy2) nobrand_run_hy2_action ;;
     nobrand-vless-sudoku) nobrand_run_vless_sudoku_action ;;
     nobrand-vless-reality) nobrand_run_vless_reality_action ;;

@@ -50,7 +50,7 @@ def render_client_profiles(result, listeners=None, chinese=True):
     if not isinstance(profiles, list):
         raise ProfileError("client_profiles")
     lines = []
-    titles = {"mieru": "Mieru", "snell": "Snell", "hysteria2": "Hysteria2",
+    titles = {"mieru": "Mieru", "snell": "Snell", "ss2022": "Shadowsocks 2022", "hysteria2": "Hysteria2",
               "tuic": "TUIC v5", "vless-reality": "VLESS REALITY", "vless-sudoku": "VLESS FinalMask Sudoku", "socks5": "SOCKS5"}
     def label(zh, en):
         return zh if chinese else en
@@ -103,6 +103,16 @@ def render_client_profiles(result, listeners=None, chinese=True):
                             field("传输协议", "Transport", binding.get("protocol"), True)
                             connection(host, binding.get("port"))
                 native_label = ("Mieru 原生客户端配置", "Mieru native client configuration")
+            elif protocol == "ss2022":
+                config = needed(profile.get("connection"), "connection")
+                connection(config.get("host"), config.get("port"))
+                field("加密方法", "Method", config.get("method"), True)
+                field("密钥", "Key", config.get("key"), True)
+                if type(config.get("udp")) is not bool or (not config["udp"] and profile.get("uri")):
+                    raise ProfileError("SS2022 network")
+                field("传输协议", "Transport", "TCP + UDP" if config["udp"] else "TCP")
+                native = needed(profile.get("sing_box"), "sing_box")
+                native_label = ("sing-box 客户端出站配置", "sing-box client outbound configuration")
             elif protocol == "socks5":
                 config = needed(profile.get("connection"), "connection")
                 connection(config.get("host"), config.get("port"))
@@ -147,7 +157,12 @@ def render_client_profiles(result, listeners=None, chinese=True):
                 if protocol == "snell":
                     field("PSK", "PSK", outbound.get("psk"), True)
                     field("服务端版本", "Server version", profile.get("server_version"))
-                    field("客户端协议版本", "Client wire version", outbound.get("version"), True)
+                    field("Surge 协议版本", "Surge wire version", profile.get("server_version"), True)
+                    field("sing-box 协议版本", "sing-box wire version", outbound.get("version"), True)
+                    if profile.get("mihomo"):
+                        field("Mihomo 协议版本", "Mihomo wire version", outbound.get("version"), True)
+                    elif profile.get("server_version") == 6:
+                        field("Mihomo 导出", "Mihomo export", label("不支持 Snell v6；不降级为 v4。", "Snell v6 unsupported; no v4 fallback."))
                 else:
                     if protocol == "tuic":
                         field("用户", "User", entry.get("user"))

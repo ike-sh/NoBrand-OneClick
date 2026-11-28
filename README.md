@@ -1,10 +1,10 @@
 # NoBrand-OneClick
 
-各原生代理协议共享正式版 **Splicore v0.6.5** 运行时。详见 [Splicore v0.6.5](https://github.com/ike-sh/Splicore/releases/tag/v0.6.5)。
+各原生代理协议共享正式版 **Splicore v0.6.7** 运行时。详见 [上游发行页](https://github.com/ike-sh/Splicore/releases/tag/v0.6.7)。
 
 支持平台：Linux AMD64 (x86_64)
 
-当前稳定版本：[v4.2.0](https://github.com/ike-sh/NoBrand-OneClick/releases/tag/v4.2.0)。更新内容见 [CHANGELOG](CHANGELOG.md)。
+当前稳定版本：[v4.3.0](https://github.com/ike-sh/NoBrand-OneClick/releases/tag/v4.3.0)。更新内容见 [CHANGELOG](CHANGELOG.md)。
 
 新建 VLESS + Sudoku 默认启用原生 VLESS Encryption，支持完整客户端 JSON 和 JSON 订阅输出。
 
@@ -25,12 +25,13 @@
 | 协议 / 模式 | 当前实现 |
 |---|---|
 | Mieru TCP / UDP / BOTH | Splicore；MTU、多路复用、客户端握手模式；默认 traffic off |
-| Snell v4 / v5 | Splicore；v5 服务端使用 v4 客户端 wire；QUIC Proxy Mode 不支持 |
+| Snell v4 / v5 / v6 | 受管 Inbound，支持 TCP 与普通 UDP 转发；不开放 QUIC Proxy Mode |
 | Hysteria2 + Salamander | Splicore；新 CA + 服务器叶证书；独立 auth/obfs secret |
 | TUIC v5 | Splicore；UUID + password；独立 TLS 信任 |
 | VLESS + TCP + REALITY + Vision | Splicore 原生 Local Tunnel Guard |
 | VLESS Encryption + FinalMask/Sudoku | Splicore 原生 TCP；新建默认 mlkem768 + random + 1rtt |
 | SOCKS5 | 原生 TCP CONNECT，UDP ASSOCIATE 可选，强制 RFC 1929 用户名密码认证 |
+| Shadowsocks 2022 | 每个节点独立密钥；同端口 TCP + UDP（默认）或仅 TCP，不提供 AEAD 2017 |
 | SSH Tunnel | 系统 OpenSSH 策略与账号 |
 | Port Forward | Realm / nftables |
 
@@ -38,12 +39,12 @@ Mieru 流量伪装、低熵、配额、到期、tc 限速及独立 Mita 版本�
 
 ## 安装和管理
 
-下载并校验 v4.2.0 正式安装器：
+下载并校验 v4.3.0 正式安装器：
 
 ```bash
-curl -fLO https://github.com/ike-sh/NoBrand-OneClick/releases/download/v4.2.0/install-nobrand.sh
-curl -fLO https://github.com/ike-sh/NoBrand-OneClick/releases/download/v4.2.0/SHA256SUMS
-sha256sum -c SHA256SUMS
+curl -fLO https://github.com/ike-sh/NoBrand-OneClick/releases/download/v4.3.0/install-nobrand.sh &&
+curl -fLO https://github.com/ike-sh/NoBrand-OneClick/releases/download/v4.3.0/SHA256SUMS &&
+sha256sum -c SHA256SUMS &&
 sudo bash install-nobrand.sh
 ```
 
@@ -51,17 +52,18 @@ sudo bash install-nobrand.sh
 
 Alpine Linux 请先安装 `bash` 与 `curl`，然后以 root 身份执行 `bash install-nobrand.sh`。
 
-管理命令与示例配置：
+以下为 v4.3.0 管理命令示例：
 
 ```bash
 # 也可先安装管理命令
 sudo bash install-nobrand.sh manager install
 sudo nobrand mieru install --user primary --port 31001 --advertise-host entry.example -y
-sudo nobrand snell install --name snell --version 5 --port 31002 --advertise-host entry.example -y
+sudo nobrand snell install --name snell --version 6 --port 31002 --advertise-host entry.example -y
 sudo nobrand hy2 install --port 31003 --sni tls.example --advertise-host entry.example -y
 sudo nobrand tuic install --name tuic --user primary --port 31004 --advertise-host entry.example -y
 sudo nobrand vless-reality install --name reality --target www.microsoft.com --port 31005 --advertise-host entry.example -y
 sudo nobrand vless-sudoku install --port 31006 --advertise-host entry.example -y
+sudo nobrand ss2022 install --name edge --port 31007 --advertise-host entry.example -y
 ```
 
 `entry.example`、端口和 TLS/cover 域名是占位值。监听端口与展示端点分开；`--advertise-auto` 可探测展示地址。REALITY cover 需要可用的 TLS 服务。全部代理协议（含 Sudoku）由一个 `nobrand-splicore` 服务承载；仅在候选校验时短暂启动私有验证进程。
@@ -92,6 +94,12 @@ sudo nobrand uninstall
 
 添加节点时可选择 TCP（默认）、UDP 或 BOTH。真实监听端口可以手动指定，回车自动分配。已有节点可在 Mieru 菜单选择「修改真实监听端口」，也可运行 `sudo nobrand mieru set-port --name NAME --port PORT`。BOTH 一次更新 TCP 基础端口和 UDP 基础端口加一。独立设置的展示端点保持原值，标记为跟随监听的展示端口同步更新。节点名会用于 Mihomo 和 Mieru 客户端展示。
 
+### Snell 与 Shadowsocks 2022
+
+Snell v4 导出 version 4；v5 给 Surge 导出 5，给 sing-box 和 Mihomo 导出兼容的 4；v6 给 Surge 和 sing-box 导出 6，**不生成 Mihomo v6 配置**。普通 UDP 载荷不等于 QUIC Proxy Mode。v5 内核还占用同号 UDP 监听端口，管理器预留它，但不为 QUIC 打开防火墙或导出配置。这里的格式范围依据 [v0.6.7 Snell 导出器](https://github.com/ike-sh/Splicore/blob/v0.6.7/internal/splicore/exporter/snell.go)；生成 Surge 声明不代表已在 macOS 或 iOS 实机验收。
+
+`nobrand ss2022` 可创建、改端口/展示入口、轮换密钥、导出和删除节点。AES-128 使用 16 字节密钥，AES-256 与 ChaCha20 使用 32 字节；手动输入必须是标准 Base64，否则拒绝。省略时安全随机生成，轮换后需重新导出。`show`、`status` 和 Doctor 不显示密钥；`nobrand ss2022 export --name edge --format sing-box` 等显式导出包含密钥。仅 TCP 配置请用 Mihomo、sing-box 或通用信息，`ss://` 无法表达此限制。Snell v6 和 SS2022 均为上游 experimental 能力。三种 SS2022 方法均与 sing-box 1.14.1 实通；Mihomo 的 ChaCha20 首轮有一次 TCP 无回显，后续多组冷启动未复现。需要稳妥的 Mihomo 配置可选默认 AES-128；详见[实测记录](docs/V4.3-ACCEPTANCE.md)。
+
 ### SOCKS5 认证和导出
 
 SOCKS5 强制用户名密码认证。安装时提供用户名，密码留空时由系统安全随机生成。TCP CONNECT 始终可用，UDP ASSOCIATE 默认关闭。凭据与流量均以明文传输。非回环监听需要在菜单确认使用可信线路或访问控制，命令行可显式使用 `--allow-cleartext-remote`。
@@ -110,10 +118,15 @@ REALITY 目标是一个仅监听回环的原生 guard。guard 只将允许的 co
 
 旧 Xray/Mita 等多内核部署 → 新架构：**不支持自动原地迁移**。新版只读检测并拒绝，不转换或删除旧节点、凭据、服务或防火墙。使用匹配的旧安装器导出、备份并处理旧部署；第三方软件不被接管。
 
-已有 v4.1.0 原生安装可用 v4.2.0 安装器执行 `sudo bash install-nobrand.sh manager upgrade`，再执行 `sudo nobrand mieru upgrade` 将共享内核升级到 v0.6.5。升级使用原数据库的快照和主密钥，保留账号、节点、凭据和入口设置。下载按正式 Manifest、SHA256SUMS、包内校验和与二进制身份核对。
+从 v4.2.0 原生部署升级：
 
-升级保留上一代二进制、数据库、密钥和状态用于整代回滚。相同版本和配置通过校验后沿用当前部署。失败的新装恢复到未安装状态，失败的更新恢复上一代。降级到不支持当前 SOCKS5 节点的内核时，管理器会拒绝操作并保留快照。
+1. 先用旧管理器执行 `sudo nobrand backup create /root/nobrand-pre43.tar.gz`，私下保存备份。
+2. 下载并校验 v4.3.0 安装器，执行 `sudo bash install-nobrand.sh manager upgrade`，先更新管理器。
+3. 若旧库尚无 Commit Witness，只在管理员核对并明确接受当前数据库内容后，执行 `sudo nobrand runtime upgrade --acknowledge-current-state`。它只在停服后的候选数据库副本上建立基线，保留原数据库、Vault 主密钥和回滚快照；首次基线不证明过去提交的完整性。遇到待提交、损坏或不匹配的 witness 时，保留现场，不要删除或覆盖它。
 
+升级保留上一代二进制、数据库、密钥和状态用于整代回滚。相同版本和配置通过校验后沿用当前部署。失败的新装恢复到未安装状态，失败的更新恢复上一代。降级到不支持现有节点的内核时，管理器会拒绝操作并保留快照。不要将旧二进制与新库或不同代的 witness 混用。
+
+- [v4.3.0 客户端、流量与升级验收](docs/V4.3-ACCEPTANCE.md)
 - [安装、升级、FAQ 与排查](docs/SPLICORE-MIGRATION.md)
 - [当前架构与模块边界](docs/MODULE-DEPENDENCIES.md)
 

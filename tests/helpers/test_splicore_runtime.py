@@ -35,7 +35,12 @@ elif args[:2]==["version","--json"]:
     print(json.dumps(IDENTITY))
 elif args[:2]==["inbound","list"]:
     graph=json.loads(pathlib.Path(__file__).with_name("desired.json").read_text())
-    print(json.dumps({"items":[{"inbound":{"id":n["id"],"name":"nb-"+n["id"],"listeners":[{"endpoint":n["document"]["listener"]}]},"health":"healthy"} for n in graph["nodes"] if n.get("enabled",True)]}))
+    def listeners(n):
+        d=n["document"]
+        if n["protocol"]=="ss2022":
+            return [{"endpoint":d["listener"],"transport":t} for t in (["tcp","udp"] if d["settings"]["udp"] else ["tcp"])]
+        return [{"endpoint":d["listener"]}]
+    print(json.dumps({"items":[{"inbound":{"id":n["id"],"name":"nb-"+n["id"],"listeners":listeners(n)},"health":"healthy"} for n in graph["nodes"] if n.get("enabled",True)]}))
 '''
 
 DRIVER = '''#!/usr/bin/env python3
@@ -230,6 +235,13 @@ class RuntimeTests(unittest.TestCase):
         sc.save(self.runtime.current, pointer)
         self.runtime.adopt_snapshot()
         self.assertEqual(self.runtime.current.resolve(), current)
+        self.deploy(desired(31232))
+        previous = self.runtime.previous.resolve()
+        old_launcher = previous / 'launch.py'
+        old_launcher.write_text('# obsolete archived launcher; not executable input')
+        self.runtime.adopt_snapshot()
+        self.assertEqual(old_launcher.read_text(), sc.LAUNCHER)
+        self.assertEqual((previous / 'bootstrap.yaml').read_text(), self.runtime.bootstrap_text(previous))
 
     def test_standalone_backup_restore_preserves_credentials_and_key(self):
         self.deploy()
@@ -273,7 +285,8 @@ class RuntimeTests(unittest.TestCase):
         node = desired()["nodes"][0]
         node["document"]["settings"]["version"] = 5
         profiles = sc.client_profiles(node)
-        self.assertIn("version = 4", profiles["surge"])
+        self.assertIn("version = 5", profiles["surge"])
+        self.assertIn("version: 4", profiles["mihomo"])
         self.assertEqual(profiles["server_version"], 5)
         self.assertEqual(profiles["sing_box"]["version"], 4)
         self.assertEqual(profiles["sing_box"]["psk"], "synthetic-fixed-psk")
@@ -390,6 +403,51 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(text.count("/launch.py"), 1)
             self.assertNotIn("while true", text)
             self.assertIn("Restart=on-failure" if adapter == "systemd" else 'supervisor="supervise-daemon"', text)
+
+    def test_historical_snapshot_feature_boundaries_include_disabled_nodes(self):
+        legacy = sc.snapshot_release('v0.6.5')
+        for version in (4, 5):
+            graph = desired()
+            graph['nodes'][0]['document']['settings']['version'] = version
+            self.runtime.verify_snapshot_compatibility(graph, legacy)
+        graph['nodes'][0].update(enabled=False)
+        graph['nodes'][0]['document']['settings']['version'] = 6
+        with self.assertRaisesRegex(sc.Failure, 'Snell version'):
+            self.runtime.verify_snapshot_compatibility(graph, legacy)
+        graph['nodes'][0]['protocol'] = 'ss2022'
+        with self.assertRaisesRegex(sc.Failure, 'SS2022'):
+            self.runtime.verify_snapshot_compatibility(graph, legacy)
+        graph['nodes'][0]['protocol'] = 'socks5'
+        self.runtime.verify_snapshot_compatibility(graph, legacy)
+        with self.assertRaisesRegex(sc.Failure, 'SOCKS5'):
+            self.runtime.verify_snapshot_compatibility(graph, sc.snapshot_release('v0.6.4'))
+
+    def test_witness_ack_never_overrides_pending_corrupt_or_missing_current(self):
+        from types import SimpleNamespace
+        source = self.root / 'state.db'
+        source.write_bytes(b'private fixture')
+        dest = self.root / 'snapshot.db'
+        for legacy, status in ((True, 'witness_corrupt'), (True, 'verified'), (False, 'witness_missing')):
+            reply = {'status': status, 'pending_witness': False, 'pending_transactions': 0}
+            with patch.object(sc, 'command', return_value=SimpleNamespace(stdout=json.dumps(reply))) as cli:
+                with self.assertRaises(sc.Failure) as ctx:
+                    sc.snapshot_state('binary', source, dest, legacy, True)
+                self.assertEqual(ctx.exception.category, 'STORAGE_INTEGRITY')
+                self.assertEqual(cli.call_count, 1)
+                self.assertEqual(cli.call_args.args[0][1:3], ['state', 'integrity'])
+        reply = {'status': 'verified', 'pending_witness': False, 'pending_transactions': 1}
+        with patch.object(sc, 'command', return_value=SimpleNamespace(stdout=json.dumps(reply))):
+            self.assertEqual(sc.inspect_state('binary', source), reply)
+        reply['status'] = 'witness_missing'
+        with patch.object(sc, 'command', return_value=SimpleNamespace(stdout=json.dumps(reply))), self.assertRaises(sc.Failure):
+            sc.inspect_state('binary', source, legacy=True)
+        pending = self.root / 'state.db.witness.pending'
+        pending.write_bytes(b'keep')
+        with patch.object(sc, 'command') as cli, self.assertRaises(sc.Failure):
+            sc.snapshot_state('binary', source, dest, True, True)
+        cli.assert_not_called()
+        self.assertEqual(pending.read_bytes(), b'keep')
+        self.assertFalse(dest.exists())
 
     def test_reviewed_pin_upgrade_and_old_generation_rollback(self):
         self.deploy()

@@ -29,12 +29,13 @@ usage() {
   cat <<EOF
 NoBrand-OneClick ${SCRIPT_VERSION} / Splicore ${SPLICORE_VERSION}
 用法 / Usage: nobrand <protocol> <action> [options]
-协议 / Protocols: mieru, snell, hy2, tuic, vless-reality, vless-sudoku, socks5, ssh, forward
+协议 / Protocols: mieru, snell, hy2, tuic, vless-reality, vless-sudoku, socks5, ss2022, ssh, forward
 Actions: install, show, status, doctor, start, stop, restart, uninstall
 Fresh install: --port PORT --advertise-host HOST -y
 Mieru: --protocol TCP|UDP|BOTH --user NAME --password VALUE --mtu 1400
 Mieru / SOCKS5: set-port --name NAME --port PORT
-Snell: --version 4|5; QUIC Proxy Mode is unsupported.
+SS2022: --method METHOD --udp on|off [--key BASE64]; export --name NAME --format json|uri|mihomo|sing-box
+Snell: --version 4|5|6; QUIC Proxy Mode is unsupported.
 REALITY: --target COVER_HOST --target-port 443; native Vision and Local Tunnel Guard.
 HY2: --sni HOST; fresh TLS trust and Salamander credentials.
 Native state: nobrand runtime status|doctor|backup|restore|rollback
@@ -210,7 +211,7 @@ parse_nobrand_native_args() {
     socks5:help|socks5:-h|socks5:--help) ACTION=nobrand-help; NOBRAND_ARGS_HANDLED=1; return 0 ;;
     socks5:menu|socks5:install|socks5:status|socks5:doctor|socks5:show|socks5:export|socks5:set-port|\
     socks5:set-username|socks5:rotate-password|socks5:set-udp|socks5:set-udp-relay|\
-    socks5:start|socks5:stop|socks5:remove|mieru:set-port) ;;
+    socks5:start|socks5:stop|socks5:remove|mieru:set-port|snell:set-port) ;;
     *) die "未知 $protocol 操作: $operation"; return 1 ;;
   esac
   while [ "$#" -gt 0 ]; do
@@ -273,18 +274,68 @@ parse_nobrand_native_args() {
   NOBRAND_ARGS_HANDLED=1
 }
 
+parse_nobrand_ss2022_args() {
+  local operation="${1:-menu}" rc
+  [ "$#" -eq 0 ] || shift
+  case "$operation" in
+    help|-h|--help) ACTION=nobrand-help; NOBRAND_ARGS_HANDLED=1; return 0 ;;
+    menu|install|status|show|set-port|set-endpoint|set-udp|rotate-key|export|start|stop|restart|remove|doctor) ;;
+    *) die "未知 SS2022 操作: $operation"; return 1 ;;
+  esac
+  NOBRAND_NATIVE_SELECTOR=""
+  NOBRAND_SPLICORE_EXPORT_FORMAT=""
+  while [ "$#" -gt 0 ]; do
+    case "$operation:$1" in
+      menu:*) die 'ss2022 menu 不接受参数'; return 1 ;;
+      *:--name|install:--method|install:--key|rotate-key:--key|install:--udp|set-udp:--udp|export:--format)
+        [ -n "${2:-}" ] && [[ "$2" != --* ]] || { die "$1 缺少参数"; return 1; }
+        case "$1" in
+          --name) NOBRAND_NATIVE_SELECTOR="$2" ;;
+          --method)
+            case "$2" in 2022-blake3-aes-128-gcm|2022-blake3-aes-256-gcm|2022-blake3-chacha20-poly1305) SS2022_METHOD="$2" ;;
+              *) die '不支持的 SS2022 method'; return 1 ;; esac ;;
+          --key) SS2022_KEY="$2" ;;
+          --udp) case "$2" in on|off) SS2022_UDP="$2" ;; *) die '--udp 需要 on 或 off'; return 1 ;; esac ;;
+          --format) case "$2" in json|uri|mihomo|sing-box) NOBRAND_SPLICORE_EXPORT_FORMAT="$2" ;; *) die '--format 需要 json、uri、mihomo 或 sing-box'; return 1 ;; esac ;;
+        esac
+        shift 2 ;;
+      install:--port|set-port:--port|install:--ingress-profile|install:--advertise-*|set-endpoint:--advertise-*|\
+      install:--yes|install:-y|set-endpoint:--yes|set-endpoint:-y|rotate-key:--yes|rotate-key:-y|remove:--yes|remove:-y|*:--dry-run)
+        rc=0; parse_nobrand_common_option "$1" "${2:-}" || rc=$?
+        case "$rc" in 0) shift ;; 2) shift 2 ;; *) die "未知 SS2022 参数: $1"; return 1 ;; esac ;;
+      *) die "未知 SS2022 参数: $1"; return 1 ;;
+    esac
+  done
+  case "$operation" in
+    menu|install|status|doctor) ;;
+    *) [ -n "$NOBRAND_NATIVE_SELECTOR" ] || { die '--name 需要节点名'; return 1; } ;;
+  esac
+  [ "$operation" != set-port ] || [ -n "$PORT" ] || { die '--port 需要端口号'; return 1; }
+  [ "$operation" != set-udp ] || [ -n "$SS2022_UDP" ] || { die '--udp 需要 on 或 off'; return 1; }
+  NOBRAND_NATIVE_ACTION="$operation"
+  ACTION=nobrand-ss2022
+  NOBRAND_ARGS_HANDLED=1
+}
+
 parse_nobrand_snell_args() {
+  if [ "${1:-}" = set-port ]; then
+    parse_nobrand_native_args snell "$@" || return 1
+    SNELL_ACTION=set-port
+    SNELL_NAME="$NOBRAND_NATIVE_SELECTOR"
+    return 0
+  fi
   SNELL_ACTION="${1:-menu}"
   [ "$#" -eq 0 ] || shift
   case "$SNELL_ACTION" in
     v4|4) SNELL_ACTION=install; SNELL_VERSION=4; ;;
     v5|5) SNELL_ACTION=install; SNELL_VERSION=5; ;;
+    v6|6) SNELL_ACTION=install; SNELL_VERSION=6; ;;
     add|create) SNELL_ACTION=install ;;
     list|nodes) SNELL_ACTION=show ;;
     delete|uninstall) SNELL_ACTION=remove ;;
     endpoint) SNELL_ACTION="set-endpoint" ;;
     quic|set-quic) SNELL_ACTION="set-quic" ;;
-    menu|install|show|set-endpoint|remove|start|stop|restart|status|doctor|upgrade) ;;
+    menu|install|show|export|set-endpoint|remove|start|stop|restart|status|doctor|upgrade) ;;
     help|-h|--help) SNELL_ACTION=help ;;
     *) die "未知 Snell 操作: $SNELL_ACTION" ;;
   esac
@@ -297,7 +348,12 @@ parse_nobrand_snell_args() {
         ;;
       --version)
         SNELL_VERSION="${2:-}"
-        [ -n "$SNELL_VERSION" ] || die "--version 需要 4 或 5"
+        [ -n "$SNELL_VERSION" ] || die "--version 需要 4、5 或 6"
+        shift 2
+        ;;
+      --format)
+        [ "$SNELL_ACTION" = export ] || { die '--format 仅用于 snell export'; return 1; }
+        case "${2:-}" in json|surge|sing-box|mihomo) NOBRAND_SPLICORE_EXPORT_FORMAT="$2" ;; *) die '--format 需要 json、surge、sing-box 或 mihomo'; return 1 ;; esac
         shift 2
         ;;
       --psk)
@@ -327,12 +383,11 @@ parse_nobrand_snell_args() {
     esac
   done
   case "$SNELL_VERSION" in
-    4|5) ;;
-    *) die "Snell 只支持 v4、v5" ;;
+    4|5|6) ;;
+    *) die "Snell 只支持 v4、v5、v6"; return 1 ;;
   esac
-  if [ "$SNELL_VERSION" = 4 ] && [ "$SNELL_QUIC_PROXY" = on ]; then
-    die "Snell v4 不支持 QUIC Proxy 模式"
-  fi
+  [ "$SNELL_QUIC_PROXY" != on ] || { die 'Splicore 不支持 Snell QUIC Proxy Mode'; return 1; }
+  [ "$SNELL_ACTION" != export ] || [ -n "$SNELL_NAME" ] || { die '--name 需要节点名'; return 1; }
   ACTION="nobrand-snell"
   NOBRAND_ARGS_HANDLED=1
 }
@@ -722,6 +777,10 @@ detect_nobrand_entry() {
       shift
       parse_nobrand_snell_args "$@"
       ;;
+    ss2022)
+      shift
+      parse_nobrand_ss2022_args "$@"
+      ;;
     socks5)
       shift
       if [ "$#" -eq 0 ]; then
@@ -785,7 +844,7 @@ detect_nobrand_entry() {
           --protocol)
             NOBRAND_PROTOCOL_FILTER="${2:-}"
             [ -n "$NOBRAND_PROTOCOL_FILTER" ] \
-              || die "--protocol 需要 mieru、snell、hy2、tuic、vless-reality、vless-sudoku、socks5、ssh 或 forward"
+              || die "--protocol 需要 mieru、snell、hy2、tuic、vless-reality、vless-sudoku、socks5、ss2022、ssh 或 forward"
             shift 2
             ;;
           *) die "未知 nodes 参数: $1" ;;
@@ -840,6 +899,10 @@ detect_nobrand_entry() {
 }
 
 NOBRAND_REPARSED_ARGS=()
+if [ "${1:-}" = --lang ]; then
+  case "${2:-}" in zh) LANG_ZH=1 ;; en) LANG_ZH=0 ;; *) die '--lang 需要 zh 或 en' ;; esac
+  shift 2
+fi
 detect_nobrand_entry "$@"
 if [ "${#NOBRAND_REPARSED_ARGS[@]}" -gt 0 ]; then
   set -- "${NOBRAND_REPARSED_ARGS[@]}"

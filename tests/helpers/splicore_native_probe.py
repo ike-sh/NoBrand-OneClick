@@ -169,7 +169,7 @@ def run(args):
     checks, trace = {}, []
     result = {'version': sc.RELEASE['version'], 'commit': sc.RELEASE['commit'], 'checks': checks,
               'scope': 'Linux amd64 temporary loopback; local process supervisor', 'download_trace': trace,
-              'systemd': 'PENDING', 'openrc': 'PENDING', 'arm64': 'BUILD ONLY / runtime NOT CERTIFIED',
+              'systemd': 'PENDING', 'openrc': 'PENDING', 'arm64': 'UNSUPPORTED by this installer',
               'nftables_port_range': 'PENDING / NOT RUN', 'udp_payload_bytes': [64, 512]}
     def passed(name):
         checks[name] = 'PASS'; print(name + ': PASS', flush=True)

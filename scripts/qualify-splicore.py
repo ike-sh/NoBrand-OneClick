@@ -67,6 +67,8 @@ CHECKOUT = "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"
 UPLOAD = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
 MIHOMO_NAME = "mihomo-linux-amd64-v1.19.30.gz"
 MIHOMO_SHA = "cf06ce2c7d1421bdbda14ee4a5b6046672dc35ebf8eecd8e77504ec3c0ed9a84"
+SING_BOX_NAME = "sing-box-1.14.1-linux-amd64.tar.gz"
+SING_BOX_SHA = "12cb2816b52febb356f6a885b740cc8758c3f30b8ae0ca8edba80f0d2d35343f"
 SPEC = importlib.util.spec_from_file_location("qualification_runtime", ROOT / "runtime/splicore.py")
 sc = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(sc)
@@ -318,7 +320,7 @@ def presentation_candidate_integrity():
 
 
 def review_integrity():
-    if sc.RELEASE["version"] == "v0.6.5":
+    if sc.RELEASE["version"] == "v0.6.7":
         return review_native_integrity()
     historical = reviewed_integrity(tree=RELEASE_BASE)
     candidate = presentation_candidate_integrity()
@@ -331,8 +333,8 @@ def review_integrity():
 
 def review_native_integrity():
     """Check current release inputs against the approved integration inventory."""
-    manifest = json.loads((ROOT / "tests/fixtures/splicore-v065-integration.json").read_text())
-    require(manifest.get("baseline") == "8f6520685d85e424f1bf0e7fa512f9e4daaee984"
+    manifest = json.loads((ROOT / "tests/fixtures/splicore-v067-integration.json").read_text())
+    require(manifest.get("baseline") == "1e0440db392ca79d4ba2b6a0507ecec4c3d06f45"
             and manifest.get("splicore_commit") == sc.RELEASE["commit"], "integration baseline differs")
     expected = {str(p.relative_to(ROOT)) for folder, pattern in (
         ("src", "*.sh"), ("runtime", "*.py"), ("runtime", "*.json"), ("scripts", "*.sh"),
@@ -472,6 +474,8 @@ def prepare_assets(destination):
         for name in ("SHA256SUMS", sc.RELEASE["manifest_asset"], *(e["name"] for e in sc.RELEASE["assets"].values())):
             sc.download(base + name, staging / name)
         sc.download("https://github.com/MetaCubeX/mihomo/releases/download/v1.19.30/" + MIHOMO_NAME, staging / MIHOMO_NAME)
+        sc.download("https://github.com/SagerNet/sing-box/releases/download/v1.14.1/" + SING_BOX_NAME, staging / SING_BOX_NAME)
+        require(sc.sha(staging / SING_BOX_NAME) == SING_BOX_SHA, "sing-box reference archive checksum differs", "INFRASTRUCTURE")
         result = check_assets(staging, staging / MIHOMO_NAME)
         destination.mkdir(mode=0o700)
         for path in staging.iterdir():
@@ -482,7 +486,7 @@ def prepare_assets(destination):
 def summarize(log, probe):
     require(log.endswith("[PASS] NoBrand test suite\n"), "regression completion marker missing")
     require(probe["result"] == "PASS" and probe["checks"] and all(v == "PASS" for v in probe["checks"].values()), "runtime result is incomplete")
-    if sc.RELEASE["version"] == "v0.6.5":
+    if sc.RELEASE["version"] == "v0.6.7":
         selected = set(re.findall(r"^  (tests/\S+\.sh)$", (ROOT / "scripts/test.sh").read_text(), re.M))
         executed = re.findall(r"^\[RUN\] (tests/\S+\.sh)$", log, re.M)
         require(set(executed) == selected and len(executed) == len(selected), "integration Bash tests missing or repeated")
@@ -530,7 +534,9 @@ def campaign(args, evidence):
         result["artifacts"] = prepare_assets(artifacts)
         mihomo = artifacts / MIHOMO_NAME
         result["artifact_origin"] = "exact public HTTPS releases; verified before execution"
-    env = dict(os.environ, NOBRAND_SPLICORE_PUBLIC_ARTIFACTS=str(artifacts),
+    sing_box = args.sing_box_archive or artifacts / SING_BOX_NAME
+    require(sing_box.is_file() and sc.sha(sing_box) == SING_BOX_SHA, "missing or incorrect sing-box test peer archive")
+    env = dict(os.environ, NOBRAND_SPLICORE_PUBLIC_ARTIFACTS=str(artifacts), NOBRAND_REFERENCE_SING_BOX_ARCHIVE=str(sing_box.resolve()),
                NOBRAND_REFERENCE_MIHOMO_GZIP=str(mihomo), NOBRAND_RUNTIME_EVIDENCE_DIR=str(evidence),
                NOBRAND_PRIVILEGE_EVIDENCE=str(evidence / "privilege.jsonl"), PYTHONDONTWRITEBYTECODE="1")
     result["execution"] = run_logged(["bash", "scripts/test.sh", "--runtime"], evidence / "regression.log", 1800, env=env)
@@ -560,6 +566,7 @@ def main():
     parser.add_argument("--evidence", type=Path)
     parser.add_argument("--artifacts", type=Path)
     parser.add_argument("--mihomo-gzip", type=Path)
+    parser.add_argument("--sing-box-archive", type=Path, help="test-only v1.14.1 peer (default: under --artifacts)")
     args = parser.parse_args()
     os.umask(0o077)
     if args.mode == "inventory":

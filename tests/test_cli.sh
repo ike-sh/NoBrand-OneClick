@@ -81,8 +81,21 @@ assert_eq 'user-add|bob|edge.example.com||1|0' \
   'Mieru user-add host-only non-interactive CLI parsing'
 snell="$(parse install-nobrand.sh snell install --name alice --version 5 --port 3611 --advertise-auto -y)"
 assert_eq 'nobrand-snell|install|5|alice|||1|1||0|||||' "$snell" 'Snell CLI parser default QUIC'
-snell_quic="$(parse install-nobrand.sh snell install --name alice --version 5 --port 3611 --quic on --advertise-auto -y)"
-assert_eq 'nobrand-snell|install|5|alice|||1|1|on|0|||||' "$snell_quic" 'Snell CLI parser QUIC ON'
+for version in 4 5 6; do
+  if parse install-nobrand.sh snell install --name alice --version "$version" --quic on >/dev/null 2>&1; then
+    fail "Snell v${version}: QUIC Proxy must be rejected"
+  fi
+done
+snell_change_port="$(bash -c '
+  installer="$1"; shift; MITA_SOURCE_ONLY=1 source "$installer"; trap - ERR
+  nb_splicore_protocol() { printf "%s|%s|%s|%s" "$1" "$2" "$3" "$PORT"; }
+  nb_splicore_route_main
+' test "$TEST_ROOT/install-nobrand.sh" snell set-port --name existing-v6 --port 52006)"
+assert_eq 'snell|set-port|existing-v6|52006' "$snell_change_port" 'Snell named listener edit dispatch'
+for invalid_port_args in '--name alpha' '--port 52006' '--name alpha --port 52006 --version 4'; do
+  # shellcheck disable=SC2086
+  if parse install-nobrand.sh snell set-port $invalid_port_args >/dev/null 2>&1; then fail "invalid Snell set-port arguments: $invalid_port_args"; fi
+done
 snell_toggle="$(parse install-nobrand.sh snell set-quic --name alice --quic off -y)"
 assert_eq 'nobrand-snell|set-quic|5|alice|||1|0|off|0|||||' "$snell_toggle" 'Snell CLI QUIC toggle'
 hy2="$(parse install-nobrand.sh hy2 install --port 3612 --sni www.microsoft.com --advertise-auto -y)"
@@ -125,12 +138,8 @@ fi
 if parse install-nobrand.sh snell install --name bad --version 1 --advertise-auto -y >/dev/null 2>&1; then
   fail 'Snell v1 must be rejected'
 fi
-if parse install-nobrand.sh snell v6 >/dev/null 2>&1; then
-  fail 'Snell v6 alias must be rejected'
-fi
-if parse install-nobrand.sh snell install --name bad --version 6 --advertise-auto -y >/dev/null 2>&1; then
-  fail 'Snell --version 6 must be rejected'
-fi
+assert_contains "$(parse install-nobrand.sh snell v6 --name alpha)" 'nobrand-snell|install|6|alpha|' 'Snell v6 alias'
+assert_contains "$(parse install-nobrand.sh snell install --name alpha --version 6)" 'nobrand-snell|install|6|alpha|' 'Snell --version 6'
 if parse install-nobrand.sh snell install --name bad --version 5 --quic >/dev/null 2>&1; then
   fail 'missing --quic value must be rejected'
 fi
@@ -162,8 +171,8 @@ fi
 
 help="$(bash "$TEST_ROOT/install-nobrand.sh" --help)"
 assert_contains "$help" 'NoBrand-OneClick' 'NoBrand help entry'
-assert_contains "$help" 'Snell v4-v5' 'NoBrand help protocols'
-assert_not_contains "$help" 'Snell v6' 'NoBrand help removed v6'
+assert_contains "$help" 'Snell v4 / v5 / v6' 'NoBrand Snell versions'
+assert_contains "$help" 'nobrand ss2022 install' 'NoBrand Shadowsocks 2022 help'
 assert_contains "$help" 'clean install' 'NoBrand clean installation policy'
 assert_contains "$help" 'VLESS + FinalMask + Sudoku' 'NoBrand VLESS help protocol'
 assert_contains "$help" 'VLESS REALITY' 'NoBrand REALITY help protocol'
@@ -186,20 +195,20 @@ if parse install-nobrand.sh manager upgrade extra >/dev/null 2>&1; then
 fi
 
 version="$(bash "$TEST_ROOT/install-nobrand.sh" --version)"
-assert_eq $'NoBrand-OneClick 4.2.0\n作者: ike' "$version" 'NoBrand Chinese-first version output'
+assert_eq $'NoBrand-OneClick 4.3.0\n作者: ike' "$version" 'NoBrand Chinese-first version output'
 english_version="$(bash -c '
   installer="$1"
   set --
   MITA_SOURCE_ONLY=1 source "$installer"
   LANG_ZH=0 nobrand_version
 ' test "$TEST_ROOT/install-nobrand.sh")"
-assert_eq $'NoBrand-OneClick 4.2.0\nAuthor: ike' "$english_version" \
+assert_eq $'NoBrand-OneClick 4.3.0\nAuthor: ike' "$english_version" \
   'NoBrand English version output'
 mieru_version="$(bash "$TEST_ROOT/install-nobrand.sh" mieru --version)"
-assert_eq $'NoBrand-OneClick Mieru 4.2.0\n作者: ike' "$mieru_version" \
+assert_eq $'NoBrand-OneClick Mieru 4.3.0\n作者: ike' "$mieru_version" \
   'Mieru Chinese-first version output'
 mieru_english_version="$(bash "$TEST_ROOT/install-nobrand.sh" mieru --lang en --version)"
-assert_eq $'NoBrand-OneClick Mieru 4.2.0\nAuthor: ike' "$mieru_english_version" \
+assert_eq $'NoBrand-OneClick Mieru 4.3.0\nAuthor: ike' "$mieru_english_version" \
   'Mieru English version output'
 cp "$TEST_ROOT/install-nobrand.sh" "$cli_fixture/nb"
 short_version="$(bash "$cli_fixture/nb" --version)"

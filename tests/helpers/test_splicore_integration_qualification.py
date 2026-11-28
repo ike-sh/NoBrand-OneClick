@@ -25,9 +25,9 @@ class IntegrationQualificationTests(unittest.TestCase):
     (root/'src/new.sh').write_text(payload)
     self.assertTrue(audit.violations(root),payload)
  def test_release_and_rollback_pins_are_separate(self):
-  self.assertEqual(q.sc.RELEASE['version'],'v0.6.5')
-  self.assertEqual(q.sc.RELEASE['commit'],'3c062eb21da933217f6d0bd4f2c42dc1075bb942')
-  self.assertEqual(set(q.sc.RELEASE['rollback_releases']),{'v0.4.0','v0.5.0','v0.6.4'})
+  self.assertEqual(q.sc.RELEASE['version'],'v0.6.7')
+  self.assertEqual(q.sc.RELEASE['commit'],'a5ecdc5785fbcf978534046517d1692613d91706')
+  self.assertEqual(set(q.sc.RELEASE['rollback_releases']),{'v0.4.0','v0.5.0','v0.6.4','v0.6.5'})
   self.assertFalse(q.sc.RELEASE['capabilities']['vless-sudoku']['requires_external_xray'])
  def test_exact_integration_inventory_and_workflow(self):
   self.assertEqual(q.review_integrity()['result'],'PASS')
@@ -46,6 +46,31 @@ class IntegrationQualificationTests(unittest.TestCase):
     self.assertEqual(raised.exception.category,'ARCH_UNSUPPORTED')
     self.assertFalse(destination.exists())
     download.assert_not_called()
+
+ def test_only_confirmed_parent_can_purge_inside_uninstall(self):
+  import os, subprocess
+  with tempfile.TemporaryDirectory() as d:
+   root=Path(d)
+   env=dict(os.environ, NOBRAND_STATE_DIR=d+'/state', NOBRAND_CONFIG_DIR=d+'/config',
+            NOBRAND_LIB_DIR=d+'/lib', NOBRAND_SYSTEM_ROOT=d, NOBRAND_LIFECYCLE_DIR=d+'/journal',
+            NOBRAND_LIFECYCLE_LOCK_FILE=d+'/lock', NOBRAND_PARENT_UNINSTALL_TX='abc')
+   journal=root/'journal/transaction.env';journal.parent.mkdir()
+   code='''import sys,splicore
+try:
+ with splicore.Runtime(adapter="process").locked(parent_purge=sys.argv[1]=="purge"): pass
+except splicore.Failure as error:
+ sys.exit(93 if error.category=="LIFECYCLE_PENDING" else 1)
+'''
+   for inherited, token, action, scope, mutated, expected in (
+     (True,'abc','purge','global',1,0), (False,'abc','purge','global',1,93),
+     (True,'wrong','purge','global',1,93), (True,'abc','start','global',1,93),
+     (True,'abc','purge','manager',1,93), (True,'abc','purge','global',0,93)):
+    with self.subTest(inherited=inherited, token=token, action=action, scope=scope, mutated=mutated):
+     journal.write_text(f'FORMAT=nobrand-lifecycle-v2\nOPERATION=uninstall\nSCOPE={scope}\nSTATUS=in-progress\n'
+                        f'TRANSACTION_ID=abc\nMUTATION_STARTED={mutated}\nLAST_COMPLETED_PHASE=prepare\n')
+     env['NOBRAND_PARENT_UNINSTALL_TX']=token
+     wrapper=('exec 7>"$NOBRAND_LIFECYCLE_LOCK_FILE"; flock -x 7; ' if inherited else '')+'exec python3 -c "$1" "$2"'
+     self.assertEqual(subprocess.run(['bash','-c',wrapper,'test',code,action],env=env,cwd=ROOT/'runtime').returncode,expected)
 
  def test_cross_architecture_snapshot_is_refused_before_binary_execution(self):
   with tempfile.TemporaryDirectory() as directory, patch.object(q.sc,'binary_identity') as identity:

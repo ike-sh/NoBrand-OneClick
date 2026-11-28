@@ -15,10 +15,10 @@ nobrand_version() {
 
 nobrand_usage() {
   cat <<EOF
-NoBrand-OneClick ${SCRIPT_VERSION} — Multi-Ingress / Mieru / Snell v4-v5 / Hysteria2 / TUIC v5 / VLESS REALITY / VLESS + FinalMask + Sudoku / SOCKS5 / SSH Tunnel / Port Forward
+NoBrand-OneClick ${SCRIPT_VERSION} — Multi-Ingress / Mieru / Snell v4 / v5 / v6 / Hysteria2 / TUIC v5 / VLESS REALITY / VLESS + FinalMask + Sudoku / SOCKS5 / Shadowsocks 2022 / SSH Tunnel / Port Forward
 
 用法:
-  nobrand                         打开统一菜单
+  nobrand [--lang zh|en]          打开统一菜单 / Open the main menu
   nb                              与 nobrand 完全相同的短别名
   nobrand --version               显示产品版本与作者
   nobrand --help                  显示本帮助
@@ -29,6 +29,7 @@ NoBrand-OneClick ${SCRIPT_VERSION} — Multi-Ingress / Mieru / Snell v4-v5 / Hys
   nobrand runtime status|doctor|plan|recover|rollback
   nobrand runtime apply|render --file DESIRED.json
   nobrand runtime backup|restore --file BACKUP.tar.gz
+  nobrand runtime upgrade --acknowledge-current-state
   nobrand runtime start|stop|restart|uninstall|purge
   nobrand ingress list|doctor     查看入口配置或执行只读 Ingress Doctor
   nobrand ingress show PROFILE    查看入口配置
@@ -37,7 +38,7 @@ NoBrand-OneClick ${SCRIPT_VERSION} — Multi-Ingress / Mieru / Snell v4-v5 / Hys
   nobrand ingress set-default PROFILE | unset-default
   nobrand backup create [FILE]    备份 NoBrand schema-v3 全部 state 与配置
   nobrand backup restore FILE     恢复 NoBrand 备份
-  nobrand uninstall [-y]          统一卸载 Mieru/Snell/HY2/TUIC/VLESS/SSH/Forward/Common
+  nobrand uninstall [-y]          统一卸载 全部受管协议和公共资源
   nobrand manager install|upgrade 从当前执行的 exact installer 安装/升级统一管理器
 
   nobrand mieru                    打开完整 Mieru 菜单
@@ -50,11 +51,27 @@ NoBrand-OneClick ${SCRIPT_VERSION} — Multi-Ingress / Mieru / Snell v4-v5 / Hys
     --ingress-profile PROFILE
     --mtu --traffic-pattern --low-entropy --multiplexing --handshake-mode
 
-  nobrand snell install --name NAME [--version 5|4] [--port PORT] [--quic off]
+  nobrand snell install --name NAME [--version 4|5|6] [--port PORT] [--quic off]
       [--advertise-host HOST --advertise-port PORT | --advertise-auto] [-y]
   nobrand snell show|status|doctor|start|stop|restart|remove [--name NAME]
+  nobrand snell export --name NAME [--format json|surge|sing-box|mihomo]
+  nobrand snell set-port --name NAME --port PORT
   nobrand snell set-endpoint --name NAME
       [--advertise-host HOST --advertise-port PORT | --advertise-auto]
+
+  nobrand ss2022                    打开 Shadowsocks 2022 菜单
+  nobrand ss2022 install --name NAME [--port PORT] [--ingress-profile PROFILE]
+      [--method 2022-blake3-aes-128-gcm|2022-blake3-aes-256-gcm|2022-blake3-chacha20-poly1305]
+      [--key BASE64] [--udp on|off] [--advertise-host HOST --advertise-port PORT | --advertise-auto] [-y]
+      默认 AES-128、随机密钥、同端口 TCP + UDP；--udp off 仅监听 TCP。
+  nobrand ss2022 status|doctor [--name NAME]
+  nobrand ss2022 show|start|stop|restart|remove --name NAME
+  nobrand ss2022 set-port --name NAME --port PORT
+  nobrand ss2022 set-endpoint --name NAME --advertise-host HOST [--advertise-port PORT]
+  nobrand ss2022 rotate-key --name NAME [--key BASE64] [-y]
+  nobrand ss2022 set-udp --name NAME --udp on|off
+  nobrand ss2022 export --name NAME [--format json|uri|mihomo|sing-box]
+      只有显式 export 返回密钥；ss:// 不能表达仅 TCP 节点。
 
   nobrand socks5 install --name NAME --user USER [--port PORT]
       [--listen IP --allow-cleartext-remote] [--udp on|off]
@@ -112,7 +129,7 @@ NoBrand-OneClick ${SCRIPT_VERSION} — Multi-Ingress / Mieru / Snell v4-v5 / Hys
   nobrand forward import FILE
 
 说明:
-  - Snell 只支持 v5（默认/推荐）与 v4（兼容）。
+  - Snell 支持 v4、v5（默认）、v6；不支持 QUIC Proxy Mode。
   - 普通代理由一个固定 Splicore ${SPLICORE_VERSION} daemon 管理，安装支持 Linux amd64。
   - SOCKS5 强制 RFC 1929 用户名密码认证，支持 TCP CONNECT，UDP 默认关闭。
   - 非回环 SOCKS5 使用明文凭据与流量，请确认可信线路或访问控制后使用 --allow-cleartext-remote。
@@ -244,15 +261,31 @@ nb_all_node_rows() {
     vless-sudoku|sudoku|vless) return 0 ;;
     ssh|ssh-tunnel) ssh_tunnel_node_rows ;;
     forward|port-forward) forward_node_rows ;;
-    mieru|snell|socks5|hy2|hysteria2|tuic|vless-reality|reality) return 0 ;;
+    mieru|snell|socks5|ss2022|hy2|hysteria2|tuic|vless-reality|reality) return 0 ;;
     *) return 1 ;;
   esac
 }
 
+# The port registry uses protocol:id; ingress references use splicore:id.
+# Read only public listener metadata. Never print a document or a credential.
+nb_is_native_owner() {
+  case "${1%%:*}" in splicore|splicore-aux|snell|ss2022|socks5|mieru|tuic|hysteria2|vless-reality|vless-sudoku) ;;
+    *) return 1 ;; esac
+  [ -f "${NOBRAND_STATE_DIR}/splicore/current/desired.json" ]
+}
+
+nb_native_owner_field() {
+  local filter="$2" proto="${1%%:*}" id="${1#*:}"
+  case "$proto" in splicore) proto='' ;; splicore-aux) proto=snell ;; esac
+  jq -r --arg id "$id" --arg proto "$proto" \
+    'select(.owner=="nobrand-splicore-v1") | .nodes[] | select(.id==$id and ($proto=="" or .protocol==$proto)) | '"$filter" \
+    "${NOBRAND_STATE_DIR}/splicore/current/desired.json" 2>/dev/null
+}
+
 nb_owner_ingress_profile_id() {
   local owner="$1" id
+  if nb_is_native_owner "$owner"; then nb_native_owner_field "$owner" '.ingress.profile_id // empty'; return $?; fi
   case "$owner" in
-    splicore:*) jq -r --arg id "${owner#splicore:}" '.nodes[]|select(.id==$id)|.ingress.profile_id // empty' "${NOBRAND_STATE_DIR}/splicore/current/desired.json" ;;
     forward:*)
       jq -r --arg id "${owner#forward:}" '.rules[]|select(.rule_id==$id)|.ingress_profile_id // empty' \
         "$NOBRAND_FORWARD_STATE_FILE" 2>/dev/null || true
@@ -267,7 +300,17 @@ nb_owner_state_file() {
 }
 
 nb_owner_ingress_enforcement() {
-  local owner="$1" path id
+  local owner="$1" path id address profile
+  if nb_is_native_owner "$owner"; then
+    address="$(nb_owner_ingress_local_address "$owner")" || return 1
+    profile="$(nb_owner_ingress_profile_id "$owner")" || return 1
+    if [ -n "$profile" ] && [ "$(nb_ingress_profile_enforcement "$profile")" = strict ] && [[ "$address" != 0.0.0.0 && "$address" != :: && -n "$address" ]]; then
+      printf strict
+    else
+      printf permissive
+    fi
+    return 0
+  fi
   case "$owner" in
     forward:*)
       id="${owner#forward:}"
@@ -281,6 +324,10 @@ nb_owner_ingress_enforcement() {
 
 nb_owner_ingress_method() {
   local owner="$1" path id
+  if nb_is_native_owner "$owner"; then
+    if [ "$(nb_owner_ingress_enforcement "$owner")" = strict ]; then printf native-bind; else printf wildcard; fi
+    return 0
+  fi
   case "$owner" in
     forward:*)
       id="${owner#forward:}"
@@ -294,6 +341,7 @@ nb_owner_ingress_method() {
 
 nb_owner_ingress_local_address() {
   local owner="$1" path id profile_id
+  if nb_is_native_owner "$owner"; then nb_native_owner_field "$owner" '.document.listener.host'; return $?; fi
   profile_id="$(nb_owner_ingress_profile_id "$owner" 2>/dev/null || true)"
   case "$owner" in
     forward:*)
@@ -308,6 +356,7 @@ nb_owner_ingress_local_address() {
 
 nb_owner_enabled() {
   local owner="$1" path id
+  if nb_is_native_owner "$owner"; then nb_native_owner_field "$owner" 'if has("enabled") then .enabled else true end'; return $?; fi
   case "$owner" in
     forward:*) id="${owner#forward:}"; jq -r --arg id "$id" '.rules[]|select(.rule_id==$id)|.enabled' "$NOBRAND_FORWARD_STATE_FILE" 2>/dev/null ;;
     ssh-tunnel:*) printf true ;;
@@ -321,7 +370,7 @@ nb_node_detail_rows() {
   while IFS='|' read -r owner transport port advertise_host advertise_port; do
     [ -n "$owner" ] || continue
     case "$filter:$owner" in
-      :*|all:*|mieru:mieru:*|snell:snell:*|hy2:hy2:*|hysteria2:hy2:*|tuic:tuic:*|vless-reality:vless-reality:*|reality:vless-reality:*|vless-sudoku:vless-sudoku:*|sudoku:vless-sudoku:*|vless:vless-*|forward:forward:*|port-forward:forward:*) ;;
+      :*|all:*|mieru:mieru:*|snell:snell:*|ss2022:ss2022:*|socks5:socks5:*|hy2:hy2:*|hysteria2:hy2:*|tuic:tuic:*|vless-reality:vless-reality:*|reality:vless-reality:*|vless-sudoku:vless-sudoku:*|sudoku:vless-sudoku:*|vless:vless-*|forward:forward:*|port-forward:forward:*) ;;
       *) continue ;;
     esac
     profile_id="$(nb_owner_ingress_profile_id "$owner")"
@@ -1454,7 +1503,10 @@ nobrand_uninstall_impl() {
     fi
   fi
   if nb_splicore_installed; then
-    nb_splicore_call purge || return 1
+    local txid
+    nb_lifecycle_tx_valid || return 1
+    txid="$(nb_lifecycle_field TRANSACTION_ID)" || return 1
+    NOBRAND_PARENT_UNINSTALL_TX="$txid" nb_splicore_call purge || return 1
   fi
   admin_lock_acquire || return 1
   if [ -s "$NOBRAND_FORWARD_STATE_FILE" ] || [ -s "$NOBRAND_REALM_RUNTIME_META" ] \
@@ -1537,8 +1589,8 @@ nobrand_uninstall() {
     *) nb_fail_ambiguous_state; return 1 ;;
   esac
   if [ "${YES:-0}" -ne 1 ]; then
-    confirm '确认完整卸载 NoBrand 3 管理的 Mieru/Snell/HY2/TUIC/VLESS REALITY/VLESS Sudoku/SSH Tunnel/Forward/Common？[y/N]: ' \
-      'Completely uninstall NoBrand-3-managed Mieru/Snell/HY2/TUIC/VLESS REALITY/VLESS Sudoku/SSH Tunnel/Forward/Common resources? [y/N]: ' \
+    confirm '确认卸载 NoBrand 及全部受管节点（含 Snell、SOCKS5、SS2022）、SSH Tunnel 和端口转发？[y/N]: ' \
+      'Uninstall NoBrand, all managed nodes (including Snell, SOCKS5 and SS2022), SSH Tunnel and Port Forward? [y/N]: ' \
       n \
       || { t '已取消' 'Cancelled'; return 0; }
   fi
