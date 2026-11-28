@@ -6,13 +6,14 @@ runtime_system_root="$(mktemp -d)"
 trap 'rm -rf -- "$runtime_system_root"' EXIT
 export NOBRAND_SYSTEM_ROOT="$runtime_system_root"
 python3 "$TEST_ROOT/tests/helpers/test_splicore_runtime.py"
+python3 "$TEST_ROOT/tests/helpers/test_protocols_v43.py"
 # Copy the distribution alone: embedded Python/manifest must work without src/.
 source "$TEST_ROOT/tests/testlib.sh"
 workspace="$(mktemp -d)"
 trap 'rm -rf -- "$workspace" "$runtime_system_root"' EXIT
 cp "$TEST_ROOT/dist/install-nobrand.sh" "$workspace/installer.sh"
 output="$(bash "$workspace/installer.sh" runtime capabilities)"
-assert_contains "$output" 'v0.6.5' 'standalone public pin'
+assert_contains "$output" 'v0.6.7' 'standalone public pin'
 assert_contains "$output" 'requires_external_xray' 'explicit native Sudoku capability'
 source_installer
 nb_splicore_protocol() { printf 'primary:%s:%s\n' "$1" "$2"; }

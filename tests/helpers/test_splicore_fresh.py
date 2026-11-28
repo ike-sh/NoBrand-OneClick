@@ -166,6 +166,30 @@ class FreshTests(base.RuntimeTests):
             with self.assertRaises(sc.Failure): self.deploy(bad)
             self.assertEqual(before, self.events())
 
+    def test_fresh_tls_clock_step_rechecks_real_chain_without_accepting_errors(self):
+        tls = self.runtime.certificate('clock-test', 'probe.example')
+        real = sc.command
+        for first, second_ok, retries in ((9, True, 1), (10, False, 0), (9, False, 1)):
+            attempts = []
+            def check(args, *a, **kw):
+                if args[:2] != ['openssl', 'verify']:
+                    return real(args, *a, **kw)
+                self.assertNotIn('-attime', args)
+                self.assertNotIn('-no_check_time', args)
+                attempts.append(1)
+                if len(attempts) > 1 and second_ok:
+                    return real(args, *a, **kw)
+                error = b'error 9 at 1 depth lookup: certificate is not yet valid' if first == 9 else b'error 10 at 0 depth lookup: certificate has expired'
+                return subprocess.CompletedProcess(args, 2, b'', error + b'\n')
+            with self.subTest(first=first, second_ok=second_ok), patch.object(sc, 'command', side_effect=check), \
+                 patch.object(sc.time, 'monotonic', side_effect=[0, 1, 4]), patch.object(sc.time, 'sleep') as wait:
+                if second_ok:
+                    sc.tls_check(tls)
+                else:
+                    with self.assertRaises(sc.Failure): sc.tls_check(tls)
+                self.assertEqual(wait.call_count, retries)
+                self.assertEqual(len(attempts), 1 + retries)
+
     def test_ordinary_port_conflict_is_a_port_error(self):
         with socket.socket() as listener:
             listener.bind(('127.0.0.1', 0)); listener.listen()

@@ -225,9 +225,16 @@ if primary:
     for node in state["nodes"]:
         doc = node["document"]
         protocol = node["protocol"]
-        transport = doc["settings"]["transport"] if protocol == "mieru" else "TCP" if protocol in ("snell", "socks5", "vless-reality", "vless-sudoku") else "UDP"
+        transport = doc["settings"]["transport"] if protocol == "mieru" else "TCP" if protocol in ("snell", "ss2022", "socks5", "vless-reality", "vless-sudoku") else "UDP"
         emit(protocol + ":" + node["id"], transport, doc["listener"]["port"],
              doc["display_endpoint"]["host"], doc["display_endpoint"]["port"])
+        if protocol == "snell" and doc["settings"].get("version") == 5:
+            # Splicore binds a v5 auxiliary UDP socket even with QUIC Proxy off.
+            # It is a local reservation, not an advertised UDP endpoint.
+            emit("splicore-aux:" + node["id"], "UDP", doc["listener"]["port"])
+        if protocol == "ss2022" and doc["settings"]["udp"]:
+            emit(protocol + ":" + node["id"], "UDP", doc["listener"]["port"],
+                 doc["display_endpoint"]["host"], doc["display_endpoint"]["port"])
         if protocol == "socks5" and doc["settings"].get("udp") is True:
             relay = doc["settings"].get("udp_relay", {})
             first, last = relay.get("port_min", 0), relay.get("port_max", 0)
@@ -292,6 +299,11 @@ nb_port_available_for_transport() {
 nb_port_available_for_profile() {
   local port="$1" transport="$2" profile_id="${3:-$NOBRAND_LEGACY_INGRESS_PROFILE_ID}" ignore_owner="${4:-}"
   nb_valid_port "$port" || return 1
+  if [ "$transport" = TCP+UDP ]; then
+    nb_port_available_for_profile "$port" TCP "$profile_id" "$ignore_owner" \
+      && nb_port_available_for_profile "$port" UDP "$profile_id" "$ignore_owner"
+    return $?
+  fi
   if [ "$transport" = BOTH ]; then
     port="$(normalize_uint "$port")" || return 1
     [ "$port" -lt 65535 ] \
@@ -309,7 +321,7 @@ nb_port_available_for_profile() {
 
 nb_select_available_port() {
   local transport profile_id="${2:-$NOBRAND_LEGACY_INGRESS_PROFILE_ID}" bounds lo hi selected attempt random_value rc=0
-  if [ "$1" = BOTH ]; then transport=BOTH; else transport="$(nb_normalize_transport "$1")" || return 1; fi
+  case "$1" in BOTH|TCP+UDP) transport="$1" ;; *) transport="$(nb_normalize_transport "$1")" || return 1 ;; esac
   bounds="$(nb_ingress_profile_auto_range "$profile_id" 2>/dev/null)" || rc=$?
   if [ "$rc" -eq 0 ] && [ -n "$bounds" ]; then
     lo="${bounds%%|*}"

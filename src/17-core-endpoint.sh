@@ -76,6 +76,7 @@ nb_endpoint_conflict_owner() {
   while IFS='|' read -r owner row_transport listen_port advertise_host advertise_port; do
     [ -n "$owner" ] || continue
     [ "$owner" = "$ignore_owner" ] && continue
+    case "$owner" in splicore-aux:*|splicore-guard:*) continue ;; esac
     [ "$row_transport" = "$transport" ] || continue
     if [ -z "$advertise_host" ] && [ -z "$auto_host" ]; then
       auto_host="$(public_ip 2>/dev/null || true)"

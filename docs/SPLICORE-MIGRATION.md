@@ -10,9 +10,9 @@
 
 ## 新装
 
-参见 [README](../README.md) 的命令。Debian/Ubuntu、RHEL 系和 Alpine 的依赖/服务模板保留；公开 artifact 只支持 amd64/arm64，其他架构拒绝，无源码编译或 legacy fallback。
+参见 [README](../README.md) 的命令。Debian/Ubuntu、RHEL 系和 Alpine 的依赖/服务模板保留；本管理器只接受 Linux AMD64 正式发行包，其他架构拒绝，无源码编译或 legacy fallback。
 
-状态 authority：`architecture=splicore-native`、`splicore_version=v0.5.0`、`config_schema=1`。产品 registry 的 `schema_version=3` 与原生 desired schema 是不同层次。节点直接保存原生 managed creation 文档，不经过 Xray/sing-box 配置转换。
+状态 authority：`architecture=splicore-native`、`splicore_version=v0.6.7`、`config_schema=1`。产品 registry 的 `schema_version=3` 与原生 desired schema 是不同层次。节点直接保存原生 managed creation 文档，不经过 Xray/sing-box 配置转换。
 
 默认 Mieru 是 TCP、MTU 1400、traffic off、低熵关闭。BOTH 映射为一对 TCP/UDP inbound，UDP 使用 port+1。无独立 Mita 下载、账号 metrics scheduler、配额或 tc 限速。旧版的 unsupported CLI 选项会拒绝。
 
@@ -30,7 +30,7 @@ cover 不是已认证 VLESS 的目的地白名单；项目没有在这里添加�
 
 ## 原生版本升级
 
-先使用已校验的 v4.1.0 安装器执行 `sudo bash install-nobrand.sh manager upgrade`，再执行 `sudo nobrand vless-sudoku upgrade`（或其他协议的 upgrade 入口）。各协议升级与 `runtime apply` 共享一个 artifact/generation 事务，保留已有节点凭据和原加密模式。v0.4.0 的原始 binary/config/database/master key 作为上一代快照保留。相同 manifest 与 desired 只 verify，不重启。未来升级需维护者更新审核过的 manifest、校验和及测试；不会访问 Splicore latest/main/master/nightly。
+从 v4.2.0 升级时，先用旧版做私有备份，再用 v4.3.0 安装器执行 `manager upgrade` 更新管理器。检查旧库状态并明确接受现有内容后，执行 `sudo nobrand runtime upgrade --acknowledge-current-state` 单独升级内核，不要同时改节点。v0.6.7 首次为旧库建立 Commit Witness 基线，只能证明基线以后的提交。保留原代 DB、Vault 主密钥、配置与二进制；对带 witness 的节点备份时必须保留匹配的 sidecar。发现 pending、损坏或不匹配时保留现场，不自行删除 witness 或覆盖 DB。详见 [上游升级说明](https://github.com/ike-sh/Splicore/blob/v0.6.7/docs/UPGRADE.md)。
 
 候选先校验证书、端口、bootstrap 与 inbound；REALITY 另在 client runtime 停止的私有进程中校验 guard/rules。完成后才停止主服务并切换指针。失败恢复同一 Splicore 架构的上一代 binary/config/database/master key。首次失败不启动任何旧 Core。
 
@@ -38,7 +38,7 @@ cover 不是已认证 VLESS 的目的地白名单；项目没有在这里添加�
 
 ## 备份与卸载
 
-`nobrand backup create PATH` 保存完整 native state/config（0600），序列化 generation 指针，不包含下载二进制/普通服务文件。恢复前检查 archive traversal、link、类型、大小、native marker，下载并校验精确 artifact 后恢复服务。旧备份不导入。备份含凭据和主密钥，必须私下保存。
+`nobrand backup create PATH` 保存完整 native state/config（0600），序列化 generation 指针；还原归档中的内核时必须匹配已批准的发行身份。恢复前检查 archive traversal、link、类型、大小、native marker，校验精确 artifact 后恢复服务。旧备份不导入。备份含凭据和主密钥，必须私下保存。
 
 `runtime uninstall` 移除 native runtime 的活动资源；`runtime purge` 同时清理其拥有的数据。`nobrand uninstall` 还处理 Forward、SSH 和管理器资源；原生 Sudoku 随 Splicore 处理；保留第三方资源与 SSH 管理员确认流程。legacy 命中时一律拒绝。
 
@@ -52,4 +52,4 @@ cover 不是已认证 VLESS 的目的地白名单；项目没有在这里添加�
 - **未完成安装**：先执行 `nobrand runtime transactions`；完整 generation 快照可用 `runtime recover` 回退。无变更的完整 lifecycle-v2 安装记录保留审计副本后终结；历史变更缺少请求/快照时明确阻塞，禁止直接删除 transaction.env。
 - **VLESS + Sudoku 客户端配置**：新建默认启用原生 VLESS Encryption。使用 `nobrand vless-sudoku export` 或 `subscription` 导出完整 Xray 26.10.21 JSON，保留 Encryption 和 FinalMask；已有节点保留原加密模式。
 - **只看状态**：`nobrand status`、`nobrand doctor`、`nobrand runtime plan`。显式 export/backup 含敏感数据，不要贴到公开报告。
-- **systemd/OpenRC/arm64 是否已实机认证**：尚未。现有真实流量结果限 Linux amd64 回环和临时进程 supervisor；arm64 为 BUILD ONLY。
+- **平台与实测范围**：本版仅支持 Linux AMD64。回环连接验收不等于公网或移动设备实测；不提供 ARM64 安装。

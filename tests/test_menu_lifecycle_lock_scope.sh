@@ -172,8 +172,9 @@ CASE_RESULTS=()
 printf 'BASELINE_VERSION=%s\n' "$SCRIPT_VERSION"
 run_idle_case main 1 HUP 129 ''
 run_idle_case snell_submenu 2 TERM 143 '' 2
-run_idle_case snell_selector 3 HUP 129 '' 2 5
-run_idle_case menu_pause 2 HUP 129 '' 15
+run_idle_case snell_selector 3 HUP 129 '' 2 6
+run_idle_case ss2022_selector 3 HUP 129 '' 8 3
+run_idle_case menu_pause 2 HUP 129 '' 17
 run_idle_case mieru_user_submenu 3 HUP 129 '' 1 3
 run_idle_case explicit_mieru 1 HUP 129 nobrand-mieru-menu
 run_idle_case explicit_user_manage 1 HUP 129 user-manage

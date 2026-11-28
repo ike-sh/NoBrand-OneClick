@@ -1,6 +1,8 @@
 # shellcheck shell=bash
 # ---------- One NoBrand-owned Splicore artifact, daemon and transaction ----------
 # nb_splicore_python is embedded by scripts/build.sh from runtime/splicore.py.
+# Forward runtime upgrade/restore flags verbatim. Generic --yes must never
+# imply --acknowledge-current-state for a pre-witness database.
 nb_splicore_require_platform() {
   if [ "$(uname -s)" = Linux ]; then
     case "$(uname -m)" in x86_64|amd64) return 0 ;; esac
@@ -98,6 +100,7 @@ nb_splicore_call() (
   export USER_QUOTA_MB USER_EXPIRE USER_BANDWIDTH_MBPS USER_PACKAGE
   export PROFILE PROFILE_CLI MTU_CLI MULTIPLEXING_CLI HANDSHAKE_CLI TRAFFIC_CLI LOW_ENTROPY_CLI
   export PROTOCOL_CLI PORT_CLI PASSWORD_CLI ADVERTISE_CLI
+  export SS2022_METHOD SS2022_KEY SS2022_UDP
   export SNELL_VERSION SNELL_PSK SNELL_QUIC_PROXY TUIC_SNI TUIC_USER HY2_SNI SCRIPT_VERSION
   export VLESS_REALITY_TARGET VLESS_REALITY_TARGET_PORT NOBRAND_SPLICORE_LISTEN NOBRAND_SPLICORE_INGRESS_ID
   export NOBRAND_SPLICORE_EXPORT_FORMAT NOBRAND_SPLICORE_CLIENT_VERSION
@@ -202,6 +205,60 @@ nb_socks5_udp_interactive() {
     "$(jq -c .udp_relay <<<"$node")"
 }
 
+nb_ss2022_prompt_options() {
+  local choice
+  if [ -z "$SS2022_METHOD" ]; then
+    read_tty choice "$(t '加密方法: 1) AES-128-GCM  2) AES-256-GCM  3) ChaCha20-Poly1305 [默认 1]: ' \
+      'Method: 1) AES-128-GCM  2) AES-256-GCM  3) ChaCha20-Poly1305 [default 1]: ')" || return 1
+    case "${choice:-1}" in 1) SS2022_METHOD=2022-blake3-aes-128-gcm ;; 2) SS2022_METHOD=2022-blake3-aes-256-gcm ;;
+      3) SS2022_METHOD=2022-blake3-chacha20-poly1305 ;; *) warn "$(t '无效选择' 'Invalid choice')"; return 1 ;; esac
+  fi
+  if [ -z "$SS2022_UDP" ]; then
+    read_tty choice "$(t '传输: 1) 同端口 TCP + UDP  2) 仅 TCP [默认 1]: ' \
+      'Transport: 1) TCP + UDP on the same port  2) TCP only [default 1]: ')" || return 1
+    case "${choice:-1}" in 1) SS2022_UDP=on ;; 2) SS2022_UDP=off ;; *) warn "$(t '无效选择' 'Invalid choice')"; return 1 ;; esac
+  fi
+  [ -n "$SS2022_KEY" ] || nb_ss2022_prompt_key
+}
+
+nb_ss2022_prompt_key() {
+  read_tty SS2022_KEY "$(t 'Base64 密钥（回车安全随机生成）: ' 'Base64 key (Enter to generate securely): ')" secret
+}
+
+nb_native_prepare_endpoint() {
+  local protocol="$1" selector="$2" node id port owner conflict transport
+  local INGRESS_PROFILE_ID
+  node="$(nb_splicore_call protocol --protocol "$protocol" --operation status --selector "$selector" \
+    | jq -ce '.nodes | select(length==1) | .[0]')" || return 1
+  id="$(jq -er '.id' <<<"$node")" || return 1
+  port="$(jq -er '.listener.port' <<<"$node")" || return 1
+  owner="$protocol:$id"
+  INGRESS_PROFILE_ID="$(nb_owner_ingress_profile_id "splicore:$id")" || return 1
+  INGRESS_PROFILE_ID="${INGRESS_PROFILE_ID:-$NOBRAND_LEGACY_INGRESS_PROFILE_ID}"
+  if [ "$ADVERTISE_CLI" -eq 0 ] && [ "$YES" -ne 1 ]; then
+    nb_collect_advertise_endpoint_interactive "$protocol" "$port" || return 1
+  fi
+  NOBRAND_SPLICORE_DISPLAY_PORT_POLICY=custom
+  if [ "$ADVERTISE_AUTO_REQUESTED" -eq 1 ]; then
+    ADVERTISE_HOST="$(nb_ingress_profile_display_host "$INGRESS_PROFILE_ID" 2>/dev/null || true)"
+    if [ -n "$ADVERTISE_HOST" ]; then
+      ADVERTISE_PORT="$(nb_ingress_profile_display_port "$INGRESS_PROFILE_ID" "$port")" || return 1
+      NOBRAND_SPLICORE_DISPLAY_PORT_POLICY="$(nb_ingress_profile_json "$INGRESS_PROFILE_ID" | jq -er .display_port_policy)" || return 1
+    else
+      ADVERTISE_HOST="$(public_ip)" || return 1
+    fi
+  fi
+  if [ -z "$ADVERTISE_PORT" ]; then ADVERTISE_PORT="$port"; NOBRAND_SPLICORE_DISPLAY_PORT_POLICY=follow-actual; fi
+  nb_validate_advertise_endpoint "$ADVERTISE_HOST" "$ADVERTISE_PORT" TCP || { warn "$(t '客户端展示入口无效' 'Invalid client endpoint')"; return 1; }
+  ADVERTISE_HOST="$(nb_normalize_endpoint_host "$ADVERTISE_HOST")" || return 1
+  ADVERTISE_PORT="$(normalize_uint "$ADVERTISE_PORT")" || return 1
+  for transport in TCP UDP; do
+    [ "$transport" != UDP ] || jq -e '.udp' <<<"$node" >/dev/null || continue
+    conflict="$(nb_endpoint_conflict_owner "$transport" "$ADVERTISE_HOST" "$ADVERTISE_PORT" "$owner" || true)"
+    [ -z "$conflict" ] || { warn "DISPLAY_ENDPOINT_CONFLICT: $conflict"; return 1; }
+  done
+}
+
 nb_splicore_protocol() {
   nb_splicore_legacy_preflight || return 1
   local protocol="$1" operation="$2" selector="${3:-}" output conflict transport display_port display_host local_host="" human_output=0
@@ -243,7 +300,9 @@ nb_splicore_protocol() {
       *) valid_mtu "$MTU_REQUEST" || return 1; MTU="$MTU_REQUEST" ;;
     esac
   fi
-  if [ "$operation" = set-endpoint ] || [ "$operation" = user-set-endpoint ]; then
+  if [[ "$operation" = set-endpoint && ( "$protocol" = ss2022 || "$protocol" = snell ) ]]; then
+    nb_native_prepare_endpoint "$protocol" "$selector" || return 1
+  elif [ "$operation" = set-endpoint ] || [ "$operation" = user-set-endpoint ]; then
     if [ "${ADVERTISE_CLI:-0}" -eq 0 ] && [ "${YES:-0}" -ne 1 ]; then
       nb_collect_advertise_endpoint_interactive "$protocol" "${NOBRAND_SPLICORE_MENU_PORT:-443}" || return 1
     fi
@@ -295,20 +354,32 @@ nb_splicore_protocol() {
           read_tty PASSWORD "$(t '密码（回车安全随机生成）: ' 'Password (Enter to generate): ')" secret || return 1
         fi
       fi
-      if [[ "$protocol" = mieru || "$protocol" = socks5 ]] && [ -z "${PORT:-}" ]; then
+      if [ "$protocol" = ss2022 ]; then
+        nb_ss2022_prompt_options || return 1
+      fi
+      if [[ "$protocol" = mieru || "$protocol" = socks5 || "$protocol" = ss2022 || "$protocol" = snell ]] && [ -z "${PORT:-}" ]; then
         read_tty PORT "$(t '服务端真实监听端口（回车自动分配）：' 'Server listen port (Enter to allocate): ')" || return 1
       fi
     fi
     transport=TCP
     case "$protocol" in tuic|hysteria2) transport=UDP ;; mieru) transport="${PROTOCOL:-TCP}" ;; esac
     transport="${transport^^}"
-    if [ -z "${PORT:-}" ] && [ "${DRY_RUN:-0}" -ne 1 ]; then
-      PORT="$(nb_select_available_port "$transport" "$INGRESS_PROFILE_ID")" || return 1
+    local allocation="$transport"
+    if { [ "$protocol" = ss2022 ] && [ "${SS2022_UDP:-on}" = on ]; } || { [ "$protocol" = snell ] && [ "$SNELL_VERSION" = 5 ]; }; then
+      allocation=TCP+UDP
+    fi
+    if [ -z "${PORT:-}" ] && { [ "${DRY_RUN:-0}" -ne 1 ] || [ "$protocol" = ss2022 ]; }; then
+      if [ "${DRY_RUN:-0}" -eq 1 ]; then nb_prepare_ingress_request || return 1; fi
+      PORT="$(nb_select_available_port "$allocation" "$INGRESS_PROFILE_ID")" || return 1
     fi
     if [ -n "${PORT:-}" ]; then
       nb_valid_port "$PORT" || { die "$(t '真实监听端口必须为 1–65535。' 'The listen port must be in 1–65535.')"; return 1; }
       PORT="$(normalize_uint "$PORT")"
       if [ "${DRY_RUN:-0}" -ne 1 ]; then
+        if [ "$allocation" = TCP+UDP ] && ! nb_port_available_for_profile "$PORT" "$allocation" "$INGRESS_PROFILE_ID"; then
+          warn "$(t "TCP 或 UDP 端口 ${PORT} 已占用或被保留。" "TCP or UDP port ${PORT} is occupied or reserved.")"
+          return 1
+        fi
         if nb_ingress_port_is_reserved "$INGRESS_PROFILE_ID" "$PORT"; then
           nb_describe_port_conflict "${transport/BOTH/TCP}" "$PORT" "$INGRESS_PROFILE_ID" >&2
           return 1
@@ -365,6 +436,9 @@ nb_splicore_protocol() {
     if [ -n "${ADVERTISE_HOST:-}" ]; then ADVERTISE_HOST="$(nb_normalize_endpoint_host "$ADVERTISE_HOST")"; fi
     display_port="$(normalize_uint "$display_port")"
     conflict="$(nb_endpoint_conflict_owner "${transport/BOTH/TCP}" "${ADVERTISE_HOST:-${NOBRAND_SPLICORE_AUTO_HOST:-}}" "$display_port" 2>/dev/null || true)"
+    if [ "$protocol" = ss2022 ] && [ "${SS2022_UDP:-on}" = on ] && [ -z "$conflict" ]; then
+      conflict="$(nb_endpoint_conflict_owner UDP "$display_host" "$display_port" 2>/dev/null || true)"
+    fi
     if [ "$transport" = BOTH ] && [ -z "$conflict" ] && [ "$display_port" -lt 65535 ]; then
       conflict="$(nb_endpoint_conflict_owner UDP "${ADVERTISE_HOST:-${NOBRAND_SPLICORE_AUTO_HOST:-}}" "$((display_port + 1))" 2>/dev/null || true)"
     fi
@@ -378,6 +452,9 @@ nb_splicore_protocol() {
   fi
   if [ "${YES:-0}" -ne 1 ] && [ "${DRY_RUN:-0}" -ne 1 ]; then
     case "$protocol:$operation" in
+      ss2022:rotate-key)
+        [ -n "$SS2022_KEY" ] || nb_ss2022_prompt_key || return 1
+        ;;
       socks5:set-username)
         [ -n "$USERNAME" ] || read_tty USERNAME "$(t '新用户名: ' 'New username: ')" || return 1
         ;;
@@ -392,7 +469,7 @@ nb_splicore_protocol() {
   output="$(nb_splicore_call protocol --protocol "$protocol" --operation "$operation" \
     --selector "$selector" "${runtime_options[@]}")" || return $?
   case "$operation:$protocol" in
-    install:socks5|export:socks5|export:vless-sudoku|subscription:vless-sudoku) ;;
+    *:ss2022|export:snell|install:socks5|export:socks5|export:vless-sudoku|subscription:vless-sudoku) ;;
     show:*|client-config:*|export:*|user-show:*) human_output=1 ;;
     install:*|reconfigure:vless-sudoku|user-add:mieru)
       if [ "${DRY_RUN:-0}" -ne 1 ]; then human_output=1; fi
@@ -414,7 +491,7 @@ nb_splicore_menu_select() {
   data="$(nb_splicore_call protocol --protocol "$protocol" --operation status)" || return 1
   printf '%s\n' "$data" | jq -r '.nodes | unique_by(.pair // .id)[] | "  - \(.name) (\(.id))"'
   count="$(printf '%s\n' "$data" | jq '.nodes | unique_by(.pair // .id) | length')"
-  [ "$count" -gt 0 ] || { warn '尚无 Splicore 节点'; return 1; }
+  [ "$count" -gt 0 ] || { warn "$(t '尚无 Splicore 节点' 'No Splicore nodes found')"; return 1; }
   only_name="$(printf '%s\n' "$data" | jq -r '.nodes[0].name')"
   read_tty choice "$(t '节点名: ' 'Node name: ')${only_name}" || return 1
   if [ -z "$choice" ]; then
@@ -434,12 +511,14 @@ nb_splicore_prompt_port() {
   local data
   data="$(nb_splicore_call protocol --protocol "$1" --operation status)" || return 1
   printf '%s\n' "$data" | jq -er --arg id "$2" --arg real "$(t '真实监听' 'Real listener')" \
-    --arg display "$(t '客户端入口' 'Display endpoint')" --arg follow "$(t '端口随监听更新' 'Port follows listener')" '
+    --arg display "$(t '客户端入口' 'Display endpoint')" --arg follow "$(t '端口随监听更新' 'Port follows listener')" \
+    --arg aux "$(t '同号辅助 UDP socket；不开放 UDP 防火墙' 'Auxiliary same-port UDP socket; no UDP firewall opening')" '
     def endpoint: (if .host | contains(":") then "[\(.host)]" else .host end) + ":\(.port)";
     (.nodes[] | select(.id==$id)) as $node |
     .nodes[] | select(.id==$id or ($node.pair != null and .pair==$node.pair)) |
-    "  \($real) \(.listener | endpoint) /\(.transport | ascii_upcase) · \($display) \(.display_endpoint | endpoint)" +
-    (if .display_port_policy=="follow-actual" then " (\($follow))" else "" end)' || return 1
+    "  \($real) \(.listener | endpoint) /\((.transports // [.transport]) | join("+") | ascii_upcase) · \($display) \(.display_endpoint | endpoint)" +
+    (if .display_port_policy=="follow-actual" then " (\($follow))" else "" end) +
+    (if .protocol=="snell" and .version==5 then " · \($aux)" else "" end)' || return 1
   read_tty PORT "$(t '新的真实监听端口: ' 'New server listen port: ')" || return 1
   nb_valid_port "$PORT" || { warn "$(t '真实监听端口必须为 1–65535。' 'The listen port must be in 1–65535.')"; return 1; }
   PORT="$(normalize_uint "$PORT")"
@@ -452,6 +531,10 @@ nb_splicore_route_main() {
   case "${ACTION:-}" in
     nobrand-runtime) nb_splicore_call "${NOBRAND_RUNTIME_ARGS[@]}" ;;
     nobrand-mieru-set-port) nb_splicore_protocol mieru set-port "$NOBRAND_NATIVE_SELECTOR" ;;
+    nobrand-ss2022)
+      [ "$NOBRAND_NATIVE_ACTION" != menu ] || { NOBRAND_SPLICORE_HANDLED=0; return 0; }
+      nb_splicore_protocol ss2022 "$NOBRAND_NATIVE_ACTION" "$NOBRAND_NATIVE_SELECTOR"
+      ;;
     nobrand-socks5)
       [ "$NOBRAND_NATIVE_ACTION" != menu ] || { NOBRAND_SPLICORE_HANDLED=0; return 0; }
       nb_splicore_protocol socks5 "$NOBRAND_NATIVE_ACTION" "$NOBRAND_NATIVE_SELECTOR"

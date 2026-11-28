@@ -8,7 +8,7 @@ export NOBRAND_CONFIG_DIR="$fixture/config"
 export NOBRAND_LIB_DIR="$fixture/lib"
 source_installer
 read_tty() { printf -v "$1" 0; }
-for menu in nobrand_menu_loop snell_menu_loop hysteria2_menu_loop tuic_menu_loop vless_reality_menu_loop vless_sudoku_menu_loop ssh_tunnel_menu_loop forward_menu_loop ingress_menu_loop; do
+for menu in nobrand_menu_loop snell_menu_loop socks5_menu_loop ss2022_menu_loop hysteria2_menu_loop tuic_menu_loop vless_reality_menu_loop vless_sudoku_menu_loop ssh_tunnel_menu_loop forward_menu_loop ingress_menu_loop; do
   text="$($menu)"
   if [ "$menu" = nobrand_menu_loop ]; then
     assert_contains "$text" '退出' "localized $menu navigation"

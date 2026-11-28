@@ -38,7 +38,7 @@ fi
 # Actual native association blocks deletion and resolves the owner Profile.
 generation="$NOBRAND_STATE_DIR/splicore/generations/test"
 mkdir -p "$generation"
-jq -n --arg profile "$mapped_id" '{nodes:[{id:"native",ingress:{profile_id:$profile}}]}' >"$generation/desired.json"
+jq -n --arg profile "$mapped_id" '{architecture:"splicore-native",owner:"nobrand-splicore-v1",nodes:[{id:"native",protocol:"ss2022",ingress:{profile_id:$profile}}]}' >"$generation/desired.json"
 ln -s generations/test "$NOBRAND_STATE_DIR/splicore/current"
 assert_eq splicore:native "$(nb_ingress_profile_reference_rows "$mapped_id")" 'native association'
 assert_eq "$mapped_id" "$(nb_owner_ingress_profile_id splicore:native)" 'owner profile'

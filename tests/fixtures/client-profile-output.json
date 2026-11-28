@@ -205,23 +205,34 @@
       "protocol": "snell",
       "server_version": 4,
       "client_wire_version": 4,
-      "surge": "snell4 = snell, 203.0.113.10, 10201, psk = synthetic-psk, version = 4",
+      "client_versions": {
+        "surge": 4,
+        "sing_box": 4,
+        "mihomo": 4
+      },
+      "surge": "snell4 = snell, 203.0.113.10, 10201, psk = synthetic-psk, version = 4, reuse = false",
       "sing_box": {
         "type": "snell",
         "tag": "snell4",
         "server": "203.0.113.10",
         "server_port": 10201,
         "version": 4,
-        "psk": "synthetic-psk"
+        "psk": "synthetic-psk",
+        "reuse": false
       },
-      "mihomo": "- name: \"snell4\"\n  type: snell\n  server: \"203.0.113.10\"\n  port: 10201\n  psk: \"synthetic-psk\"\n  version: 4\n  udp: true\n"
+      "mihomo": "- name: \"snell4\"\n  type: snell\n  server: \"203.0.113.10\"\n  port: 10201\n  psk: \"synthetic-psk\"\n  version: 4\n  udp: true\n  reuse: false\n"
     },
     {
       "id": "snell5",
       "protocol": "snell",
       "server_version": 5,
       "client_wire_version": 4,
-      "surge": "snell5 = snell, 203.0.113.10, 10201, psk = synthetic-psk, version = 4",
+      "client_versions": {
+        "surge": 5,
+        "sing_box": 4,
+        "mihomo": 4
+      },
+      "surge": "snell5 = snell, 203.0.113.10, 10201, psk = synthetic-psk, version = 5",
       "sing_box": {
         "type": "snell",
         "tag": "snell5",

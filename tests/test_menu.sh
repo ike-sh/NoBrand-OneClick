@@ -53,7 +53,7 @@ unconfirmed_output="$fixture/unconfirmed-global.out"
 : >"$unconfirmed_trace"
 set +e
 (
-  unconfirmed_choices=(16 1 0)
+  unconfirmed_choices=(18 1 0)
   unconfirmed_choice_index=0
   read_tty() {
     [ "$unconfirmed_choice_index" -lt "${#unconfirmed_choices[@]}" ] \
@@ -97,7 +97,7 @@ private_exit_output="$fixture/private-exit.out"
 : >"$private_exit_trace"
 set +e
 (
-  private_exit_choices=(16 1 0)
+  private_exit_choices=(18 1 0)
   private_exit_choice_index=0
   read_tty() {
     [ "$private_exit_choice_index" -lt "${#private_exit_choices[@]}" ] \
@@ -141,7 +141,7 @@ set +e
   read_tty() {
     global_read_count=$((global_read_count + 1))
     [ "$global_read_count" -eq 1 ] || fail 'global uninstall rendered a second input surface'
-    printf -v "$1" 16
+    printf -v "$1" 18
   }
   nobrand_print_banner() { printf 'banner\n' >>"$global_trace"; msg 'NoBrand global uninstall menu'; }
   menu_pause() { printf 'pause\n' >>"$global_trace"; }
@@ -163,7 +163,7 @@ assert_eq 1 "$(grep -Fc 'banner' "$global_trace")" 'global uninstall menu render
 assert_eq 1 "$(grep -Fc 'global-uninstall' "$global_trace")" 'global uninstall action count'
 assert_not_contains "$(<"$global_trace")" 'pause' 'global uninstall pause suppression'
 assert_not_contains "$(<"$global_trace")" 'on-error' 'global uninstall error-handler suppression'
-assert_eq 1 "$(grep -Fc '卸载 NoBrand-OneClick（全部协议）' "$global_output")" \
+assert_eq 1 "$(grep -Fc '卸载 NoBrand-OneClick' "$global_output")" \
   'global uninstall action-surface count'
 
 # Protocol-only uninstall returns normally. The root menu can render again and
@@ -173,7 +173,7 @@ protocol_output="$fixture/protocol-uninstall.out"
 : >"$protocol_trace"
 set +e
 (
-  protocol_choices=(1 10 0)
+  protocol_choices=(1 12 0)
   protocol_choice_index=0
   read_tty() {
     [ "$protocol_choice_index" -lt "${#protocol_choices[@]}" ] \
@@ -218,22 +218,47 @@ nobrand_run_vless_sudoku_action() { printf 'vless:%s\n' "$VLESS_SUDOKU_ACTION" >
 nobrand_backup_action() { printf 'backup:%s:%s\n' "$NOBRAND_BACKUP_ACTION" "${NOBRAND_BACKUP_PATH:-}" >>"$action_log"; }
 
 # Exercise the real Snell submenu before replacing it for the top-level
-# routing pass. No v6 label or unsupported QUIC enable action may remain.
+# routing pass. All three wire versions must be reachable without enabling QUIC Proxy.
 nobrand_run_snell_action() {
   printf 'snell:%s:%s:%s\n' "$SNELL_ACTION" "${SNELL_VERSION:-}" "${SNELL_QUIC_PROXY:-}" >>"$action_log"
 }
 # The real menu function reads this test-selection global indirectly.
 # shellcheck disable=SC2034
 snell_menu_select_instance() { SNELL_NAME=menu-v5; }
-set_inputs 1 2 3 4 8 0
+set_inputs 1 2 3 4 5 9 0
 # Loaded by source_installer; the later definition is the routing stub.
 # shellcheck disable=SC2218
 snell_menu_loop >"$fixture/snell.out"
 snell_output="$(<"$fixture/snell.out")"
-assert_contains "$snell_output" '安装 Snell v5 [推荐]' 'Snell v5 menu'
+for version in 6 5 4; do
+  assert_contains "$snell_output" "安装 Snell v$version" 'Snell install label'
+  grep -qx "snell:install:$version:" "$action_log" || fail "missing Snell v$version install route"
+done
 assert_contains "$snell_output" 'QUIC 支持范围' 'Snell native capability label'
 assert_contains "$snell_output" 'QUIC Proxy Mode' 'Snell unsupported QUIC explanation'
 assert_not_contains "$snell_output" '启用 QUIC Proxy Mode' 'no unsupported QUIC enable action'
+
+# Exercise item 11 with production selection and port prompts. The runtime
+# boundary is stubbed; specifically require the selected ID, not the label.
+(
+  d="$NOBRAND_STATE_DIR/splicore/generations/ui"
+  mkdir -p "$d"; ln -s generations/ui "$NOBRAND_STATE_DIR/splicore/current"
+  jq -n '{nodes:[range(4;7) as $v | {id:("id"+($v|tostring)),name:("v"+($v|tostring)),protocol:"snell",version:$v,transport:"tcp",listener:{host:"127.0.0.1",port:51001},display_endpoint:{host:"edge.example",port:51001},display_port_policy:"follow-actual"}]}' >"$fixture/snell-status.json"
+  jq '{nodes:[.nodes[]|{id,client:{name:.name}}]}' "$fixture/snell-status.json" >"$d/desired.json"
+  snell_menu_select_instance() { nb_splicore_menu_select snell; }
+  nb_splicore_call() { cat "$fixture/snell-status.json"; }
+  nb_splicore_protocol() { printf '%s|%s|%s|%s\n' "$1" "$2" "$3" "$PORT" >>"$fixture/snell-port.log"; }
+  for language in 1 0; do
+    LANG_ZH="$language"; set_inputs 11 v6 65536 11 v4 51004 11 v5 51005 11 v6 51006 0
+    snell_menu_loop >"$fixture/snell-port-${language}.out"
+  done
+)
+expected_port_trace=$'snell|set-port|id4|51004\nsnell|set-port|id5|51005\nsnell|set-port|id6|51006'
+assert_eq "$(printf '%s\n' "$expected_port_trace" "$expected_port_trace")" "$(<"$fixture/snell-port.log")" 'item 11 dispatches by ID after a valid port'
+assert_eq 1 "$(grep -cF 'Auxiliary same-port UDP socket; no UDP firewall opening' "$fixture/snell-port-0.out")" 'v5 alone reports a local auxiliary UDP reservation'
+assert_contains "$(<"$fixture/snell-port-1.out")" ' 11) 修改真实监听端口' 'Snell item 11 Chinese label'
+assert_contains "$(<"$fixture/snell-port-0.out")" ' 11) Change real listen port' 'Snell item 11 English label'
+assert_contains "$(<"$fixture/snell-port-0.out")" '127.0.0.1:51001 /TCP · Display endpoint edge.example:51001 (Port follows listener)' 'Snell old listener and display policy'
 
 set_inputs invalid -1 999 '' 1 2 3 4 5 6 7 8 9 10 11 yes 0
 # Loaded by source_installer; the later definition is the top-level routing stub.
@@ -260,32 +285,40 @@ vless_sudoku_menu_loop() { printf 'top:vless\n' >>"$action_log"; }
 vless_reality_menu_loop() { printf 'top:reality\n' >>"$action_log"; }
 nobrand_backup_menu_loop() { printf 'top:backup\n' >>"$action_log"; }
 snell_menu_loop() { printf 'top:snell\n' >>"$action_log"; }
-set_inputs invalid -1 999 '' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 0
-nobrand_menu_loop >"$fixture/top.out"
-top_output="$(<"$fixture/top.out")"
-assert_contains "$top_output" 'VLESS REALITY + Vision（TCP；推荐 Public Ingress）' 'top REALITY menu visibility'
-assert_contains "$top_output" 'VLESS + FinalMask + Sudoku（TCP）' 'top VLESS menu visibility'
-assert_contains "$top_output" 'TUIC v5' 'top TUIC menu visibility'
-assert_contains "$top_output" 'SSH Tunnel（现有 OpenSSH）' 'top SSH Tunnel menu visibility'
-assert_contains "$top_output" '端口转发 / Port Forward（nftables / Realm）' 'top Port Forward menu visibility'
-assert_contains "$top_output" '网络入口 / Ingress' 'top Ingress menu visibility'
-assert_contains "$top_output" '卸载 NoBrand-OneClick（全部协议）' 'top unified uninstall label'
-assert_not_contains "$top_output" '保留 Mieru' 'top uninstall must not claim Mieru preservation'
-for item in mieru snell hy2 tuic reality vless ssh forward ingress nodes status doctor backup network help uninstall; do
-  grep -qx "top:${item}" "$action_log" || fail "top menu handler not reached: $item"
+socks5_menu_loop() { printf 'top:socks5\n' >>"$action_log"; }
+ss2022_menu_loop() { printf 'top:ss2022\n' >>"$action_log"; }
+zh_labels=(Mieru 'Snell v4 / v5 / v6' 'Hysteria2 + Salamander' 'TUIC v5' 'VLESS REALITY + Vision'
+  'VLESS + FinalMask + Sudoku' 'SOCKS5 代理' 'Shadowsocks 2022' 'SSH Tunnel' '端口转发 / Port Forward'
+  '网络入口 / Ingress' '查看全部节点' '综合状态' 'Doctor / 诊断' '备份 / 恢复' '性能 / BBR / FQ' '帮助 / CLI' '卸载 NoBrand-OneClick' '退出')
+en_labels=(Mieru 'Snell v4 / v5 / v6' 'Hysteria2 + Salamander' 'TUIC v5' 'VLESS REALITY + Vision'
+  'VLESS + FinalMask + Sudoku' 'SOCKS5 proxy' 'Shadowsocks 2022' 'SSH Tunnel' 'Port Forward'
+  Ingress 'List all nodes' Status 'Doctor / Diagnostics' 'Backup / Restore' 'Performance / BBR / FQ' 'Help / CLI' 'Uninstall NoBrand-OneClick' Exit)
+routes=(mieru snell hy2 tuic reality vless socks5 ss2022 ssh forward ingress nodes status doctor backup network help uninstall)
+for language in zh en; do
+  if [ "$language" = zh ]; then LANG_ZH=1; labels=("${zh_labels[@]}"); else LANG_ZH=0; labels=("${en_labels[@]}"); fi
+  # Assert the complete rendered table in order, not just presence of strings.
+  set_inputs 0; nobrand_menu_loop >"$fixture/top.out"
+  expected="$(for n in {1..18}; do printf ' %2d) %s\n' "$n" "${labels[n-1]}"; done; printf '  0) %s\n' "${labels[18]}")"
+  assert_eq "$expected" "$(grep -E '^[[:space:]]*[0-9]+[)]' "$fixture/top.out")" "top menu $language labels and numbers"
+  # Record the exact callback for each keystroke including invalid values.
+  : >"$action_log"; set_inputs invalid -1 19 '' {1..18} 0; nobrand_menu_loop >/dev/null
+  assert_eq "$(printf 'top:%s\n' "${routes[@]}")" "$(<"$action_log")" "top menu $language actual handler order"
 done
+# Consumed by the sourced menu translations below.
+# shellcheck disable=SC2034
+LANG_ZH=1
 
 # A menu action that arms the SSH rollback watchdog must unwind the root menu,
 # allowing the fresh administrator connection to acquire the lifecycle lock.
 nobrand_ssh_confirmation_pending() { return 0; }
 nobrand_pending_ssh_confirmation_notice() { printf 'pending SSH confirmation\n'; }
-set_inputs 7
+set_inputs 9
 nobrand_menu_loop >"$fixture/pending-ssh-menu.out"
 assert_contains "$(<"$fixture/pending-ssh-menu.out")" 'pending SSH confirmation' \
   'top menu exits for fresh-admin SSH watchdog confirmation'
 
 menu_pause() { : >"$fixture/unified-uninstall-pause"; }
-set_inputs 16
+set_inputs 18
 nobrand_menu_loop >"$fixture/pending-unified-uninstall-menu.out"
 [ ! -e "$fixture/unified-uninstall-pause" ] \
   || fail 'unified uninstall paused while SSH confirmation needed the lifecycle lock'

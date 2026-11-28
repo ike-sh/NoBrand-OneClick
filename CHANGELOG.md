@@ -1,5 +1,13 @@
 # Changelog
 
+## 4.3.0（未发布）
+
+- Linux AMD64 单内核升级至 Splicore v0.6.7。旧版数据库需要显式确认首次 Commit Witness 基线；整代备份与回滚保留数据库、主密钥及匹配的 witness。
+- 新签发的受管 TLS 证书如因主机时钟短暂回拨尚未生效，最多等待 3 秒重新验证；不跳过证书有效期检查。
+- 重排双语主菜单：SOCKS5 第 7 项、Shadowsocks 2022 第 8 项，卸载固定在第 18 项。
+- 新增受管 Snell v6；不更改已有 v4/v5 节点。客户端配置按目标导出；v6 不提供 Mihomo 配置，不开放 QUIC Proxy Mode。
+- 新增受管 Shadowsocks 2022，支持三种加密方法、同端口 TCP + UDP 或仅 TCP、独立密钥轮换及显式导出。仅 TCP 节点不生成语义不完整的分享链接。
+
 ## 4.2.0 - 2026-11-21
 
 - 支持 Linux AMD64 (x86_64)，锁定 Splicore v0.6.5 正式发行包。校验发行 Manifest、SHA256SUMS 和二进制身份。

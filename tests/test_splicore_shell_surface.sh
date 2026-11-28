@@ -42,7 +42,11 @@ assert_not_contains "$(tar -tzf "$backup")" '/bin/' 'backup omits runtime binari
 generation="$NOBRAND_STATE_DIR/splicore/generations/synthetic"
 mkdir -p "$generation"
 jq -n '{schema:1,config_schema:1,architecture:"splicore-native",owner:"nobrand-splicore-v1",nodes:[
- {id:"s1",protocol:"snell",client:{name:"alpha"},document:{listener:{host:"127.0.0.1",port:31001},display_endpoint:{host:"edge.example",port:443},settings:{version:5}}},
+ {id:"s1",protocol:"snell",client:{name:"alpha"},document:{listener:{host:"127.0.0.1",port:31001},display_endpoint:{host:"edge.example",port:443},settings:{version:4}}},
+ {id:"s5",protocol:"snell",client:{name:"five"},document:{listener:{host:"127.0.0.1",port:31005},display_endpoint:{host:"edge.example",port:445},settings:{version:5}}},
+ {id:"s6",protocol:"snell",client:{name:"six"},document:{listener:{host:"127.0.0.1",port:31006},display_endpoint:{host:"edge.example",port:446},settings:{version:6}}},
+ {id:"ss1",protocol:"ss2022",enabled:true,ingress:{profile_id:"profile-a"},client:{name:"both"},document:{listener:{host:"127.0.0.1",port:31007},display_endpoint:{host:"edge.example",port:447},settings:{udp:true}}},
+ {id:"ss2",protocol:"ss2022",client:{name:"tcp"},document:{listener:{host:"127.0.0.1",port:31008},display_endpoint:{host:"edge.example",port:448},settings:{udp:false}}},
  {id:"r1",protocol:"vless-reality",client:{name:"reality"},document:{listener:{host:"127.0.0.1",port:31002},display_endpoint:{host:"edge.example",port:444},settings:{}},guard:{listen:{host:"127.0.0.1",port:31003}}},
  {id:"h1",protocol:"hysteria2",client:{name:"hy2"},document:{listener:{host:"127.0.0.1",port:31001},display_endpoint:{host:"edge.example",port:443},settings:{}}}
 ]}' >"$generation/desired.json"
@@ -50,6 +54,18 @@ ln -s generations/synthetic "$NOBRAND_STATE_DIR/splicore/current"
 assert_eq snell:s1 "$(nb_registry_port_owner TCP 31001)" 'native TCP owner'
 assert_eq hysteria2:h1 "$(nb_registry_port_owner UDP 31001)" 'native UDP owner'
 assert_eq vless-reality:r1 "$(nb_registry_port_owner TCP 31002)" 'REALITY uses TCP'
+assert_eq splicore-aux:s5 "$(nb_registry_port_owner UDP 31005)" 'Snell v5 reserves auxiliary UDP'
+assert_eq snell:s6 "$(nb_registry_port_owner TCP 31006)" 'Snell v6 owns TCP'
+if nb_registry_port_owner UDP 31006 >/dev/null; then fail 'Snell v6 must not claim UDP'; fi
+for transport in TCP UDP; do
+  assert_eq ss2022:ss1 "$(nb_registry_port_owner "$transport" 31007)" 'SS2022 same-port owner'
+  assert_eq ss2022:ss1 "$(nb_endpoint_conflict_owner "$transport" edge.example 447)" 'SS2022 same-port display owner'
+done
+assert_eq ss2022:ss2 "$(nb_registry_port_owner TCP 31008)" 'SS2022 TCP-only owner'
+if nb_registry_port_owner UDP 31008 >/dev/null; then fail 'SS2022 TCP-only must not claim UDP'; fi
+assert_eq profile-a "$(nb_owner_ingress_profile_id ss2022:ss1)" 'SS2022 registry profile'
+assert_eq splicore:ss1 "$(nb_ingress_profile_reference_rows profile-a)" 'SS2022 managed ingress association'
+assert_eq 127.0.0.1 "$(nb_owner_ingress_local_address ss2022:ss1)" 'SS2022 actual bind address'
 assert_eq splicore-guard:r1 "$(nb_registry_port_owner TCP 31003)" 'guard port reservation'
 # Menus must reject a stale selection before invoking the mutation callback.
 read_tty() { printf -v "$1" alpha; }

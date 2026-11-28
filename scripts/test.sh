@@ -66,6 +66,7 @@ unit_tests=(
   tests/test_vless_sudoku_lifecycle.sh
   tests/test_cli.sh
   tests/test_menu.sh
+  tests/test_ss2022_shell.sh
   tests/test_menu_lifecycle_lock_scope.sh
   tests/test_menu_instance_selection.sh
   tests/test_version_consistency.sh
@@ -86,11 +87,15 @@ done
 if [ "$run_runtime" -eq 1 ]; then
   : "${NOBRAND_SPLICORE_PUBLIC_ARTIFACTS:?set the directory containing pinned Splicore archives, SHA256SUMS and RELEASE_MANIFEST.json}"
   : "${NOBRAND_REFERENCE_MIHOMO_GZIP:?set the pinned reference client gzip path}"
+  : "${NOBRAND_REFERENCE_SING_BOX_ARCHIVE:?set the pinned test-only sing-box archive path}"
   runtime_evidence="${NOBRAND_RUNTIME_EVIDENCE_DIR:-$(mktemp -d)}"
   mkdir -p "$runtime_evidence"
   PYTHONDONTWRITEBYTECODE=1 python3 tests/helpers/splicore_native_probe.py \
     --artifacts "$NOBRAND_SPLICORE_PUBLIC_ARTIFACTS" --mihomo-gzip "$NOBRAND_REFERENCE_MIHOMO_GZIP" \
     --private-log "$runtime_evidence/private-runtime.log" --output "$runtime_evidence/runtime-probe.json"
+  PYTHONDONTWRITEBYTECODE=1 python3 tests/helpers/probe_protocols_v43.py \
+    --artifacts "$NOBRAND_SPLICORE_PUBLIC_ARTIFACTS" --sing-box-archive "$NOBRAND_REFERENCE_SING_BOX_ARCHIVE" \
+    --output "$runtime_evidence/protocols-v43.json"
 
 else
   printf '[SKIP] real runtime integration (run scripts/test.sh --runtime)\n'

@@ -1094,7 +1094,7 @@ nb_ingress_show() {
 
 nb_ingress_owner_capability() {
   case "$1" in
-    splicore:*|vless-sudoku:*) printf native-bind ;;
+    splicore:*|splicore-aux:*|ss2022:*|snell:*|socks5:*|mieru:*|tuic:*|hysteria2:*|vless-reality:*|vless-sudoku:*) printf native-bind ;;
     forward:*)
       if [ "$(nb_owner_ingress_method "$1" 2>/dev/null || true)" = address-match ]; then
         printf address-match

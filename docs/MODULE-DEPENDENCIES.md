@@ -8,7 +8,7 @@
 19-splicore: read-only legacy refusal
               ↓
 runtime/splicore.py
-  ├─ splicore-release.json: official v0.5.0 exact pin
+  ├─ splicore-release.json: official v0.6.7 exact pin
   ├─ artifact validation and atomic install
   ├─ native desired → private validation generation
   ├─ one active daemon / splicore-launch.py
@@ -16,7 +16,7 @@ runtime/splicore.py
   └─ matching client profiles / native rollback
 ```
 
-Mieru、Snell、HY2、TUIC、REALITY、Sudoku 不依赖旧独立 Core 下载器。旧转换、证书导入、服务
+Mieru、Snell、HY2、TUIC、REALITY、Sudoku、SOCKS5 和 Shadowsocks 2022 不依赖旧独立 Core 下载器。旧转换、证书导入、服务
 snapshot/restore、多 Core rollback 已移除。旧文件/服务名只在只读检测边界使用。
 
 ## Shared product layer

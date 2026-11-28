@@ -364,10 +364,10 @@ snell_menu_set_quic() {
 snell_menu_service() {
   local choice=""
   snell_menu_select_instance || return 0
-  msg '  1) 状态'
-  msg '  2) 启动'
-  msg '  3) 停止'
-  msg '  4) 重启'
+  t '  1) 状态' '  1) Status'
+  t '  2) 启动' '  2) Start'
+  t '  3) 停止' '  3) Stop'
+  t '  4) 重启' '  4) Restart'
   read_tty choice "$(t '请选择 [1-4]: ' 'Choose [1-4]: ')" || choice=""
   case "$choice" in
     1) SNELL_ACTION=status ;;
@@ -380,50 +380,54 @@ snell_menu_service() {
 }
 
 snell_menu_loop() {
-  local choice="" confirm=""
+  local choice="" confirm="" SNELL_NAME="" SNELL_ACTION="" SNELL_VERSION=5 SNELL_PSK="" SNELL_QUIC_PROXY=""
+  local PORT="" PORT_CLI=0 ADVERTISE_HOST="" ADVERTISE_PORT="" ADVERTISE_CLI=0 ADVERTISE_AUTO_REQUESTED=0 YES=0
   trap - ERR
   while true; do
+    nobrand_menu_selection_clear
     msg ''
     msg '========== Snell =========='
-    msg '  1) 安装 Snell v5 [推荐]'
-    msg '  2) 安装 Snell v4 [兼容]'
-    msg '  3) 查看 Snell 节点'
-    msg '  4) QUIC 支持范围'
-    msg '  5) 修改展示端点 / Display Endpoint'
-    msg '  6) 服务管理'
-    msg '  7) 检查运行时更新'
-    msg '  8) Doctor / 诊断'
-    msg '  9) 删除节点'
-    msg '  0) 返回'
-    read_tty choice "$(t '请选择 [0-9]: ' 'Choose [0-9]: ')" || return 0
+    t '  1) 安装 Snell v6' '  1) Install Snell v6'
+    t '  2) 安装 Snell v5' '  2) Install Snell v5'
+    t '  3) 安装 Snell v4' '  3) Install Snell v4'
+    t '  4) 查看 Snell 节点' '  4) Show Snell nodes'
+    t '  5) QUIC 支持范围' '  5) QUIC support'
+    t '  6) 修改展示端点 / Display Endpoint' '  6) Change display endpoint'
+    t '  7) 服务管理' '  7) Service management'
+    t '  8) 检查运行时更新' '  8) Update runtime'
+    t '  9) Doctor / 诊断' '  9) Doctor / Diagnostics'
+    t ' 10) 删除节点' ' 10) Remove node'
+    t ' 11) 修改真实监听端口' ' 11) Change real listen port'
+    t '  0) 返回' '  0) Back'
+    read_tty choice "$(t '请选择 [0-11]: ' 'Choose [0-11]: ')" || return 0
     case "$choice" in
-      1) snell_menu_install_version 5 ;;
-      2) snell_menu_install_version 4 ;;
-      3) SNELL_NAME=""; SNELL_ACTION=show; nobrand_menu_run nobrand_run_snell_action ;;
-      4) snell_menu_set_quic ;;
-      5)
+      1) snell_menu_install_version 6 ;;
+      2) snell_menu_install_version 5 ;;
+      3) snell_menu_install_version 4 ;;
+      4) SNELL_NAME=""; SNELL_ACTION=show; nobrand_menu_run nobrand_run_snell_action ;;
+      5) snell_menu_set_quic ;;
+      6)
         snell_menu_select_instance || continue
         ADVERTISE_CLI=0 ADVERTISE_AUTO_REQUESTED=0 YES=0 SNELL_ACTION="set-endpoint"
         nobrand_menu_run nobrand_run_snell_action
         ;;
-      6) snell_menu_service ;;
-      7)
-        msg '升级版本: 1) v5  2) v4'
-        read_tty confirm '请选择 [1-2]: ' || confirm=""
-        case "$confirm" in 1) SNELL_VERSION=5 ;; 2) SNELL_VERSION=4 ;; *) warn '无效选择'; continue ;; esac
-        SNELL_NAME="" SNELL_ACTION=upgrade
-        nobrand_menu_run nobrand_run_snell_action
-        ;;
-      8) SNELL_ACTION=doctor; nobrand_menu_run nobrand_run_snell_action ;;
-      9)
+      7) snell_menu_service ;;
+      8) SNELL_NAME=""; SNELL_ACTION=upgrade; nobrand_menu_run nobrand_run_snell_action ;;
+      9) SNELL_NAME=""; SNELL_ACTION=doctor; nobrand_menu_run nobrand_run_snell_action ;;
+      10)
         snell_menu_select_instance || continue
-        read_tty confirm "确认删除 ${SNELL_NAME}？输入 yes: " || confirm=""
-        [ "$confirm" = yes ] || { warn '已取消'; continue; }
+        read_tty confirm "$(t "确认删除 ${SNELL_NAME}？输入 yes: " "Remove ${SNELL_NAME}? Enter yes: ")" || confirm=""
+        [ "$confirm" = yes ] || { warn "$(t '已取消' 'Cancelled')"; continue; }
         SNELL_ACTION=remove
         nobrand_menu_run nobrand_run_snell_action
         ;;
+      11)
+        snell_menu_select_instance || continue
+        nb_splicore_prompt_port snell "$NOBRAND_MENU_SELECTION_ID" || continue
+        nobrand_menu_run nb_splicore_protocol snell set-port "$NOBRAND_MENU_SELECTION_ID"
+        ;;
       0) return 0 ;;
-      *) warn '无效选择' ;;
+      *) warn "$(t '无效选择' 'Invalid choice')" ;;
     esac
     menu_pause
   done
@@ -1492,6 +1496,62 @@ socks5_menu_loop() {
   done
 }
 
+ss2022_menu_loop() {
+  local choice operation selector answer
+  local PORT PORT_CLI ADVERTISE_HOST ADVERTISE_PORT ADVERTISE_CLI ADVERTISE_AUTO_REQUESTED
+  local SS2022_METHOD SS2022_KEY SS2022_UDP NOBRAND_SPLICORE_EXPORT_FORMAT YES=0
+  local INGRESS_PROFILE='' INGRESS_PROFILE_CLI=0 INGRESS_PROFILE_ID=''
+  while true; do
+    PORT=''; PORT_CLI=0; ADVERTISE_HOST=''; ADVERTISE_PORT=''; ADVERTISE_CLI=0; ADVERTISE_AUTO_REQUESTED=0
+    SS2022_METHOD=''; SS2022_KEY=''; SS2022_UDP=''; NOBRAND_SPLICORE_EXPORT_FORMAT=''
+    nobrand_menu_selection_clear
+    msg ''
+    msg '========== Shadowsocks 2022 =========='
+    t '  1) 创建节点' '  1) Create node'
+    t '  2) 查看节点' '  2) List nodes'
+    t '  3) 修改真实监听端口' '  3) Change real listen port'
+    t '  4) 修改客户端展示入口' '  4) Change client display endpoint'
+    t '  5) 轮换密钥' '  5) Rotate key'
+    t '  6) 导出客户端配置' '  6) Export client configuration'
+    t '  7) 服务管理' '  7) Service management'
+    t '  8) 删除节点' '  8) Remove node'
+    t '  9) Doctor / 诊断' '  9) Doctor / Diagnostics'
+    t '  0) 返回' '  0) Back'
+    read_tty choice "$(t '请选择 [0-9]: ' 'Choose [0-9]: ')" || return 0
+    case "$choice" in
+      0) return 0 ;;
+      1) nobrand_menu_run nb_splicore_protocol ss2022 install ;;
+      2) nobrand_menu_run nb_splicore_protocol ss2022 status ;;
+      9) nobrand_menu_run nb_splicore_protocol ss2022 doctor ;;
+      3|4|5|6|7|8)
+        nb_splicore_menu_select ss2022 || { menu_pause; continue; }
+        selector="$NOBRAND_MENU_SELECTION_ID"
+        case "$choice" in
+          3) nb_splicore_prompt_port ss2022 "$selector" || continue; operation=set-port ;;
+          4) operation=set-endpoint ;;
+          5) operation=rotate-key ;;
+          6)
+            t '导出内容包含密钥。' 'The export contains the secret key.'
+            read_tty answer "$(t '1) JSON  2) ss://（需要 UDP）  3) Mihomo  4) sing-box [1-4，默认 1]: ' \
+              '1) JSON  2) ss:// (requires UDP)  3) Mihomo  4) sing-box [1-4, default 1]: ')" || continue
+            case "${answer:-1}" in 1) NOBRAND_SPLICORE_EXPORT_FORMAT=json ;; 2) NOBRAND_SPLICORE_EXPORT_FORMAT=uri ;;
+              3) NOBRAND_SPLICORE_EXPORT_FORMAT=mihomo ;; 4) NOBRAND_SPLICORE_EXPORT_FORMAT=sing-box ;; *) continue ;; esac
+            operation='export' ;;
+          7)
+            read_tty answer "$(t '1) 状态  2) 启动  3) 停止  4) 重启: ' '1) Status  2) Start  3) Stop  4) Restart: ')" || continue
+            case "$answer" in 1) operation=status ;; 2) operation=start ;; 3) operation=stop ;; 4) operation=restart ;; *) continue ;; esac ;;
+          8)
+            read_tty answer "$(t '输入 yes 确认删除: ' 'Enter yes to remove: ')" || continue
+            [ "$answer" = yes ] || continue; operation=remove ;;
+        esac
+        nobrand_menu_run nb_splicore_protocol ss2022 "$operation" "$selector"
+        ;;
+      *) warn "$(t '无效选择' 'Invalid choice')" ;;
+    esac
+    menu_pause
+  done
+}
+
 nobrand_menu_loop() {
   local choice="" uninstall_rc=0
   MENU_MODE=1
@@ -1500,24 +1560,25 @@ nobrand_menu_loop() {
     nobrand_print_banner
     msg ''
     msg '  1) Mieru'
-    msg '  2) Snell v4 / v5'
+    msg '  2) Snell v4 / v5 / v6'
     msg '  3) Hysteria2 + Salamander'
     msg '  4) TUIC v5'
-    msg '  5) VLESS REALITY + Vision（TCP；推荐 Public Ingress）'
-    msg '  6) VLESS + FinalMask + Sudoku（TCP）'
-    msg '  7) SSH Tunnel（现有 OpenSSH）'
-    msg '  8) 端口转发 / Port Forward（nftables / Realm）'
-    msg '  9) 网络入口 / Ingress'
-    msg ' 10) 查看全部节点'
-    msg ' 11) 综合状态'
-    msg ' 12) Doctor / 诊断'
-    msg ' 13) 备份 / 恢复'
-    msg ' 14) 性能 / BBR / FQ（Mieru 公共网络工具）'
-    msg ' 15) 帮助 / CLI'
-    msg ' 16) 卸载 NoBrand-OneClick（全部协议）'
-    t ' 17) SOCKS5 代理' ' 17) SOCKS5 proxy'
-    msg '  0) 退出'
-    read_tty choice "$(t '请选择 [0-17]: ' 'Choose [0-17]: ')" || return 0
+    msg '  5) VLESS REALITY + Vision'
+    msg '  6) VLESS + FinalMask + Sudoku'
+    t '  7) SOCKS5 代理' '  7) SOCKS5 proxy'
+    msg '  8) Shadowsocks 2022'
+    msg '  9) SSH Tunnel'
+    t ' 10) 端口转发 / Port Forward' ' 10) Port Forward'
+    t ' 11) 网络入口 / Ingress' ' 11) Ingress'
+    t ' 12) 查看全部节点' ' 12) List all nodes'
+    t ' 13) 综合状态' ' 13) Status'
+    t ' 14) Doctor / 诊断' ' 14) Doctor / Diagnostics'
+    t ' 15) 备份 / 恢复' ' 15) Backup / Restore'
+    t ' 16) 性能 / BBR / FQ' ' 16) Performance / BBR / FQ'
+    t ' 17) 帮助 / CLI' ' 17) Help / CLI'
+    t ' 18) 卸载 NoBrand-OneClick' ' 18) Uninstall NoBrand-OneClick'
+    t '  0) 退出' '  0) Exit'
+    read_tty choice "$(t '请选择 [0-18]: ' 'Choose [0-18]: ')" || return 0
     case "$choice" in
       1) menu_loop ;;
       2) snell_menu_loop ;;
@@ -1525,17 +1586,18 @@ nobrand_menu_loop() {
       4) tuic_menu_loop ;;
       5) vless_reality_menu_loop ;;
       6) vless_sudoku_menu_loop ;;
-      7) ssh_tunnel_menu_loop ;;
-      8) forward_menu_loop ;;
-      9) ingress_menu_loop ;;
-      10) NOBRAND_PROTOCOL_FILTER=""; nobrand_menu_run nobrand_nodes; menu_pause ;;
-      11) nobrand_menu_run nobrand_status; menu_pause ;;
-      12) nobrand_menu_run nobrand_doctor; menu_pause ;;
-      13) nobrand_backup_menu_loop ;;
-      14) nobrand_menu_run do_perf; menu_pause ;;
-      15) nobrand_usage; menu_pause ;;
-      17) socks5_menu_loop ;;
-      16)
+      7) socks5_menu_loop ;;
+      8) ss2022_menu_loop ;;
+      9) ssh_tunnel_menu_loop ;;
+      10) forward_menu_loop ;;
+      11) ingress_menu_loop ;;
+      12) NOBRAND_PROTOCOL_FILTER=""; nobrand_menu_run nobrand_nodes; menu_pause ;;
+      13) nobrand_menu_run nobrand_status; menu_pause ;;
+      14) nobrand_menu_run nobrand_doctor; menu_pause ;;
+      15) nobrand_backup_menu_loop ;;
+      16) nobrand_menu_run do_perf; menu_pause ;;
+      17) nobrand_usage; menu_pause ;;
+      18)
         YES=0
         set +e
         nobrand_menu_run nobrand_uninstall
@@ -1547,7 +1609,7 @@ nobrand_menu_loop() {
         nobrand_ssh_confirmation_pending || menu_pause
         ;;
       0) return 0 ;;
-      *) warn '无效选择' ;;
+      *) warn "$(t '无效选择' 'Invalid choice')" ;;
     esac
     if nobrand_ssh_confirmation_pending; then
       nobrand_pending_ssh_confirmation_notice
